@@ -85,6 +85,23 @@ is rejected while the owner remains usable for the exact successor. This is a
 scheduling boundary for later GPU work, not a semantic change, GPU
 implementation, throughput result or Studio parity claim.
 
+**GPU migration transaction benchmark, 2026-09-01, working branch only
+[INSTRUMENT IMPLEMENTED; NO MEDIA RESULT YET]:** `kjerag-spike --bin playback`
+accepts the fail-closed benchmark mode
+`measure=200:300 pace=off receipt=NEW-FILE bench=0`. It consumes frames 0
+through 199 causally through the production `Scene` as untimed warm-up, then
+times exactly the 300 complete source/map/waited-draw transactions for frames
+200 through 499. There is no pacing sleep, capture, PNG encoding or filesystem
+publication inside the interval. The durable no-replace JSON receipt records
+every transaction and its source, primitive, prepare and waited-draw phases;
+nearest-rank median/p95/p99/maximum and interval throughput; scene presentation,
+drop, starvation and redraw counts; the exact view and source identities; and
+clean build, executable and GPU identities. Source and build identities are
+authenticated before playback and reverified only after timing. This is the
+stable pre/post throughput boundary for the GPU migration. It is not a Studio
+parity, realtime playback, audio or visual-quality result. A real baseline run
+still has to be made through `scripts/quiet.sh` from a clean committed build.
+
 **ONE X2 Studio-derived playback, 2026-08-31, shipping branch:** ordinary
 zero-config playback now selects the capture-owned causal ONE X2 route
 automatically. It consumes every decoded pair from frame zero, carries warm

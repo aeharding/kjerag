@@ -73,6 +73,9 @@ fn main() -> Fallible<()> {
         .as_deref()
         .map(|out| EvidenceRun::authenticate(&options.input, out))
         .transpose()?;
+    if let Some(receipt) = options.receipt.as_deref() {
+        ensure_measure_destination(receipt)?;
+    }
     if let (Some(_), Some(out)) = (options.range, options.out_dir.as_deref()) {
         ensure_range_destination(out)?;
     }
@@ -80,8 +83,16 @@ fn main() -> Fallible<()> {
         .range
         .map(|_| AuthenticatedPair::open(&options.input))
         .transpose()?;
+    let measure_sources = options
+        .measure
+        .map(|_| AuthenticatedPair::open(&options.input))
+        .transpose()?;
     let range_provenance = options
         .range
+        .map(|_| RangeProvenance::authenticate())
+        .transpose()?;
+    let measure_provenance = options
+        .measure
         .map(|_| RangeProvenance::authenticate())
         .transpose()?;
 
@@ -121,6 +132,8 @@ fn main() -> Fallible<()> {
             evidence,
             range_sources,
             range_provenance,
+            measure_sources,
+            measure_provenance,
         },
     )
 }
@@ -128,13 +141,47 @@ fn main() -> Fallible<()> {
 const USAGE: &str = "usage: playback <file.insv> [seconds] [hz] [shots] [yaw] \
      [file|off|right|left|down|up] [fov] [bilinear|luma|sharp] [band|noband] \
      [target=N] [bench=0|1] [yaw=deg] [pitch=deg] [fov=deg] [lock=0|1] [out=PNG] \
-     [evidence-out=NEW-DIRECTORY] [range=START:COUNT out-dir=NEW-DIRECTORY]";
+     [evidence-out=NEW-DIRECTORY] [range=START:COUNT out-dir=NEW-DIRECTORY] \
+     [measure=START:COUNT pace=off receipt=NEW-FILE]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RangeSpec {
     start: u64,
     count: u64,
     end: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MeasureSpec {
+    start: u64,
+    count: u64,
+    end: u64,
+}
+
+impl MeasureSpec {
+    fn parse(raw: &str) -> Fallible<Self> {
+        let (start, count) = raw.split_once(':').ok_or("measure= must be START:COUNT")?;
+        if start.is_empty() || count.is_empty() || count.contains(':') {
+            return Err("measure= must be START:COUNT".into());
+        }
+        let start = start
+            .parse::<u64>()
+            .map_err(|error| format!("bad measure start: {error}"))?;
+        let count = count
+            .parse::<u64>()
+            .map_err(|error| format!("bad measure count: {error}"))?;
+        if start == 0 {
+            return Err("measure start must leave at least one warm-up frame".into());
+        }
+        if count == 0 {
+            return Err("measure count must be greater than zero".into());
+        }
+        let end = start
+            .checked_add(count)
+            .and_then(|exclusive| exclusive.checked_sub(1))
+            .ok_or("measure end cannot be counted")?;
+        Ok(Self { start, count, end })
+    }
 }
 
 impl RangeSpec {
@@ -178,6 +225,8 @@ struct Options {
     evidence_out: Option<PathBuf>,
     range: Option<RangeSpec>,
     out_dir: Option<PathBuf>,
+    measure: Option<MeasureSpec>,
+    receipt: Option<PathBuf>,
 }
 
 impl Options {
@@ -213,6 +262,9 @@ impl Options {
                     | "evidence-out"
                     | "range"
                     | "out-dir"
+                    | "measure"
+                    | "pace"
+                    | "receipt"
             ) {
                 return Err(format!("unknown playback option {name}=").into());
             }
@@ -249,12 +301,25 @@ impl Options {
             .map(|value| RangeSpec::parse(value))
             .transpose()?;
         let out_dir = named.get("out-dir").map(PathBuf::from);
+        let measure = named
+            .get("measure")
+            .map(|value| MeasureSpec::parse(value))
+            .transpose()?;
+        let pace_off = match named.get("pace").copied() {
+            None => false,
+            Some("off") => true,
+            Some(_) => return Err("pace= must be off".into()),
+        };
+        let receipt = named.get("receipt").map(PathBuf::from);
 
         if target.is_none() && (out.is_some() || evidence_out.is_some()) {
             return Err("out= and evidence-out= are only valid with target=".into());
         }
         if target.is_some() && range.is_some() {
             return Err("target= and range= are mutually exclusive".into());
+        }
+        if measure.is_some() && (target.is_some() || range.is_some()) {
+            return Err("measure= cannot be combined with target= or range=".into());
         }
         if target.is_some() && shots != 0 {
             return Err("target= owns its exact capture; positional shots must be 0".into());
@@ -267,6 +332,15 @@ impl Options {
         }
         if range.is_some() != out_dir.is_some() {
             return Err("range= and out-dir= must be supplied together".into());
+        }
+        if measure.is_some() != receipt.is_some() || measure.is_some() != pace_off {
+            return Err("measure=, pace=off and receipt= must be supplied together".into());
+        }
+        if measure.is_some() && (shots != 0 || out.is_some() || evidence_out.is_some()) {
+            return Err("measure= cannot capture pictures or production evidence".into());
+        }
+        if measure.is_some() && bench {
+            return Err("measure= requires bench=0 so no decode benchmark precedes it".into());
         }
         if evidence_out.is_some() && bench {
             return Err(
@@ -295,6 +369,8 @@ impl Options {
             evidence_out,
             range,
             out_dir,
+            measure,
+            receipt,
         })
     }
 }
@@ -406,6 +482,7 @@ enum Run {
     Timed(Duration),
     Target(Target),
     Range(RangeRun),
+    Measure(MeasureRun),
 }
 
 struct Target {
@@ -419,38 +496,52 @@ struct RangeRun {
     out_dir: PathBuf,
 }
 
+struct MeasureRun {
+    spec: MeasureSpec,
+    receipt: PathBuf,
+}
+
 struct RunBindings {
     evidence: Option<EvidenceRun>,
     range_sources: Option<AuthenticatedPair>,
     range_provenance: Option<RangeProvenance>,
+    measure_sources: Option<AuthenticatedPair>,
+    measure_provenance: Option<RangeProvenance>,
 }
 
 impl Run {
     fn new(options: &Options) -> Self {
-        match (options.target, options.range) {
-            (Some(index), None) => Self::Target(Target {
+        match (options.target, options.range, options.measure) {
+            (Some(index), None, None) => Self::Target(Target {
                 index,
                 out: options.out.clone().unwrap_or_else(|| {
                     PathBuf::from("scratch").join(format!("playback-frame{index}.png"))
                 }),
                 evidence_out: options.evidence_out.clone(),
             }),
-            (None, Some(spec)) => Self::Range(RangeRun {
+            (None, Some(spec), None) => Self::Range(RangeRun {
                 spec,
                 out_dir: options
                     .out_dir
                     .clone()
                     .expect("parsed range mode has an output directory"),
             }),
-            (None, None) => Self::Timed(Duration::from_secs(options.seconds)),
-            (Some(_), Some(_)) => unreachable!("parser rejects target and range together"),
+            (None, None, Some(spec)) => Self::Measure(MeasureRun {
+                spec,
+                receipt: options
+                    .receipt
+                    .clone()
+                    .expect("parsed measure mode has a receipt"),
+            }),
+            (None, None, None) => Self::Timed(Duration::from_secs(options.seconds)),
+            _ => unreachable!("parser rejects competing run modes"),
         }
     }
 
     fn duration(&self) -> Option<Duration> {
         match self {
             Self::Timed(duration) => Some(*duration),
-            Self::Target(_) | Self::Range(_) => None,
+            Self::Target(_) | Self::Range(_) | Self::Measure(_) => None,
         }
     }
 }
@@ -467,6 +558,8 @@ fn play(
         evidence,
         range_sources,
         range_provenance,
+        measure_sources,
+        measure_provenance,
     } = bindings;
     let Drawn {
         camera,
@@ -487,22 +580,28 @@ fn play(
     // An instrument has no stored calibration to read, and this is not the
     // app. It draws the factory calibration, the parity base: the per-capture
     // seam fit was the non-parity mechanism and is gone (issue #48, 2026-08-15).
-    let mut scene = match (&evidence, &range_sources) {
-        (Some(evidence), None) => {
+    let mut scene = match (&evidence, &range_sources, &measure_sources) {
+        (Some(evidence), None, None) => {
             let [first, second] = evidence.sources.descriptor_paths()?;
             Scene::open_pair(&first, &second)?
         }
-        (None, Some(sources)) => {
+        (None, Some(sources), None) | (None, None, Some(sources)) => {
             let [first, second] = sources.descriptor_paths()?;
             Scene::open_pair(&first, &second)?
         }
-        (None, None) => Scene::open(input)?,
-        (Some(_), Some(_)) => unreachable!("range and evidence modes are mutually exclusive"),
+        (None, None, None) => Scene::open(input)?,
+        _ => unreachable!("parser makes authenticated modes mutually exclusive"),
     };
     if let Some(sources) = &range_sources {
         let actual = scene
             .source_paths()
             .ok_or("range scene has no admitted source paths")?;
+        sources.require_descriptor_order(&actual)?;
+    }
+    if let Some(sources) = &measure_sources {
+        let actual = scene
+            .source_paths()
+            .ok_or("measure scene has no admitted source paths")?;
         sources.require_descriptor_order(&actual)?;
     }
     scene.set_horizon(horizon);
@@ -550,6 +649,43 @@ fn play(
             camera.fov.to_degrees(),
             u8::from(horizon == Horizon::Locked),
         ),
+        Run::Measure(measure) => println!(
+            "pace:   causal frames 0 through {} without pacing; warm-up 0..={}, measure \
+             {}..={} at {}x{}, yaw {:.2}, pitch {:.2}, fov {:.2}, lock {}",
+            measure.spec.end,
+            measure.spec.start - 1,
+            measure.spec.start,
+            measure.spec.end,
+            OUTPUT.width,
+            OUTPUT.height,
+            camera.yaw.to_degrees(),
+            camera.pitch.to_degrees(),
+            camera.fov.to_degrees(),
+            u8::from(horizon == Horizon::Locked),
+        ),
+    }
+
+    if let Run::Measure(measure) = &run {
+        return measure_playback(
+            &mut scene,
+            &mut pipeline,
+            &gpu,
+            MeasureView {
+                camera,
+                horizon,
+                readout,
+                sampling,
+                band,
+                tone,
+            },
+            measure,
+            measure_sources
+                .as_ref()
+                .ok_or("measure sources were not authenticated")?,
+            measure_provenance
+                .as_ref()
+                .ok_or("measure build provenance was not authenticated")?,
+        );
     }
 
     let start = Instant::now();
@@ -579,6 +715,7 @@ fn play(
                     Run::Range(_) => {
                         return Err(format!("range playback stopped: {stall}").into());
                     }
+                    Run::Measure(_) => unreachable!("measure mode has its own loop"),
                     Run::Timed(_) => {}
                 }
                 eprintln!("play:   stopped: {stall}");
@@ -780,7 +917,9 @@ fn play(
 
             let target = match &run {
                 Run::Target(target) => target,
-                Run::Timed(_) | Run::Range(_) => unreachable!("target hit belongs to target mode"),
+                Run::Timed(_) | Run::Range(_) | Run::Measure(_) => {
+                    unreachable!("target hit belongs to target mode")
+                }
             };
             if shot.index != target.index {
                 return Err(format!(
@@ -879,7 +1018,367 @@ fn play(
             range.spec.start, range.spec.end
         )
         .into()),
+        Run::Measure(_) => unreachable!("measure mode returns from its own loop"),
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MeasuredFrame {
+    index: u64,
+    timestamp: Duration,
+    source_ns: u64,
+    primitive_ns: u64,
+    prepare_ns: u64,
+    draw_ns: u64,
+    transaction_ns: u64,
+}
+
+#[derive(Clone, Copy)]
+struct MeasureView<'a> {
+    camera: Camera,
+    horizon: Horizon,
+    readout: &'a str,
+    sampling: Sampling,
+    band: bool,
+    tone: bool,
+}
+
+fn measure_playback(
+    scene: &mut Scene,
+    pipeline: &mut ScenePipeline,
+    gpu: &Gpu,
+    view: MeasureView<'_>,
+    run: &MeasureRun,
+    sources: &AuthenticatedPair,
+    provenance: &RangeProvenance,
+) -> Fallible<()> {
+    let mut drive_now = Instant::now();
+    for expected in 0..run.spec.start {
+        draw_measured_frame(scene, pipeline, gpu, view.camera, expected, &mut drive_now)?;
+    }
+
+    // This reading is deliberately after frame START-1's waited GPU submit.
+    // It is the boundary between the causal warm-up and the measured window.
+    let before = scene.stats().ok_or("measure scene has no player")?;
+    let interval_started = Instant::now();
+    let mut frames = Vec::with_capacity(
+        usize::try_from(run.spec.count).map_err(|_| "measure count does not fit memory")?,
+    );
+    for expected in run.spec.start..=run.spec.end {
+        frames.push(draw_measured_frame(
+            scene,
+            pipeline,
+            gpu,
+            view.camera,
+            expected,
+            &mut drive_now,
+        )?);
+    }
+    let interval = interval_started.elapsed();
+    let stats = scene
+        .stats()
+        .ok_or("measure scene has no player")?
+        .since(before);
+    if frames.len() as u64 != run.spec.count
+        || stats.presented != run.spec.count
+        || stats.dropped != 0
+    {
+        return Err(format!(
+            "measure window completed {} transactions after {} presented and {} dropped; expected {} transactions, {} presented and 0 dropped",
+            frames.len(),
+            stats.presented,
+            stats.dropped,
+            run.spec.count,
+            run.spec.count,
+        )
+        .into());
+    }
+
+    sources.verify()?;
+    let build = provenance.verify()?;
+    let adapter = gpu.adapter.get_info();
+    let receipt = measure_receipt(MeasureReceipt {
+        run,
+        camera: view.camera,
+        horizon: view.horizon,
+        readout: view.readout,
+        sampling: view.sampling,
+        band: view.band,
+        tone: view.tone,
+        interval,
+        stats,
+        frames: &frames,
+        sources: sources.receipt(),
+        build,
+        adapter_name: &adapter.name,
+        adapter_backend: format!("{:?}", adapter.backend),
+        adapter_device_type: format!("{:?}", adapter.device_type),
+        adapter_driver: &adapter.driver,
+        adapter_driver_info: &adapter.driver_info,
+    })?;
+    publish_measure_receipt(&run.receipt, &receipt)?;
+    println!(
+        "measure: frames {}..={} after {} warm-up frames, {:.3} frames/s, {}",
+        run.spec.start,
+        run.spec.end,
+        run.spec.start,
+        run.spec.count as f64 / interval.as_secs_f64().max(f64::EPSILON),
+        run.receipt.display(),
+    );
+    Ok(())
+}
+
+fn draw_measured_frame(
+    scene: &Scene,
+    pipeline: &mut ScenePipeline,
+    gpu: &Gpu,
+    camera: Camera,
+    expected: u64,
+    drive_now: &mut Instant,
+) -> Fallible<MeasuredFrame> {
+    let transaction_started = Instant::now();
+    let timestamp = loop {
+        let next = scene.pump(*drive_now);
+        match next {
+            Next::At(due) => *drive_now = due,
+            Next::Refresh => std::thread::yield_now(),
+            Next::Never => {
+                return Err(format!("file ended before measure frame {expected}").into());
+            }
+            Next::Stopped(stall) => {
+                return Err(format!("measure playback stopped: {stall}").into());
+            }
+        }
+        match scene.frame() {
+            Some((index, timestamp)) if index == expected => break timestamp,
+            Some((index, _)) if index > expected => {
+                return Err(format!(
+                    "measure skipped source frame {expected} and offered frame {index}"
+                )
+                .into());
+            }
+            _ => {}
+        }
+    };
+    let source_done = Instant::now();
+    let primitive = scene.primitive(camera);
+    let primitive_done = Instant::now();
+    pipeline.prepare(
+        &primitive,
+        &gpu.device,
+        &gpu.queue,
+        OUTPUT.width as f32 / OUTPUT.height as f32,
+    );
+    let prepare_done = Instant::now();
+    gpu.render(pipeline)?;
+    let draw_done = Instant::now();
+    if scene.displayed_frame() != Some((expected, timestamp)) {
+        return Err(format!(
+            "measure frame {expected} completed without that exact frame being displayed"
+        )
+        .into());
+    }
+    Ok(MeasuredFrame {
+        index: expected,
+        timestamp,
+        source_ns: duration_ns(source_done.duration_since(transaction_started))?,
+        primitive_ns: duration_ns(primitive_done.duration_since(source_done))?,
+        prepare_ns: duration_ns(prepare_done.duration_since(primitive_done))?,
+        draw_ns: duration_ns(draw_done.duration_since(prepare_done))?,
+        transaction_ns: duration_ns(draw_done.duration_since(transaction_started))?,
+    })
+}
+
+fn duration_ns(duration: Duration) -> Fallible<u64> {
+    u64::try_from(duration.as_nanos())
+        .map_err(|_| "measured duration exceeds u64 nanoseconds".into())
+}
+
+struct MeasureReceipt<'a> {
+    run: &'a MeasureRun,
+    camera: Camera,
+    horizon: Horizon,
+    readout: &'a str,
+    sampling: Sampling,
+    band: bool,
+    tone: bool,
+    interval: Duration,
+    stats: kjerag_media::Stats,
+    frames: &'a [MeasuredFrame],
+    sources: Vec<Value>,
+    build: Value,
+    adapter_name: &'a str,
+    adapter_backend: String,
+    adapter_device_type: String,
+    adapter_driver: &'a str,
+    adapter_driver_info: &'a str,
+}
+
+fn measure_receipt(run: MeasureReceipt<'_>) -> Fallible<Vec<u8>> {
+    let transactions = run
+        .frames
+        .iter()
+        .map(|frame| frame.transaction_ns)
+        .collect::<Vec<_>>();
+    let sources = run
+        .frames
+        .iter()
+        .map(|frame| frame.source_ns)
+        .collect::<Vec<_>>();
+    let primitives = run
+        .frames
+        .iter()
+        .map(|frame| frame.primitive_ns)
+        .collect::<Vec<_>>();
+    let prepares = run
+        .frames
+        .iter()
+        .map(|frame| frame.prepare_ns)
+        .collect::<Vec<_>>();
+    let draws = run
+        .frames
+        .iter()
+        .map(|frame| frame.draw_ns)
+        .collect::<Vec<_>>();
+    let frame_values = run
+        .frames
+        .iter()
+        .map(|frame| {
+            json!({
+                "index": frame.index,
+                "timestamp_seconds": frame.timestamp.as_secs(),
+                "timestamp_nanoseconds": frame.timestamp.subsec_nanos(),
+                "source_ns": frame.source_ns,
+                "primitive_ns": frame.primitive_ns,
+                "prepare_ns": frame.prepare_ns,
+                "draw_ns": frame.draw_ns,
+                "transaction_ns": frame.transaction_ns
+            })
+        })
+        .collect::<Vec<_>>();
+    let elapsed_ns = duration_ns(run.interval)?;
+    let receipt = json!({
+        "schema": "kjerag.playback-transaction-benchmark.v1",
+        "claim": "unpaced waited source/map/draw transactions after a causal frame-zero warm-up",
+        "limitations": {
+            "studio_parity_claimed": false,
+            "realtime_playback_claimed": false,
+            "audio_measured": false,
+            "capture_or_png_in_interval": false
+        },
+        "request": {
+            "warmup_start": 0,
+            "warmup_end_inclusive": run.run.spec.start - 1,
+            "start": run.run.spec.start,
+            "count": run.run.spec.count,
+            "end_inclusive": run.run.spec.end,
+            "pace": "off",
+            "no_seek": true,
+            "every_source_frame_consumed": true
+        },
+        "view": {
+            "yaw_radians": run.camera.yaw,
+            "pitch_radians": run.camera.pitch,
+            "fov_radians": run.camera.fov,
+            "yaw_degrees": run.camera.yaw.to_degrees(),
+            "pitch_degrees": run.camera.pitch.to_degrees(),
+            "fov_degrees": run.camera.fov.to_degrees(),
+            "horizon_locked": run.horizon == Horizon::Locked,
+            "readout": run.readout,
+            "sampling": format!("{:?}", run.sampling),
+            "seam_band": run.band,
+            "exposure_tone": run.tone,
+            "render_format": "rgba8unorm",
+            "render_width": OUTPUT.width,
+            "render_height": OUTPUT.height
+        },
+        "source": run.sources,
+        "build": run.build,
+        "gpu": {
+            "name": run.adapter_name,
+            "backend": run.adapter_backend,
+            "device_type": run.adapter_device_type,
+            "driver": run.adapter_driver,
+            "driver_info": run.adapter_driver_info
+        },
+        "run": {
+            "elapsed_ns": elapsed_ns,
+            "throughput_frames_per_second": run.run.spec.count as f64
+                / run.interval.as_secs_f64().max(f64::EPSILON),
+            "presented": run.stats.presented,
+            "dropped": run.stats.dropped,
+            "starved": run.stats.starved,
+            "scene_redraws": run.stats.redraws,
+            "instrument_redraws": run.frames.len(),
+            "transaction_ns": distribution(&transactions)?,
+            "source_ns": distribution(&sources)?,
+            "primitive_ns": distribution(&primitives)?,
+            "prepare_ns": distribution(&prepares)?,
+            "draw_ns": distribution(&draws)?
+        },
+        "frames": frame_values
+    });
+    let mut encoded = serde_json::to_vec_pretty(&receipt)?;
+    encoded.push(b'\n');
+    Ok(encoded)
+}
+
+fn distribution(values: &[u64]) -> Fallible<Value> {
+    if values.is_empty() {
+        return Err("cannot summarize an empty measurement".into());
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    Ok(json!({
+        "median": nearest_rank(&sorted, 50),
+        "p95": nearest_rank(&sorted, 95),
+        "p99": nearest_rank(&sorted, 99),
+        "max": sorted[sorted.len() - 1]
+    }))
+}
+
+fn nearest_rank(sorted: &[u64], percentile: usize) -> u64 {
+    let rank = percentile.saturating_mul(sorted.len()).div_ceil(100);
+    sorted[rank.max(1) - 1]
+}
+
+fn ensure_measure_destination(out: &Path) -> Fallible<()> {
+    if out.exists() {
+        return Err(format!("receipt file {} already exists", out.display()).into());
+    }
+    let parent = out.parent().unwrap_or(Path::new("."));
+    if !parent.is_dir() {
+        return Err(format!("receipt parent {} is not a directory", parent.display()).into());
+    }
+    let stage = measure_stage(out)?;
+    if stage.exists() {
+        return Err(format!("measure staging file {} must be new", stage.display()).into());
+    }
+    Ok(())
+}
+
+fn measure_stage(out: &Path) -> Fallible<PathBuf> {
+    let parent = out.parent().unwrap_or(Path::new("."));
+    let name = out
+        .file_name()
+        .ok_or("receipt= must name a file")?
+        .to_string_lossy();
+    Ok(parent.join(format!(".{name}.measure-tmp-{}", std::process::id())))
+}
+
+fn publish_measure_receipt(out: &Path, encoded: &[u8]) -> Fallible<()> {
+    ensure_measure_destination(out)?;
+    let stage = measure_stage(out)?;
+    let result = (|| -> Fallible<()> {
+        write_new(&stage, encoded)?;
+        rename_noreplace(&stage, out)?;
+        sync_directory(out.parent().unwrap_or(Path::new(".")))?;
+        Ok(())
+    })();
+    if result.is_err() && stage.exists() {
+        let _ = fs::remove_file(&stage);
+    }
+    result
 }
 
 /// A run of captures during playback, and what they cost the redraw they
@@ -1446,9 +1945,9 @@ fn rename_noreplace(_from: &Path, _to: &Path) -> Fallible<()> {
     Err("production evidence no-replace publication requires Linux renameat2".into())
 }
 
-/// Build and executable identity retained before a range run starts. This is
-/// separate from `EvidenceRun` only because range mode owns `out-dir=` and
-/// must not require or pretend to publish target `evidence-out=` artifacts.
+/// Build and executable identity retained before an authenticated run starts.
+/// This is separate from `EvidenceRun` because range and measurement modes do
+/// not publish target `evidence-out=` artifacts.
 struct RangeProvenance {
     workspace: PathBuf,
     runtime_head: String,
@@ -1499,7 +1998,7 @@ impl RangeProvenance {
             &tree,
         )?;
         if head != self.runtime_head || tree != self.runtime_tree {
-            return Err("runtime checkout changed during range playback".into());
+            return Err("runtime checkout changed during authenticated playback".into());
         }
         Ok(range_build_receipt(
             &self.runtime_head,
@@ -1511,7 +2010,7 @@ impl RangeProvenance {
 
 fn require_bound_identity(bound: &Value, current: &Value, label: &str) -> Fallible<()> {
     if bound != current {
-        return Err(format!("{label} identity changed during range playback").into());
+        return Err(format!("{label} identity changed during authenticated playback").into());
     }
     Ok(())
 }
@@ -2186,6 +2685,8 @@ mod tests {
         assert_eq!(parsed.evidence_out, None);
         assert_eq!(parsed.range, None);
         assert_eq!(parsed.out_dir, None);
+        assert_eq!(parsed.measure, None);
+        assert_eq!(parsed.receipt, None);
     }
 
     #[test]
@@ -2336,6 +2837,185 @@ mod tests {
         );
         assert!(options(&["flight.insv", "target=1", "target=2"]).is_err());
         assert!(options(&["flight.insv", "surprise=1"]).is_err());
+    }
+
+    #[test]
+    fn measure_mode_has_exact_warmup_window_and_required_unpaced_receipt() {
+        let parsed = options(&[
+            "flight.insv",
+            "measure=200:300",
+            "pace=off",
+            "receipt=scratch/gpu-baseline.json",
+            "bench=0",
+            "yaw=71.13",
+            "pitch=-13.99",
+            "fov=57.95",
+            "lock=1",
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed.measure,
+            Some(MeasureSpec {
+                start: 200,
+                count: 300,
+                end: 499,
+            })
+        );
+        assert_eq!(
+            parsed.receipt.as_deref(),
+            Some(Path::new("scratch/gpu-baseline.json"))
+        );
+        assert!(!parsed.bench);
+        let Run::Measure(run) = Run::new(&parsed) else {
+            panic!("measure mode must not have a wall-clock end");
+        };
+        assert_eq!(run.spec.start - 1, 199);
+        assert_eq!(run.spec.end, 499);
+    }
+
+    #[test]
+    fn measure_mode_rejects_ambiguous_or_incomplete_requests() {
+        let valid = [
+            "flight.insv",
+            "measure=200:300",
+            "pace=off",
+            "receipt=scratch/measure.json",
+            "bench=0",
+        ];
+        for request in ["0:1", "1:0", "1", ":1", "1:", "1:2:3", "x:1", "1:x"] {
+            let mut words = valid;
+            let argument = format!("measure={request}");
+            words[1] = &argument;
+            assert!(options(&words).is_err(), "accepted measure={request}");
+        }
+        assert!(options(&["flight.insv", "measure=200:300", "bench=0"]).is_err());
+        assert!(options(&["flight.insv", "measure=200:300", "pace=off", "bench=0"]).is_err());
+        assert!(
+            options(&[
+                "flight.insv",
+                "measure=200:300",
+                "pace=on",
+                "receipt=scratch/m.json",
+                "bench=0"
+            ])
+            .is_err()
+        );
+        assert!(
+            options(&[
+                "flight.insv",
+                "measure=200:300",
+                "pace=off",
+                "receipt=scratch/m.json"
+            ])
+            .is_err()
+        );
+        for competing in [
+            "target=499",
+            "out=scratch/frame.png",
+            "evidence-out=scratch/e",
+        ] {
+            let mut words = valid.to_vec();
+            words.push(competing);
+            assert!(options(&words).is_err(), "accepted {competing}");
+        }
+    }
+
+    #[test]
+    fn nearest_rank_summary_is_exact_at_requested_percentiles() {
+        let values = (1..=100).rev().collect::<Vec<_>>();
+        let summary = distribution(&values).unwrap();
+        assert_eq!(summary["median"], 50);
+        assert_eq!(summary["p95"], 95);
+        assert_eq!(summary["p99"], 99);
+        assert_eq!(summary["max"], 100);
+        assert!(distribution(&[]).is_err());
+    }
+
+    #[test]
+    fn measure_receipt_binds_boundaries_counts_phases_and_identity() {
+        let run = MeasureRun {
+            spec: MeasureSpec {
+                start: 200,
+                count: 3,
+                end: 202,
+            },
+            receipt: PathBuf::from("scratch/unused.json"),
+        };
+        let frames = (200..=202)
+            .map(|index| MeasuredFrame {
+                index,
+                timestamp: Duration::from_millis(index),
+                source_ns: index,
+                primitive_ns: index + 1,
+                prepare_ns: index + 2,
+                draw_ns: index + 3,
+                transaction_ns: index + 4,
+            })
+            .collect::<Vec<_>>();
+        let encoded = measure_receipt(MeasureReceipt {
+            run: &run,
+            camera: Camera {
+                yaw: 1.0,
+                pitch: -0.25,
+                fov: 0.75,
+            },
+            horizon: Horizon::Locked,
+            readout: "file",
+            sampling: Sampling::Sharp,
+            band: true,
+            tone: true,
+            interval: Duration::from_secs(1),
+            stats: kjerag_media::Stats {
+                redraws: 4,
+                presented: 3,
+                dropped: 0,
+                starved: 1,
+                worst_late: Duration::ZERO,
+                audio: None,
+            },
+            frames: &frames,
+            sources: vec![json!({"lane": 0}), json!({"lane": 1})],
+            build: json!({"runtime_git_commit": "commit"}),
+            adapter_name: "gpu",
+            adapter_backend: "Vulkan".to_owned(),
+            adapter_device_type: "DiscreteGpu".to_owned(),
+            adapter_driver: "driver",
+            adapter_driver_info: "info",
+        })
+        .unwrap();
+        let receipt: Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(receipt["request"]["warmup_end_inclusive"], 199);
+        assert_eq!(receipt["request"]["start"], 200);
+        assert_eq!(receipt["request"]["count"], 3);
+        assert_eq!(receipt["request"]["end_inclusive"], 202);
+        assert_eq!(receipt["run"]["presented"], 3);
+        assert_eq!(receipt["run"]["starved"], 1);
+        assert_eq!(receipt["run"]["transaction_ns"]["median"], 205);
+        assert_eq!(receipt["run"]["transaction_ns"]["p95"], 206);
+        assert_eq!(receipt["frames"].as_array().unwrap().len(), 3);
+        assert_eq!(receipt["frames"][0]["index"], 200);
+        assert_eq!(receipt["frames"][2]["index"], 202);
+        assert_eq!(receipt["source"][1]["lane"], 1);
+        assert_eq!(receipt["build"]["runtime_git_commit"], "commit");
+    }
+
+    #[test]
+    fn measure_receipt_publication_is_durable_and_never_replaces() {
+        let root = std::env::temp_dir().join(format!(
+            "kjerag-playback-measure-test-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let out = root.join("receipt.json");
+        publish_measure_receipt(&out, b"first\n").unwrap();
+        assert_eq!(fs::read(&out).unwrap(), b"first\n");
+        let error = publish_measure_receipt(&out, b"replacement\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already exists"), "{error}");
+        assert_eq!(fs::read(&out).unwrap(), b"first\n");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
