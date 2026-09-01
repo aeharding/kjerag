@@ -63,6 +63,17 @@ depends on `media` rather than the other way round. `render` re-exports both
 and adds the `Extent` trait, which is the `wgpu::Extent3d` half of `Size`
 that cannot live in a crate with no wgpu.
 
+The resident ONE X2 draw prerequisite has a separate, private source-import
+owner in `direct_type2`. Its only production constructor consumes the exact
+`Arc<Frames>`, requires two lenses, imports both descriptors directly into
+`[Planes; 2]` and builds their picture bind group. It has no raw-plane or
+stamp-only association boundary, and exposes no bind-group or texture handle:
+its only rendering capability binds and draws the exact picture internally.
+Field order releases the bind group, planes and frame owner in that order. It
+remains unselected: Scene's legacy `VecDeque<Live>` and three-frame retention
+path are unchanged until the resident result and render-pass retirement owners
+can be joined without weakening either lifetime.
+
 ## Failures the pilot is told about (issue #124)
 
 There is one way a failure reaches the pilot and it is the alert, and that is

@@ -3,6 +3,31 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Sealed ONE X2 source-import ownership prerequisite, 2026-09-01,
+implementation branch only [PRIVATE AND UNSELECTED; NO SCENE, PLAYBACK,
+PERFORMANCE OR PARITY CLAIM]:** the direct type-2 module now owns one private
+aggregate whose only production constructor consumes `Arc<Frames>`, refuses
+anything other than exactly two lens frames, imports both dmabufs itself into
+`[Planes; 2]`, and creates the exact picture bind group from those imports.
+There is no from-parts, raw-plane or stamp-only constructor. Its declaration
+order deliberately releases the bind group, both imported plane pairs and
+only then the exact decoder-frame owner, so a published aggregate cannot hand
+an aliased VA-API surface back before the wgpu objects that refer to it.
+The aggregate exposes no borrowed or owned wgpu handle: its sole rendering
+operation performs the direct type-2 bind and draw inside `direct_type2` and
+returns nothing. A caller therefore cannot clone the picture bind group and
+drop the planes and frame owner out from under that clone.
+
+The existing `VecDeque<Live>`, `Vec<Planes>` import and `RETAINED` policy are
+unchanged for legacy and currently selected playback. Focused CPU-only tests
+cover zero, one, two and three-lens structural admission and exercise the
+aggregate's actual generic field-drop order as bind group, planes A, planes B,
+then frames. They intentionally do not fabricate `DrmFrame`,
+`AVDRMFrameDescriptor` or decoder allocation: constructor success, first- or
+second-dmabuf import failure and real wgpu destruction therefore still require
+a compatible Vulkan device plus decoder-backed test media. No resident map is
+joined, installed or selected at this checkpoint.
+
 **Resident ONE X2 drawable installation prerequisite, 2026-09-01,
 implementation branch only [PRIVATE AND UNSELECTED; NO SCENE, PLAYBACK,
 PERFORMANCE OR PARITY CLAIM]:** the native type-2 consumer is split into one

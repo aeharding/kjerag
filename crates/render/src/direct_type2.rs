@@ -7,9 +7,82 @@
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
+use kjerag_media::Frames;
+
+use crate::dmabuf;
 use crate::projection;
 use crate::studio_type2::{ALPHA_BYTES, OneXsMapFrame, PACKED_BYTES};
-use crate::{FrameStamp, MAX_LENSES, Planes};
+use crate::{Fallible, FrameStamp, MAX_LENSES, Planes};
+
+/// One exact decoded ONE X2 pair and the picture binding made from it.
+///
+/// This is deliberately private and currently unselected. Its only production
+/// constructor consumes the decoder owner, imports both of that owner's lens
+/// descriptors and creates the binding before publishing the aggregate. There
+/// is no constructor from planes or a frame stamp, so another allocation cannot
+/// be associated with already-imported textures afterward.
+///
+/// Field order is load-bearing Rust drop order: the binding is released first,
+/// then its imported textures, and only then the decoder surfaces they alias.
+/// The generic parameters exist solely so the unit test can exercise that exact
+/// struct's drop order without fabricating decoder allocations or dmabufs.
+#[allow(dead_code)]
+pub(crate) struct ImportedOneXsPicture<B = wgpu::BindGroup, P = [Planes; 2], F = Arc<Frames>> {
+    picture: B,
+    planes: P,
+    frames: F,
+}
+
+#[allow(dead_code)]
+impl ImportedOneXsPicture {
+    pub(crate) fn import(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        uniforms: &wgpu::Buffer,
+        sampler: &wgpu::Sampler,
+        frames: Arc<Frames>,
+    ) -> Fallible<Self> {
+        let [a, b] = exact_one_xs_lenses(&frames.lenses)?;
+        // Array construction drops an already-imported A if B refuses. The
+        // consumed `frames` parameter remains alive until that cleanup ends.
+        let planes = [
+            dmabuf::import(device, a.descriptor(), frames.size)?,
+            dmabuf::import(device, b.descriptor(), frames.size)?,
+        ];
+        let picture = bind_picture(device, layout, uniforms, [&planes[0], &planes[1]], sampler);
+        Ok(Self {
+            picture,
+            planes,
+            frames,
+        })
+    }
+
+    /// Bind and draw this exact source without exposing its cloneable picture
+    /// group to the caller.
+    ///
+    /// A later Scene owner can retain the opaque aggregate through render-pass
+    /// retirement and invoke this operation, but it cannot detach the binding
+    /// from the planes and decoder surfaces that make it valid.
+    pub(crate) fn draw<'pass>(
+        &'pass self,
+        pipeline: &'pass DirectType2Pipeline,
+        map: &'pass wgpu::BindGroup,
+        pass: &mut wgpu::RenderPass<'pass>,
+    ) {
+        pipeline.draw(pass, &self.picture, map);
+    }
+}
+
+fn exact_one_xs_lenses<T>(lenses: &[T]) -> Fallible<[&T; 2]> {
+    match lenses {
+        [a, b] => Ok([a, b]),
+        _ => Err(format!(
+            "ONE X2 source import requires exactly 2 lens frames, got {}",
+            lenses.len()
+        )
+        .into()),
+    }
+}
 
 /// Immutable direct type-2 shader, pipeline and native-map layout.
 ///
@@ -495,11 +568,89 @@ fn fs(in: Type2VsOut) -> @location(0) vec4<f32> {
 #[cfg(test)]
 mod tests {
     use std::future::Future;
+    use std::sync::Mutex;
 
     use super::*;
     use crate::map_oracle::{CapturedMap, DensePixel, MAP_HEIGHT, MAP_WIDTH};
     use crate::projection::{Held, Reframe};
     use crate::{Camera, Size};
+
+    struct DropWitness {
+        name: &'static str,
+        dropped: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl DropWitness {
+        fn new(name: &'static str, dropped: &Arc<Mutex<Vec<&'static str>>>) -> Self {
+            Self {
+                name,
+                dropped: Arc::clone(dropped),
+            }
+        }
+    }
+
+    impl Drop for DropWitness {
+        fn drop(&mut self) {
+            self.dropped.lock().unwrap().push(self.name);
+        }
+    }
+
+    #[test]
+    fn one_xs_source_import_requires_exactly_two_lenses() {
+        let none: [u8; 0] = [];
+        let one = [1];
+        let pair = [1, 2];
+        let three = [1, 2, 3];
+
+        assert_eq!(
+            exact_one_xs_lenses(&none).unwrap_err().to_string(),
+            "ONE X2 source import requires exactly 2 lens frames, got 0"
+        );
+        assert_eq!(
+            exact_one_xs_lenses(&one).unwrap_err().to_string(),
+            "ONE X2 source import requires exactly 2 lens frames, got 1"
+        );
+        assert_eq!(exact_one_xs_lenses(&pair).unwrap(), [&1, &2]);
+        assert_eq!(
+            exact_one_xs_lenses(&three).unwrap_err().to_string(),
+            "ONE X2 source import requires exactly 2 lens frames, got 3"
+        );
+    }
+
+    #[test]
+    fn imported_one_xs_picture_drops_binding_then_planes_then_frames() {
+        let dropped = Arc::new(Mutex::new(Vec::new()));
+        let imported = ImportedOneXsPicture {
+            picture: DropWitness::new("bind group", &dropped),
+            planes: [
+                DropWitness::new("planes A", &dropped),
+                DropWitness::new("planes B", &dropped),
+            ],
+            frames: DropWitness::new("frames", &dropped),
+        };
+
+        drop(imported);
+        assert_eq!(
+            *dropped.lock().unwrap(),
+            ["bind group", "planes A", "planes B", "frames"]
+        );
+    }
+
+    #[test]
+    fn imported_one_xs_picture_exposes_only_its_draw_operation() {
+        let source = include_str!("direct_type2.rs");
+        let owner = source
+            .split_once("impl ImportedOneXsPicture {")
+            .unwrap()
+            .1
+            .split_once("fn exact_one_xs_lenses")
+            .unwrap()
+            .0;
+
+        assert!(!owner.contains("-> &wgpu::BindGroup"));
+        assert!(!owner.contains("-> wgpu::BindGroup"));
+        assert!(owner.contains("pipeline.draw(pass, &self.picture, map);"));
+    }
 
     #[test]
     fn direct_shader_parses_and_uses_only_two_native_map_bindings() {
