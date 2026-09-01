@@ -9,7 +9,7 @@
 use std::marker::PhantomData;
 use std::sync::mpsc;
 
-use super::pis::gpu::GpuPisFlight;
+use super::pis::gpu::{GpuPisDynamicStage, GpuPisFlight, GpuPisPipeline, GpuPisStageReceipt};
 use super::pis::{AtoB, BtoA, Level, PisDirection};
 use super::scalar::{ColdInputs, LevelInputs, MaskPyramid};
 use super::temporal::BlurredBelts;
@@ -27,6 +27,8 @@ const STAGE_PATCHES: usize = 2 * (Level::One.patches() + Level::Two.patches());
 const L1_LACK_ROWS: usize = 2 * Level::One.patch_rows();
 const L1_BLOCKS: usize = Level::One.patches();
 const MASK_WORDS_PER_LENS: usize = (ROWS * COLS).div_ceil(4);
+const PIS_PAIR_SCHEMA: u32 = 0x5049_5301;
+const PIS_HEADER_WORDS: usize = 32;
 
 mod level_marker {
     pub trait Sealed {}
@@ -80,6 +82,39 @@ struct PisPreparedBinding<'a, D: PisDirection, L: GpuPreparedLevelMarker> {
     l1_block_mask: &'a wgpu::Buffer,
     bases: PisPreparedBaseWords,
     marker: PhantomData<(D, L)>,
+}
+
+struct SealedPreparedPair<'a> {
+    flight: &'a GpuPisFlight,
+    level: Level,
+    shared_images: &'a wgpu::Buffer,
+    shared_masks: &'a wgpu::Buffer,
+    gradients: &'a wgpu::Buffer,
+    raw_weights: &'a wgpu::Buffer,
+    patch_weight_sums: &'a wgpu::Buffer,
+    models: &'a wgpu::Buffer,
+    a: PisPreparedBaseWords,
+    b: PisPreparedBaseWords,
+}
+
+impl<'a> SealedPreparedPair<'a> {
+    fn new<L: GpuPreparedLevelMarker>(frame: &'a GpuPreparedFrame<impl Sized>) -> Self {
+        let a = frame.bind_pis_level::<AtoB, L>();
+        let b = frame.bind_pis_level::<BtoA, L>();
+        debug_assert_eq!(a.flight(), b.flight());
+        Self {
+            flight: a.flight(),
+            level: L::LEVEL,
+            shared_images: a.shared_images(),
+            shared_masks: a.shared_masks(),
+            gradients: a.gradients(),
+            raw_weights: a.raw_weights(),
+            patch_weight_sums: a.patch_weight_sums(),
+            models: a.models(),
+            a: a.bases,
+            b: b.bases,
+        }
+    }
 }
 
 impl<'a, D: PisDirection, L: GpuPreparedLevelMarker> PisPreparedBinding<'a, D, L> {
@@ -168,6 +203,88 @@ pub(crate) struct GpuPreparedFrame<K> {
     belts: GpuBlurredBelts<K>,
 }
 
+/// Kernel-owned dynamic state handed atomically to the frame owner.
+///
+/// It contains no prepared buffer, base, flight, queue or submission handle.
+pub(crate) struct PreparedPisDispatch<'a> {
+    pub(crate) stage: super::scalar::PairSolveStage,
+    pub(crate) pipeline: &'a wgpu::ComputePipeline,
+    pub(crate) layout: &'a wgpu::BindGroupLayout,
+    pub(crate) u32s: Vec<u32>,
+    pub(crate) f32s: Vec<f32>,
+    pub(crate) output_words: usize,
+    pub(crate) output_span_words: usize,
+    pub(crate) b_output_base_words: usize,
+}
+
+/// One exact resident PIS terminal. No prepared source or submission component
+/// can be detached from its frame owner.
+#[must_use = "the resident GPU PIS terminal has not been consumed"]
+pub(crate) struct GpuPreparedTerminal<K> {
+    receipt: GpuPisStageReceipt,
+    pipeline: wgpu::ComputePipeline,
+    _output: wgpu::Buffer,
+    _output_span_words: usize,
+    _b_output_base_words: usize,
+    prepared: GpuPreparedFrame<K>,
+}
+
+impl<K> GpuPreparedTerminal<K> {
+    pub(crate) fn into_prepared(self, solver: &GpuPisPipeline) -> Fallible<GpuPreparedFrame<K>> {
+        solver.validate_terminal_context(&self.pipeline)?;
+        Ok(self.prepared)
+    }
+
+    pub(crate) fn acknowledge_terminal(self, solver: &GpuPisPipeline) -> Fallible<()> {
+        solver.validate_terminal_context(&self.pipeline)?;
+        self.prepared.acknowledge_terminal()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn receipt_for_test(&self) -> &GpuPisStageReceipt {
+        &self.receipt
+    }
+
+    #[cfg(test)]
+    pub(crate) fn readback_for_test(
+        mut self,
+    ) -> Fallible<(GpuPisStageReceipt, Vec<u32>, GpuPreparedFrame<K>)> {
+        let words = 2 * self._output_span_words;
+        let readback = self.prepared.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 diagnostic GPU PIS terminal readback"),
+            size: words_bytes(words),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder =
+            self.prepared
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("ONE X2 diagnostic GPU PIS terminal readback"),
+                });
+        encoder.copy_buffer_to_buffer(&self._output, 0, &readback, 0, words_bytes(words));
+        self.prepared.belts.submit_front_end(encoder.finish())?;
+        let slice = readback.slice(..);
+        let (mapped, answer) = mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = mapped.send(result);
+        });
+        self.prepared.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })?;
+        answer.recv()??;
+        let bytes = slice.get_mapped_range();
+        let output = bytes
+            .chunks_exact(4)
+            .map(|word| u32::from_ne_bytes(word.try_into().unwrap()))
+            .collect();
+        drop(bytes);
+        readback.unmap();
+        Ok((self.receipt, output, self.prepared))
+    }
+}
+
 impl<K> GpuPreparedFrame<K> {
     fn bind_pis_level<D, L>(&self) -> PisPreparedBinding<'_, D, L>
     where
@@ -187,6 +304,102 @@ impl<K> GpuPreparedFrame<K> {
             bases: prepared_bases::<D, L>(),
             marker: PhantomData,
         }
+    }
+
+    /// Consume this whole frame into one paired resident PIS submission.
+    /// Prepared bases, bind construction, exact queue submission and lease
+    /// advancement remain private to the frame owner.
+    pub(crate) fn submit_pis_stage(
+        mut self,
+        solver: &GpuPisPipeline,
+        dynamic: GpuPisDynamicStage,
+    ) -> Fallible<GpuPreparedTerminal<K>> {
+        let mut dispatch = solver.prepare_resident_dispatch(dynamic)?;
+        let level = dispatch.stage.level();
+        let pair = match level {
+            Level::One => SealedPreparedPair::new::<GpuLevelOne>(&self),
+            Level::Two => SealedPreparedPair::new::<GpuLevelTwo>(&self),
+        };
+        let flight = pair.flight.clone();
+        let a_base = pis_direction_header_base(&dispatch.u32s, 2)?;
+        let b_base = pis_direction_header_base(&dispatch.u32s, 5)?;
+        write_pis_bases(
+            &mut dispatch.u32s,
+            a_base,
+            pair.level,
+            Direction::AtoB,
+            pair.a,
+        )?;
+        write_pis_bases(
+            &mut dispatch.u32s,
+            b_base,
+            pair.level,
+            Direction::BtoA,
+            pair.b,
+        )?;
+
+        let dynamic_u32 = upload_words(
+            &self.device,
+            &self.queue,
+            "ONE X2 resident GPU PIS dynamic u32 input",
+            &dispatch.u32s,
+        );
+        let dynamic_f32 = upload_words(
+            &self.device,
+            &self.queue,
+            "ONE X2 resident GPU PIS dynamic f32 input",
+            &dispatch
+                .f32s
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+        );
+        let output = storage_buffer(
+            &self.device,
+            "ONE X2 resident GPU PIS terminal bits",
+            dispatch.output_words,
+        );
+        let resources = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ONE X2 resident GPU PIS sealed resources"),
+            layout: dispatch.layout,
+            entries: &[
+                binding(0, &dynamic_u32),
+                binding(1, &dynamic_f32),
+                binding(2, &output),
+                binding(3, pair.shared_images),
+                binding(4, pair.shared_masks),
+                binding(5, pair.gradients),
+                binding(6, pair.raw_weights),
+                binding(7, pair.patch_weight_sums),
+                binding(8, pair.models),
+            ],
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("ONE X2 resident paired GPU PIS"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("ONE X2 resident paired GPU PIS directions"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(dispatch.pipeline);
+            pass.set_bind_group(0, &resources, &[]);
+            pass.dispatch_workgroups(2, 1, 1);
+        }
+        self.belts.submit_front_end(encoder.finish())?;
+        Ok(GpuPreparedTerminal {
+            receipt: GpuPisStageReceipt {
+                flight,
+                stage: dispatch.stage,
+            },
+            pipeline: dispatch.pipeline.clone(),
+            _output: output,
+            _output_span_words: dispatch.output_span_words,
+            _b_output_base_words: dispatch.b_output_base_words,
+            prepared: self,
+        })
     }
 
     /// Consume the resident frame at its explicit CPU re-entry boundary.
@@ -216,6 +429,60 @@ impl<K> GpuPreparedFrame<K> {
             (self.l1_lack_rows.clone(), counts[7]),
             (self.l1_block_mask.clone(), counts[8]),
         ]
+    }
+}
+
+fn pis_direction_header_base(words: &[u32], pair_index: usize) -> Fallible<usize> {
+    if words.first() != Some(&PIS_PAIR_SCHEMA) {
+        return Err("ONE X2 resident GPU PIS dynamic state has the wrong paired schema".into());
+    }
+    let base = usize::try_from(
+        *words
+            .get(pair_index)
+            .ok_or("ONE X2 resident GPU PIS dynamic state is missing a direction header")?,
+    )?;
+    if base
+        .checked_add(PIS_HEADER_WORDS)
+        .is_none_or(|end| end > words.len())
+    {
+        return Err("ONE X2 resident GPU PIS direction header exceeds dynamic state".into());
+    }
+    Ok(base)
+}
+
+fn write_pis_bases(
+    words: &mut [u32],
+    base: usize,
+    level: Level,
+    _direction: Direction,
+    binding: PisPreparedBaseWords,
+) -> Fallible<()> {
+    if words[base] as usize != level.rows() || words[base + 1] as usize != level.cols() {
+        return Err(
+            "ONE X2 resident GPU PIS level or direction does not match its sealed frame".into(),
+        );
+    }
+    for (index, value) in [
+        (9, binding.source_image),
+        (10, binding.target_image),
+        (11, binding.source_mask),
+        (12, binding.target_mask),
+        (14, binding.gradient),
+        (15, binding.gradient),
+        (16, binding.weight),
+        (17, binding.patch_sum),
+        (21, binding.model),
+    ] {
+        words[base + index] = value;
+    }
+    words[base + 30] = 1;
+    Ok(())
+}
+
+fn binding(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: buffer.as_entire_binding(),
     }
 }
 
@@ -1686,8 +1953,6 @@ mod tests {
             .unwrap_or_else(|error| panic!("GPU belt qualification failed on {adapter}: {error}"));
         let resident = belt_pipeline
             .submit_resident_retained(
-                &device,
-                &queue,
                 SourceTextures {
                     a: &texture_a,
                     b: &texture_b,
@@ -1700,29 +1965,7 @@ mod tests {
         let front_end = GpuPisFrontEnd::new(&device, &queue).unwrap_or_else(|error| {
             panic!("GPU prepared-source qualification failed on {adapter}: {error}")
         });
-        let mut prepared = front_end
-            .prepare(&device, &queue, resident, &masks)
-            .unwrap();
-        GpuPisPipeline::validate_prepared_for_test(&prepared, &flight, Level::Two).unwrap();
-        prepared.a_to_b.level_two.receipt.direction = Direction::BtoA;
-        assert!(
-            GpuPisPipeline::validate_prepared_for_test(&prepared, &flight, Level::Two).is_err(),
-            "direction mutation entered the direct kernel"
-        );
-        prepared.a_to_b.level_two.receipt.direction = Direction::AtoB;
-        let saved_flight = prepared.b_to_a.level_two.receipt.flight.clone();
-        prepared.b_to_a.level_two.receipt.flight.generation += 1;
-        assert!(
-            GpuPisPipeline::validate_prepared_for_test(&prepared, &flight, Level::Two).is_err(),
-            "flight mutation entered the direct kernel"
-        );
-        prepared.b_to_a.level_two.receipt.flight = saved_flight;
-        prepared.a_to_b.level_two.model_bytes.start += 4;
-        assert!(
-            GpuPisPipeline::validate_prepared_for_test(&prepared, &flight, Level::Two).is_err(),
-            "prepared range mutation entered the direct kernel"
-        );
-        prepared.a_to_b.level_two.model_bytes.start -= 4;
+        let mut prepared = front_end.prepare(resident, &masks).unwrap();
         assert!(
             validate_direct_stage_for_test(
                 PairSolveStage::Cold {
@@ -1825,7 +2068,7 @@ mod tests {
                     GpuPisPipeline::from_shader_for_direct_test(&device, &queue, &swapped_shader)
                         .unwrap();
                 let output = swapped
-                    .solve_prepared(
+                    .solve_prepared_diagnostic(
                         &device,
                         &queue,
                         prepared,
@@ -1880,7 +2123,7 @@ mod tests {
                 prepared = returned;
             }
             let output = pis
-                .solve_prepared(
+                .solve_prepared_diagnostic(
                     &device,
                     &queue,
                     prepared,
@@ -1934,6 +2177,52 @@ mod tests {
             assert_terminal("B-to-A", level, &actual.b_to_a.grid, &expected_b);
             prepared = returned;
         }
+
+        let resident_request = |calculation| {
+            let level = Level::Two;
+            let stage = PairSolveStage::Cold { calculation, level };
+            let modes = vec![CostMode::Weighted; level.patch_rows()];
+            let a_input = LevelInputs::build::<AtoB>(&retained, &pyramid, level)
+                .input::<AtoB>(level, modes.clone())
+                .0;
+            let b_input = LevelInputs::build::<BtoA>(&retained, &pyramid, level)
+                .input::<BtoA>(level, modes)
+                .0;
+            GpuPisDynamicStage {
+                stage,
+                a_to_b: GpuPisDynamicDirection::from_oracle(
+                    &a_input,
+                    InitialGrid::from_test_row_major(level, vec![Flow::ZERO; level.patches()])
+                        .unwrap(),
+                    None,
+                    DescentAdmission::NoPatches,
+                ),
+                b_to_a: GpuPisDynamicDirection::from_oracle(
+                    &b_input,
+                    InitialGrid::from_test_row_major(level, vec![Flow::ZERO; level.patches()])
+                        .unwrap(),
+                    None,
+                    DescentAdmission::NoPatches,
+                ),
+            }
+        };
+        let terminal = pis.submit_prepared(prepared, resident_request(7)).unwrap();
+        assert_eq!(
+            terminal.receipt_for_test().stage,
+            PairSolveStage::Cold {
+                calculation: 7,
+                level: Level::Two,
+            }
+        );
+        let prepared = terminal.into_prepared(&pis).unwrap();
+        let terminal = pis.submit_prepared(prepared, resident_request(8)).unwrap();
+        let other =
+            GpuPisPipeline::from_shader_for_direct_test(&device, &queue, DIRECT_TEST_SHADER)
+                .unwrap();
+        assert!(
+            terminal.acknowledge_terminal(&other).is_err(),
+            "a resident terminal crossed a different qualified pipeline"
+        );
     }
 
     #[test]

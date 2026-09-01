@@ -3,38 +3,38 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
-**Direct GPU-prepared PIS binding checkpoint, 2026-09-01, implementation
-branch only [UNSELECTED; L1/L2 AND BOTH DIRECTIONS EXACT ON TARGET RADV; KNOWN
-RESIDENT-LIFETIME BLOCKER REMAINS; NO SCENE OR OWNERSHIP-READINESS CLAIM]:** the
-qualified paired GPU PIS kernel now has a standalone entry that binds one
-`GpuPreparedFrame` directly. It binds each immutable prepared allocation as a
-whole storage buffer and carries sealed word bases in the per-direction stage
-header, so the unaligned logical ranges are never used as wgpu binding
-offsets. Only cost modes, initial grids, optional hints, descent admission and
-the selected disparity interval are uploaded per stage. Images, physical
-masks, gradients, raw weights, rolling patch sums and five-word source models
-are neither reconstructed nor uploaded by this adapter. The readable CPU
-`Input` entry remains the oracle and the existing selected Scene path is
-unchanged; there is no direct-path CPU fallback.
+**Sealed resident GPU-prepared PIS checkpoint, 2026-09-01, implementation
+branch only [UNSELECTED; L1/L2 AND BOTH DIRECTIONS; NO SCENE OR INTEGRATION
+READINESS CLAIM]:** the qualified paired GPU PIS kernel has a concrete
+no-readback transition that consumes one complete `GpuPreparedFrame`. The
+frame owner privately derives both directions' level-typed word bases, binds
+every immutable allocation as a whole storage buffer, encodes and submits on
+its stored exact queue, and advances the one inherited submission lease to the
+actual returned submission. No prepared buffer, base, flight, device, queue or
+submission index is exposed or caller-assembled. The returned opaque terminal
+retains the exact flight, `PairSolveStage`, pipeline identity, output buffer and
+same non-cloneable frame owner; chaining consumes it back into that same frame,
+while explicit terminal acknowledgement waits for the latest lease once.
 
-The direct terminal value owns and returns the same non-cloneable prepared
-frame token so one allocation can cross all cold and warm stages without
-detaching its flight. The current base commit still carries the known resident
-submission-lifetime blocker: this checkpoint does not yet advance and
-acknowledge the single producer lease at exact terminal completion, and it is
-therefore not Scene-ready or ownership-ready.
+Only cost modes, initial grids, optional hints, descent admission and the
+selected disparity interval are uploaded per stage. Images, physical masks,
+gradients, raw weights, rolling patch sums and five-word source models are
+neither reconstructed nor uploaded by this adapter. Diagnostic qualification
+alone copies terminal bits to CPU. The readable CPU `Input` entry remains the
+oracle and the existing selected Scene path is unchanged; there is no
+direct-path CPU fallback.
 
-One integrated target-device qualification creates a resident producer and
-complete front end once, then compares exact terminal component bits at level
-two and level one for both directions with asymmetric weighted rows, hints,
-admission and disparity intervals. It reuses the same prepared frame across
-both stages. Planted direction, flight, stage and logical-range mutations are
-refused before dispatch, and a shader-level prepared image/mask buffer swap is
-observably different at the terminal comparison. The fixture caught and
-corrected one binding error during implementation: native swaps the images for
-B-to-A but deliberately retains physical mask slots A then B for both
-directions. This is a bounded adapter and qualification result, not a
-performance, range, Studio-internal, Scene, lifetime or merge-readiness claim.
+The integrated target-device test creates one resident producer and complete
+front end, compares exact terminal bits at both levels and directions under
+asymmetric modes, hints, admissions and intervals, observes a planted shader
+buffer swap, then chains two ordinary no-readback resident stages and refuses
+a terminal from a different qualified pipeline. Both-direction prepared
+buffers and bases are one private frame aggregate, so cross-frame, level and
+direction assembly is not expressible through the crate API. The remaining
+integration blocker is replacement of the interim structural pipeline-handle
+identity with the shared `OneXsGpuContext` foundation used by every resident
+stage. Until that lands this is not Scene-ready, ownership-ready or a
+performance/range claim.
 
 **GPU-resident estimator front-end checkpoint, 2026-09-01, implementation
 branch only [A-TO-B LEVEL TWO ONLY; TARGET-GPU GATE PASSED; NO SCENE WIRING OR
