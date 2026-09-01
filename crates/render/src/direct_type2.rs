@@ -10,9 +10,16 @@ use std::sync::Arc;
 use kjerag_media::Frames;
 
 use crate::dmabuf;
+use crate::flow::one_xs::ParentMapBuilder;
+use crate::flow::one_xs::gpu_context::OneXsGpuContext;
+use crate::flow::one_xs::one_xs_belt_gpu::{
+    ImportedOneXsSource, ResidentImportedFront, ResidentSourceBinder, ResidentSourceCapture,
+    ResidentSourceFrontPipeline, SourceTextures,
+};
 use crate::projection;
 use crate::studio_type2::{ALPHA_BYTES, OneXsMapFrame, PACKED_BYTES};
 use crate::{Fallible, FrameStamp, MAX_LENSES, Planes};
+use kjerag_meta::{OrientationTrack, Readout};
 
 /// One exact decoded ONE X2 pair and the picture binding made from it.
 ///
@@ -24,24 +31,32 @@ use crate::{Fallible, FrameStamp, MAX_LENSES, Planes};
 ///
 /// Field order is load-bearing Rust drop order: the binding is released first,
 /// then its imported textures, and only then the decoder surfaces they alias.
+/// The context clone is last and has no source allocation to release.
 /// The generic parameters exist solely so the unit test can exercise that exact
 /// struct's drop order without fabricating decoder allocations or dmabufs.
 #[allow(dead_code)]
-pub(crate) struct ImportedOneXsPicture<B = wgpu::BindGroup, P = [Planes; 2], F = Arc<Frames>> {
+pub(crate) struct ImportedOneXsPicture<
+    B = wgpu::BindGroup,
+    P = [Planes; 2],
+    F = Arc<Frames>,
+    C = OneXsGpuContext,
+> {
     picture: B,
     planes: P,
     frames: F,
+    context: C,
 }
 
 #[allow(dead_code)]
 impl ImportedOneXsPicture {
     pub(crate) fn import(
-        device: &wgpu::Device,
+        context: &OneXsGpuContext,
         layout: &wgpu::BindGroupLayout,
         uniforms: &wgpu::Buffer,
         sampler: &wgpu::Sampler,
         frames: Arc<Frames>,
     ) -> Fallible<Self> {
+        let device = context.device();
         let [a, b] = exact_one_xs_lenses(&frames.lenses)?;
         // Array construction drops an already-imported A if B refuses. The
         // consumed `frames` parameter remains alive until that cleanup ends.
@@ -54,7 +69,27 @@ impl ImportedOneXsPicture {
             picture,
             planes,
             frames,
+            context: context.clone(),
         })
+    }
+
+    /// Consume this exact imported pair into the existing resident
+    /// parent/geometry/belt front half.
+    ///
+    /// Context and frame identity are not caller inputs. They come from this
+    /// sealed owner and are checked before reservation or command encoding.
+    /// The temporary texture clones are made only so Rust can end the field
+    /// borrow before the complete owner moves into the submission lease; they
+    /// name the same two imported luma allocations and never escape.
+    pub(crate) fn submit_resident_front(
+        self,
+        pipeline: &ResidentSourceFrontPipeline,
+        capture: &ResidentSourceCapture,
+        builder: &ParentMapBuilder,
+        orientation: &OrientationTrack,
+        readout: Readout,
+    ) -> Fallible<ResidentImportedFront> {
+        pipeline.submit_imported(capture, builder, orientation, readout, self)
     }
 
     /// Bind and draw this exact source without exposing its cloneable picture
@@ -70,6 +105,27 @@ impl ImportedOneXsPicture {
         pass: &mut wgpu::RenderPass<'pass>,
     ) {
         pipeline.draw(pass, &self.picture, map);
+    }
+}
+
+impl ImportedOneXsSource for ImportedOneXsPicture {
+    fn ensure_resident_context(&self, context: &OneXsGpuContext) -> Fallible<()> {
+        self.context.ensure_same(context)
+    }
+
+    fn resident_frame(&self) -> FrameStamp {
+        self.frames.stamp()
+    }
+
+    fn submit_with(self, binder: ResidentSourceBinder<'_>) -> Fallible<ResidentImportedFront> {
+        let luma = [self.planes[0].luma.clone(), self.planes[1].luma.clone()];
+        binder.submit_exact(
+            SourceTextures {
+                a: &luma[0],
+                b: &luma[1],
+            },
+            self,
+        )
     }
 }
 
@@ -627,12 +683,13 @@ mod tests {
                 DropWitness::new("planes B", &dropped),
             ],
             frames: DropWitness::new("frames", &dropped),
+            context: DropWitness::new("context", &dropped),
         };
 
         drop(imported);
         assert_eq!(
             *dropped.lock().unwrap(),
-            ["bind group", "planes A", "planes B", "frames"]
+            ["bind group", "planes A", "planes B", "frames", "context"]
         );
     }
 
@@ -649,6 +706,9 @@ mod tests {
 
         assert!(!owner.contains("-> &wgpu::BindGroup"));
         assert!(!owner.contains("-> wgpu::BindGroup"));
+        assert!(!owner.contains("-> &wgpu::Texture"));
+        assert!(!owner.contains("-> wgpu::Texture"));
+        assert!(owner.contains("pipeline.submit_imported("));
         assert!(owner.contains("pipeline.draw(pass, &self.picture, map);"));
     }
 

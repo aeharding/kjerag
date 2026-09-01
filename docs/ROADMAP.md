@@ -3,6 +3,35 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Sealed source-to-resident-front transition, 2026-09-01, implementation
+branch only [PRIVATE AND UNSELECTED; NO SCENE, POST-L1, PLAYBACK, PERFORMANCE
+OR PARITY CLAIM]:** `ImportedOneXsPicture` now has one consuming transition
+into the existing resident parent, geometry and belt front half. The caller
+supplies only the resident capture, frozen parent inputs and readout. The
+transition derives the opaque `FrameStamp`, GPU context and exact two luma
+textures from the sealed imported owner. Context refusal happens before the
+capture reservation or command encoding. Parent, geometry and belt commands
+then share the existing unfinished encoder, and the same complete imported
+owner moves into the first submission lease.
+
+The crate-visible admission method accepts the concrete
+`ImportedOneXsPicture`, not `SourceTextures` plus an independently chosen
+owner. Its one-shot binder cannot be constructed by a caller and returns only
+an opaque `ResidentImportedFront`. Its concrete motion continuation remains
+private to the resident owner until that later boundary is qualified. No bind
+group, texture, plane, decoder frame, device, queue or submission handle is
+returned. The two temporary wgpu texture
+clones remain inside the consuming implementation and name the owner's own
+imported luma allocations; they exist only to end Rust field borrows before
+the complete aggregate moves into the lease.
+
+Generic field ownership still proves binding, planes A, planes B, decoder
+frames and context drop in that order. Structural tests pin concrete-owner
+admission, internal stamp/context derivation and the absence of raw resource
+accessors. Existing GPU lease tests remain the proof that a source owner is
+retained until exact submission completion. This checkpoint does not
+fabricate dmabuf success and does not install a resident result.
+
 **Sealed ONE X2 source-import ownership prerequisite, 2026-09-01,
 implementation branch only [PRIVATE AND UNSELECTED; NO SCENE, PLAYBACK,
 PERFORMANCE OR PARITY CLAIM]:** the direct type-2 module now owns one private

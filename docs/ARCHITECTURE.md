@@ -400,6 +400,18 @@ parity.
   decoder. `ScenePipeline` keeps the last 3 pairs alive behind the one it
   binds; iced submits after `prepare` returns and presents later still, so
   "the draw call was recorded" is not "the GPU is done".
+- The unselected resident ONE X2 path enforces the same rule with a sealed
+  transition rather than a retention convention. `ImportedOneXsPicture` owns
+  the exact two imported plane pairs, their picture binding, GPU context and
+  decoder `Frames`. Its consuming resident-front operation derives the exact
+  frame identity and luma textures internally, refuses a foreign context
+  before reservation or encoding, appends parent, geometry and belt work to
+  one command stream, and moves that same aggregate into the submission
+  lease. The crate-visible admission accepts the concrete aggregate rather
+  than a `SourceTextures`/owner pair. Its opaque result retains the only
+  module-private consuming motion continuation, which is not yet published as
+  an integration API. No raw wgpu or dmabuf resource crosses that boundary.
+  This is an ownership prerequisite only; Scene and playback do not select it.
 - Reference import code: `ez-ffmpeg` 0.17 `wgpu_filter/hw_interop.rs`,
   `iroh-live` `rusty-codecs/src/render/dmabuf_import.rs`, `bevy-dmabuf`.
 - GStreamer was evaluated and rejected: no wgpu or dmabuf-to-Vulkan sink.

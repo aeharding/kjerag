@@ -18,6 +18,7 @@ use super::pis::gpu::GpuPisFlight;
 use super::temporal::{BlurredBelts, gaussian_blur};
 use super::{Lens, LensPair};
 use crate::Fallible;
+use crate::direct_type2::ImportedOneXsPicture;
 use crate::flow::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sample_source_belts};
 use kjerag_media::FrameStamp;
 use kjerag_meta::{OrientationTrack, Readout};
@@ -80,6 +81,115 @@ impl GpuResidentFramePipeline {
         let reservation = capture.reserve(frame)?;
         self.parent
             .encode(builder, orientation, reservation, readout)
+    }
+}
+
+/// Concrete sealed imported-source capability used by the resident front
+/// half. The trait exposes identity checks and one consuming callback, never a
+/// texture, plane, bind group, frame owner or wgpu handle.
+#[allow(dead_code)]
+pub(crate) trait ImportedOneXsSource: Sized {
+    fn ensure_resident_context(&self, context: &OneXsGpuContext) -> Fallible<()>;
+    fn resident_frame(&self) -> FrameStamp;
+    fn submit_with(self, binder: ResidentSourceBinder<'_>) -> Fallible<ResidentImportedFront>;
+}
+
+/// The complete existing parent/geometry/belt producer for one context.
+/// Callers can only enter it with the concrete sealed imported-picture owner.
+#[allow(dead_code)]
+pub(crate) struct ResidentSourceFrontPipeline {
+    context: OneXsGpuContext,
+    parent: GpuResidentFramePipeline,
+    geometry: geometry_gpu::GpuGeometryPipeline,
+    belts: GpuSolverBeltPipeline,
+}
+
+#[allow(dead_code)]
+impl ResidentSourceFrontPipeline {
+    pub(crate) fn new(context: OneXsGpuContext) -> Fallible<Self> {
+        Ok(Self {
+            context: context.clone(),
+            parent: GpuResidentFramePipeline::new(context.clone())?,
+            geometry: geometry_gpu::GpuGeometryPipeline::new(
+                context.clone(),
+                &super::base_map::one_xs_static_coordinates(),
+            )?,
+            belts: GpuSolverBeltPipeline::new(context)?,
+        })
+    }
+
+    pub(crate) fn new_capture(&self) -> ResidentSourceCapture {
+        ResidentSourceCapture(resident_frame_gpu::GpuResidentCapture::new())
+    }
+
+    /// Identity refusal precedes reservation, allocation and encoding. The
+    /// exact frame comes from the sealed imported owner rather than a caller.
+    pub(crate) fn submit_imported(
+        &self,
+        capture: &ResidentSourceCapture,
+        builder: &ParentMapBuilder,
+        orientation: &OrientationTrack,
+        readout: Readout,
+        source: ImportedOneXsPicture,
+    ) -> Fallible<ResidentImportedFront> {
+        source.ensure_resident_context(&self.context)?;
+        let frame = source.resident_frame();
+        let parent = self
+            .parent
+            .begin_parent(&capture.0, frame, builder, orientation, readout)?;
+        let geometry = self.geometry.encode_resident_parents(parent)?;
+        source.submit_with(ResidentSourceBinder {
+            geometry,
+            belts: &self.belts,
+        })
+    }
+}
+
+/// Capture-local root. Its reservation cannot be forged or separated.
+#[allow(dead_code)]
+pub(crate) struct ResidentSourceCapture(resident_frame_gpu::GpuResidentCapture);
+
+/// One-shot callback handed only to the concrete imported-source owner after
+/// identity checks and front-half encoding. Its fields are private, so no
+/// caller can manufacture another owner/source association.
+#[allow(dead_code)]
+pub(crate) struct ResidentSourceBinder<'a> {
+    geometry: geometry_gpu::EncodedGpuGeometry,
+    belts: &'a GpuSolverBeltPipeline,
+}
+
+#[allow(dead_code)]
+impl ResidentSourceBinder<'_> {
+    pub(crate) fn submit_exact(
+        self,
+        sources: SourceTextures<'_>,
+        owner: ImportedOneXsPicture,
+    ) -> Fallible<ResidentImportedFront> {
+        self.geometry
+            .submit_belts(self.belts, sources, owner)
+            .map(|inner| ResidentImportedFront { inner })
+    }
+}
+
+/// Opaque front-half result. Its only continuation consumes the exact
+/// geometry/source lease into resident motion; no component is returned.
+#[must_use = "the imported ONE X2 resident front half has not been consumed"]
+#[allow(dead_code)]
+pub(crate) struct ResidentImportedFront {
+    inner: geometry_gpu::GpuGeometryBelts<ImportedOneXsPicture>,
+}
+
+#[allow(dead_code)]
+impl ResidentImportedFront {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn prepare_motion(
+        self,
+        stage: &geometry_gpu::temporal_gpu::GpuMotionStage,
+    ) -> Fallible<
+        geometry_gpu::temporal_gpu::GpuMotionTransaction<
+            geometry_gpu::GpuGeometryBelts<ImportedOneXsPicture>,
+        >,
+    > {
+        self.inner.prepare_motion(stage)
     }
 }
 
@@ -1534,6 +1644,49 @@ mod tests {
         fn drop(&mut self) {
             let _ = self.dropped.send(self.wait_state.load(Ordering::SeqCst));
         }
+    }
+
+    #[test]
+    fn resident_front_admits_only_the_concrete_imported_owner() {
+        let source = include_str!("one_xs_belt_gpu.rs");
+        let admission = source
+            .split_once("pub(crate) fn submit_imported(")
+            .unwrap()
+            .1
+            .split_once("/// Capture-local root")
+            .unwrap()
+            .0;
+
+        assert!(admission.contains("source: ImportedOneXsPicture"));
+        assert!(!admission.contains("SourceTextures"));
+        assert!(!admission.contains("source_owner"));
+        assert!(
+            admission.find("ensure_resident_context").unwrap()
+                < admission.find("begin_parent").unwrap()
+        );
+        assert!(
+            admission.find("resident_frame()").unwrap() < admission.find("begin_parent").unwrap()
+        );
+    }
+
+    #[test]
+    fn resident_front_returns_only_an_opaque_consuming_continuation() {
+        let source = include_str!("one_xs_belt_gpu.rs");
+        let result = source
+            .split_once("pub(crate) struct ResidentImportedFront")
+            .unwrap()
+            .1
+            .split_once("const CODES_PER_WORD")
+            .unwrap()
+            .0;
+
+        assert!(result.contains("fn prepare_motion("));
+        assert!(!result.contains("fn texture"));
+        assert!(!result.contains("fn planes"));
+        assert!(!result.contains("fn bind_group"));
+        assert!(!result.contains("fn source_owner"));
+        assert!(!result.contains("fn device"));
+        assert!(!result.contains("fn queue"));
     }
 
     #[test]
