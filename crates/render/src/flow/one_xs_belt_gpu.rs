@@ -1326,6 +1326,78 @@ mod tests {
         );
     }
 
+    const DOUBLE_UNWIND_CHILD: &str = "KJERAG_TEST_BELT_LEASE_DOUBLE_UNWIND_CHILD";
+    const DOUBLE_UNWIND_MARKER: &str = "ONE X2 submission lease double unwind passed";
+
+    struct LeaseDropGuard(Option<SubmissionLease<Arc<()>>>);
+
+    impl Drop for LeaseDropGuard {
+        fn drop(&mut self) {
+            // This runs while the outer panic is already unwinding. If the
+            // lease ever lets its injected poll panic escape, Rust aborts this
+            // process for the double panic. The controller test deliberately
+            // confines that failure to a child test process.
+            drop(self.0.take());
+        }
+    }
+
+    #[test]
+    fn submission_lease_double_unwind_child() {
+        if std::env::var_os(DOUBLE_UNWIND_CHILD).is_none() {
+            return;
+        }
+
+        let state = Arc::new(AtomicU8::new(0));
+        let owner = Arc::new(());
+        let retained = Arc::downgrade(&owner);
+        let lease =
+            SubmissionLease::injected(owner.clone(), InjectedWait::Panic, Arc::clone(&state));
+        let outer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = LeaseDropGuard(Some(lease));
+            panic!("injected ONE X2 outer unwind");
+        }))
+        .expect_err("the outer panic did not reach its catch boundary");
+        assert_eq!(
+            outer.downcast_ref::<&str>(),
+            Some(&"injected ONE X2 outer unwind"),
+            "the lease replaced the active outer panic payload"
+        );
+        assert_eq!(
+            state.load(Ordering::SeqCst),
+            1,
+            "the injected poll panic did not occur during lease Drop"
+        );
+        drop(owner);
+        assert!(
+            retained.upgrade().is_some(),
+            "double-unwind quarantine released the source owner"
+        );
+        eprintln!("{DOUBLE_UNWIND_MARKER}");
+    }
+
+    #[test]
+    fn submission_lease_drop_during_outer_unwind_is_process_safe() {
+        let helper = "flow::one_xs_belt_gpu::tests::submission_lease_double_unwind_child";
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("the test harness has an executable path"),
+        )
+        .args(["--exact", helper, "--nocapture"])
+        .env(DOUBLE_UNWIND_CHILD, "1")
+        .output()
+        .expect("could not start the isolated double-unwind helper");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "isolated double-unwind helper failed with {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status
+        );
+        assert!(
+            stdout.contains(DOUBLE_UNWIND_MARKER) || stderr.contains(DOUBLE_UNWIND_MARKER),
+            "isolated helper did not prove outer-payload and quarantine checks\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+
     #[test]
     fn gpu_solver_belts_are_byte_exact_on_adversarial_odd_padded_sources() {
         let (device, queue, adapter) = match gpu() {

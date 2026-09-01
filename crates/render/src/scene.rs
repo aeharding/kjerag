@@ -7022,7 +7022,7 @@ mod tests {
         assert_eq!(
             Arc::strong_count(&observed_frames),
             retained_with_pending - 1,
-            "completed ABA refusal retained or prematurely reused its source owner"
+            "completed ABA refusal did not release exactly its pending FramePair Arc"
         );
         reservation
             .abort()
