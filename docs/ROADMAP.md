@@ -18,8 +18,8 @@ Vulkan device is available, and its explicit invocation goes through
 media-independent synthetic source fixture gate.
 
 **Production GPU ONE X2 solver-belt bridge, 2026-09-01, implementation branch
-only [WIRED INTO PLAYBACK; BYTE-EXACT TARGET-GPU TWIN; ONE REAL FRAME
-BYTE-IDENTICAL TO THE FROZEN CPU BUILD; NO THROUGHPUT, STUDIO PARITY OR OWNER
+only [WIRED INTO PLAYBACK; BYTE-EXACT TARGET-GPU TWIN; AUTHENTICATED 61-FRAME
+CPU IDENTITY; 25.6% MEDIAN THROUGHPUT GAIN; NOT REALTIME; NO STUDIO OR OWNER
 VERDICT CLAIM]:** selected playback now sends the imported R8 lens textures
 and each frame's retained float2 maps directly to the exact GPU sampler and
 3-by-3 reducer. It reads back only the final two 1080-by-60 U8 solver belts,
@@ -52,16 +52,25 @@ previous complete display and estimator transaction available for the existing
 rollback path. Existing-result lookup and successor preparation occur under
 one lock, so recreating the render pipeline cannot open a ready/prepare race.
 
-On the target Radeon 760M/RADV adapter, the complete render crate passed 598
-tests with 23 data-dependent tests ignored. The required adversarial GPU twin
-matched all 129,600 bytes. A separately built frozen CPU branch and this GPU
-branch then causally rendered frames 0 through 2 of the owner ONE X2 clip at
-the reported 71.13 yaw, -13.99 pitch, 57.95-degree locked view with Sharp
-sampling and the factory seam. Both runs presented three frames with none
-dropped, and their frame-2 2560-by-1440 PNGs were byte-identical at SHA-256
-`72b76cc0c887e30c51abd43e8132fafa83f598bd8a5482508e74a5a399cbd2ea`.
-This is an integration and bounded correctness result, not a speed result or a
-replacement for the authenticated causal review interval.
+On the target Radeon 760M/RADV adapter, the complete workspace gate passed;
+the render crate ran 601 tests with 23 data-dependent tests ignored. The
+required adversarial GPU twin matched all 129,600 bytes, and the opt-in real
+Scene regression passed against the owner ONE X2 pair through dmabuf import.
+
+Clean candidate commit `f0db9851753415b8f69e1d6a7c97472094f4c841`
+then causally processed frames 0 through 6399 at the reported 71.13 yaw,
+-13.99 pitch and 57.95-degree locked view with Sharp sampling and the factory
+seam. It presented all 6,400 frames with zero dropped and zero starved. Every
+one of the 61 requested PNGs, 61 packed maps and 61 alpha maps for frames 6339
+through 6399 was byte-identical to the separately built frozen CPU package.
+The candidate range receipt is SHA-256
+`a7a4e917ab6b6e986d45b73468882ecf2983eef4def7e9c9fa32b8afab776818`.
+All 61 candidate-authenticated computed traces were also byte-identical to the
+frozen CPU traces and reported zero uncovered pixels; that trace receipt is
+SHA-256
+`4a8c7d58c5702623b2b1b505872d7cb56b23d529f1b9a970c0778a3fd424b847`.
+This proves identity to Kjerag's accepted CPU boundary, not a new Studio export
+or an owner-eye verdict on this exact build.
 
 **Initial GPU ONE X2 solver-belt producer, 2026-09-01, implementation branch
 history [BYTE-EXACT TARGET-GPU TWIN]:** a render-internal compute pipeline
@@ -109,7 +118,8 @@ scheduling boundary for later GPU work, not a semantic change, GPU
 implementation, throughput result or Studio parity claim.
 
 **GPU migration transaction benchmark, 2026-09-01, working branch only
-[INSTRUMENT IMPLEMENTED; NO MEDIA RESULT YET]:** `kjerag-spike --bin playback`
+[FOUR BALANCED CPU/GPU PAIRS; 25.6% MEDIAN GAIN; NOT REALTIME]:**
+`kjerag-spike --bin playback`
 accepts the fail-closed benchmark mode
 `measure=200:300 pace=off receipt=NEW-FILE bench=0`. It consumes frames 0
 through 199 causally through the production `Scene` as untimed warm-up, then
@@ -134,9 +144,22 @@ mismatched delivery refuses the run. Receipt schema v2 names the ONE X2
 lens-type selector, native packed type-2 map and `DirectOneXs` draw, and each
 frame records that authenticated route; its negligible stamp comparisons are
 included in `prepare_ns` and interval throughput and copy no map payload. This
-is the stable pre/post throughput boundary for the GPU migration. It is not a Studio parity,
-realtime playback, audio or visual-quality result. A real baseline run still
-has to be made through `scripts/quiet.sh` from a clean committed build.
+is the stable pre/post throughput boundary for the GPU migration. It is not a
+Studio parity, realtime playback, audio or visual-quality result.
+
+The frozen CPU implementation at benchmark commit
+`4c5b91fbf27eef5333984826a4f454607a6afa3b` and GPU candidate
+`f0db9851753415b8f69e1d6a7c97472094f4c841` were built in separate worktrees
+and target directories. Four order-balanced CPU/GPU pairs ran through
+`scripts/quiet.sh` on the same source hashes, Radeon 760M, RADV driver and Mesa
+build. Every run authenticated `one-x2-direct-type-2`, presented all 300 timed
+frames and dropped none. CPU throughput was 19.234, 19.339, 19.363 and 19.489
+fps; GPU throughput was 23.726, 24.285, 24.336 and 24.391 fps. Their medians
+are 19.351 and 24.310 fps, a 25.6% gain. Median transaction time fell from
+50.69 ms to 40.11 ms, entirely at preparation: its median fell from 37.44 ms
+to 26.80 ms while waited draw stayed about 13.2 ms. The result is still only
+about 81.1% of the 29.97-fps source clock, so it is a measured first-stage win,
+not completion of the GPU migration or a realtime claim.
 
 **ONE X2 Studio-derived playback, 2026-08-31, shipping branch:** ordinary
 zero-config playback now selects the capture-owned causal ONE X2 route
