@@ -47,8 +47,8 @@ use super::{
     PATCH_STRIDE, ROWS, selected_pis_interval,
 };
 use crate::flow::one_xs_belt::{
-    CameraMaskError, CameraMaskReport, CameraMaskSupport, RetainedBaseMaps, SolverBelts,
-    SourceBelts, base_support_masks, reconstructed_camera_masks,
+    CameraMaskError, CameraMaskReport, RetainedBaseMaps, SolverBelts, SourceBelts,
+    base_support_masks, reconstructed_camera_masks,
 };
 use crate::projection::Reframe;
 
@@ -96,20 +96,6 @@ impl ColdInputs {
         Ok((Self::from_staging_and_masks(staging, masks), report))
     }
 
-    /// Prepare the same images using capture-static conditioned mask support.
-    ///
-    /// The support raster depends only on calibration and source dimensions,
-    /// so a playback owner constructs it once and reuses it while applying the
-    /// per-frame retained base maps.
-    pub(crate) fn from_staging_and_camera_mask_support(
-        staging: &SourceBelts,
-        base_maps: &RetainedBaseMaps,
-        support: &CameraMaskSupport,
-    ) -> (Self, CameraMaskReport) {
-        let (masks, report) = support.apply(base_maps);
-        (Self::from_staging_and_masks(staging, masks), report)
-    }
-
     fn from_staging_and_masks(staging: &SourceBelts, masks: LensPair<Vec<u8>>) -> Self {
         let retained = staging.reduce_area_3x3();
         let blurred = temporal::gaussian_blur(&retained);
@@ -143,14 +129,24 @@ impl ColdInputs {
         Self::validate_shape(&image, &mask)?;
         let retained = SolverBelts::from_lenses(image)
             .expect("validated retained image pair has the solver-belt shape");
+        Ok(Self::from_solver_belts_and_masks(retained, mask))
+    }
+
+    /// Apply the selected input blur to an already shape-typed solver pair.
+    pub(crate) fn from_solver_belts_and_masks(
+        retained: SolverBelts,
+        mask: LensPair<Vec<u8>>,
+    ) -> Self {
+        debug_assert_eq!(mask.a.len(), ROWS * COLS);
+        debug_assert_eq!(mask.b.len(), ROWS * COLS);
         let blurred = temporal::gaussian_blur(&retained);
-        Ok(Self {
+        Self {
             image: LensPair {
                 a: blurred.lens(Lens::A).to_vec(),
                 b: blurred.lens(Lens::B).to_vec(),
             },
             mask,
-        })
+        }
     }
 
     fn validate_shape(

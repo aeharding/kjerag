@@ -188,6 +188,21 @@ impl FrameStamp {
         DecodeEpoch::new().stamp(index, timestamp)
     }
 
+    /// Mint adjacent delivery identities for another crate's unit tests.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn for_test(index: u64, timestamp: Duration, previous: Option<&Self>) -> Self {
+        let decode_epoch = previous
+            .map(|stamp| stamp.decode_epoch.clone())
+            .unwrap_or_else(|| Arc::new(()));
+        Self {
+            pair: Arc::new(()),
+            decode_epoch,
+            index,
+            timestamp,
+        }
+    }
+
     /// Whether two deliveries came from one reader without an intervening
     /// seek attempt.
     ///

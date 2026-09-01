@@ -29,6 +29,15 @@ pub struct OneXsLumaFrame {
 }
 
 impl OneXsLumaFrame {
+    #[cfg(test)]
+    pub(crate) fn for_test(frame: FrameStamp, size: Size, sources: LensPair<SourceImage>) -> Self {
+        Self {
+            frame,
+            size,
+            sources,
+        }
+    }
+
     pub fn frame(&self) -> &FrameStamp {
         &self.frame
     }

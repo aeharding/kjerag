@@ -14,7 +14,7 @@ use kjerag_meta::{CalibrationSet, Filter, OrientationTrack, Readout};
 
 use crate::flow::one_xs_belt::{
     BaseMapShapeError, CameraMaskError, CameraMaskReport, CameraMaskSupport, RetainedBaseMaps,
-    sample_source_belts,
+    SolverBelts, sample_source_belts,
 };
 use crate::studio_type2::{OneXsMapFrame, PackedMap};
 use crate::{Camera, Held, OneXsLumaFrame, Reframe, Sampling};
@@ -35,6 +35,38 @@ pub(crate) struct FrameResult {
     pub weighted_rows: WorkRowCounts,
     pub lens_a_census: Census,
     pub lens_b_census: Census,
+}
+
+/// Fallible per-frame geometry, bound to one exact decoded delivery.
+///
+/// This value is deliberately linear: it cannot be cloned, and committing it
+/// consumes it. The retained numeric owner is untouched until [`FrameOwner::commit`].
+pub(crate) struct PreparedFrame {
+    frame: FrameStamp,
+    retained: RetainedBaseMaps,
+    patch_base: LensPair<BaseMap>,
+    preimage: LensPair<PreimageMap>,
+    masks: LensPair<Vec<u8>>,
+    camera_mask: CameraMaskReport,
+}
+
+impl PreparedFrame {
+    /// The exact delivery this preparation is allowed to commit.
+    pub(crate) fn frame(&self) -> &FrameStamp {
+        &self.frame
+    }
+
+    /// The exact retained maps from which a CPU or GPU belt producer samples.
+    pub(crate) fn retained_base_maps(&self) -> &RetainedBaseMaps {
+        &self.retained
+    }
+
+    fn sample_solver_belts(&self, frame: &OneXsLumaFrame) -> Result<SolverBelts, FrameOwnerError> {
+        if frame.frame() != self.frame() {
+            return Err(FrameOwnerError::PreparedSourceMismatch);
+        }
+        Ok(sample_source_belts(frame.sources(), self.retained_base_maps()).reduce_area_3x3())
+    }
 }
 
 enum State {
@@ -90,24 +122,23 @@ impl FrameOwner {
         })
     }
 
-    /// Consume one exact decoded luma pair and produce its exact-bound map.
-    ///
-    /// Every operation which can fail runs before the retained estimator is
-    /// consumed. After that point only exact-shape internal constructors and
-    /// the already-validated adjacent `PairOwner` transition remain. Thus an
-    /// error leaves the owner at the previously committed frame.
-    pub fn process(&mut self, frame: &OneXsLumaFrame) -> Result<FrameResult, FrameOwnerError> {
-        self.validate_delivery(frame.frame())?;
-        if frame.size() != self.source_size {
+    /// Validate and prepare all fallible geometry without consuming history.
+    pub(crate) fn prepare(
+        &self,
+        frame: &FrameStamp,
+        source_size: Size,
+    ) -> Result<PreparedFrame, FrameOwnerError> {
+        self.validate_delivery(frame)?;
+        if source_size != self.source_size {
             return Err(FrameOwnerError::SourceSize {
                 expected: self.source_size,
-                actual: frame.size(),
+                actual: source_size,
             });
         }
 
         let parents = self
             .parent
-            .build_for_frame(&self.orientation, frame.frame(), self.readout)
+            .build_for_frame(&self.orientation, frame, self.readout)
             .map_err(FrameOwnerError::Parent)?;
         let prefiltered = LensPair {
             a: map_merge(&self.resources.static_coordinates().a, &parents.a)
@@ -137,17 +168,44 @@ impl FrameOwner {
             b: PreimageMap::new(parents.b.row_major_values().to_vec())
                 .expect("selected parent lens B ROI has the type-2 shape"),
         };
+        let (masks, camera_mask) = self.camera_mask_support.apply(&retained);
 
-        let staging = sample_source_belts(frame.sources(), &retained);
-        let (input, camera_mask) = ColdInputs::from_staging_and_camera_mask_support(
-            &staging,
-            &retained,
-            &self.camera_mask_support,
-        );
+        Ok(PreparedFrame {
+            frame: frame.clone(),
+            retained,
+            patch_base,
+            preimage,
+            masks,
+            camera_mask,
+        })
+    }
+
+    /// Consume one prepared delivery and its exact pre-blur solver belts.
+    ///
+    /// The second delivery check rejects a stale prepared transaction before
+    /// retained history is touched. Once history is taken, the existing
+    /// fixed-shape transition and materializer cannot fail; state is committed
+    /// at the same final point as the original monolithic transaction.
+    pub(crate) fn commit(
+        &mut self,
+        prepared: PreparedFrame,
+        solver_belts: SolverBelts,
+    ) -> Result<FrameResult, FrameOwnerError> {
+        self.validate_delivery(&prepared.frame)?;
+        let PreparedFrame {
+            frame,
+            patch_base,
+            preimage,
+            masks,
+            camera_mask,
+            ..
+        } = prepared;
+
+        let input = ColdInputs::from_solver_belts_and_masks(solver_belts, masks);
 
         // All fallible source, geometry and mask work is complete. Consume the
         // retained estimator only now, then finish through fixed-size values.
-        let position = PairPosition::new(&self.continuity, frame.frame().index());
+        let position = PairPosition::new(&self.continuity, frame.index());
         let previous_state = std::mem::replace(&mut self.state, State::NeedFrameZero);
         let step = match previous_state {
             State::NeedFrameZero => PairOwner::start(position, input),
@@ -196,11 +254,7 @@ impl FrameOwner {
         let packed =
             PackedMap::new(maps.packed).expect("bilateral materializer has the fixed type-2 shape");
         let result = FrameResult {
-            map: OneXsMapFrame::new(
-                frame.frame().clone(),
-                packed,
-                self.resources.alpha().clone(),
-            ),
+            map: OneXsMapFrame::new(frame.clone(), packed, self.resources.alpha().clone()),
             phase: step.output.phase,
             camera_mask,
             invalid_nodes: step.output.invalid_nodes,
@@ -209,10 +263,17 @@ impl FrameOwner {
             lens_b_census: maps.lens_b_census,
         };
         self.state = State::Running {
-            previous: frame.frame().clone(),
+            previous: frame,
             estimator: Box::new(step.owner),
         };
         Ok(result)
+    }
+
+    /// Process one exact decoded luma pair through the synchronous CPU route.
+    pub fn process(&mut self, frame: &OneXsLumaFrame) -> Result<FrameResult, FrameOwnerError> {
+        let prepared = self.prepare(frame.frame(), frame.size())?;
+        let solver_belts = prepared.sample_solver_belts(frame)?;
+        self.commit(prepared, solver_belts)
     }
 
     fn validate_delivery(&self, offered: &FrameStamp) -> Result<(), FrameOwnerError> {
@@ -315,6 +376,7 @@ pub(crate) enum FrameOwnerError {
     CameraMask(CameraMaskError),
     Sequence(SequenceError),
     EstimatorContinuity(super::owner::ContinuityError),
+    PreparedSourceMismatch,
     SourceSize { expected: Size, actual: Size },
 }
 
@@ -329,6 +391,9 @@ impl fmt::Display for FrameOwnerError {
             Self::CameraMask(error) => error.fmt(out),
             Self::Sequence(error) => error.fmt(out),
             Self::EstimatorContinuity(error) => error.fmt(out),
+            Self::PreparedSourceMismatch => {
+                out.write_str("ONE X2 prepared geometry and source belts name different frames")
+            }
             Self::SourceSize { expected, actual } => write!(
                 out,
                 "ONE X2 source frame is {}x{} but calibration requires {}x{}",
@@ -342,7 +407,130 @@ impl Error for FrameOwnerError {}
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use kjerag_meta::{
+        CalibrationSet, ExposureTrack, GyroConfig, GyroEncoding, GyroTrack, OrientationSample,
+        OrientationTrack, Quat,
+    };
+
     use super::*;
+    use crate::flow::one_xs_belt::SourceImage;
+    use crate::projection::tests::{ONE_XS_FRAME, one_xs_lenses};
+
+    fn calibration() -> CalibrationSet {
+        CalibrationSet {
+            camera_model: "Insta360 ONE X2".to_owned(),
+            firmware: "synthetic".to_owned(),
+            dimension: kjerag_meta::Size {
+                width: ONE_XS_FRAME.width,
+                height: ONE_XS_FRAME.height,
+            },
+            lenses: one_xs_lenses(),
+            rolling_shutter_ms: 23.516_071_319_580_078,
+            gyro: GyroConfig {
+                encoding: GyroEncoding::Scaled,
+                imu_orientation: "Zxy",
+                first_frame_timestamp: 0,
+                gyro_timestamp: None,
+            },
+            exposure: [ExposureTrack::default(), ExposureTrack::default()],
+            imu: GyroTrack::default(),
+            fused: OrientationTrack::from_samples(
+                (1_900_000..=2_100_000)
+                    .step_by(2_000)
+                    .map(|offset_us| OrientationSample {
+                        offset_us,
+                        world_from_body: Quat::IDENTITY,
+                    })
+                    .collect(),
+            ),
+            calibration_canvas: kjerag_meta::Size {
+                width: 6_080,
+                height: 3_040,
+            },
+        }
+    }
+
+    fn frame(index: u64, previous: Option<&FrameStamp>, code: u8) -> OneXsLumaFrame {
+        let stamp = FrameStamp::for_test(index, Duration::from_secs(2), previous);
+        let source = || SourceImage::from_compact(1, 1, vec![code]).unwrap();
+        OneXsLumaFrame::for_test(
+            stamp,
+            Size {
+                width: ONE_XS_FRAME.width,
+                height: ONE_XS_FRAME.height,
+            },
+            LensPair {
+                a: source(),
+                b: source(),
+            },
+        )
+    }
+
+    fn assert_same_result(left: &FrameResult, right: &FrameResult) {
+        assert_eq!(left.map.frame(), right.map.frame());
+        assert_eq!(left.map.packed().bytes(), right.map.packed().bytes());
+        assert_eq!(left.map.alpha().bytes(), right.map.alpha().bytes());
+        assert_eq!(left.phase, right.phase);
+        assert_eq!(left.camera_mask, right.camera_mask);
+        assert_eq!(left.invalid_nodes, right.invalid_nodes);
+        assert_eq!(left.weighted_rows, right.weighted_rows);
+        assert_eq!(left.lens_a_census, right.lens_a_census);
+        assert_eq!(left.lens_b_census, right.lens_b_census);
+    }
+
+    #[test]
+    fn explicit_prepare_commit_matches_synchronous_process_and_next_state() {
+        let calibration = calibration();
+        let first = frame(0, None, 113);
+        let second = frame(1, Some(first.frame()), 117);
+        let mut synchronous = FrameOwner::new(&calibration).unwrap();
+        let mut split = FrameOwner::new(&calibration).unwrap();
+
+        let synchronous_first = synchronous.process(&first).unwrap();
+        let prepared = split.prepare(first.frame(), first.size()).unwrap();
+        assert_eq!(prepared.frame(), first.frame());
+        let belts = prepared.sample_solver_belts(&first).unwrap();
+        let split_first = split.commit(prepared, belts).unwrap();
+        assert_same_result(&synchronous_first, &split_first);
+
+        let synchronous_second = synchronous.process(&second).unwrap();
+        let prepared = split.prepare(second.frame(), second.size()).unwrap();
+        let belts = prepared.sample_solver_belts(&second).unwrap();
+        let split_second = split.commit(prepared, belts).unwrap();
+        assert_same_result(&synchronous_second, &split_second);
+    }
+
+    #[test]
+    fn stale_preparation_fails_without_consuming_the_owner() {
+        let calibration = calibration();
+        let first = frame(0, None, 113);
+        let second = frame(1, Some(first.frame()), 117);
+        let mut owner = FrameOwner::new(&calibration).unwrap();
+        let accepted = owner.prepare(first.frame(), first.size()).unwrap();
+        let stale = owner.prepare(first.frame(), first.size()).unwrap();
+        let belts = SolverBelts::from_fn(|lens, row, col| {
+            (lens.index() as u8)
+                .wrapping_add(row as u8)
+                .wrapping_add(col as u8)
+        });
+
+        owner.commit(accepted, belts.clone()).unwrap();
+        let error = match owner.commit(stale, belts.clone()) {
+            Ok(_) => panic!("stale prepared transaction was accepted"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            FrameOwnerError::Sequence(SequenceError::Duplicate { index: 0 })
+        ));
+
+        let prepared = owner.prepare(second.frame(), second.size()).unwrap();
+        let result = owner.commit(prepared, belts).unwrap();
+        assert_eq!(result.phase, Phase::Warm);
+        assert_eq!(result.map.frame(), second.frame());
+    }
 
     #[test]
     fn first_delivery_must_be_frame_zero() {

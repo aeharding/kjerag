@@ -3,6 +3,24 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**ONE X2 GPU migration transaction boundary, 2026-08-31, working branch only
+[STRUCTURAL PREREQUISITE; NO GPU OR PERFORMANCE CLAIM]:** the capture-owned
+`FrameOwner` now separates fallible, non-mutating frame preparation from the
+linear estimator commit. Preparation accepts the exact `FrameStamp` and source
+size before luma readback exists, validates delivery continuity, and computes
+the parent maps, filtered retained base maps, patch preimages and selected
+camera masks without consuming `PairOwner`. Its non-cloneable `PreparedFrame`
+can then travel with exact pre-blur 1080-by-60 solver belts. Commit consumes
+both, rechecks the stamp against the currently committed delivery, applies the
+existing input blur, cold/warm transition and map materialization, and replaces
+the retained owner only at the prior successful-transaction point. The
+synchronous CPU `process` path is only a wrapper over those two operations.
+Focused tests compare its complete first and next-frame outputs and retained
+state against explicit prepare/commit, and prove a stale prepared transaction
+is rejected while the owner remains usable for the exact successor. This is a
+scheduling boundary for later GPU work, not a semantic change, GPU
+implementation, throughput result or Studio parity claim.
+
 **ONE X2 Studio-derived playback, 2026-08-31, shipping branch:** ordinary
 zero-config playback now selects the capture-owned causal ONE X2 route
 automatically. It consumes every decoded pair from frame zero, carries warm
