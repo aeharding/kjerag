@@ -3,6 +3,44 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Atomic resident source-plus-map install prerequisite, 2026-09-01,
+implementation branch only [PRIVATE AND UNSELECTED; NO SCENE, WARM, PLAYBACK,
+PERFORMANCE OR PARITY CLAIM]:** successful Cold2 final-map validity now has one
+consuming path into a root-free installed draw. The inherited submission lease
+first proves the joined compute work complete and returns the exact imported
+picture/geometry owner. The post owner simultaneously removes and seals the
+exact root reservation and successor into a separate installation capability.
+The remaining geometry, validity, post-L1 state, public flow, resident packed
+map, capture-static alpha and imported picture are inseparable in one
+`InstalledOneXsDraw`; its only operations write the current `Reframe` to that
+picture's exact retained uniform and bind/draw it through its exact retained
+`DirectType2Pipeline`. It exposes no source, texture, buffer, bind group,
+device, queue, pipeline or detached draw component.
+
+Before binding or retirement admission, the retained direct pipeline proves
+that it belongs to the map's exact graphics device. Retirement capacity is a
+typed bounded admission result. A carrier-first install owner retains the
+whole draw before the root candidate and permit, so refusal and unwind release
+the source/map carrier before reservation rollback. Under the capture root's
+one mutex, installation authenticates context, session, root allocation,
+flight/frame, pending seal, generation, allocation-identical prior and
+quarantine state, then replaces committed successor and whole ready draw and
+clears pending as one transition. Failure publishes neither and the old ready
+allocation remains available. Each redraw snapshots only an `Arc` of that
+whole ready payload and reserves a fresh permit without changing history.
+
+The focused forced-RADV chain covers real Cold0 through Cold2, final validity,
+binding, permit, atomic install, old-ready retention while the next flight is
+pending and while retirement is full, exact old-uniform update despite a
+separately created pipeline/uniform, carrier-before-root refusal witnesses,
+two exact render-pass retirements and repeated redraw without history commit.
+A second forced-RADV test proves cloned-device acceptance and independently
+requested-device refusal before binding or permit reservation. This remains a
+private prerequisite: Scene cannot select it, warm arithmetic cannot consume
+it, and it makes no playback, screenshot integration, performance, rendered
+parity or Studio-parity claim. Studio remains the frozen correctness oracle;
+no optimization reverse engineering was performed.
+
 **Capture-scoped resident calibration ownership, 2026-09-01, implementation
 branch only [PRIVATE AND UNSELECTED; NO POST-L1 JOIN, INSTALL, SCENE,
 PERFORMANCE OR PARITY CLAIM]:** the sealed imported ONE X2 front transition now

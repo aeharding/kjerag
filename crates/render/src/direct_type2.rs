@@ -38,12 +38,14 @@ pub(crate) struct ImportedOneXsPicture<
     B = wgpu::BindGroup,
     P = [Planes; 2],
     F = Arc<Frames>,
+    U = wgpu::Buffer,
     C = OneXsGpuContext,
     S = ResidentSourceIdentity,
 > {
     picture: B,
     planes: P,
     frames: F,
+    uniforms: U,
     context: C,
     session: S,
 }
@@ -71,6 +73,7 @@ impl ImportedOneXsPicture {
             picture,
             planes,
             frames,
+            uniforms: uniforms.clone(),
             context: context.clone(),
             session: capture.source_identity(),
         })
@@ -97,11 +100,11 @@ impl ImportedOneXsPicture {
     /// A later Scene owner can retain the opaque aggregate through render-pass
     /// retirement and invoke this operation, but it cannot detach the binding
     /// from the planes and decoder surfaces that make it valid.
-    pub(crate) fn draw<'pass>(
-        &'pass self,
-        pipeline: &'pass DirectType2Pipeline,
-        map: &'pass wgpu::BindGroup,
-        pass: &mut wgpu::RenderPass<'pass>,
+    pub(crate) fn draw(
+        &self,
+        pipeline: &DirectType2Pipeline,
+        map: &wgpu::BindGroup,
+        pass: &mut wgpu::RenderPass<'_>,
     ) {
         pipeline.draw(pass, &self.picture, map);
     }
@@ -111,6 +114,12 @@ impl ImportedOneXsPicture {
             return Err("ONE X2 final map names a different imported picture allocation".into());
         }
         Ok(())
+    }
+
+    pub(crate) fn write_reframe(&self, reframe: &crate::Reframe) {
+        self.context
+            .queue()
+            .write_buffer(&self.uniforms, 0, reframe.bytes());
     }
 
     #[cfg(test)]
@@ -159,9 +168,36 @@ impl ImportedOneXsPicture {
             picture,
             planes,
             frames: Arc::new(Frames::empty_for_test(frame, crate::Size::new(1, 1))),
+            uniforms: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("ONE X2 resident test uniforms"),
+                size: std::mem::size_of::<crate::Reframe>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
             context: context.clone(),
             session,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resident_test_draw_owner(
+        context: &OneXsGpuContext,
+        session: ResidentSourceIdentity,
+        frame: FrameStamp,
+        layout: &wgpu::BindGroupLayout,
+        uniforms: &wgpu::Buffer,
+        sampler: &wgpu::Sampler,
+    ) -> Self {
+        let mut owner = Self::resident_test_owner(context, session, frame);
+        owner.picture = bind_picture(
+            context.device(),
+            layout,
+            uniforms,
+            [&owner.planes[0], &owner.planes[1]],
+            sampler,
+        );
+        owner.uniforms = uniforms.clone();
+        owner
     }
 }
 
@@ -222,6 +258,7 @@ fn exact_one_xs_lenses<T>(lenses: &[T]) -> Fallible<[&T; 2]> {
 /// source ownership live in separate per-result bindings, so replacing one
 /// result cannot mutate the resources sampled by an older in-flight draw.
 pub(crate) struct DirectType2Pipeline {
+    device: wgpu::Device,
     pipeline: wgpu::RenderPipeline,
     map_layout: wgpu::BindGroupLayout,
 }
@@ -268,6 +305,7 @@ impl DirectType2Pipeline {
             cache: None,
         });
         Self {
+            device: device.clone(),
             pipeline,
             map_layout,
         }
@@ -275,6 +313,14 @@ impl DirectType2Pipeline {
 
     pub(crate) fn map_layout(&self) -> &wgpu::BindGroupLayout {
         &self.map_layout
+    }
+
+    pub(crate) fn ensure_device(&self, context: &OneXsGpuContext) -> Fallible<()> {
+        if self.device == *context.device() {
+            Ok(())
+        } else {
+            Err("ONE X2 direct type-2 pipeline belongs to a different graphics device".into())
+        }
     }
 
     pub(crate) fn draw(
@@ -759,6 +805,7 @@ mod tests {
                 DropWitness::new("planes B", &dropped),
             ],
             frames: DropWitness::new("frames", &dropped),
+            uniforms: DropWitness::new("uniforms", &dropped),
             context: DropWitness::new("context", &dropped),
             session: DropWitness::new("session", &dropped),
         };
@@ -771,6 +818,7 @@ mod tests {
                 "planes A",
                 "planes B",
                 "frames",
+                "uniforms",
                 "context",
                 "session"
             ]
@@ -797,6 +845,60 @@ mod tests {
         assert!(source.contains("pub(crate) fn import_picture("));
         assert!(owner.contains("capture.submit_imported(self)"));
         assert!(owner.contains("pipeline.draw(pass, &self.picture, map);"));
+    }
+
+    #[test]
+    fn direct_pipeline_accepts_cloned_device_and_refuses_independent_device() {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..Default::default()
+        });
+        let Some(adapter) = block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN))
+            .into_iter()
+            .next()
+        else {
+            assert!(std::env::var_os("KJERAG_REQUIRE_GPU").is_none());
+            return;
+        };
+        let request = || {
+            block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("direct type-2 device identity"),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+                ..Default::default()
+            }))
+            .unwrap()
+        };
+        let (device, queue) = request();
+        let (foreign_device, foreign_queue) = request();
+        let layout = crate::scene::bind_group_layout(&device);
+        let pipeline = DirectType2Pipeline::new(&device, &layout, wgpu::TextureFormat::Rgba8Unorm);
+        pipeline
+            .ensure_device(&OneXsGpuContext::new(&device, &queue))
+            .unwrap();
+        let error = pipeline
+            .ensure_device(&OneXsGpuContext::new(&foreign_device, &foreign_queue))
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "ONE X2 direct type-2 pipeline belongs to a different graphics device"
+        );
+
+        let install = include_str!("flow/one_xs_belt_gpu.rs")
+            .split_once("fn prepare_completed_cold_install(")
+            .unwrap()
+            .1
+            .split_once("const CODES_PER_WORD")
+            .unwrap()
+            .0;
+        assert!(
+            install.find("pipeline.ensure_device").unwrap()
+                < install.find("bind_completed_cold").unwrap()
+        );
+        assert!(
+            install.find("pipeline.ensure_device").unwrap()
+                < install.find(".reserve(retirements)").unwrap()
+        );
     }
 
     #[test]

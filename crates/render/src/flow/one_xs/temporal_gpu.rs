@@ -333,6 +333,40 @@ impl GpuMotionResidentL2Post<GpuColdPriorPublicLevelTwo> {
         Ok(())
     }
 
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn take_install_candidate(
+        &mut self,
+    ) -> Fallible<GpuResidentCandidate> {
+        let reservation = self
+            .motion
+            .reservation
+            .as_ref()
+            .ok_or("ONE X2 final install lost its root reservation")?;
+        let successor = self
+            .motion
+            .successor
+            .as_ref()
+            .ok_or("ONE X2 final install lost its resident successor")?;
+        if successor.flight() != reservation.flight() {
+            return Err("ONE X2 resident successor does not match its root reservation".into());
+        }
+
+        // Take the successor first. If a future invariant regression loses
+        // the reservation between the checks and these exclusive mutations,
+        // no root token has left `self`, so outer carrier-first drop order is
+        // still preserved.
+        let successor = self
+            .motion
+            .successor
+            .take()
+            .ok_or("ONE X2 final install lost its resident successor")?;
+        let reservation = self
+            .motion
+            .reservation
+            .take()
+            .ok_or("ONE X2 final install lost its root reservation")?;
+        Ok(reservation.seal_validated(successor))
+    }
+
     #[cfg(test)]
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn cold_lifecycle_for_test(
         &self,

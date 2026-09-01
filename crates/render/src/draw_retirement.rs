@@ -21,6 +21,25 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::Fallible;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DrawRetirementError {
+    Full,
+    Quarantined,
+    GenerationExhausted,
+}
+
+impl std::fmt::Display for DrawRetirementError {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str(match self {
+            Self::Full => "ONE X2 draw retirement is full",
+            Self::Quarantined => "ONE X2 draw retirement is quarantined",
+            Self::GenerationExhausted => "ONE X2 draw retirement generation was exhausted",
+        })
+    }
+}
+
+impl Error for DrawRetirementError {}
+
 struct Admission {
     available: AtomicUsize,
     capacity: usize,
@@ -110,7 +129,7 @@ impl<P> IcedDrawRetirements<P> {
         }
     }
 
-    pub(crate) fn reserve(&self) -> Fallible<DrawPermit> {
+    pub(crate) fn reserve(&self) -> Result<DrawPermit, DrawRetirementError> {
         self.lock().reserve()
     }
 
@@ -173,19 +192,19 @@ impl<P> DrawRetirements<P> {
     /// A full or quarantined owner refuses here, before a candidate payload is
     /// moved. Repeated redraws reserve a fresh permit without implying another
     /// history transition.
-    pub(crate) fn reserve(&mut self) -> Fallible<DrawPermit> {
+    pub(crate) fn reserve(&mut self) -> Result<DrawPermit, DrawRetirementError> {
         if self.failed {
-            return Err("ONE X2 draw retirement is quarantined".into());
+            return Err(DrawRetirementError::Quarantined);
         }
         if self.next_generation == 0 {
-            return Err("ONE X2 draw retirement generation was exhausted".into());
+            return Err(DrawRetirementError::GenerationExhausted);
         }
         self.admission
             .available
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |available| {
                 available.checked_sub(1)
             })
-            .map_err(|_| "ONE X2 draw retirement is full")?;
+            .map_err(|_| DrawRetirementError::Full)?;
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1);
         Ok(DrawPermit {

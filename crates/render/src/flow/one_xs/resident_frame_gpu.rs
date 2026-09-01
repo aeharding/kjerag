@@ -9,10 +9,13 @@
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::Fallible;
+use crate::flow::one_xs::gpu_context::OneXsGpuContext;
 use crate::flow::one_xs::pis::gpu::GpuPisFlight;
 use kjerag_media::FrameStamp;
 
 use super::pis_frontend_gpu::RetainedL2DirectionPixelVec2Buffer;
+use super::{InstalledOneXsDraw, InstalledOneXsReady, ResidentSourceIdentity};
+use crate::draw_retirement::{DrawRetirementError, IcedDrawRetirements};
 
 /// Storage installed only after a whole resident frame succeeds.
 ///
@@ -78,6 +81,10 @@ impl ResidentSuccessor {
         &self.motion_references
     }
 
+    pub(super) fn flight(&self) -> &GpuPisFlight {
+        &self.flight
+    }
+
     pub(super) fn attach_post_l1(&mut self, storage: ResidentPostL1Storage) -> Fallible<()> {
         if self._post_l1.is_some() {
             return Err("ONE X2 resident successor already owns post-L1 state".into());
@@ -93,19 +100,15 @@ struct PendingSeal {
     flight: GpuPisFlight,
 }
 
-/// Placeholder for the future resident direct-draw capability. No current
-/// production transition can construct or install one.
-struct ResidentReadyPlaceholder {
-    _private: (),
-}
-
 struct RootState {
     generation: u64,
     pending: Option<PendingSeal>,
     committed: Option<Arc<ResidentSuccessor>>,
-    ready: Option<ResidentReadyPlaceholder>,
+    ready: Option<Arc<InstalledOneXsDraw>>,
     quarantined: bool,
     quarantined_successors: Vec<Arc<ResidentSuccessor>>,
+    context: Option<OneXsGpuContext>,
+    session: Option<ResidentSourceIdentity>,
 }
 
 struct SharedRoot {
@@ -143,6 +146,8 @@ pub(super) struct GpuResidentCandidate {
     reservation: Option<GpuResidentReservation>,
     successor: Arc<ResidentSuccessor>,
     disarmed: bool,
+    #[cfg(test)]
+    carrier_drop_witness: Option<Arc<std::sync::atomic::AtomicU8>>,
 }
 
 impl GpuResidentCapture {
@@ -156,9 +161,23 @@ impl GpuResidentCapture {
                     ready: None,
                     quarantined: false,
                     quarantined_successors: Vec::new(),
+                    context: None,
+                    session: None,
                 }),
             }),
         }
+    }
+
+    pub(super) fn new_bound(context: OneXsGpuContext, session: ResidentSourceIdentity) -> Self {
+        let mut capture = Self::new();
+        let shared = Arc::get_mut(&mut capture.shared).expect("new root is uniquely owned");
+        let state = shared
+            .state
+            .get_mut()
+            .expect("new root mutex is not poisoned");
+        state.context = Some(context);
+        state.session = Some(session);
+        capture
     }
 
     pub(super) fn reserve(&self, frame: FrameStamp) -> Fallible<GpuResidentReservation> {
@@ -193,6 +212,42 @@ impl GpuResidentCapture {
         })
     }
 
+    /// Snapshot the complete installed draw and reserve a fresh retirement
+    /// slot. This does not touch committed history and never exposes a piece of
+    /// the payload.
+    pub(super) fn ready_for_draw(
+        &self,
+        retirements: &IcedDrawRetirements<InstalledOneXsDraw>,
+    ) -> Result<Option<InstalledOneXsReady>, DrawRetirementError> {
+        let permit = retirements.reserve()?;
+        let state = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| DrawRetirementError::Quarantined)?;
+        Ok(state.ready.as_ref().map(|draw| InstalledOneXsReady {
+            draw: Arc::clone(draw),
+            permit,
+        }))
+    }
+
+    #[cfg(test)]
+    pub(super) fn take_ready_for_drop_order_test(
+        &self,
+        retirements: &IcedDrawRetirements<InstalledOneXsDraw>,
+    ) -> InstalledOneXsReady {
+        let permit = retirements.reserve().unwrap();
+        let draw = self
+            .shared
+            .state
+            .lock()
+            .unwrap()
+            .ready
+            .take()
+            .expect("drop-order test requires installed ready draw");
+        InstalledOneXsReady { draw, permit }
+    }
+
     #[cfg(test)]
     pub(super) fn snapshot(&self) -> TestSnapshot {
         let state = self.shared.state.lock().unwrap();
@@ -202,6 +257,7 @@ impl GpuResidentCapture {
             pending_flight: state.pending.as_ref().map(|seal| seal.flight.clone()),
             committed: state.committed.clone(),
             ready: state.ready.is_some(),
+            ready_allocation: state.ready.as_ref().map(Arc::downgrade),
             quarantined: state.quarantined,
         }
     }
@@ -231,11 +287,20 @@ impl GpuResidentReservation {
         if successor.flight != self.seal.flight {
             return Err("ONE X2 resident successor does not match its root reservation".into());
         }
-        Ok(GpuResidentCandidate {
+        Ok(self.seal_validated(successor))
+    }
+
+    /// Construct after the owning post state has compared the successor and
+    /// reservation without extracting either one. This path cannot fail and
+    /// therefore cannot roll the root back ahead of an outer source carrier.
+    pub(super) fn seal_validated(self, successor: ResidentSuccessor) -> GpuResidentCandidate {
+        GpuResidentCandidate {
             reservation: Some(self),
             successor: Arc::new(successor),
             disarmed: false,
-        })
+            #[cfg(test)]
+            carrier_drop_witness: None,
+        }
     }
 
     pub(super) fn abort(mut self) -> Fallible<()> {
@@ -285,6 +350,19 @@ impl Drop for GpuResidentReservation {
 }
 
 impl GpuResidentCandidate {
+    #[cfg(test)]
+    pub(super) fn observe_carrier_drop(&mut self, witness: Arc<std::sync::atomic::AtomicU8>) {
+        self.carrier_drop_witness = Some(witness);
+    }
+
+    #[cfg(test)]
+    pub(super) fn clear_pending_for_stale_test(&self) {
+        let reservation = self
+            .reservation
+            .as_ref()
+            .expect("test candidate retains reservation");
+        reservation.shared.state.lock().unwrap().pending = None;
+    }
     pub(super) fn successor(&self) -> &Arc<ResidentSuccessor> {
         &self.successor
     }
@@ -317,6 +395,47 @@ impl GpuResidentCandidate {
             std::mem::forget(Arc::clone(&self.successor));
         }
         result
+    }
+
+    /// Atomically publish the exact successor and whole installed draw. Every
+    /// identity check occurs under the capture root's one mutex, and failure
+    /// drops the offered source/map carrier before reservation rollback.
+    pub(super) fn install(&mut self, draw: &Arc<InstalledOneXsDraw>) -> Fallible<()> {
+        let reservation = self
+            .reservation
+            .as_mut()
+            .expect("resident candidate retains its reservation");
+        let mut state =
+            match reservation.shared.state.lock() {
+                Ok(state) => state,
+                Err(_) => return Err(
+                    "ONE X2 resident capture install found a poisoned root; candidate quarantined"
+                        .into(),
+                ),
+            };
+        let exact_seal = state.pending.as_ref() == Some(&reservation.seal);
+        let exact_prior = same_successor(state.committed.as_ref(), reservation.prior.as_ref());
+        if !exact_seal || !exact_prior || state.quarantined {
+            state.quarantined = true;
+            state
+                .quarantined_successors
+                .push(Arc::clone(&self.successor));
+            return Err("ONE X2 resident capture install does not match its seal and prior allocation; candidate quarantined".into());
+        }
+        let root_identity = reservation.identity();
+        let identity = state
+            .context
+            .as_ref()
+            .zip(state.session.as_ref())
+            .ok_or("ONE X2 resident root has no capture context or session");
+        let (context, session) = identity?;
+        draw.ensure_install_identity(context, session, &root_identity, &reservation.seal.flight)?;
+        state.committed = Some(Arc::clone(&self.successor));
+        state.ready = Some(Arc::clone(draw));
+        state.pending = None;
+        reservation.active = false;
+        self.disarmed = true;
+        Ok(())
     }
 
     /// Test-only stand-in for the future atomic successor plus ready install.
@@ -357,6 +476,15 @@ impl Drop for GpuResidentCandidate {
         if self.disarmed {
             return;
         }
+        #[cfg(test)]
+        if let Some(witness) = &self.carrier_drop_witness {
+            assert_eq!(
+                witness.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "resident root rollback preceded installed source/map carrier drop"
+            );
+            witness.store(2, std::sync::atomic::Ordering::SeqCst);
+        }
         let Some(reservation) = self.reservation.take() else {
             return;
         };
@@ -387,7 +515,19 @@ pub(super) struct TestSnapshot {
     pub(super) pending_flight: Option<GpuPisFlight>,
     pub(super) committed: Option<Arc<ResidentSuccessor>>,
     pub(super) ready: bool,
+    ready_allocation: Option<Weak<InstalledOneXsDraw>>,
     pub(super) quarantined: bool,
+}
+
+#[cfg(test)]
+impl TestSnapshot {
+    pub(super) fn same_ready(&self, other: &Self) -> bool {
+        match (&self.ready_allocation, &other.ready_allocation) {
+            (None, None) => true,
+            (Some(left), Some(right)) => Weak::ptr_eq(left, right),
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]

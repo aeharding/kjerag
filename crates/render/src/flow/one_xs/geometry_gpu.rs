@@ -120,6 +120,23 @@ pub(crate) struct GpuGeometryFrameOwner<K> {
     _geometry: GpuRetainedGeometry,
 }
 
+impl GpuGeometryFrameOwner<crate::direct_type2::ImportedOneXsPicture> {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn into_installed_parts(
+        self,
+    ) -> (
+        crate::direct_type2::ImportedOneXsPicture,
+        GpuGeometryFrameOwner<()>,
+    ) {
+        (
+            self._source_owner,
+            GpuGeometryFrameOwner {
+                _source_owner: (),
+                _geometry: self._geometry,
+            },
+        )
+    }
+}
+
 /// Exact geometry-to-belt product. The mask handle is private and can only
 /// enter the matching prepared-source front end; the geometry allocation and
 /// imported source owner remain inside the belt submission lease.
@@ -913,7 +930,12 @@ mod tests {
             }
         };
         let motion = GpuMotionStage::new(context.clone()).unwrap();
-        let capture = motion.new_capture();
+        let session = crate::flow::one_xs_belt_gpu::ResidentSourceIdentity::for_test();
+        let capture =
+            crate::flow::one_xs_belt_gpu::resident_frame_gpu::GpuResidentCapture::new_bound(
+                context.clone(),
+                session.clone(),
+            );
         let reservation = capture
             .reserve(FrameStamp::for_test(71, Duration::from_millis(71), None))
             .unwrap();
@@ -974,10 +996,23 @@ mod tests {
         };
         let texture_a = texture("resident Cold0 source A");
         let texture_b = texture("resident Cold0 source B");
-        let imported = crate::direct_type2::ImportedOneXsPicture::resident_test_owner(
+        let picture_layout = crate::scene::bind_group_layout(context.device());
+        let uniforms = context.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("resident installed draw uniforms"),
+            size: std::mem::size_of::<crate::Reframe>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let sampler = context.device().create_sampler(&Default::default());
+        let imported = crate::direct_type2::ImportedOneXsPicture::resident_test_draw_owner(
             &context,
-            crate::flow::one_xs_belt_gpu::ResidentSourceIdentity::for_test(),
+            session,
             flight.frame.clone(),
+            &picture_layout,
+            &uniforms,
+            &sampler,
         );
         let belts = encoded
             .submit_belts(
@@ -1151,9 +1186,230 @@ mod tests {
             &expected_public[..FLOW_WORDS]
         );
         drop(diagnostic);
-        drop(ready);
+        let direct = Arc::new(crate::direct_type2::DirectType2Pipeline::new(
+            context.device(),
+            &picture_layout,
+            wgpu::TextureFormat::Rgba8Unorm,
+        ));
+        let recreated_uniforms = context.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("recreated resident draw uniforms"),
+            size: std::mem::size_of::<crate::Reframe>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let recreated_reframe = crate::Reframe::blank(2.0, true);
+        context
+            .queue()
+            .write_buffer(&recreated_uniforms, 0, recreated_reframe.bytes());
+        let _recreated_source = crate::direct_type2::ImportedOneXsPicture::resident_test_draw_owner(
+            &context,
+            crate::flow::one_xs_belt_gpu::ResidentSourceIdentity::for_test(),
+            FrameStamp::for_test(99, Duration::from_millis(99), None),
+            &picture_layout,
+            &recreated_uniforms,
+            &sampler,
+        );
+        let _recreated_pipeline = Arc::new(crate::direct_type2::DirectType2Pipeline::new(
+            context.device(),
+            &picture_layout,
+            wgpu::TextureFormat::Rgba8Unorm,
+        ));
+        let retirements = crate::draw_retirement::IcedDrawRetirements::new(context.device(), 2);
+        let witness = Arc::new(AtomicU8::new(0));
+        let mut install = crate::flow::one_xs_belt_gpu::prepare_completed_cold_install(
+            ready,
+            direct,
+            &retirements,
+        )
+        .unwrap();
+        install.observe_draw_drop(Arc::clone(&witness));
+        let installed = install.install().unwrap();
+        let reframe = crate::Reframe::blank(1.0, false);
+        installed.write_reframe(&reframe);
+        assert_eq!(read_uniform(&context, &uniforms), reframe.bytes());
+        assert_eq!(
+            read_uniform(&context, &recreated_uniforms),
+            recreated_reframe.bytes()
+        );
+        let installed_snapshot = capture.snapshot();
+        assert!(installed_snapshot.ready);
+        assert!(!installed_snapshot.pending);
+        assert!(installed_snapshot.committed.is_some());
         assert_eq!(completion.load(Ordering::SeqCst), 2);
-        assert!(!capture.snapshot().pending);
+
+        let next = capture
+            .reserve(FrameStamp::for_test(72, Duration::from_millis(72), None))
+            .unwrap();
+        let pending_snapshot = capture.snapshot();
+        assert!(pending_snapshot.pending);
+        assert!(installed_snapshot.same_ready(&pending_snapshot));
+        let held_permit = retirements.reserve().unwrap();
+        let next_references = context.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("resident retirement-full successor"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let successor =
+            crate::flow::one_xs_belt_gpu::resident_frame_gpu::ResidentSuccessor::from_motion(
+                next.flight().clone(),
+                next_references,
+            );
+        let bound = crate::flow::one_xs_belt_gpu::ResidentBoundInstall {
+            draw: Some(Arc::clone(&installed.draw)),
+            root: Some(next.seal(successor).unwrap()),
+        };
+        let error = match bound.reserve(&retirements) {
+            Ok(_) => panic!("full retirement admitted a successor install"),
+            Err(error) => error,
+        };
+        assert_eq!(error, crate::draw_retirement::DrawRetirementError::Full);
+        let full_snapshot = capture.snapshot();
+        assert!(!full_snapshot.pending);
+        assert!(pending_snapshot.same_ready(&full_snapshot));
+        assert!(Arc::ptr_eq(
+            pending_snapshot.committed.as_ref().unwrap(),
+            full_snapshot.committed.as_ref().unwrap()
+        ));
+        drop(held_permit);
+
+        let target = context.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("resident installed draw target"),
+            size: wgpu::Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let draw_once = |ready: crate::flow::one_xs_belt_gpu::InstalledOneXsReady| {
+            let mut encoder =
+                context
+                    .device()
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("resident installed draw"),
+                    });
+            let view = target.create_view(&Default::default());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("resident installed draw"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            ready.arm_and_draw(&retirements, &mut pass);
+            drop(pass);
+            context.queue().submit([encoder.finish()]);
+            context
+                .device()
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
+                .unwrap();
+            assert_eq!(retirements.poll().unwrap(), 1);
+        };
+        draw_once(installed);
+        draw_once(capture.ready_for_draw(&retirements).unwrap().unwrap());
+        let redraw_snapshot = capture.snapshot();
+        assert!(installed_snapshot.same_ready(&redraw_snapshot));
+        assert!(Arc::ptr_eq(
+            installed_snapshot.committed.as_ref().unwrap(),
+            redraw_snapshot.committed.as_ref().unwrap()
+        ));
+
+        // Remove the root's final Arc only through a purpose-specific test
+        // capability, then prove an install refusal drops that whole carrier
+        // before the candidate begins reservation rollback.
+        let ready = capture.take_ready_for_drop_order_test(&retirements);
+        let refusal = capture
+            .reserve(FrameStamp::for_test(73, Duration::from_millis(73), None))
+            .unwrap();
+        let next_references = context.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("resident drop-order successor"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let successor =
+            crate::flow::one_xs_belt_gpu::resident_frame_gpu::ResidentSuccessor::from_motion(
+                refusal.flight().clone(),
+                next_references,
+            );
+        let mut refusal = crate::flow::one_xs_belt_gpu::ResidentInstallCandidate {
+            draw: Some(ready.draw),
+            root: Some(refusal.seal(successor).unwrap()),
+            panic_before_root_install: false,
+            permit: Some(ready.permit),
+        };
+        refusal.observe_root_rollback(Arc::clone(&witness));
+        let error = refusal.probe_install_refusal().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("different imported picture allocation")
+        );
+        assert_eq!(witness.load(Ordering::SeqCst), 0);
+
+        refusal.inject_stale_root();
+        let error = refusal.probe_install_refusal().unwrap_err();
+        assert!(error.to_string().contains("candidate quarantined"));
+        assert_eq!(witness.load(Ordering::SeqCst), 0);
+
+        refusal.inject_install_panic();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = refusal.install();
+        }));
+        assert!(unwind.is_err(), "injected resident install did not unwind");
+        assert_eq!(witness.load(Ordering::SeqCst), 2);
+    }
+
+    fn read_uniform(context: &OneXsGpuContext, source: &wgpu::Buffer) -> Vec<u8> {
+        let size = std::mem::size_of::<crate::Reframe>() as u64;
+        let readback = context.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("resident installed uniform readback"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder =
+            context
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("resident installed uniform readback"),
+                });
+        encoder.copy_buffer_to_buffer(source, 0, &readback, 0, size);
+        let submission = context.queue().submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        let (sent, received) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            sent.send(result).unwrap()
+        });
+        context
+            .device()
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .unwrap();
+        received.recv().unwrap().unwrap();
+        slice.get_mapped_range().to_vec()
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {

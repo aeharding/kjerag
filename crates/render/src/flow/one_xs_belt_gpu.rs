@@ -19,7 +19,9 @@ use super::resources::OneXsResources;
 use super::temporal::{BlurredBelts, gaussian_blur};
 use super::{Lens, LensPair};
 use crate::Fallible;
+use crate::direct_type2::DirectType2Pipeline;
 use crate::direct_type2::ImportedOneXsPicture;
+use crate::draw_retirement::{DrawPermit, DrawRetirementError, IcedDrawRetirements};
 use crate::flow::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sample_source_belts};
 use kjerag_media::FrameStamp;
 use kjerag_meta::{CalibrationSet, OrientationTrack, Readout};
@@ -152,10 +154,11 @@ impl ResidentSourceFrontPipeline {
     ) -> Fallible<Self> {
         let parent_inputs = ParentMapBuilder::new(calibration)?;
         let resources = OneXsResources::new(&calibration.lenses)?;
+        let identity = ResidentSourceIdentity::new();
         Ok(Self {
             context: context.clone(),
-            identity: ResidentSourceIdentity::new(),
-            root: resident_frame_gpu::GpuResidentCapture::new(),
+            identity: identity.clone(),
+            root: resident_frame_gpu::GpuResidentCapture::new_bound(context.clone(), identity),
             parent_inputs,
             orientation,
             parent: GpuResidentFramePipeline::new(context.clone())?,
@@ -268,6 +271,220 @@ impl ResidentSourceBinder<'_> {
 #[allow(dead_code)]
 pub(crate) struct ResidentImportedFront {
     inner: geometry_gpu::GpuGeometryBelts<ImportedOneXsPicture>,
+}
+
+/// One nonconstructible installed source/map pair. Its sole rendering surface
+/// binds and draws the exact imported picture through the exact final map.
+/// Cloning is possible only as `Arc<InstalledOneXsDraw>`.
+#[allow(dead_code)] // private prerequisite; Scene selection is intentionally excluded
+pub(crate) struct InstalledOneXsDraw {
+    source: ImportedOneXsPicture,
+    map: map_patch_gpu::InstalledGpuMapBinding,
+    pipeline: Arc<DirectType2Pipeline>,
+    #[cfg(test)]
+    drop_witness: Option<InstalledDrawDropWitness>,
+}
+
+#[cfg(test)]
+struct InstalledDrawDropWitness(Arc<std::sync::atomic::AtomicU8>);
+
+#[cfg(test)]
+impl Drop for InstalledDrawDropWitness {
+    fn drop(&mut self) {
+        self.0.store(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[allow(dead_code)]
+impl InstalledOneXsDraw {
+    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.source.draw(&self.pipeline, self.map.read(), pass);
+    }
+
+    /// Update only this installed picture's exact retained uniform allocation.
+    pub(crate) fn write_reframe(&self, reframe: &crate::Reframe) {
+        self.source.write_reframe(reframe);
+    }
+
+    fn ensure_install_identity(
+        &self,
+        context: &OneXsGpuContext,
+        session: &ResidentSourceIdentity,
+        root: &resident_frame_gpu::GpuResidentIdentity,
+        flight: &GpuPisFlight,
+    ) -> Fallible<()> {
+        self.source.ensure_resident_context(context)?;
+        self.source.ensure_resident_session(session)?;
+        self.source.ensure_resident_frame(&flight.frame)?;
+        if self.map.frame() != &flight.frame {
+            return Err("ONE X2 installed map names a different capture flight".into());
+        }
+        if !self.map.matches_root(root) {
+            return Err("ONE X2 installed map belongs to a different capture root".into());
+        }
+        Ok(())
+    }
+}
+
+/// Carrier-first whole-frame install. Declaration order is load-bearing:
+/// ordinary drop and unwind release the source/map carrier, then roll back the
+/// root candidate, then return the unused draw permit.
+#[must_use = "the resident installed draw must be atomically published or rolled back"]
+#[allow(dead_code)]
+pub(crate) struct ResidentInstallCandidate {
+    draw: Option<Arc<InstalledOneXsDraw>>,
+    root: Option<resident_frame_gpu::GpuResidentCandidate>,
+    #[cfg(test)]
+    panic_before_root_install: bool,
+    permit: Option<DrawPermit>,
+}
+
+/// Bound source/map carrier and exact unpublished successor. Declaration
+/// order makes retirement backpressure release the offered carrier before the
+/// root candidate rolls its pending reservation back.
+#[must_use = "the bound resident install must reserve retirement capacity"]
+#[allow(dead_code)]
+struct ResidentBoundInstall {
+    draw: Option<Arc<InstalledOneXsDraw>>,
+    root: Option<resident_frame_gpu::GpuResidentCandidate>,
+}
+
+#[allow(dead_code)]
+impl ResidentBoundInstall {
+    fn reserve(
+        mut self,
+        retirements: &IcedDrawRetirements<InstalledOneXsDraw>,
+    ) -> Result<ResidentInstallCandidate, DrawRetirementError> {
+        let permit = retirements.reserve()?;
+        Ok(ResidentInstallCandidate {
+            draw: self.draw.take(),
+            root: self.root.take(),
+            #[cfg(test)]
+            panic_before_root_install: false,
+            permit: Some(permit),
+        })
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) struct InstalledOneXsReady {
+    draw: Arc<InstalledOneXsDraw>,
+    permit: DrawPermit,
+}
+
+#[allow(dead_code)]
+impl InstalledOneXsReady {
+    pub(crate) fn write_reframe(&self, reframe: &crate::Reframe) {
+        self.draw.write_reframe(reframe);
+    }
+
+    pub(crate) fn arm_and_draw<'pass>(
+        self,
+        retirements: &IcedDrawRetirements<InstalledOneXsDraw>,
+        pass: &mut wgpu::RenderPass<'pass>,
+    ) {
+        retirements.arm_and_draw(self.permit, pass, self.draw, |draw, pass| draw.draw(pass));
+    }
+}
+
+#[allow(dead_code)]
+impl ResidentInstallCandidate {
+    pub(crate) fn install(mut self) -> Fallible<InstalledOneXsReady> {
+        #[cfg(test)]
+        if self.panic_before_root_install {
+            panic!("injected resident install unwind");
+        }
+        self.root
+            .as_mut()
+            .expect("resident install lost its root candidate")
+            .install(
+                self.draw
+                    .as_ref()
+                    .expect("resident install lost its draw carrier"),
+            )?;
+        let draw = self
+            .draw
+            .take()
+            .expect("resident install lost its draw carrier");
+        drop(
+            self.root
+                .take()
+                .expect("installed root candidate is disarmed"),
+        );
+        Ok(InstalledOneXsReady {
+            draw,
+            permit: self
+                .permit
+                .take()
+                .expect("resident install lost its draw permit"),
+        })
+    }
+
+    #[cfg(test)]
+    fn observe_draw_drop(&mut self, witness: Arc<std::sync::atomic::AtomicU8>) {
+        Arc::get_mut(
+            self.draw
+                .as_mut()
+                .expect("test install retains unique draw carrier"),
+        )
+        .expect("test install has not cloned its draw carrier")
+        .drop_witness = Some(InstalledDrawDropWitness(Arc::clone(&witness)));
+    }
+
+    #[cfg(test)]
+    fn observe_root_rollback(&mut self, witness: Arc<std::sync::atomic::AtomicU8>) {
+        self.root
+            .as_mut()
+            .expect("test install retains root candidate")
+            .observe_carrier_drop(witness);
+    }
+
+    #[cfg(test)]
+    fn inject_stale_root(&mut self) {
+        self.root
+            .as_ref()
+            .expect("test install retains root candidate")
+            .clear_pending_for_stale_test();
+    }
+
+    #[cfg(test)]
+    fn probe_install_refusal(&mut self) -> Fallible<()> {
+        self.root
+            .as_mut()
+            .expect("test install retains root candidate")
+            .install(
+                self.draw
+                    .as_ref()
+                    .expect("test install retains draw carrier"),
+            )
+    }
+
+    #[cfg(test)]
+    fn inject_install_panic(&mut self) {
+        self.panic_before_root_install = true;
+    }
+}
+
+#[allow(dead_code)]
+pub(in crate::flow::one_xs::one_xs_belt_gpu) fn prepare_completed_cold_install(
+    map: map_patch_gpu::GpuPackedMapFrame<pis_frontend_gpu::CompletedColdFinalOperands>,
+    pipeline: Arc<DirectType2Pipeline>,
+    retirements: &IcedDrawRetirements<InstalledOneXsDraw>,
+) -> Fallible<ResidentInstallCandidate> {
+    let context = map.install_context();
+    pipeline.ensure_device(&context)?;
+    let bound = map.bind_completed_cold(&context, pipeline.map_layout())?;
+    Ok(ResidentBoundInstall {
+        draw: Some(Arc::new(InstalledOneXsDraw {
+            source: bound.source,
+            map: bound.binding,
+            pipeline,
+            #[cfg(test)]
+            drop_witness: None,
+        })),
+        root: Some(bound.candidate),
+    }
+    .reserve(retirements)?)
 }
 
 #[allow(dead_code)]
@@ -1216,6 +1433,30 @@ impl<K> SubmissionLease<K> {
         }
     }
 
+    /// Wait for the complete joined submission and return its exact source
+    /// owner instead of releasing it. This is the sole transition from the
+    /// compute lease into a render-retired installed draw.
+    fn complete_into_owner(&mut self) -> Fallible<K> {
+        let completion = self
+            .completion
+            .take()
+            .ok_or("ONE X2 GPU submission lease was already completed")?;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| completion.wait())) {
+            Ok(Ok(())) => self
+                .source_owner
+                .take()
+                .ok_or_else(|| "ONE X2 GPU submission lease lost its source owner".into()),
+            Ok(Err(error)) => {
+                self.quarantine_owner();
+                Err(error)
+            }
+            Err(payload) => {
+                self.quarantine_owner();
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
+
     fn validate_provenance(&self, producer: &OneXsGpuContext) -> Fallible<()> {
         match &self.completion {
             Some(ExactSubmission::Device { context, .. }) => context.ensure_same(producer),
@@ -1931,7 +2172,7 @@ mod tests {
         assert!(pipeline.contains("self.parent_inputs.readout()"));
         assert!(pipeline.contains("OneXsResources::new(&calibration.lenses)"));
         assert!(pipeline.contains("GpuResidentFramePipeline::new(context.clone())"));
-        assert!(pipeline.contains("GpuResidentCapture::new()"));
+        assert!(pipeline.contains("GpuResidentCapture::new_bound("));
         assert!(capture.contains("ResidentSourceFrontPipeline::new("));
         assert!(!production.contains("pub(crate) struct ResidentSourceFrontPipeline"));
         assert!(!pipeline.contains("root: &resident_frame_gpu::GpuResidentCapture"));
@@ -2021,6 +2262,51 @@ mod tests {
         assert!(!result.contains("fn source_owner"));
         assert!(!result.contains("fn device"));
         assert!(!result.contains("fn queue"));
+    }
+
+    #[test]
+    fn installed_draw_api_is_whole_payload_only_and_carrier_first() {
+        let source = include_str!("one_xs_belt_gpu.rs");
+        let installed = source
+            .split_once("pub(crate) struct InstalledOneXsDraw")
+            .unwrap()
+            .1
+            .split_once("pub(crate) struct ResidentInstallCandidate")
+            .unwrap()
+            .0;
+        assert!(installed.contains("source: ImportedOneXsPicture"));
+        assert!(installed.contains("map: map_patch_gpu::InstalledGpuMapBinding"));
+        assert!(installed.contains("pipeline: Arc<DirectType2Pipeline>"));
+        assert!(installed.contains("fn draw("));
+        assert!(installed.contains("fn write_reframe("));
+        for forbidden in [
+            "fn source(",
+            "fn map(",
+            "fn bind_group(",
+            "fn buffer(",
+            "fn device(",
+            "fn queue(",
+            "fn pipeline(",
+        ] {
+            assert!(!installed.contains(forbidden), "found {forbidden}");
+        }
+
+        let candidate = source
+            .split_once("pub(crate) struct ResidentInstallCandidate")
+            .unwrap()
+            .1
+            .split_once("pub(crate) struct InstalledOneXsReady")
+            .unwrap()
+            .0;
+        assert!(candidate.find("draw:").unwrap() < candidate.find("root:").unwrap());
+        assert!(candidate.find("root:").unwrap() < candidate.find("permit:").unwrap());
+
+        let root = include_str!("one_xs/resident_frame_gpu.rs");
+        assert!(!root.contains("ResidentReadyPlaceholder"));
+        assert!(root.contains("ready: Option<Arc<InstalledOneXsDraw>>"));
+        assert!(root.contains("state.committed = Some(Arc::clone(&self.successor));"));
+        assert!(root.contains("state.ready = Some(Arc::clone(draw));"));
+        assert!(root.contains("state.pending = None;"));
     }
 
     #[test]

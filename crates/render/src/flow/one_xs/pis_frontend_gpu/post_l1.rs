@@ -198,6 +198,69 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) struct CompletedColdFinalOperands {
     flight: crate::flow::one_xs::pis::gpu::GpuPisFlight,
 }
 
+/// Root-free result of consuming the completed final-map operands. The source
+/// is separate only long enough for the parent module to place both pieces in
+/// one nonconstructible installed draw.
+pub(in crate::flow::one_xs::one_xs_belt_gpu) struct CompletedColdInstallParts {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) source: ImportedOneXsPicture,
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) carrier: CompletedColdDrawCarrier,
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) candidate:
+        crate::flow::one_xs::one_xs_belt_gpu::resident_frame_gpu::GpuResidentCandidate,
+}
+
+/// All final-map producer state needed by the installed draw, after the root
+/// reservation and successor have been consumed into a separate capability.
+pub(in crate::flow::one_xs::one_xs_belt_gpu) struct CompletedColdDrawCarrier {
+    _prepared: super::super::GpuPreparedFrame<GpuGeometryFrameOwner<ImportedOneXsPicture>>,
+    _geometry: GpuGeometryFrameOwner<()>,
+    _validity: GpuResidentValidity,
+    _post: GpuMotionResidentL2Post<GpuColdPriorPublicLevelTwo>,
+    _public: wgpu::Buffer,
+    _context: OneXsGpuContext,
+    _flight: crate::flow::one_xs::pis::gpu::GpuPisFlight,
+    root: crate::flow::one_xs::one_xs_belt_gpu::resident_frame_gpu::GpuResidentIdentity,
+}
+
+impl CompletedColdFinalOperands {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn into_install_parts(
+        mut self,
+    ) -> Fallible<CompletedColdInstallParts> {
+        let root = self
+            .post
+            .resident_identity()?
+            .ok_or("ONE X2 final install lost its capture root identity")?;
+        let geometry = self.prepared.belts.lease.complete_into_owner()?;
+        let (source, geometry) = geometry.into_installed_parts();
+        // Every refusal retains the root inside `self`; the separately
+        // extracted source local is then dropped before `self`. Success takes
+        // the already-compared pair through a non-fallible constructor.
+        let candidate = self.post.take_install_candidate()?;
+        Ok(CompletedColdInstallParts {
+            source,
+            carrier: CompletedColdDrawCarrier {
+                _prepared: self.prepared,
+                _geometry: geometry,
+                _validity: self.validity,
+                _post: self.post,
+                _public: self.public,
+                _context: self.context,
+                _flight: self.flight,
+                root,
+            },
+            candidate,
+        })
+    }
+}
+
+impl CompletedColdDrawCarrier {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn matches_root(
+        &self,
+        root: &crate::flow::one_xs::one_xs_belt_gpu::resident_frame_gpu::GpuResidentIdentity,
+    ) -> bool {
+        self.root.matches(root)
+    }
+}
+
 pub(in crate::flow::one_xs::one_xs_belt_gpu) fn admit_completed_cold_final(
     mut checkpoint: GpuCompletedColdCheckpoint<ImportedOneXsPicture>,
     producer: &OneXsGpuContext,

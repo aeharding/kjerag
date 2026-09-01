@@ -4736,7 +4736,7 @@ fn bind(
     super::direct_type2::bind_picture(device, layout, uniforms, lenses, sampler)
 }
 
-fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+pub(crate) fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     // The uniform block and the pictures are read by both passes: the draw
     // samples them and the band correlates them (issue #103). The state buffer
     // at the end is the draw's alone here, read-only; the compute pass reaches

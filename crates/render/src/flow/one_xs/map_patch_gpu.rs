@@ -624,6 +624,91 @@ impl<O: Operands> GpuPackedMapFrame<O> {
     }
 }
 
+pub(super) struct CompletedColdBoundMap {
+    pub(super) source: ImportedOneXsPicture,
+    pub(super) binding: InstalledGpuMapBinding,
+    pub(super) candidate: super::resident_frame_gpu::GpuResidentCandidate,
+}
+
+pub(super) struct InstalledGpuMapBinding {
+    frame: FrameStamp,
+    read: wgpu::BindGroup,
+    _packed: wgpu::Buffer,
+    _actions: wgpu::Buffer,
+    _context: OneXsGpuContext,
+    _statics: Arc<GpuFinalMapStatics>,
+    carrier: super::pis_frontend_gpu::CompletedColdDrawCarrier,
+}
+
+impl InstalledGpuMapBinding {
+    pub(super) fn frame(&self) -> &FrameStamp {
+        &self.frame
+    }
+
+    pub(super) fn read(&self) -> &wgpu::BindGroup {
+        &self.read
+    }
+
+    pub(super) fn matches_root(
+        &self,
+        root: &super::resident_frame_gpu::GpuResidentIdentity,
+    ) -> bool {
+        self.carrier.matches_root(root)
+    }
+}
+
+impl GpuPackedMapFrame<CompletedColdFinalOperands> {
+    pub(super) fn install_context(&self) -> OneXsGpuContext {
+        self.context.clone()
+    }
+
+    /// Consume the validated map into a root-free binding plus the one exact
+    /// root installation capability. Nothing returned exposes a raw resource.
+    pub(super) fn bind_completed_cold(
+        self,
+        context: &OneXsGpuContext,
+        layout: &wgpu::BindGroupLayout,
+    ) -> Result<CompletedColdBoundMap, BindingError> {
+        self.context
+            .ensure_same(context)
+            .map_err(|_| BindingError::Context)?;
+        let read = context
+            .device()
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ONE X2 installed resident native type-2 resources"),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.packed.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Buffer(self.statics.alpha_binding()),
+                    },
+                ],
+            });
+        let parts = self
+            .upstream
+            .into_install_parts()
+            .map_err(|error| BindingError::Upstream(error.to_string()))?;
+        let binding = InstalledGpuMapBinding {
+            frame: self.frame.clone(),
+            read,
+            _packed: self.packed,
+            _actions: self._actions,
+            _context: self.context,
+            _statics: self.statics,
+            carrier: parts.carrier,
+        };
+        Ok(CompletedColdBoundMap {
+            source: parts.source,
+            binding,
+            candidate: parts.candidate,
+        })
+    }
+}
+
 pub(super) struct GpuMapBinding<O: Operands> {
     frame: FrameStamp,
     read: wgpu::BindGroup,
@@ -640,11 +725,26 @@ impl<O: Operands> GpuMapBinding<O> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum BindingError {
     Context,
     Frame,
+    Upstream(String),
 }
+
+impl fmt::Display for BindingError {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Context => {
+                output.write_str("ONE X2 resident map belongs to a different GPU context")
+            }
+            Self::Frame => output.write_str("ONE X2 resident map names a different frame"),
+            Self::Upstream(error) => output.write_str(error),
+        }
+    }
+}
+
+impl Error for BindingError {}
 
 #[cfg(test)]
 fn readback_packed(
