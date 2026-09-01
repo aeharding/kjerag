@@ -315,6 +315,8 @@ impl SourceTextures<'_> {
 /// bind-group and readback resources so overlapping frames cannot overwrite
 /// one another.
 pub(crate) struct GpuSolverBeltPipeline {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
     horizontal_pipeline: wgpu::ComputePipeline,
     vertical_pipeline: wgpu::ComputePipeline,
@@ -408,17 +410,21 @@ impl GpuSolverBeltPipeline {
             mapped_at_creation: false,
         });
         let built = Self {
+            device: device.clone(),
+            queue: queue.clone(),
             pipeline,
             horizontal_pipeline,
             vertical_pipeline,
             layout,
             witness,
         };
-        built.qualify(device, queue)?;
+        built.qualify()?;
         Ok(built)
     }
 
-    fn qualify(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<()> {
+    fn qualify(&self) -> Fallible<()> {
+        let device = &self.device;
+        let queue = &self.queue;
         let fixture = qualification_fixture();
         let texture_a = qualification_texture(
             device,
@@ -433,8 +439,6 @@ impl GpuSolverBeltPipeline {
             &fixture.sources.b,
         );
         let pending = self.submit_inner(
-            device,
-            queue,
             SourceTextures {
                 a: &texture_a,
                 b: &texture_b,
@@ -504,8 +508,6 @@ impl GpuSolverBeltPipeline {
         let expected_blur = gaussian_blur(&blur_input);
         let actual_blur = self
             .submit_inner(
-                device,
-                queue,
                 SourceTextures {
                     a: &texture_a,
                     b: &texture_b,
@@ -548,15 +550,11 @@ impl GpuSolverBeltPipeline {
     /// not keep that external surface out of the decoder's pool.
     pub(crate) fn submit_retained<K>(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
         sources: SourceTextures<'_>,
         maps: &RetainedBaseMaps,
         source_owner: K,
     ) -> Fallible<PendingBlurredBelts<K>> {
         self.submit_inner(
-            device,
-            queue,
             sources,
             maps,
             source_owner,
@@ -568,13 +566,13 @@ impl GpuSolverBeltPipeline {
 
     fn submit_inner<K>(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
         sources: SourceTextures<'_>,
         maps: &RetainedBaseMaps,
         source_owner: K,
         input: SubmissionInput<'_>,
     ) -> Fallible<PendingBlurredBelts<K>> {
+        let device = &self.device;
+        let queue = &self.queue;
         let qualify_intermediates = matches!(
             input,
             SubmissionInput::Sampled {
@@ -705,8 +703,7 @@ impl GpuSolverBeltPipeline {
         encoder.copy_buffer_to_buffer(&packed, 0, &readback, 0, OUTPUT_BYTES);
         let submission = queue.submit([encoder.finish()]);
         Ok(PendingBlurredBelts {
-            device: device.clone(),
-            _source_owner: source_owner,
+            lease: SubmissionLease::new(device.clone(), submission, source_owner),
             _map: map,
             _packed: packed,
             _horizontal: horizontal,
@@ -714,16 +711,182 @@ impl GpuSolverBeltPipeline {
             preblur_readback,
             witness_readback,
             _resources: resources,
-            submission,
         })
+    }
+}
+
+/// The exact device-owned submission whose source surface cannot be reused
+/// until completion has been proved.
+enum ExactSubmission {
+    Device {
+        device: wgpu::Device,
+        index: wgpu::SubmissionIndex,
+        #[cfg(test)]
+        observer: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>,
+    },
+    #[cfg(test)]
+    Injected {
+        outcome: InjectedWait,
+        observer: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    },
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum InjectedWait {
+    Success,
+    Error,
+    Panic,
+}
+
+impl ExactSubmission {
+    fn wait(self) -> Fallible<()> {
+        match self {
+            Self::Device {
+                device,
+                index,
+                #[cfg(test)]
+                observer,
+            } => {
+                #[cfg(test)]
+                if let Some(observer) = &observer {
+                    observer.store(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                let result = device
+                    .poll(wgpu::PollType::Wait {
+                        submission_index: Some(index),
+                        timeout: None,
+                    })
+                    .map(|_| ())
+                    .map_err(Box::<dyn Error + Send + Sync>::from);
+                #[cfg(test)]
+                if let Some(observer) = &observer {
+                    observer.store(2, std::sync::atomic::Ordering::SeqCst);
+                }
+                result
+            }
+            #[cfg(test)]
+            Self::Injected { outcome, observer } => {
+                observer.store(1, std::sync::atomic::Ordering::SeqCst);
+                let result = match outcome {
+                    InjectedWait::Success => Ok(()),
+                    InjectedWait::Error => Err("injected ONE X2 submission poll failure".into()),
+                    InjectedWait::Panic => panic!("injected ONE X2 submission poll panic"),
+                };
+                observer.store(2, std::sync::atomic::Ordering::SeqCst);
+                result
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn observe(&mut self, state: std::sync::Arc<std::sync::atomic::AtomicU8>) {
+        match self {
+            Self::Device { observer, .. } => *observer = Some(state),
+            Self::Injected { observer, .. } => *observer = state,
+        }
+    }
+}
+
+/// Linear ownership of one external source through one exact GPU submission.
+///
+/// Completion success releases the source owner and disarms the lease. A poll
+/// failure instead intentionally leaks that owner: without completion proof,
+/// returning an aliased decoder surface to its pool would permit GPU/decoder
+/// reuse races. Drop performs the same fail-closed completion when a caller
+/// abandons a pending submission before normal readback.
+struct SubmissionLease<K> {
+    completion: Option<ExactSubmission>,
+    source_owner: Option<K>,
+}
+
+impl<K> SubmissionLease<K> {
+    fn new(device: wgpu::Device, index: wgpu::SubmissionIndex, source_owner: K) -> Self {
+        Self {
+            completion: Some(ExactSubmission::Device {
+                device,
+                index,
+                #[cfg(test)]
+                observer: None,
+            }),
+            source_owner: Some(source_owner),
+        }
+    }
+
+    fn complete(&mut self) -> Fallible<()> {
+        let Some(completion) = self.completion.take() else {
+            return Ok(());
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| completion.wait())) {
+            Ok(Ok(())) => {
+                drop(self.source_owner.take());
+                Ok(())
+            }
+            Ok(Err(error)) => {
+                self.quarantine_owner();
+                Err(error)
+            }
+            Err(payload) => {
+                self.quarantine_owner();
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn injected(
+        source_owner: K,
+        outcome: InjectedWait,
+        observer: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    ) -> Self {
+        Self {
+            completion: Some(ExactSubmission::Injected { outcome, observer }),
+            source_owner: Some(source_owner),
+        }
+    }
+
+    fn quarantine_owner(&mut self) {
+        if let Some(owner) = self.source_owner.take() {
+            // A failed or panicking poll is not proof that the GPU stopped
+            // reading the imported decoder surface. Intentionally retain it
+            // for the process lifetime so it cannot return to decoder reuse.
+            std::mem::forget(owner);
+        }
+    }
+
+    fn complete_for_drop(&mut self) {
+        let Some(completion) = self.completion.take() else {
+            return;
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| completion.wait())) {
+            Ok(Ok(())) => drop(self.source_owner.take()),
+            Ok(Err(_)) | Err(_) => self.quarantine_owner(),
+        }
+    }
+
+    #[cfg(test)]
+    fn observe(&mut self, state: std::sync::Arc<std::sync::atomic::AtomicU8>) {
+        if let Some(completion) = &mut self.completion {
+            completion.observe(state);
+        }
+    }
+}
+
+impl<K> Drop for SubmissionLease<K> {
+    fn drop(&mut self) {
+        // Destructors cannot safely propagate a native-backend panic: doing so
+        // while already unwinding would abort the process. Quarantine the
+        // source on either an error or panic and swallow only at this terminal
+        // cancellation boundary. Explicit completion preserves the original
+        // error or panic after performing the same quarantine.
+        self.complete_for_drop();
     }
 }
 
 /// One submitted GPU solver-belt transaction.
 #[must_use = "the submitted ONE X2 solver belts have not been consumed"]
 pub(crate) struct PendingBlurredBelts<K> {
-    device: wgpu::Device,
-    _source_owner: K,
+    lease: SubmissionLease<K>,
     _map: wgpu::Buffer,
     /// Retained until the copy into `readback` has completed.
     _packed: wgpu::Buffer,
@@ -732,7 +895,6 @@ pub(crate) struct PendingBlurredBelts<K> {
     preblur_readback: Option<wgpu::Buffer>,
     witness_readback: Option<wgpu::Buffer>,
     _resources: wgpu::BindGroup,
-    submission: wgpu::SubmissionIndex,
 }
 
 impl<K> PendingBlurredBelts<K> {
@@ -740,6 +902,14 @@ impl<K> PendingBlurredBelts<K> {
     #[cfg(test)]
     pub(crate) fn packed(&self) -> &wgpu::Buffer {
         &self._packed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_completion(
+        &mut self,
+        state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    ) {
+        self.lease.observe(state);
     }
 
     /// Wait for and consume the exact compact post-Gaussian payload.
@@ -759,7 +929,7 @@ impl<K> PendingBlurredBelts<K> {
         ))
     }
 
-    fn read_inner(self) -> Fallible<(BlurredBelts, Option<SolverBelts>, Option<[u32; 2]>)> {
+    fn read_inner(mut self) -> Fallible<(BlurredBelts, Option<SolverBelts>, Option<[u32; 2]>)> {
         let slice = self.readback.slice(..);
         let (mapped, answer) = mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -781,10 +951,7 @@ impl<K> PendingBlurredBelts<K> {
             });
             (slice, answer)
         });
-        self.device.poll(wgpu::PollType::Wait {
-            submission_index: Some(self.submission),
-            timeout: None,
-        })?;
+        self.lease.complete()?;
         answer.recv()??;
         if let Some((_, answer)) = &witness {
             answer.recv()??;
@@ -1044,8 +1211,120 @@ fn blur_vertical(@builtin(global_invocation_id) id: vec3<u32>) {
 #[cfg(test)]
 mod tests {
     use std::future::Future;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, Ordering};
 
     use super::*;
+
+    struct DropProbe {
+        wait_state: Arc<AtomicU8>,
+        dropped: mpsc::Sender<u8>,
+    }
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            let _ = self.dropped.send(self.wait_state.load(Ordering::SeqCst));
+        }
+    }
+
+    #[test]
+    fn submission_lease_abandon_waits_before_releasing_source_owner() {
+        let state = Arc::new(AtomicU8::new(0));
+        let (dropped, answer) = mpsc::channel();
+        let lease = SubmissionLease::injected(
+            DropProbe {
+                wait_state: Arc::clone(&state),
+                dropped,
+            },
+            InjectedWait::Success,
+            Arc::clone(&state),
+        );
+        assert_eq!(state.load(Ordering::SeqCst), 0);
+        drop(lease);
+        assert_eq!(answer.recv().unwrap(), 2, "owner preceded exact wait");
+    }
+
+    #[test]
+    fn submission_lease_success_disarms_drop_without_a_second_wait() {
+        let state = Arc::new(AtomicU8::new(0));
+        let (dropped, answer) = mpsc::channel();
+        let mut lease = SubmissionLease::injected(
+            DropProbe {
+                wait_state: Arc::clone(&state),
+                dropped,
+            },
+            InjectedWait::Success,
+            Arc::clone(&state),
+        );
+        lease.complete().unwrap();
+        assert_eq!(answer.recv().unwrap(), 2, "owner preceded successful wait");
+        state.store(7, Ordering::SeqCst);
+        drop(lease);
+        assert_eq!(
+            state.load(Ordering::SeqCst),
+            7,
+            "disarmed lease waited again during drop"
+        );
+    }
+
+    #[test]
+    fn submission_lease_poll_failure_retains_source_owner_for_process_lifetime() {
+        let state = Arc::new(AtomicU8::new(0));
+        let owner = Arc::new(());
+        let retained = Arc::downgrade(&owner);
+        let mut lease =
+            SubmissionLease::injected(owner.clone(), InjectedWait::Error, Arc::clone(&state));
+        let error = lease.complete().unwrap_err();
+        assert_eq!(error.to_string(), "injected ONE X2 submission poll failure");
+        assert_eq!(state.load(Ordering::SeqCst), 2);
+        drop(lease);
+        drop(owner);
+        assert!(
+            retained.upgrade().is_some(),
+            "poll failure returned the source owner to possible decoder reuse"
+        );
+    }
+
+    #[test]
+    fn submission_lease_explicit_panic_retains_owner_and_preserves_panic() {
+        let state = Arc::new(AtomicU8::new(0));
+        let owner = Arc::new(());
+        let retained = Arc::downgrade(&owner);
+        let mut lease =
+            SubmissionLease::injected(owner.clone(), InjectedWait::Panic, Arc::clone(&state));
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = lease.complete();
+        }))
+        .expect_err("injected native-backend panic was not preserved");
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"injected ONE X2 submission poll panic")
+        );
+        assert_eq!(state.load(Ordering::SeqCst), 1);
+        drop(lease);
+        drop(owner);
+        assert!(
+            retained.upgrade().is_some(),
+            "poll panic returned the source owner to possible decoder reuse"
+        );
+    }
+
+    #[test]
+    fn submission_lease_drop_swallows_poll_panic_and_retains_owner() {
+        let state = Arc::new(AtomicU8::new(0));
+        let owner = Arc::new(());
+        let retained = Arc::downgrade(&owner);
+        let lease =
+            SubmissionLease::injected(owner.clone(), InjectedWait::Panic, Arc::clone(&state));
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(lease)))
+            .expect("lease Drop propagated a native-backend panic");
+        assert_eq!(state.load(Ordering::SeqCst), 1);
+        drop(owner);
+        assert!(
+            retained.upgrade().is_some(),
+            "panicking Drop returned the source owner to possible decoder reuse"
+        );
+    }
 
     #[test]
     fn gpu_solver_belts_are_byte_exact_on_adversarial_odd_padded_sources() {
@@ -1070,8 +1349,6 @@ mod tests {
             .unwrap_or_else(|error| panic!("GPU qualification failed on {adapter}: {error}"));
         let pending = pipeline
             .submit_inner(
-                &device,
-                &queue,
                 SourceTextures {
                     a: &texture_a,
                     b: &texture_b,
@@ -1151,8 +1428,6 @@ mod tests {
         assert_eq!(input.pixel(Lens::B, 0, 0), 241, "lens B storage boundary");
         let actual = pipeline
             .submit_inner(
-                &device,
-                &queue,
                 SourceTextures {
                     a: &texture_a,
                     b: &texture_b,
