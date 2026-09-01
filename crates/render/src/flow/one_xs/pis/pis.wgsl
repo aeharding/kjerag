@@ -404,6 +404,34 @@ fn disparity_rejects(flow: vec2<f32>) -> bool {
     return !(col_ok && row_ok);
 }
 
+fn write_qualification_probes(local_index: u32) {
+    if word(29u) == 0u || local_index != 0u { return; }
+    let base = output_base + 2u * patches();
+    terminal_bits[base] = local_word(word(22u));
+    let division_at = word(23u);
+    let division_count = word(24u);
+    for (var probe = 0u; probe < division_count; probe++) {
+        let at = division_at + 2u * probe;
+        terminal_bits[base + 1u + probe] = div_f32_bits(local_word(at), local_word(at + 1u));
+    }
+    let distance_at = word(25u);
+    let distance_count = word(26u);
+    let distance_output = base + 1u + division_count;
+    for (var probe = 0u; probe < distance_count; probe++) {
+        let at = distance_at + 4u * probe;
+        let current = vec2<f32>(local_float(at), local_float(at + 1u));
+        let seed = vec2<f32>(local_float(at + 2u), local_float(at + 3u));
+        terminal_bits[distance_output + probe] = u32(terminal_distance_exceeds_eight(current, seed));
+    }
+    let disparity_at = word(27u);
+    let disparity_count = word(28u);
+    let disparity_output = distance_output + distance_count;
+    for (var probe = 0u; probe < disparity_count; probe++) {
+        let at = disparity_at + 2u * probe;
+        terminal_bits[disparity_output + probe] = u32(disparity_rejects(vec2<f32>(local_float(at), local_float(at + 1u))));
+    }
+}
+
 @compute @workgroup_size(32)
 fn solve_pis_wavefront(
     @builtin(workgroup_id) group: vec3<u32>,
@@ -414,6 +442,7 @@ fn solve_pis_wavefront(
     word_base = words[descriptor];
     float_base = words[descriptor + 1u];
     output_base = words[descriptor + 2u];
+    write_qualification_probes(local_index);
 
     let slot = local_index >> 2u;
     let lane = local_index & 3u;

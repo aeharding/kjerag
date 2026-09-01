@@ -26,7 +26,43 @@ use crate::flow::one_xs::scalar::{
 
 const HEADER_WORDS: usize = 32;
 const OUTPUT_WORDS_PER_PATCH: usize = 2;
-const DIAGNOSTIC_WORDS: usize = 0;
+const DIVISION_PROBES: &[(u32, u32, u32)] = &[
+    (0x0000_0001, 0x4000_0000, 0x0000_0000),
+    (0x0000_0003, 0x4000_0000, 0x0000_0002),
+    (0x0080_0000, 0x4000_0000, 0x0040_0000),
+    (0x00ff_ffff, 0x4000_0000, 0x0080_0000),
+    (0x7f7f_ffff, 0x3f00_0000, 0x7f80_0000),
+    (0xff7f_ffff, 0x3f00_0000, 0xff80_0000),
+    (0x0080_0000, 0x7f7f_ffff, 0x0000_0000),
+    (0x7f7f_ffff, 0x0080_0000, 0x7f80_0000),
+    (0x478f_e475, 0x3a83_126f, 0x4c8c_851a),
+    (0xc54c_efee, 0x3a83_126f, 0xca48_224e),
+    (0x4547_e588, 0x3a83_126f, 0x4a43_3626),
+    (0x42a1_7a6c, 0x4200_0000, 0x4021_7a6c),
+    (0xc327_2b0f, 0x4280_0000, 0xc027_2b0f),
+    (0x3f80_0000, 0x4774_2400, 0x3786_37bd),
+    (0x0000_0000, 0x0000_0000, 0xffc0_0000),
+    (0x8000_0000, 0x0000_0000, 0xffc0_0000),
+    (0x0000_0000, 0x8000_0000, 0xffc0_0000),
+    (0x8000_0000, 0x8000_0000, 0xffc0_0000),
+];
+
+// Each tuple is (dx bits, dy bits, reject). These are the exact f32
+// subtraction/f64-hypot rounding discriminators from the boundary audit.
+const DISTANCE_PROBES: &[(u32, u32, u32)] = &[
+    (0x4100_0000, 0x3400_0000, 0),
+    (0x4100_0000, 0x3400_0001, 1),
+    (0x4100_0000, 0x0000_0001, 0),
+    (0x4100_0001, 0x0000_0000, 1),
+    (0x40ff_ffff, 0x3b35_04f3, 0),
+    (0x40ff_ffff, 0x3b35_04f4, 1),
+    (0x7f80_0000, 0x0000_0000, 1),
+    (0x7fc0_0001, 0x0000_0000, 0),
+];
+
+const DISPARITY_PROBES: usize = 5;
+const PROBE_WORDS: usize = 1 + DIVISION_PROBES.len() + DISTANCE_PROBES.len() + DISPARITY_PROBES;
+const DIAGNOSTIC_WORDS: usize = PROBE_WORDS;
 
 /// One capture-owned GPU sparse-solver transaction.
 ///
@@ -57,6 +93,7 @@ struct TerminalBits<D: PisDirection> {
     level: Level,
     dcol: Box<[u32]>,
     drow: Box<[u32]>,
+    diagnostics: Box<[u32]>,
     direction: PhantomData<D>,
 }
 
@@ -208,6 +245,12 @@ enum QualificationError {
         expected: u32,
         expected_candidates: Box<[u32]>,
     },
+    Probe {
+        direction: &'static str,
+        probe: usize,
+        actual: u32,
+        expected: u32,
+    },
 }
 
 impl fmt::Display for QualificationError {
@@ -224,6 +267,15 @@ impl fmt::Display for QualificationError {
             } => write!(
                 out,
                 "ONE X2 GPU PIS arithmetic is not exact on this graphics device: {direction} {level} patch {patch} {component} bits are {actual:#010x}, expected {expected:#010x}; CPU pass-0 candidate score bits {expected_candidates:#010x?}",
+            ),
+            Self::Probe {
+                direction,
+                probe,
+                actual,
+                expected,
+            } => write!(
+                out,
+                "ONE X2 GPU PIS qualification probe is not exact on this graphics device: {direction} probe {probe} bits are {actual:#010x}, expected {expected:#010x}",
             ),
         }
     }
@@ -359,6 +411,38 @@ impl GpuPisPipeline {
         a_admission: DescentAdmission,
         b_admission: DescentAdmission,
     ) -> Fallible<PairedPatchGrids> {
+        self.solve_pair_mode(
+            device,
+            queue,
+            a_to_b,
+            a_initial,
+            a_hint,
+            b_to_a,
+            b_initial,
+            b_hint,
+            a_admission,
+            b_admission,
+            false,
+        )?
+        .into_patch_grids()
+        .map_err(Into::into)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_pair_mode(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        a_to_b: &Input<AtoB>,
+        a_initial: InitialGrid<AtoB>,
+        a_hint: Option<&HintGrid<AtoB>>,
+        b_to_a: &Input<BtoA>,
+        b_initial: InitialGrid<BtoA>,
+        b_hint: Option<&HintGrid<BtoA>>,
+        a_admission: DescentAdmission,
+        b_admission: DescentAdmission,
+        qualification_probes: bool,
+    ) -> Fallible<PairedTerminalBits> {
         if a_to_b.level != b_to_a.level {
             return Err(format!(
                 "ONE X2 paired GPU PIS directions have different levels: {} and {}",
@@ -366,11 +450,9 @@ impl GpuPisPipeline {
             )
             .into());
         }
-        let a = PackedInput::new(a_to_b, a_initial, a_hint, a_admission)?;
-        let b = PackedInput::new(b_to_a, b_initial, b_hint, b_admission)?;
-        self.dispatch_pair(device, queue, PackedPair::new(a, b)?)?
-            .into_patch_grids()
-            .map_err(Into::into)
+        let a = PackedInput::new(a_to_b, a_initial, a_hint, a_admission, qualification_probes)?;
+        let b = PackedInput::new(b_to_a, b_initial, b_hint, b_admission, qualification_probes)?;
+        self.dispatch_pair(device, queue, PackedPair::new(a, b)?)
     }
 
     fn dispatch_pair(
@@ -471,6 +553,8 @@ impl GpuPisPipeline {
             queue,
             Level::Two,
             true,
+            true,
+            true,
             DescentAdmission::EveryPatch,
             DescentAdmission::EveryPatch,
         )?;
@@ -478,6 +562,8 @@ impl GpuPisPipeline {
             device,
             queue,
             Level::One,
+            true,
+            true,
             true,
             DescentAdmission::NoPatches,
             DescentAdmission::NoPatches,
@@ -487,23 +573,57 @@ impl GpuPisPipeline {
             queue,
             Level::Two,
             false,
+            false,
+            true,
             DescentAdmission::NoPatches,
             DescentAdmission::EveryPatch,
-        )
+        )?;
+        self.qualify_case(
+            device,
+            queue,
+            Level::One,
+            false,
+            true,
+            false,
+            DescentAdmission::EveryPatch,
+            DescentAdmission::NoPatches,
+        )?;
+        self.qualify_case(
+            device,
+            queue,
+            Level::Two,
+            true,
+            false,
+            true,
+            DescentAdmission::NoPatches,
+            DescentAdmission::EveryPatch,
+        )?;
+        self.qualify_survivor_boundary(device, queue)?;
+        self.qualify_tie_boundary(device, queue)?;
+        self.qualify_zero_survivor_descent(device, queue)?;
+        assert_descent_fixture_coverage()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn qualify_case(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         level: Level,
-        use_hint: bool,
+        use_disparity: bool,
+        a_uses_hint: bool,
+        b_uses_hint: bool,
         a_admission: DescentAdmission,
         b_admission: DescentAdmission,
     ) -> Fallible<()> {
-        let (a_input, b_input, a_initial, b_initial, a_hint, b_hint) = qualification_fixture(level);
-        let a_hint_ref = use_hint.then_some(&a_hint);
-        let b_hint_ref = use_hint.then_some(&b_hint);
+        let (mut a_input, mut b_input, a_initial, b_initial, a_hint, b_hint) =
+            qualification_fixture(level);
+        if !use_disparity {
+            a_input.disparity = None;
+            b_input.disparity = None;
+        }
+        let a_hint_ref = a_uses_hint.then_some(&a_hint);
+        let b_hint_ref = b_uses_hint.then_some(&b_hint);
         let expected_a = solve_with_descent_admission(
             &a_input,
             clone_initial(&a_initial),
@@ -516,7 +636,7 @@ impl GpuPisPipeline {
             b_hint_ref,
             b_admission,
         )?;
-        let actual = self.solve_pair(
+        let actual = self.solve_pair_mode(
             device,
             queue,
             &a_input,
@@ -527,11 +647,239 @@ impl GpuPisPipeline {
             b_hint_ref,
             a_admission,
             b_admission,
+            true,
         )?;
-        compare("A-to-B", &actual.a_to_b, &expected_a)?;
-        compare("B-to-A", &actual.b_to_a, &expected_b)?;
-        Ok(())
+        compare_qualified(actual, &expected_a, &expected_b, use_disparity)
     }
+
+    fn qualify_survivor_boundary(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Fallible<()> {
+        let (a_input, b_input, a_initial, b_initial, a_hint, b_hint) = survivor_boundary_fixture();
+        for (direction, current, hint) in [
+            (
+                "A-to-B",
+                a_input.score(0, 0, Flow::new(1.0, 0.0).unwrap()),
+                a_input.score(0, 0, Flow::ZERO),
+            ),
+            (
+                "B-to-A",
+                b_input.score(0, 0, Flow::new(1.0, 0.0).unwrap()),
+                b_input.score(0, 0, Flow::ZERO),
+            ),
+        ] {
+            if current.survivors() != 8 || hint.survivors() != 9 {
+                return Err(format!(
+                    "ONE X2 GPU PIS {direction} survivor qualifier is not discriminating: current has {}, hint has {}",
+                    current.survivors(),
+                    hint.survivors()
+                )
+                .into());
+            }
+        }
+        let expected_a = solve_with_descent_admission(
+            &a_input,
+            clone_initial(&a_initial),
+            Some(&a_hint),
+            DescentAdmission::NoPatches,
+        )?;
+        let expected_b = solve_with_descent_admission(
+            &b_input,
+            clone_initial(&b_initial),
+            Some(&b_hint),
+            DescentAdmission::NoPatches,
+        )?;
+        let actual = self.solve_pair_mode(
+            device,
+            queue,
+            &a_input,
+            a_initial,
+            Some(&a_hint),
+            &b_input,
+            b_initial,
+            Some(&b_hint),
+            DescentAdmission::NoPatches,
+            DescentAdmission::NoPatches,
+            true,
+        )?;
+        compare_qualified(actual, &expected_a, &expected_b, false)
+    }
+
+    fn qualify_tie_boundary(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<()> {
+        let level = Level::Two;
+        let (a_input, b_input) = constant_boundary_inputs(vec![1; level.pixels()]);
+        let current = Flow::new(1.0, 0.0).unwrap();
+        for (direction, input_score, hint_score) in [
+            (
+                "A-to-B",
+                a_input.score(0, 0, current),
+                a_input.score(0, 0, Flow::ZERO),
+            ),
+            (
+                "B-to-A",
+                b_input.score(0, 0, current),
+                b_input.score(0, 0, Flow::ZERO),
+            ),
+        ] {
+            if input_score.value().to_bits() != hint_score.value().to_bits() {
+                return Err(format!(
+                    "ONE X2 GPU PIS {direction} tie qualifier is not equal-score: current is {:#010x}, hint is {:#010x}",
+                    input_score.value().to_bits(),
+                    hint_score.value().to_bits()
+                )
+                .into());
+            }
+        }
+        let initial_flows = vec![current; level.patches()];
+        let hint_flows = vec![Flow::ZERO; level.patches()];
+        let a_initial = initial_grid(level, &initial_flows);
+        let b_initial = initial_grid(level, &initial_flows);
+        let a_hint = HintGrid::from_row_major(level, hint_flows.clone()).unwrap();
+        let b_hint = HintGrid::from_row_major(level, hint_flows).unwrap();
+        let expected_a = solve_with_descent_admission(
+            &a_input,
+            clone_initial(&a_initial),
+            Some(&a_hint),
+            DescentAdmission::NoPatches,
+        )?;
+        let expected_b = solve_with_descent_admission(
+            &b_input,
+            clone_initial(&b_initial),
+            Some(&b_hint),
+            DescentAdmission::NoPatches,
+        )?;
+        let actual = self.solve_pair_mode(
+            device,
+            queue,
+            &a_input,
+            a_initial,
+            Some(&a_hint),
+            &b_input,
+            b_initial,
+            Some(&b_hint),
+            DescentAdmission::NoPatches,
+            DescentAdmission::NoPatches,
+            true,
+        )?;
+        compare_qualified(actual, &expected_a, &expected_b, false)
+    }
+
+    fn qualify_zero_survivor_descent(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Fallible<()> {
+        let level = Level::Two;
+        let (a_input, b_input) = constant_boundary_inputs(vec![0; level.pixels()]);
+        if a_input.score(0, 0, Flow::ZERO).survivors() != 0
+            || b_input.score(0, 0, Flow::ZERO).survivors() != 0
+        {
+            return Err("ONE X2 GPU PIS zero-survivor descent qualifier has live taps".into());
+        }
+        let flows = vec![Flow::ZERO; level.patches()];
+        let a_initial = initial_grid(level, &flows);
+        let b_initial = initial_grid(level, &flows);
+        let expected_a = solve_with_descent_admission(
+            &a_input,
+            clone_initial(&a_initial),
+            None,
+            DescentAdmission::EveryPatch,
+        )?;
+        let expected_b = solve_with_descent_admission(
+            &b_input,
+            clone_initial(&b_initial),
+            None,
+            DescentAdmission::EveryPatch,
+        )?;
+        let actual = self.solve_pair_mode(
+            device,
+            queue,
+            &a_input,
+            a_initial,
+            None,
+            &b_input,
+            b_initial,
+            None,
+            DescentAdmission::EveryPatch,
+            DescentAdmission::EveryPatch,
+            true,
+        )?;
+        compare_qualified(actual, &expected_a, &expected_b, false)
+    }
+}
+
+fn assert_descent_fixture_coverage() -> Fallible<()> {
+    let (input, _, initial, _, hint, _) = qualification_fixture(Level::Two);
+    let solved =
+        solve_with_descent_admission(&input, initial, Some(&hint), DescentAdmission::EveryPatch)?;
+    let (mut reaches_six, mut stops_after_write) = (false, false);
+    for patch in solved.patches() {
+        for pass in patch.passes() {
+            reaches_six |= pass.descent_iterations() == 6;
+            stops_after_write |= pass.stopped_on_no_improvement();
+        }
+    }
+    if !reaches_six || !stops_after_write {
+        return Err(format!(
+            "ONE X2 GPU PIS descent qualifier is not discriminating: six steps={reaches_six}, write-before-stop={stops_after_write}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn expected_probes(use_disparity: bool) -> Vec<u32> {
+    let mut expected = Vec::with_capacity(PROBE_WORDS);
+    expected.push(0);
+    expected.extend(DIVISION_PROBES.iter().map(|probe| probe.2));
+    expected.extend(DISTANCE_PROBES.iter().map(|probe| probe.2));
+    // Interior, then each of the four strict endpoints.
+    expected.extend(if use_disparity {
+        [0, 1, 1, 1, 1]
+    } else {
+        [0; DISPARITY_PROBES]
+    });
+    expected
+}
+
+fn compare_probes<D: PisDirection>(
+    direction: &'static str,
+    actual: &TerminalBits<D>,
+    use_disparity: bool,
+) -> Fallible<()> {
+    for (probe, (actual, expected)) in actual
+        .diagnostics
+        .iter()
+        .copied()
+        .zip(expected_probes(use_disparity))
+        .enumerate()
+    {
+        if actual != expected {
+            return Err(QualificationError::Probe {
+                direction,
+                probe,
+                actual,
+                expected,
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn compare_qualified(
+    actual: PairedTerminalBits,
+    expected_a: &super::PatchGrid<AtoB>,
+    expected_b: &super::PatchGrid<BtoA>,
+    use_disparity: bool,
+) -> Fallible<()> {
+    compare_probes("A-to-B", &actual.a_to_b, use_disparity)?;
+    compare_probes("B-to-A", &actual.b_to_a, use_disparity)?;
+    let actual = actual.into_patch_grids()?;
+    compare("A-to-B", &actual.a_to_b, expected_a)?;
+    compare("B-to-A", &actual.b_to_a, expected_b)
 }
 
 fn compare<D: PisDirection>(
@@ -698,6 +1046,7 @@ fn decode_terminal<D: PisDirection>(
         level,
         dcol: dcol.into_boxed_slice(),
         drow: drow.into_boxed_slice(),
+        diagnostics: words[level.patches() * 2..].into(),
         direction: PhantomData,
     })
 }
@@ -708,6 +1057,7 @@ impl<D: PisDirection> PackedInput<D> {
         initial: InitialGrid<D>,
         hint: Option<&HintGrid<D>>,
         admission: DescentAdmission,
+        qualification_probes: bool,
     ) -> Fallible<Self> {
         if initial.level != input.level {
             return Err(format!(
@@ -747,6 +1097,14 @@ impl<D: PisDirection> PackedInput<D> {
         }));
         u32s[22] = u32s.len() as u32;
         u32s.push(0);
+        u32s[29] = u32::from(qualification_probes);
+        u32s[23] = u32s.len() as u32;
+        if qualification_probes {
+            u32s[24] = DIVISION_PROBES.len() as u32;
+            for &(numerator, denominator, _) in DIVISION_PROBES {
+                u32s.extend([numerator, denominator]);
+            }
+        }
 
         let mut f32s = Vec::new();
         append_f32_plane(&mut f32s, &mut u32s, 14, &input.gradient_col);
@@ -787,6 +1145,36 @@ impl<D: PisDirection> PackedInput<D> {
                 model.inverse_col_col,
                 model.inverse_col_row,
                 model.inverse_row_row,
+            ]);
+        }
+        u32s[25] = f32s.len() as u32;
+        if qualification_probes {
+            u32s[26] = DISTANCE_PROBES.len() as u32;
+            for &(dcol, drow, _) in DISTANCE_PROBES {
+                f32s.extend([f32::from_bits(dcol), f32::from_bits(drow), 0.0, 0.0]);
+            }
+        }
+        u32s[27] = f32s.len() as u32;
+        if qualification_probes {
+            u32s[28] = DISPARITY_PROBES as u32;
+            let interval = input
+                .disparity
+                .unwrap_or(super::DisparityInterval::new([-2.0, -1.0], [4.0, 1.0]));
+            let midpoint = [
+                (interval.first[0] + interval.second[0]) * 0.5,
+                (interval.first[1] + interval.second[1]) * 0.5,
+            ];
+            f32s.extend([
+                midpoint[0],
+                midpoint[1],
+                interval.first[0],
+                midpoint[1],
+                interval.second[0],
+                midpoint[1],
+                midpoint[0],
+                interval.first[1],
+                midpoint[0],
+                interval.second[1],
             ]);
         }
         Ok(Self {
@@ -940,6 +1328,80 @@ fn qualification_fixture(
     )
 }
 
+#[allow(clippy::type_complexity)]
+fn survivor_boundary_fixture() -> (
+    Input<AtoB>,
+    Input<BtoA>,
+    InitialGrid<AtoB>,
+    InitialGrid<BtoA>,
+    HintGrid<AtoB>,
+    HintGrid<BtoA>,
+) {
+    let level = Level::Two;
+    let pixels = level.pixels();
+    let mut target_mask = vec![0; pixels];
+    target_mask[..8].fill(1);
+    target_mask[level.cols()] = 1;
+    target_mask[2 * level.cols() + 8] = 1;
+    let (a, b) = constant_boundary_inputs(target_mask);
+    let initial = vec![Flow::new(1.0, 0.0).unwrap(); level.patches()];
+    let mut hints = initial.clone();
+    hints[0] = Flow::ZERO;
+    (
+        a,
+        b,
+        initial_grid(level, &initial),
+        initial_grid(level, &initial),
+        HintGrid::from_row_major(level, hints.clone()).unwrap(),
+        HintGrid::from_row_major(level, hints).unwrap(),
+    )
+}
+
+fn constant_boundary_inputs(target_mask: Vec<u8>) -> (Input<AtoB>, Input<BtoA>) {
+    let level = Level::Two;
+    let pixels = level.pixels();
+    let images = super::super::LensPair {
+        a: vec![10; pixels],
+        b: vec![20; pixels],
+    };
+    let masks = super::super::LensPair {
+        a: vec![1; pixels],
+        b: target_mask,
+    };
+    let gradients = vec![0.0; pixels];
+    let modes = vec![CostMode::Unweighted; level.patch_rows()];
+    (
+        Input::<AtoB>::from_native_order(
+            level,
+            images.clone(),
+            masks.clone(),
+            gradients.clone(),
+            gradients.clone(),
+            gradients.clone(),
+            modes.clone(),
+        )
+        .unwrap(),
+        Input::<BtoA>::from_native_order(
+            level,
+            images,
+            masks,
+            gradients.clone(),
+            gradients.clone(),
+            gradients,
+            modes,
+        )
+        .unwrap(),
+    )
+}
+
+fn initial_grid<D: PisDirection>(level: Level, flows: &[Flow]) -> InitialGrid<D> {
+    InitialGrid {
+        level,
+        flows: flows.into(),
+        direction: PhantomData,
+    }
+}
+
 const SHADER: &str = include_str!("pis.wgsl");
 
 #[cfg(test)]
@@ -1027,7 +1489,7 @@ mod tests {
     }
 
     #[test]
-    fn qualification_refuses_candidate_mutation() {
+    fn qualification_refuses_production_entry_mutations() {
         let (device, queue, adapter) = match gpu() {
             Ok(gpu) => gpu,
             Err(why) => {
@@ -1039,20 +1501,148 @@ mod tests {
                 return;
             }
         };
-        let broken = SHADER.replacen(
-            "if candidate == 0u || score < selected_scores[slot]",
-            "if candidate == 0u || score > selected_scores[slot]",
+        let mutations = [
+            (
+                "candidate tie order",
+                "if candidate == 0u || score < selected_scores[slot]",
+                "if candidate == 0u || score <= selected_scores[slot]",
+            ),
+            (
+                "eight/nine survivor boundary",
+                "survivors >= 9u",
+                "survivors >= 8u",
+            ),
+            (
+                "forward scan propagation",
+                "candidate_flow = stored_flow(cell - 1u);",
+                "candidate_flow = stored_flow(cell);",
+            ),
+            (
+                "hint absence",
+                "present = word(6u) != 0u;",
+                "present = true;",
+            ),
+            ("descent admission", "if word(8u) != 0u {", "if true {"),
+            (
+                "zero-survivor descent",
+                "return DescentStep(vec2<f32>(0.0), SENTINEL);",
+                "return DescentStep(vec2<f32>(1.0, 0.0), SENTINEL);",
+            ),
+            ("six-step descent limit", "descent < 6u", "descent < 5u"),
+            (
+                "write before stop",
+                "if step.residual >= previous { break; }",
+                "if step.residual >= previous { current = seed; break; }",
+            ),
+            (
+                "runtime-zero materialization",
+                "^ local_word(word(22u))",
+                "^ 1u",
+            ),
+            (
+                "disparity absence",
+                "if word(7u) == 0u { return false; }",
+                "if false { return false; }",
+            ),
+            (
+                "strict disparity endpoints",
+                "flow.x > first.x && flow.x < second.x",
+                "flow.x >= first.x && flow.x < second.x",
+            ),
+            (
+                "canonical signed-zero zero divide",
+                "return 0xffc00000u;",
+                "return 0x7fc00000u;",
+            ),
+            (
+                "terminal distance discriminator",
+                "threshold[7] = 1u << 28u;",
+                "threshold[7] = 0u;",
+            ),
+        ];
+        for (name, from, to) in mutations {
+            let broken = SHADER.replacen(from, to, 1);
+            assert_ne!(broken, SHADER, "{name} mutation found no target");
+            let error = match GpuPisPipeline::from_shader(&device, &queue, &broken, true) {
+                Ok(_) => panic!("changed paired GPU PIS {name} was accepted on {adapter}"),
+                Err(error) => error,
+            };
+            assert!(
+                error.downcast_ref::<QualificationError>().is_some(),
+                "{name} mutation returned the wrong refusal on {adapter}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_decoder_refuses_nonfinite_bits() {
+        let level = Level::Two;
+        let mut words = vec![0; level.patches() * OUTPUT_WORDS_PER_PATCH + DIAGNOSTIC_WORDS];
+        words[2 * 7] = f32::INFINITY.to_bits();
+        let error = decode_terminal::<AtoB>(level, &words).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "ONE X2 GPU PIS returned a non-finite terminal flow at level 2 patch 7: 0x7f800000, 0x00000000"
+        );
+    }
+
+    #[test]
+    fn ordinary_mode_skips_qualification_probes_without_changing_terminals() {
+        let (device, queue, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "KJERAG_REQUIRE_GPU is set and there is no GPU: {why}"
+                );
+                eprintln!("skipping paired GPU PIS ordinary-mode probe gate: {why}");
+                return;
+            }
+        };
+        let mutated = SHADER.replacen(
+            "terminal_bits[base] = local_word(word(22u));",
+            "terminal_bits[base] = 0xdeadbeefu;",
             1,
         );
-        assert_ne!(broken, SHADER, "candidate-order mutation found no target");
-        let error = match GpuPisPipeline::from_shader(&device, &queue, &broken, true) {
-            Ok(_) => panic!("changed paired GPU PIS candidate ties were accepted on {adapter}"),
-            Err(error) => error,
-        };
-        assert!(
-            error.downcast_ref::<QualificationError>().is_some(),
-            "mutation returned the wrong refusal on {adapter}: {error}"
-        );
+        assert_ne!(mutated, SHADER, "probe-write mutation found no target");
+        let pipeline = GpuPisPipeline::from_shader(&device, &queue, &mutated, false)
+            .unwrap_or_else(|error| panic!("ordinary paired GPU PIS failed on {adapter}: {error}"));
+        let (a_input, b_input, a_initial, b_initial, a_hint, b_hint) =
+            qualification_fixture(Level::Two);
+        let expected_a = solve_with_descent_admission(
+            &a_input,
+            clone_initial(&a_initial),
+            Some(&a_hint),
+            DescentAdmission::NoPatches,
+        )
+        .unwrap();
+        let expected_b = solve_with_descent_admission(
+            &b_input,
+            clone_initial(&b_initial),
+            Some(&b_hint),
+            DescentAdmission::NoPatches,
+        )
+        .unwrap();
+        let actual = pipeline
+            .solve_pair_mode(
+                &device,
+                &queue,
+                &a_input,
+                a_initial,
+                Some(&a_hint),
+                &b_input,
+                b_initial,
+                Some(&b_hint),
+                DescentAdmission::NoPatches,
+                DescentAdmission::NoPatches,
+                false,
+            )
+            .unwrap();
+        assert!(actual.a_to_b.diagnostics.iter().all(|word| *word == 0));
+        assert!(actual.b_to_a.diagnostics.iter().all(|word| *word == 0));
+        let actual = actual.into_patch_grids().unwrap();
+        compare("A-to-B", &actual.a_to_b, &expected_a).unwrap();
+        compare("B-to-A", &actual.b_to_a, &expected_b).unwrap();
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {
