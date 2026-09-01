@@ -52,33 +52,19 @@ pub(crate) struct GpuPisStageOutput {
     pub(crate) grids: PairedPatchGrids,
 }
 
-/// Exact terminal component bits for one direction and selected level.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct TerminalBits<D: PisDirection> {
+struct TerminalBits<D: PisDirection> {
     level: Level,
     dcol: Box<[u32]>,
     drow: Box<[u32]>,
-    diagnostics: Box<[u32]>,
     direction: PhantomData<D>,
 }
 
 impl<D: PisDirection> TerminalBits<D> {
-    pub(crate) const fn level(&self) -> Level {
-        self.level
-    }
-
-    pub(crate) fn dcol(&self) -> &[u32] {
-        &self.dcol
-    }
-
-    pub(crate) fn drow(&self) -> &[u32] {
-        &self.drow
-    }
-
     /// Re-enter the typed CPU boundary without changing any terminal bits.
     /// Pass reports are intentionally empty because this production handoff
     /// retains only the native terminal grid.
-    pub(crate) fn into_patch_grid(self) -> Result<super::PatchGrid<D>, TerminalGridError> {
+    fn into_patch_grid(self) -> Result<super::PatchGrid<D>, TerminalGridError> {
         let expected = self.level.patches();
         for (component, actual) in [("dcol", self.dcol.len()), ("drow", self.drow.len())] {
             if actual != expected {
@@ -98,26 +84,22 @@ impl<D: PisDirection> TerminalBits<D> {
             .zip(self.drow.iter().copied())
             .enumerate()
             .map(|(patch, (dcol, drow))| {
-                for (component, bits) in [("dcol", dcol), ("drow", drow)] {
-                    if !f32::from_bits(bits).is_finite() {
-                        return Err(TerminalGridError::NonFinite {
-                            direction: D::DIRECTION,
-                            level: self.level,
-                            patch,
-                            component,
-                            bits,
-                        });
-                    }
-                }
-                let flow = Flow::new(f32::from_bits(dcol), f32::from_bits(drow)).ok_or(
+                let dcol_value = f32::from_bits(dcol);
+                let drow_value = f32::from_bits(drow);
+                let flow = Flow::new(dcol_value, drow_value).ok_or_else(|| {
+                    let (component, bits) = if !dcol_value.is_finite() {
+                        ("dcol", dcol)
+                    } else {
+                        ("drow", drow)
+                    };
                     TerminalGridError::NonFinite {
                         direction: D::DIRECTION,
                         level: self.level,
                         patch,
-                        component: "flow",
-                        bits: dcol,
-                    },
-                )?;
+                        component,
+                        bits,
+                    }
+                })?;
                 Ok(super::Patch::seeded(flow))
             })
             .collect::<Result<Vec<_>, _>>()?
@@ -133,6 +115,12 @@ impl<D: PisDirection> TerminalBits<D> {
 /// A terminal GPU bit grid could not safely re-enter the typed CPU boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TerminalGridError {
+    Span {
+        direction: Direction,
+        level: Level,
+        expected_words: usize,
+        actual_words: usize,
+    },
     Shape {
         direction: Direction,
         level: Level,
@@ -152,6 +140,15 @@ pub(crate) enum TerminalGridError {
 impl fmt::Display for TerminalGridError {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Span {
+                direction,
+                level,
+                expected_words,
+                actual_words,
+            } => write!(
+                out,
+                "ONE X2 GPU PIS {direction:?} {level} terminal readback has {actual_words} words, expected {expected_words}"
+            ),
             Self::Shape {
                 direction,
                 level,
@@ -178,11 +175,26 @@ impl fmt::Display for TerminalGridError {
 
 impl Error for TerminalGridError {}
 
-/// The two direction-typed terminal grids from one paired level solve.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct PairedTerminalBits {
-    pub(crate) a_to_b: TerminalBits<AtoB>,
-    pub(crate) b_to_a: TerminalBits<BtoA>,
+struct PairedTerminalBits {
+    a_to_b: TerminalBits<AtoB>,
+    b_to_a: TerminalBits<BtoA>,
+}
+
+impl PairedTerminalBits {
+    fn into_patch_grids(self) -> Result<PairedPatchGrids, TerminalGridError> {
+        Ok(PairedPatchGrids {
+            a_to_b: self.a_to_b.into_patch_grid()?,
+            b_to_a: self.b_to_a.into_patch_grid()?,
+        })
+    }
+}
+
+/// Direction-typed terminal grids admitted back through the CPU boundary.
+#[derive(Debug, PartialEq)]
+pub(crate) struct PairedPatchGrids {
+    pub(crate) a_to_b: super::PatchGrid<AtoB>,
+    pub(crate) b_to_a: super::PatchGrid<BtoA>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -194,7 +206,6 @@ enum QualificationError {
         component: &'static str,
         actual: u32,
         expected: u32,
-        actual_diagnostics: Box<[u32]>,
         expected_candidates: Box<[u32]>,
     },
 }
@@ -209,11 +220,10 @@ impl fmt::Display for QualificationError {
                 component,
                 actual,
                 expected,
-                actual_diagnostics,
                 expected_candidates,
             } => write!(
                 out,
-                "ONE X2 GPU PIS arithmetic is not exact on this graphics device: {direction} {level} patch {patch} {component} bits are {actual:#010x}, expected {expected:#010x}; GPU patch-1 diagnostics {actual_diagnostics:#010x?}; CPU pass-0 candidate score bits {expected_candidates:#010x?}",
+                "ONE X2 GPU PIS arithmetic is not exact on this graphics device: {direction} {level} patch {patch} {component} bits are {actual:#010x}, expected {expected:#010x}; CPU pass-0 candidate score bits {expected_candidates:#010x?}",
             ),
         }
     }
@@ -348,7 +358,7 @@ impl GpuPisPipeline {
         b_hint: Option<&HintGrid<BtoA>>,
         a_admission: DescentAdmission,
         b_admission: DescentAdmission,
-    ) -> Fallible<PairedTerminalBits> {
+    ) -> Fallible<PairedPatchGrids> {
         if a_to_b.level != b_to_a.level {
             return Err(format!(
                 "ONE X2 paired GPU PIS directions have different levels: {} and {}",
@@ -358,7 +368,9 @@ impl GpuPisPipeline {
         }
         let a = PackedInput::new(a_to_b, a_initial, a_hint, a_admission)?;
         let b = PackedInput::new(b_to_a, b_initial, b_hint, b_admission)?;
-        self.dispatch_pair(device, queue, PackedPair::new(a, b)?)
+        self.dispatch_pair(device, queue, PackedPair::new(a, b)?)?
+            .into_patch_grids()
+            .map_err(Into::into)
     }
 
     fn dispatch_pair(
@@ -516,10 +528,8 @@ impl GpuPisPipeline {
             a_admission,
             b_admission,
         )?;
-        let actual_a = actual.a_to_b.into_patch_grid()?;
-        let actual_b = actual.b_to_a.into_patch_grid()?;
-        compare("A-to-B", &actual_a, &expected_a)?;
-        compare("B-to-A", &actual_b, &expected_b)?;
+        compare("A-to-B", &actual.a_to_b, &expected_a)?;
+        compare("B-to-A", &actual.b_to_a, &expected_b)?;
         Ok(())
     }
 }
@@ -562,7 +572,6 @@ fn compare<D: PisDirection>(
                 component: "dcol",
                 actual: actual_bits,
                 expected: expected_bits,
-                actual_diagnostics: Box::default(),
                 expected_candidates: expected_candidates.clone(),
             }
             .into());
@@ -588,7 +597,6 @@ fn compare<D: PisDirection>(
                 component: "drow",
                 actual: actual_bits,
                 expected: expected_bits,
-                actual_diagnostics: Box::default(),
                 expected_candidates: expected_candidates.clone(),
             }
             .into());
@@ -673,12 +681,11 @@ fn decode_terminal<D: PisDirection>(
 ) -> Result<TerminalBits<D>, TerminalGridError> {
     let expected_words = level.patches() * OUTPUT_WORDS_PER_PATCH + DIAGNOSTIC_WORDS;
     if words.len() != expected_words {
-        return Err(TerminalGridError::Shape {
+        return Err(TerminalGridError::Span {
             direction: D::DIRECTION,
             level,
-            component: "word span",
-            expected: expected_words,
-            actual: words.len(),
+            expected_words,
+            actual_words: words.len(),
         });
     }
     let mut dcol = Vec::with_capacity(level.patches());
@@ -691,7 +698,6 @@ fn decode_terminal<D: PisDirection>(
         level,
         dcol: dcol.into_boxed_slice(),
         drow: drow.into_boxed_slice(),
-        diagnostics: words[level.patches() * 2..].into(),
         direction: PhantomData,
     })
 }
@@ -941,6 +947,66 @@ mod tests {
     use std::future::Future;
 
     use super::*;
+
+    #[test]
+    fn terminal_decoder_refuses_malformed_span() {
+        let error = decode_terminal::<AtoB>(Level::Two, &[0; 3]).unwrap_err();
+        assert_eq!(
+            error,
+            TerminalGridError::Span {
+                direction: Direction::AtoB,
+                level: Level::Two,
+                expected_words: Level::Two.patches() * 2,
+                actual_words: 3,
+            }
+        );
+        assert!(error.to_string().contains("3 words"));
+    }
+
+    #[test]
+    fn terminal_decoder_refuses_each_nonfinite_component() {
+        for (component_index, component) in [(0, "dcol"), (1, "drow")] {
+            for bits in [
+                f32::NAN.to_bits(),
+                f32::INFINITY.to_bits(),
+                f32::NEG_INFINITY.to_bits(),
+            ] {
+                let mut words = vec![0; Level::Two.patches() * 2];
+                words[component_index] = bits;
+                let error = decode_terminal::<BtoA>(Level::Two, &words)
+                    .unwrap()
+                    .into_patch_grid()
+                    .unwrap_err();
+                assert_eq!(
+                    error,
+                    TerminalGridError::NonFinite {
+                        direction: Direction::BtoA,
+                        level: Level::Two,
+                        patch: 0,
+                        component,
+                        bits,
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_decoder_preserves_signed_zero_and_subnormal_bits() {
+        let mut words = vec![0; Level::Two.patches() * 2];
+        words[0] = (-0.0_f32).to_bits();
+        words[1] = 1;
+        words[2] = 0x8000_0001;
+        words[3] = 0.0_f32.to_bits();
+        let grid = decode_terminal::<AtoB>(Level::Two, &words)
+            .unwrap()
+            .into_patch_grid()
+            .unwrap();
+        assert_eq!(grid.patches()[0].flow().dcol().to_bits(), 0x8000_0000);
+        assert_eq!(grid.patches()[0].flow().drow().to_bits(), 1);
+        assert_eq!(grid.patches()[1].flow().dcol().to_bits(), 0x8000_0001);
+        assert_eq!(grid.patches()[1].flow().drow().to_bits(), 0);
+    }
 
     #[test]
     fn paired_gpu_matches_cpu_terminal_bits() {
