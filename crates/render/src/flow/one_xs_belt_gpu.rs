@@ -1,7 +1,7 @@
 //! GPU sampling and reduction for selected ONE X2 solver inputs.
 //!
-//! This is the GPU-shaped equivalent of [`super::one_xs_belt::sample_source_belts`]
-//! followed by [`SourceBelts::reduce_area_3x3`](super::one_xs_belt::SourceBelts::reduce_area_3x3)
+//! This is the GPU-shaped equivalent of [`crate::flow::one_xs_belt::sample_source_belts`]
+//! followed by [`SourceBelts::reduce_area_3x3`](crate::flow::one_xs_belt::SourceBelts::reduce_area_3x3)
 //! and Studio's selected 5-by-5 input Gaussian. Production playback consumes
 //! its compact post-blur readback at the CPU estimator boundary. Horizontal
 //! Q7 sums retain one u32 per logical byte; the vertical pass rounds, packs
@@ -12,13 +12,24 @@
 use std::sync::mpsc;
 use std::{error::Error, fmt};
 
-use super::one_xs::gpu_context::OneXsGpuContext;
-use super::one_xs::pis::gpu::GpuPisFlight;
-use super::one_xs::pis_frontend_gpu::{GpuPisFrontEnd, GpuPreparedFrame};
-use super::one_xs::temporal::{BlurredBelts, gaussian_blur};
-use super::one_xs::{Lens, LensPair};
-use super::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sample_source_belts};
+use super::gpu_context::OneXsGpuContext;
+use super::pis::gpu::GpuPisFlight;
+use super::temporal::{BlurredBelts, gaussian_blur};
+use super::{Lens, LensPair};
 use crate::Fallible;
+use crate::flow::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sample_source_belts};
+
+/// Resident PIS preparation is nested under the belt owner so its only
+/// boundary can consume the whole private producer token atomically.
+#[path = "one_xs/pis_frontend_gpu.rs"]
+#[allow(dead_code)]
+pub(crate) mod pis_frontend_gpu;
+
+/// Geometry is nested under the belt owner so its only production boundary
+/// can append belt work and mint the one lease atomically.
+#[path = "one_xs/geometry_gpu.rs"]
+#[allow(dead_code)]
+pub(crate) mod geometry_gpu;
 
 const CODES_PER_WORD: usize = 4;
 const OUTPUT_BYTES: u64 = SolverBelts::BYTES as u64;
@@ -27,7 +38,7 @@ const HORIZONTAL_BYTES: u64 = SolverBelts::BYTES as u64 * size_of::<u32>() as u6
 const WITNESS_BYTES: u64 = 2 * size_of::<u32>() as u64;
 const WORKGROUP_SIZE: u32 = 64;
 const _: () = assert!(SolverBelts::BYTES.is_multiple_of(CODES_PER_WORD));
-const _: () = assert!(super::one_xs::COLS.is_multiple_of(CODES_PER_WORD));
+const _: () = assert!(super::COLS.is_multiple_of(CODES_PER_WORD));
 const _: () = assert!(RetainedBaseMaps::NODES_PER_LENS.is_multiple_of(CODES_PER_WORD));
 
 const QUALIFICATION_A_ROWS: usize = 127;
@@ -133,8 +144,8 @@ fn qualification_fixture() -> QualificationFixture {
     let map = |lens: Lens| {
         (0..RetainedBaseMaps::NODES_PER_LENS)
             .map(|index| {
-                let row = index / super::one_xs::COLS;
-                let col = index % super::one_xs::COLS;
+                let row = index / super::COLS;
+                let col = index % super::COLS;
                 let selector = (31 * row + 47 * col + lens.index()) % 997;
                 match selector {
                     0 => [0.0, 0.5],
@@ -173,7 +184,7 @@ fn qualification_fixture() -> QualificationFixture {
     ];
     for dr in 0..2 {
         for dc in 0..2 {
-            a[(1 + dr) * super::one_xs::COLS + 47 + dc] = retained_fma_quad[dr][dc];
+            a[(1 + dr) * super::COLS + 47 + dc] = retained_fma_quad[dr][dc];
         }
     }
     let fma_uv = [
@@ -182,7 +193,7 @@ fn qualification_fixture() -> QualificationFixture {
     ];
     for row in 10..=11 {
         for col in 10..=11 {
-            a[row * super::one_xs::COLS + col] = fma_uv;
+            a[row * super::COLS + col] = fma_uv;
         }
     }
     let maps = RetainedBaseMaps::from_lenses(LensPair { a, b })
@@ -210,27 +221,27 @@ fn qualification_fixture() -> QualificationFixture {
 /// wide set of final Q14 rounding residues rather than relying on the sampled
 /// source fixture to happen to cover them.
 fn blur_qualification_fixture() -> SolverBelts {
-    let centre = (super::one_xs::ROWS / 2, super::one_xs::COLS / 2);
+    let centre = (super::ROWS / 2, super::COLS / 2);
     SolverBelts::from_fn(|lens, row, col| {
         let in_box = |at: (usize, usize), radius: usize| {
             row.abs_diff(at.0) <= radius && col.abs_diff(at.1) <= radius
         };
         match lens {
             Lens::A if in_box((0, 0), 3) => u8::from(row == 0 && col == 0) * 255,
-            Lens::A if in_box((0, super::one_xs::COLS / 2), 3) => {
-                u8::from(row == 0 && col == super::one_xs::COLS / 2) * 173
+            Lens::A if in_box((0, super::COLS / 2), 3) => {
+                u8::from(row == 0 && col == super::COLS / 2) * 173
             }
             Lens::A if in_box(centre, 3) => u8::from((row, col) == centre) * 255,
-            Lens::A if row >= super::one_xs::ROWS - 5 && col >= super::one_xs::COLS - 5 => 11,
+            Lens::A if row >= super::ROWS - 5 && col >= super::COLS - 5 => 11,
             Lens::B if row < 5 && col < 5 => 241,
-            Lens::B if row >= super::one_xs::ROWS - 4 && col >= super::one_xs::COLS - 4 => {
-                u8::from(row == super::one_xs::ROWS - 1 && col == super::one_xs::COLS - 1) * 199
+            Lens::B if row >= super::ROWS - 4 && col >= super::COLS - 4 => {
+                u8::from(row == super::ROWS - 1 && col == super::COLS - 1) * 199
             }
             _ if row < 32 => u8::from((row + col + lens.index()).is_multiple_of(2)) * 255,
             _ if row < 96 => ((5 * row + 17 * col + 31 * lens.index()) % 256) as u8,
             _ if row < 128 => 137 + lens.index() as u8 * 41,
             _ => {
-                let mut value = (row * super::one_xs::COLS + col) as u32
+                let mut value = (row * super::COLS + col) as u32
                     ^ (0x9e37_79b9u32.wrapping_mul(lens.index() as u32 + 1));
                 value ^= value >> 16;
                 value = value.wrapping_mul(0x7feb_352d);
@@ -470,8 +481,8 @@ impl GpuSolverBeltPipeline {
                 Lens::B
             };
             let local = index % RetainedBaseMaps::NODES_PER_LENS;
-            let row = local / super::one_xs::COLS;
-            let col = local % super::one_xs::COLS;
+            let row = local / super::COLS;
+            let col = local % super::COLS;
             return Err(GpuQualificationError::SolverByte {
                 lens,
                 row,
@@ -501,8 +512,8 @@ impl GpuSolverBeltPipeline {
                 Lens::B
             };
             let local = index % RetainedBaseMaps::NODES_PER_LENS;
-            let row = local / super::one_xs::COLS;
-            let col = local % super::one_xs::COLS;
+            let row = local / super::COLS;
+            let col = local % super::COLS;
             return Err(GpuQualificationError::BlurredByte {
                 lens,
                 row,
@@ -538,8 +549,8 @@ impl GpuSolverBeltPipeline {
                 Lens::B
             };
             let local = index % RetainedBaseMaps::NODES_PER_LENS;
-            let row = local / super::one_xs::COLS;
-            let col = local % super::one_xs::COLS;
+            let row = local / super::COLS;
+            let col = local % super::COLS;
             return Err(GpuQualificationError::BlurredByte {
                 lens,
                 row,
@@ -597,32 +608,6 @@ impl GpuSolverBeltPipeline {
                 qualify_intermediates: false,
             },
             false,
-        )?;
-        Ok(pending.into_resident(flight))
-    }
-
-    /// Complete the one concrete geometry-to-belt transition. The resident
-    /// map is only borrowed for exact binding, commands append to the geometry
-    /// encoder, and this module performs the transaction's sole submission.
-    pub(in crate::flow) fn submit_geometry_transition<K>(
-        &self,
-        producer: &OneXsGpuContext,
-        encoder: wgpu::CommandEncoder,
-        sources: SourceTextures<'_>,
-        retained_map: &wgpu::Buffer,
-        source_owner: K,
-        flight: GpuPisFlight,
-    ) -> Fallible<GpuBlurredBelts<K>> {
-        self.context.ensure_same(producer)?;
-        let pending = self.submit_inner_with_map(
-            sources,
-            MapInput::Resident(retained_map),
-            source_owner,
-            SubmissionInput::Sampled {
-                qualify_intermediates: false,
-            },
-            false,
-            Some(encoder),
         )?;
         Ok(pending.into_resident(flight))
     }
@@ -1176,109 +1161,8 @@ pub(crate) struct GpuBlurredBelts<K> {
 }
 
 impl<K> GpuBlurredBelts<K> {
-    /// Geometry-specific resident transition. The mask buffer remains sealed
-    /// in its geometry carrier and binds directly into the front end.
-    pub(in crate::flow) fn prepare_geometry_front_end(
-        self,
-        front_end: &GpuPisFrontEnd,
-        physical_masks: &wgpu::Buffer,
-    ) -> Fallible<GpuPreparedFrame<K>> {
-        self.prepare_front_end_inner(front_end, |packed| {
-            front_end.encode_geometry_transition(packed, physical_masks)
-        })
-    }
-
-    /// The only resident producer-to-front-end transition. Context refusal
-    /// happens before allocation, binding, encoding or submission; success
-    /// moves the exact flight and the sole linear lease into one opaque frame.
-    pub(in crate::flow) fn prepare_front_end(
-        self,
-        front_end: &GpuPisFrontEnd,
-        physical_masks: &LensPair<Vec<u8>>,
-    ) -> Fallible<GpuPreparedFrame<K>> {
-        self.prepare_front_end_inner(front_end, |packed| {
-            front_end.encode_resident_transition(packed, physical_masks)
-        })
-    }
-
-    fn prepare_front_end_inner(
-        mut self,
-        front_end: &GpuPisFrontEnd,
-        encode: impl FnOnce(
-            &wgpu::Buffer,
-        ) -> Fallible<super::one_xs::pis_frontend_gpu::EncodedPisFrontEnd>,
-    ) -> Fallible<GpuPreparedFrame<K>> {
-        let context = front_end.context_for_resident_transition();
-        self.lease.validate_provenance(context)?;
-        let mut encoded = encode(&self.packed)?;
-        self.lease
-            .submit_after(context, |_| encoded.take_command())?;
-        let flight = self
-            .flight
-            .take()
-            .expect("GPU-resident belts transfer their flight exactly once");
-        let retention = GpuPreparedRetention {
-            lease: self.lease,
-            _packed: self.packed,
-            _producer_map: self._producer_map,
-            _horizontal: self._horizontal,
-            _resources: self._resources,
-        };
-        Ok(GpuPreparedFrame::from_resident_transition(
-            context.clone(),
-            flight,
-            encoded,
-            retention,
-        ))
-    }
-
     #[cfg(test)]
     pub(crate) fn observe_completion(
-        &mut self,
-        state: std::sync::Arc<std::sync::atomic::AtomicU8>,
-    ) {
-        self.lease.observe(state);
-    }
-}
-
-/// Producer resources plus the sole submission lease after the exact
-/// front-end transition. It is only obtainable inside `GpuPreparedFrame`.
-pub(in crate::flow) struct GpuPreparedRetention<K> {
-    lease: SubmissionLease<K>,
-    _packed: wgpu::Buffer,
-    _producer_map: Option<wgpu::Buffer>,
-    _horizontal: wgpu::Buffer,
-    _resources: wgpu::BindGroup,
-}
-
-impl<K> GpuPreparedRetention<K> {
-    pub(in crate::flow) fn submit_pis_stage(
-        &mut self,
-        context: &OneXsGpuContext,
-        command: wgpu::CommandBuffer,
-    ) -> Fallible<()> {
-        self.lease.submit_after(context, |_| command)
-    }
-
-    #[cfg(test)]
-    pub(in crate::flow) fn submit_diagnostic_readback(
-        &mut self,
-        context: &OneXsGpuContext,
-        command: wgpu::CommandBuffer,
-    ) -> Fallible<()> {
-        self.lease.submit_after(context, |_| command)
-    }
-
-    pub(in crate::flow) fn acknowledge_terminal(
-        &mut self,
-        context: &OneXsGpuContext,
-    ) -> Fallible<()> {
-        self.lease.validate_provenance(context)?;
-        self.lease.complete()
-    }
-
-    #[cfg(test)]
-    pub(in crate::flow) fn observe_completion(
         &mut self,
         state: std::sync::Arc<std::sync::atomic::AtomicU8>,
     ) {
@@ -1914,25 +1798,17 @@ mod tests {
         let input = blur_qualification_fixture();
         assert_eq!(input.pixel(Lens::A, 0, 0), 255, "corner impulse");
         assert_eq!(
-            input.pixel(Lens::A, 0, super::super::one_xs::COLS / 2),
+            input.pixel(Lens::A, 0, super::super::COLS / 2),
             173,
             "edge impulse"
         );
         assert_eq!(
-            input.pixel(
-                Lens::A,
-                super::super::one_xs::ROWS / 2,
-                super::super::one_xs::COLS / 2,
-            ),
+            input.pixel(Lens::A, super::super::ROWS / 2, super::super::COLS / 2,),
             255,
             "centre impulse"
         );
         assert_eq!(
-            input.pixel(
-                Lens::A,
-                super::super::one_xs::ROWS - 1,
-                super::super::one_xs::COLS - 1,
-            ),
+            input.pixel(Lens::A, super::super::ROWS - 1, super::super::COLS - 1,),
             11,
             "lens A storage boundary"
         );

@@ -9,15 +9,18 @@
 use std::marker::PhantomData;
 use std::sync::mpsc;
 
-use super::gpu_context::OneXsGpuContext;
-use super::pis::gpu::{GpuPisDynamicStage, GpuPisFlight, GpuPisPipeline, GpuPisStageReceipt};
-use super::pis::{AtoB, BtoA, Level, PisDirection};
-use super::scalar::{ColdInputs, LevelInputs, MaskPyramid};
-use super::temporal::BlurredBelts;
-use super::{COLS, Direction, LensPair, ROWS};
+use super::geometry_gpu::{GpuGeometryBelts, GpuGeometryFrameOwner};
 use crate::Fallible;
+use crate::flow::one_xs::gpu_context::OneXsGpuContext;
+use crate::flow::one_xs::pis::gpu::{
+    GpuPisDynamicStage, GpuPisFlight, GpuPisPipeline, GpuPisStageReceipt,
+};
+use crate::flow::one_xs::pis::{AtoB, BtoA, Level, PisDirection};
+use crate::flow::one_xs::scalar::{ColdInputs, LevelInputs, MaskPyramid, PairSolveStage};
+use crate::flow::one_xs::temporal::BlurredBelts;
+use crate::flow::one_xs::{COLS, Direction, LensPair, ROWS};
 use crate::flow::one_xs_belt::SolverBelts;
-use crate::flow::one_xs_belt_gpu::{GpuBlurredBelts, GpuPreparedRetention};
+use crate::flow::one_xs_belt_gpu::GpuBlurredBelts;
 
 const MODEL_WORDS_PER_PATCH: usize = 5;
 const L1_PIXELS: usize = Level::One.pixels();
@@ -200,30 +203,14 @@ pub(crate) struct GpuPreparedFrame<K> {
     l1_block_mask: wgpu::Buffer,
     _weight_horizontal: wgpu::Buffer,
     _resources: wgpu::BindGroup,
-    retention: GpuPreparedRetention<K>,
-}
-
-/// Purpose-specific product of front-end allocation, binding and encoding.
-/// Only the belt owner can join it to the exact producer token.
-pub(in crate::flow) struct EncodedPisFrontEnd {
-    command: Option<wgpu::CommandBuffer>,
-    outputs: OutputBuffers,
-    resources: wgpu::BindGroup,
-}
-
-impl EncodedPisFrontEnd {
-    pub(in crate::flow) fn take_command(&mut self) -> wgpu::CommandBuffer {
-        self.command
-            .take()
-            .expect("encoded PIS front end submits exactly once")
-    }
+    belts: GpuBlurredBelts<K>,
 }
 
 /// Kernel-owned dynamic state handed atomically to the frame owner.
 ///
 /// It contains no prepared buffer, base, flight, queue or submission handle.
 pub(crate) struct PreparedPisDispatch<'a> {
-    pub(crate) stage: super::scalar::PairSolveStage,
+    pub(crate) stage: PairSolveStage,
     pub(crate) pipeline: &'a wgpu::ComputePipeline,
     pub(crate) layout: &'a wgpu::BindGroupLayout,
     pub(crate) u32s: Vec<u32>,
@@ -278,8 +265,9 @@ impl<K> GpuPreparedTerminal<K> {
         });
         encoder.copy_buffer_to_buffer(&self._output, 0, &readback, 0, words_bytes(words));
         self.prepared
-            .retention
-            .submit_diagnostic_readback(&self.prepared.context, encoder.finish())?;
+            .belts
+            .lease
+            .submit_after(&self.prepared.context, |_| encoder.finish())?;
         let slice = readback.slice(..);
         let (mapped, answer) = mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -409,8 +397,9 @@ impl<K> GpuPreparedFrame<K> {
             pass.set_bind_group(0, &resources, &[]);
             pass.dispatch_workgroups(2, 1, 1);
         }
-        self.retention
-            .submit_pis_stage(&self.context, encoder.finish())?;
+        self.belts
+            .lease
+            .submit_after(&self.context, |_| encoder.finish())?;
         Ok(GpuPreparedTerminal {
             receipt: GpuPisStageReceipt {
                 flight,
@@ -428,12 +417,8 @@ impl<K> GpuPreparedFrame<K> {
     /// Success proves the latest same-queue consumer and every earlier stage,
     /// releases the imported source owner once and disarms cancellation Drop.
     pub(crate) fn acknowledge_terminal(mut self) -> Fallible<()> {
-        self.retention.acknowledge_terminal(&self.context)
-    }
-
-    #[cfg(test)]
-    fn observe_completion(&mut self, state: std::sync::Arc<std::sync::atomic::AtomicU8>) {
-        self.retention.observe_completion(state);
+        self.belts.lease.validate_provenance(&self.context)?;
+        self.belts.lease.complete()
     }
 
     #[cfg(test)]
@@ -592,85 +577,24 @@ impl GpuPisFrontEnd {
     /// the producer visible without a CPU poll.
     pub(crate) fn prepare<K>(
         &self,
-        belts: GpuBlurredBelts<K>,
+        mut belts: GpuBlurredBelts<K>,
         physical_masks: &LensPair<Vec<u8>>,
     ) -> Fallible<GpuPreparedFrame<K>> {
-        belts.prepare_front_end(self, physical_masks)
-    }
-
-    /// Build the one concrete front-end command after the belt owner has
-    /// proved this context. This is an implementation seam for the consuming
-    /// transition, not a resident-token API.
-    pub(in crate::flow) fn encode_resident_transition(
-        &self,
-        packed: &wgpu::Buffer,
-        physical_masks: &LensPair<Vec<u8>>,
-    ) -> Fallible<EncodedPisFrontEnd> {
+        belts.lease.validate_provenance(&self.context)?;
         validate_masks(physical_masks)?;
         let device = self.context.device();
         let queue = self.context.queue();
         let mask = upload_masks(device, queue, physical_masks);
-        self.encode_bound_resident_transition(packed, &mask)
-    }
-
-    /// Bind the geometry producer's exact packed A/B physical-mask layout.
-    /// This is only callable by the concrete geometry-backed belt transition.
-    pub(in crate::flow) fn encode_geometry_transition(
-        &self,
-        packed: &wgpu::Buffer,
-        mask: &wgpu::Buffer,
-    ) -> Fallible<EncodedPisFrontEnd> {
-        if mask.size() != words_bytes(2 * MASK_WORDS_PER_LENS + 1) {
-            return Err(format!(
-                "ONE X2 GPU geometry mask buffer is {} bytes, expected {}",
-                mask.size(),
-                words_bytes(2 * MASK_WORDS_PER_LENS + 1)
-            )
-            .into());
-        }
-        self.encode_bound_resident_transition(packed, mask)
-    }
-
-    fn encode_bound_resident_transition(
-        &self,
-        packed: &wgpu::Buffer,
-        mask: &wgpu::Buffer,
-    ) -> Fallible<EncodedPisFrontEnd> {
-        let device = self.context.device();
         let outputs = OutputBuffers::new(device);
-        let resources = self.resources(device, packed, mask, &outputs);
+        let resources = self.resources(device, &belts.packed, &mask, &outputs);
         let command = self.encode_command(device, &resources);
-        Ok(EncodedPisFrontEnd {
-            command: Some(command),
-            outputs,
-            resources,
-        })
-    }
-
-    pub(in crate::flow) fn context_for_resident_transition(&self) -> &OneXsGpuContext {
-        &self.context
-    }
-}
-
-impl<K> GpuPreparedFrame<K> {
-    /// Finish the belt module's single consuming transition. The opaque
-    /// retention is already advanced to this exact front-end command.
-    pub(in crate::flow) fn from_resident_transition(
-        context: OneXsGpuContext,
-        flight: GpuPisFlight,
-        encoded: EncodedPisFrontEnd,
-        retention: GpuPreparedRetention<K>,
-    ) -> Self {
-        let EncodedPisFrontEnd {
-            command: None,
-            outputs,
-            resources,
-        } = encoded
-        else {
-            unreachable!("resident front-end command must be submitted before assembly")
-        };
-        Self {
-            context,
+        belts.lease.submit_after(&self.context, |_| command)?;
+        let flight = belts
+            .flight
+            .take()
+            .expect("GPU-resident belts transfer their flight exactly once");
+        Ok(GpuPreparedFrame {
+            context: self.context.clone(),
             flight,
             shared_images: outputs.shared_images,
             shared_masks: outputs.shared_masks,
@@ -682,8 +606,54 @@ impl<K> GpuPreparedFrame<K> {
             l1_block_mask: outputs.l1_block_mask,
             _weight_horizontal: outputs.weight_horizontal,
             _resources: resources,
-            retention,
+            belts,
+        })
+    }
+
+    /// Consume the private geometry-backed belt owner atomically. The packed
+    /// physical-mask buffer binds directly; no raw handle or separable
+    /// retention component crosses the belt ownership module.
+    pub(super) fn prepare_geometry<K>(
+        &self,
+        mut geometry: GpuGeometryBelts<K>,
+    ) -> Fallible<GpuPreparedFrame<GpuGeometryFrameOwner<K>>> {
+        geometry.belts.lease.validate_provenance(&self.context)?;
+        if geometry.masks.size() != words_bytes(2 * MASK_WORDS_PER_LENS + 1) {
+            return Err(format!(
+                "ONE X2 GPU geometry mask buffer is {} bytes, expected {}",
+                geometry.masks.size(),
+                words_bytes(2 * MASK_WORDS_PER_LENS + 1)
+            )
+            .into());
         }
+        let device = self.context.device();
+        let outputs = OutputBuffers::new(device);
+        let resources = self.resources(device, &geometry.belts.packed, &geometry.masks, &outputs);
+        let command = self.encode_command(device, &resources);
+        geometry
+            .belts
+            .lease
+            .submit_after(&self.context, |_| command)?;
+        let flight = geometry
+            .belts
+            .flight
+            .take()
+            .expect("GPU-resident geometry belts transfer their flight exactly once");
+        Ok(GpuPreparedFrame {
+            context: self.context.clone(),
+            flight,
+            shared_images: outputs.shared_images,
+            shared_masks: outputs.shared_masks,
+            gradients: outputs.gradients,
+            raw_weights: outputs.raw_weights,
+            patch_weight_sums: outputs.patch_weight_sums,
+            models: outputs.models,
+            l1_lack_rows: outputs.l1_lack_rows,
+            l1_block_mask: outputs.l1_block_mask,
+            _weight_horizontal: outputs.weight_horizontal,
+            _resources: resources,
+            belts: geometry.belts,
+        })
     }
 }
 
@@ -2148,7 +2118,7 @@ mod tests {
         let texture_a = texture("direct-bound PIS A", &sources.a);
         let texture_b = texture("direct-bound PIS B", &sources.b);
         let (_, masks) = qualification_fixture();
-        let blurred = super::super::temporal::gaussian_blur(
+        let blurred = crate::flow::one_xs::temporal::gaussian_blur(
             &sample_source_belts(&sources, &maps).reduce_area_3x3(),
         );
         let retained = ColdInputs::from_blurred_belts_and_masks(blurred, masks.clone());
@@ -2244,7 +2214,7 @@ mod tests {
             } else {
                 DescentAdmission::EveryPatch
             };
-            let expected_a = super::super::pis::solve_with_descent_admission(
+            let expected_a = crate::flow::one_xs::pis::solve_with_descent_admission(
                 &a_input,
                 InitialGrid::from_test_row_major(level, a_seed.clone()).unwrap(),
                 a_uses_hint
@@ -2253,7 +2223,7 @@ mod tests {
                 a_admission,
             )
             .unwrap();
-            let expected_b = super::super::pis::solve_with_descent_admission(
+            let expected_b = crate::flow::one_xs::pis::solve_with_descent_admission(
                 &b_input,
                 InitialGrid::from_test_row_major(level, b_seed.clone()).unwrap(),
                 b_uses_hint
@@ -2365,8 +2335,8 @@ mod tests {
             fn assert_terminal<D: PisDirection>(
                 direction: &str,
                 level: Level,
-                actual: &super::super::pis::PatchGrid<D>,
-                expected: &super::super::pis::PatchGrid<D>,
+                actual: &crate::flow::one_xs::pis::PatchGrid<D>,
+                expected: &crate::flow::one_xs::pis::PatchGrid<D>,
             ) {
                 for (patch, (actual, expected)) in
                     actual.patches().iter().zip(expected.patches()).enumerate()

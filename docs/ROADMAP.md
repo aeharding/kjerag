@@ -30,13 +30,13 @@ The physical masks use the frontend's exact packed layout: four U8 codes per
 word, lens A then lens B, followed by its explicit runtime-zero word. Belt
 sampling consumes the retained map directly and the frontend consumes the
 packed masks directly, with no map or mask reupload or layout conversion.
-Construction compares
-every retained float word and packed mask word with the selected CPU oracle on
-the actual adapter, including signed zero, exceptional parent payloads,
-periodic edges and the native ordered FMA schedule. Four live shader mutations
-cover FMA operand association, the strict directional threshold, erosion
-radius and lens unification. This checkpoint makes no playback, performance,
-Studio-parity, owner-eye or final ownership-readiness claim.
+Construction compares every retained float word and packed mask word with the
+selected CPU oracle on the actual adapter, including signed zero, exceptional
+parent payloads, periodic edges and the native ordered FMA schedule. Four live
+shader mutations cover FMA operand association, the strict directional
+threshold, erosion radius and lens unification. This checkpoint makes no
+playback, performance, Studio-parity, owner-eye or final ownership-readiness
+claim.
 
 **Sealed resident GPU-prepared PIS checkpoint, 2026-09-01, implementation
 branch only [UNSELECTED; L1/L2 AND BOTH DIRECTIONS; NO SCENE OR INTEGRATION
@@ -54,8 +54,10 @@ The producer boundary is sealed as the same aggregate: `GpuBlurredBelts` has
 no crate-visible packed-buffer, flight, generic submission or early-completion
 hook. Its only front-end transition consumes the whole token, refuses a
 foreign context before allocation, binding, encoding or submission, advances
-the inherited lease to the exact front-end command, and installs one opaque
-retention inside `GpuPreparedFrame`. Foreign front-end and PIS regressions
+the inherited lease to the exact front-end command, and moves the whole opaque
+producer token inside `GpuPreparedFrame`. The frontend is a private child of
+the belt owner, so no sibling module can name a bridge object or receive a raw
+buffer, command, context, flight, lease, or completion operation. Foreign front-end and PIS regressions
 leave both device validation scopes clean and prove the source owner waits the
 latest valid fence; independently recreated front-end and PIS pipelines on the
 same structural device/queue pair remain accepted.

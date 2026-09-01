@@ -26,14 +26,14 @@ pub mod pis;
 /// Staged GPU-resident producer for image-owned PIS inputs. It is not wired
 /// into Scene until its complete downstream transaction is qualified.
 #[allow(dead_code)]
-pub(crate) mod pis_frontend_gpu;
+pub(crate) use self::one_xs_belt_gpu::pis_frontend_gpu;
 
 /// Exact render-private device and queue identity shared by resident stages.
 pub(crate) mod gpu_context;
 
-/// Unselected GPU-resident retained-map and physical-mask producer.
-#[allow(dead_code)]
-pub(crate) mod geometry_gpu;
+/// GPU producer and its private resident PIS child share one ownership module.
+#[path = "one_xs_belt_gpu.rs"]
+pub(crate) mod one_xs_belt_gpu;
 
 /// The selected finest-level, component-zero temporal median.
 /// The capture-owned ONE X2 producer places it between patch solving and

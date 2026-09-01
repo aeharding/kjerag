@@ -7,17 +7,17 @@
 //! mask seed, 9-by-9 erosion and A/B unification. Static coordinates are
 //! uploaded once at construction. The result has no ordinary readback.
 
-use super::base_map::{
+use super::super::base_map::{
     FlowstateRoi, SELECTED_FLOWSTATE_COLS, SELECTED_FLOWSTATE_ROWS, SELECTED_LINE_COLS,
     SELECTED_LINE_ROWS, StaticLineCoordinates, filter_fisheye_line_pair, map_merge,
 };
-use super::gpu_context::OneXsGpuContext;
-use super::pis::gpu::GpuPisFlight;
+use super::super::gpu_context::OneXsGpuContext;
+use super::super::pis::gpu::GpuPisFlight;
+use super::super::{COLS, LensPair, ROWS};
 use super::pis_frontend_gpu::{GpuPisFrontEnd, GpuPreparedFrame};
-use super::{COLS, LensPair, ROWS};
+use super::{GpuBlurredBelts, GpuSolverBeltPipeline, SourceTextures};
 use crate::Fallible;
 use crate::flow::one_xs_belt::{RetainedBaseMaps, base_support_masks};
-use crate::flow::one_xs_belt_gpu::{GpuBlurredBelts, GpuSolverBeltPipeline, SourceTextures};
 
 const PARENT_NODES_PER_LENS: usize = SELECTED_FLOWSTATE_ROWS * SELECTED_FLOWSTATE_COLS;
 const RETAINED_NODES_PER_LENS: usize = SELECTED_LINE_ROWS * SELECTED_LINE_COLS;
@@ -59,8 +59,8 @@ pub(crate) struct GpuGeometryFrameOwner<K> {
 /// imported source owner remain inside the belt submission lease.
 #[must_use = "the geometry-backed ONE X2 solver belts have not been consumed"]
 pub(crate) struct GpuGeometryBelts<K> {
-    belts: GpuBlurredBelts<GpuGeometryFrameOwner<K>>,
-    masks: wgpu::Buffer,
+    pub(super) belts: GpuBlurredBelts<GpuGeometryFrameOwner<K>>,
+    pub(super) masks: wgpu::Buffer,
 }
 
 impl<K> GpuGeometryBelts<K> {
@@ -70,8 +70,7 @@ impl<K> GpuGeometryBelts<K> {
         self,
         front_end: &GpuPisFrontEnd,
     ) -> Fallible<GpuPreparedFrame<GpuGeometryFrameOwner<K>>> {
-        self.belts
-            .prepare_geometry_front_end(front_end, &self.masks)
+        front_end.prepare_geometry(self)
     }
 }
 
@@ -105,14 +104,19 @@ impl EncodedGpuGeometry {
             _source_owner: source_owner,
             _geometry: self.geometry,
         };
-        let belts = pipeline.submit_geometry_transition(
-            &self.context,
-            self.encoder,
-            sources,
-            &retained,
-            owner,
-            flight,
-        )?;
+        pipeline.context.ensure_same(&self.context)?;
+        let belts = pipeline
+            .submit_inner_with_map(
+                sources,
+                super::MapInput::Resident(&retained),
+                owner,
+                super::SubmissionInput::Sampled {
+                    qualify_intermediates: false,
+                },
+                false,
+                Some(self.encoder),
+            )?
+            .into_resident(flight);
         Ok(GpuGeometryBelts { belts, masks })
     }
 
