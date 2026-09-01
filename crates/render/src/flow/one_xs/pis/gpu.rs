@@ -62,7 +62,6 @@ const DISTANCE_PROBES: &[(u32, u32, u32)] = &[
 
 const DISPARITY_PROBES: usize = 5;
 const PROBE_WORDS: usize = 1 + DIVISION_PROBES.len() + DISTANCE_PROBES.len() + DISPARITY_PROBES;
-const DIAGNOSTIC_WORDS: usize = PROBE_WORDS;
 
 /// One capture-owned GPU sparse-solver transaction.
 ///
@@ -539,10 +538,12 @@ impl GpuPisPipeline {
             a_to_b: decode_terminal(
                 packed.level,
                 &words[packed.a_output_base..packed.a_output_base + packed.output_span],
+                packed.diagnostic_words,
             )?,
             b_to_a: decode_terminal(
                 packed.level,
                 &words[packed.b_output_base..packed.b_output_base + packed.output_span],
+                packed.diagnostic_words,
             )?,
         })
     }
@@ -965,6 +966,7 @@ struct PackedInput<D: PisDirection> {
     level: Level,
     u32s: Vec<u32>,
     f32s: Vec<f32>,
+    qualification_probes: bool,
     direction: PhantomData<D>,
 }
 
@@ -977,6 +979,7 @@ struct PackedPair {
     f32s: Vec<f32>,
     output_words: usize,
     output_span: usize,
+    diagnostic_words: usize,
     a_output_base: usize,
     b_output_base: usize,
 }
@@ -984,12 +987,18 @@ struct PackedPair {
 impl PackedPair {
     fn new(a: PackedInput<AtoB>, b: PackedInput<BtoA>) -> Fallible<Self> {
         debug_assert_eq!(a.level, b.level);
+        debug_assert_eq!(a.qualification_probes, b.qualification_probes);
         let a_word_base = PAIR_HEADER_WORDS;
         let b_word_base = a_word_base
             .checked_add(a.u32s.len())
             .ok_or("ONE X2 paired GPU PIS u32 input is too large")?;
         let b_float_base = a.f32s.len();
-        let output_span = a.level.patches() * OUTPUT_WORDS_PER_PATCH + DIAGNOSTIC_WORDS;
+        let diagnostic_words = if a.qualification_probes {
+            PROBE_WORDS
+        } else {
+            0
+        };
+        let output_span = a.level.patches() * OUTPUT_WORDS_PER_PATCH + diagnostic_words;
         let b_output_base = output_span;
         let output_words = output_span
             .checked_mul(2)
@@ -1017,6 +1026,7 @@ impl PackedPair {
             f32s,
             output_words,
             output_span,
+            diagnostic_words,
             a_output_base: 0,
             b_output_base,
         })
@@ -1026,8 +1036,9 @@ impl PackedPair {
 fn decode_terminal<D: PisDirection>(
     level: Level,
     words: &[u32],
+    diagnostic_words: usize,
 ) -> Result<TerminalBits<D>, TerminalGridError> {
-    let expected_words = level.patches() * OUTPUT_WORDS_PER_PATCH + DIAGNOSTIC_WORDS;
+    let expected_words = level.patches() * OUTPUT_WORDS_PER_PATCH + diagnostic_words;
     if words.len() != expected_words {
         return Err(TerminalGridError::Span {
             direction: D::DIRECTION,
@@ -1181,6 +1192,7 @@ impl<D: PisDirection> PackedInput<D> {
             level: input.level,
             u32s,
             f32s,
+            qualification_probes,
             direction: PhantomData,
         })
     }
@@ -1412,7 +1424,7 @@ mod tests {
 
     #[test]
     fn terminal_decoder_refuses_malformed_span() {
-        let error = decode_terminal::<AtoB>(Level::Two, &[0; 3]).unwrap_err();
+        let error = decode_terminal::<AtoB>(Level::Two, &[0; 3], 0).unwrap_err();
         assert_eq!(
             error,
             TerminalGridError::Span {
@@ -1435,7 +1447,7 @@ mod tests {
             ] {
                 let mut words = vec![0; Level::Two.patches() * 2];
                 words[component_index] = bits;
-                let error = decode_terminal::<BtoA>(Level::Two, &words)
+                let error = decode_terminal::<BtoA>(Level::Two, &words, 0)
                     .unwrap()
                     .into_patch_grid()
                     .unwrap_err();
@@ -1460,7 +1472,7 @@ mod tests {
         words[1] = 1;
         words[2] = 0x8000_0001;
         words[3] = 0.0_f32.to_bits();
-        let grid = decode_terminal::<AtoB>(Level::Two, &words)
+        let grid = decode_terminal::<AtoB>(Level::Two, &words, 0)
             .unwrap()
             .into_patch_grid()
             .unwrap();
@@ -1577,12 +1589,15 @@ mod tests {
     #[test]
     fn terminal_decoder_refuses_nonfinite_bits() {
         let level = Level::Two;
-        let mut words = vec![0; level.patches() * OUTPUT_WORDS_PER_PATCH + DIAGNOSTIC_WORDS];
+        let mut words = vec![0; level.patches() * OUTPUT_WORDS_PER_PATCH];
         words[2 * 7] = f32::INFINITY.to_bits();
-        let error = decode_terminal::<AtoB>(level, &words).unwrap_err();
+        let error = decode_terminal::<AtoB>(level, &words, 0)
+            .unwrap()
+            .into_patch_grid()
+            .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "ONE X2 GPU PIS returned a non-finite terminal flow at level 2 patch 7: 0x7f800000, 0x00000000"
+            "ONE X2 GPU PIS AtoB level 2 patch 7 terminal dcol bits 0x7f800000 are not finite"
         );
     }
 
