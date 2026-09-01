@@ -1915,7 +1915,11 @@ mod tests {
         for (name, from, to) in mutations {
             let broken = SHADER.replacen(from, to, 1);
             assert_ne!(broken, SHADER, "{name} mutation found no target");
-            let error = match GpuPisPipeline::from_shader(&device, &queue, &broken, true) {
+            let error = match GpuPisPipeline::from_shader(
+                OneXsGpuContext::new(&device, &queue),
+                &broken,
+                true,
+            ) {
                 Ok(_) => panic!("changed paired GPU PIS {name} was accepted on {adapter}"),
                 Err(error) => error,
             };
@@ -1960,8 +1964,11 @@ mod tests {
             1,
         );
         assert_ne!(mutated, SHADER, "probe-write mutation found no target");
-        let pipeline = GpuPisPipeline::from_shader(&device, &queue, &mutated, false)
-            .unwrap_or_else(|error| panic!("ordinary paired GPU PIS failed on {adapter}: {error}"));
+        let pipeline =
+            GpuPisPipeline::from_shader(OneXsGpuContext::new(&device, &queue), &mutated, false)
+                .unwrap_or_else(|error| {
+                    panic!("ordinary paired GPU PIS failed on {adapter}: {error}")
+                });
         let (a_input, b_input, a_initial, b_initial, a_hint, b_hint) =
             qualification_fixture(Level::Two);
         let expected_a = solve_with_descent_admission(

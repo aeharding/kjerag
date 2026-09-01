@@ -2302,7 +2302,11 @@ mod tests {
         for (name, before, after) in mutations {
             let mutated = SHADER.replacen(before, after, 1);
             assert_ne!(mutated, SHADER, "{name} mutation found no target");
-            let error = match GpuPisFrontEnd::from_shader(&device, &queue, &mutated, true) {
+            let error = match GpuPisFrontEnd::from_shader(
+                OneXsGpuContext::new(&device, &queue),
+                &mutated,
+                true,
+            ) {
                 Ok(_) => {
                     panic!("changed ONE X2 GPU prepared-source {name} was accepted on {adapter}")
                 }
