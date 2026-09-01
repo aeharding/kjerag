@@ -17,6 +17,7 @@ use crate::Fallible;
 const CODES_PER_WORD: usize = 4;
 const OUTPUT_BYTES: u64 = SolverBelts::BYTES as u64;
 const OUTPUT_WORDS: u32 = (SolverBelts::BYTES / CODES_PER_WORD) as u32;
+const WITNESS_BYTES: u64 = 2 * size_of::<u32>() as u64;
 const WORKGROUP_SIZE: u32 = 64;
 const _: () = assert!(SolverBelts::BYTES.is_multiple_of(CODES_PER_WORD));
 const _: () = assert!(RetainedBaseMaps::NODES_PER_LENS.is_multiple_of(CODES_PER_WORD));
@@ -134,6 +135,21 @@ fn qualification_fixture() -> QualificationFixture {
     };
     let mut a = map(Lens::A);
     let b = map(Lens::B);
+    let retained_fma_quad = [
+        [
+            [f32::from_bits(1_064_954_653), f32::from_bits(1_051_416_063)],
+            [f32::from_bits(1_064_974_894), f32::from_bits(1_051_403_380)],
+        ],
+        [
+            [f32::from_bits(1_064_972_601), f32::from_bits(1_051_518_451)],
+            [f32::from_bits(1_064_992_780), f32::from_bits(1_051_505_921)],
+        ],
+    ];
+    for dr in 0..2 {
+        for dc in 0..2 {
+            a[(1 + dr) * super::one_xs::COLS + 47 + dc] = retained_fma_quad[dr][dc];
+        }
+    }
     let fma_uv = [
         0.871 / QUALIFICATION_A_COLS as f32,
         0.251 / QUALIFICATION_A_ROWS as f32,
@@ -196,16 +212,6 @@ fn qualification_texture(
     texture
 }
 
-const RETAINED_FMA_PROBE: &str = r#"
-@compute @workgroup_size(1)
-fn probe_retained_fma() {
-    let third = bitcast<f32>(THIRD_BITS);
-    let uv = sample_base(0u, 4.0 * third, 142.0 * third);
-    output_words[0] = bitcast<u32>(uv.x);
-    output_words[1] = bitcast<u32>(uv.y);
-}
-"#;
-
 /// The two exact R8 source textures in physical A/B order.
 #[derive(Clone, Copy)]
 pub(crate) struct SourceTextures<'a> {
@@ -242,6 +248,7 @@ impl SourceTextures<'_> {
 pub(crate) struct GpuSolverBeltPipeline {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
+    witness: wgpu::Buffer,
 }
 
 impl GpuSolverBeltPipeline {
@@ -277,7 +284,13 @@ impl GpuSolverBeltPipeline {
         };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ONE X2 GPU solver belts"),
-            entries: &[texture(0), texture(1), storage(2, true), storage(3, false)],
+            entries: &[
+                texture(0),
+                texture(1),
+                storage(2, true),
+                storage(3, false),
+                storage(4, false),
+            ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ONE X2 GPU solver belts"),
@@ -296,12 +309,25 @@ impl GpuSolverBeltPipeline {
             compilation_options: Default::default(),
             cache: None,
         });
-        let built = Self { pipeline, layout };
-        built.qualify(device, queue, shader)?;
+        // Qualification reads this once before construction returns. Later
+        // overlapping submissions may overwrite it because ordinary playback
+        // deliberately never reads the witness.
+        let witness = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 retained-map FMA witness"),
+            size: WITNESS_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let built = Self {
+            pipeline,
+            layout,
+            witness,
+        };
+        built.qualify(device, queue)?;
         Ok(built)
     }
 
-    fn qualify(&self, device: &wgpu::Device, queue: &wgpu::Queue, shader: &str) -> Fallible<()> {
+    fn qualify(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<()> {
         let fixture = qualification_fixture();
         let texture_a = qualification_texture(
             device,
@@ -315,7 +341,7 @@ impl GpuSolverBeltPipeline {
             "ONE X2 GPU qualification source B",
             &fixture.sources.b,
         );
-        let pending = self.submit(
+        let pending = self.submit_inner(
             device,
             queue,
             SourceTextures {
@@ -323,8 +349,10 @@ impl GpuSolverBeltPipeline {
                 b: &texture_b,
             },
             &fixture.maps,
+            (),
+            true,
         )?;
-        let actual = pending.read()?;
+        let (actual, retained_bits) = pending.read_qualification()?;
         if let Some(index) = actual
             .bytes()
             .iter()
@@ -349,8 +377,6 @@ impl GpuSolverBeltPipeline {
             .into());
         }
 
-        let retained_bits =
-            self.probe_retained_fma(device, queue, &texture_a, &texture_b, shader)?;
         if retained_bits != RETAINED_FMA_BITS {
             return Err(GpuQualificationError::RetainedMap {
                 actual: retained_bits,
@@ -361,136 +387,13 @@ impl GpuSolverBeltPipeline {
         Ok(())
     }
 
-    fn probe_retained_fma(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        texture_a: &wgpu::Texture,
-        texture_b: &wgpu::Texture,
-        shader: &str,
-    ) -> Fallible<[u32; 2]> {
-        let quad = [
-            [
-                [f32::from_bits(1_064_954_653), f32::from_bits(1_051_416_063)],
-                [f32::from_bits(1_064_974_894), f32::from_bits(1_051_403_380)],
-            ],
-            [
-                [f32::from_bits(1_064_972_601), f32::from_bits(1_051_518_451)],
-                [f32::from_bits(1_064_992_780), f32::from_bits(1_051_505_921)],
-            ],
-        ];
-        let mut probe_a = vec![[0.0; 2]; RetainedBaseMaps::NODES_PER_LENS];
-        for dr in 0..2 {
-            for dc in 0..2 {
-                probe_a[(1 + dr) * super::one_xs::COLS + 47 + dc] = quad[dr][dc];
-            }
-        }
-        let probe_maps = RetainedBaseMaps::from_lenses(LensPair {
-            b: probe_a.clone(),
-            a: probe_a,
-        })
-        .expect("the static retained-map FMA probe has the retained shape");
-        let probe_map = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ONE X2 retained FMA probe map"),
-            size: probe_maps.bytes().len() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&probe_map, 0, probe_maps.bytes());
-        let probe_output = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ONE X2 retained FMA probe output"),
-            size: 8,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let probe_readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ONE X2 retained FMA probe readback"),
-            size: 8,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let probe_view_a = texture_a.create_view(&Default::default());
-        let probe_view_b = texture_b.create_view(&Default::default());
-        let probe_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ONE X2 retained FMA probe"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&probe_view_a),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&probe_view_b),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: probe_map.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: probe_output.as_entire_binding(),
-                },
-            ],
-        });
-        let probe_source = format!("{shader}\n{RETAINED_FMA_PROBE}");
-        let probe_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("ONE X2 retained FMA probe"),
-            source: wgpu::ShaderSource::Wgsl(probe_source.into()),
-        });
-        let probe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("ONE X2 retained FMA probe"),
-            bind_group_layouts: &[&self.layout],
-            immediate_size: 0,
-        });
-        let probe_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("ONE X2 retained FMA probe"),
-            layout: Some(&probe_layout),
-            module: &probe_module,
-            entry_point: Some("probe_retained_fma"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("ONE X2 retained FMA probe"),
-        });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ONE X2 retained FMA probe"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&probe_pipeline);
-            pass.set_bind_group(0, &probe_group, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
-        }
-        encoder.copy_buffer_to_buffer(&probe_output, 0, &probe_readback, 0, 8);
-        let submission = queue.submit([encoder.finish()]);
-        let slice = probe_readback.slice(..);
-        let (mapped, answer) = mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = mapped.send(result);
-        });
-        device.poll(wgpu::PollType::Wait {
-            submission_index: Some(submission),
-            timeout: None,
-        })?;
-        answer.recv()??;
-        let mapped = slice.get_mapped_range();
-        let bits = [
-            u32::from_ne_bytes(mapped[0..4].try_into().unwrap()),
-            u32::from_ne_bytes(mapped[4..8].try_into().unwrap()),
-        ];
-        drop(mapped);
-        probe_readback.unmap();
-        Ok(bits)
-    }
-
     /// Submit one independent source/map transaction.
     ///
     /// The returned token retains every bind resource until the submission has
     /// completed. Its packed buffer is already in final A-then-B solver order
     /// and can become a later GPU solver's direct input; [`PendingSolverBelts::read`]
     /// exists for the exact CPU-oracle gate and the current CPU solver bridge.
+    #[cfg(test)]
     pub(crate) fn submit(
         &self,
         device: &wgpu::Device,
@@ -514,6 +417,18 @@ impl GpuSolverBeltPipeline {
         maps: &RetainedBaseMaps,
         source_owner: K,
     ) -> Fallible<PendingSolverBelts<K>> {
+        self.submit_inner(device, queue, sources, maps, source_owner, false)
+    }
+
+    fn submit_inner<K>(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        sources: SourceTextures<'_>,
+        maps: &RetainedBaseMaps,
+        source_owner: K,
+        read_witness: bool,
+    ) -> Fallible<PendingSolverBelts<K>> {
         sources.validate()?;
         let map = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ONE X2 retained base maps"),
@@ -533,6 +448,14 @@ impl GpuSolverBeltPipeline {
             size: OUTPUT_BYTES,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
+        });
+        let witness_readback = read_witness.then(|| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("ONE X2 retained-map FMA witness readback"),
+                size: WITNESS_BYTES,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            })
         });
         let view_a = sources.a.create_view(&Default::default());
         let view_b = sources.b.create_view(&Default::default());
@@ -556,6 +479,10 @@ impl GpuSolverBeltPipeline {
                     binding: 3,
                     resource: packed.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.witness.as_entire_binding(),
+                },
             ],
         });
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -571,6 +498,9 @@ impl GpuSolverBeltPipeline {
             pass.dispatch_workgroups(OUTPUT_WORDS.div_ceil(WORKGROUP_SIZE), 1, 1);
         }
         encoder.copy_buffer_to_buffer(&packed, 0, &readback, 0, OUTPUT_BYTES);
+        if let Some(readback) = &witness_readback {
+            encoder.copy_buffer_to_buffer(&self.witness, 0, readback, 0, WITNESS_BYTES);
+        }
         let submission = queue.submit([encoder.finish()]);
         Ok(PendingSolverBelts {
             device: device.clone(),
@@ -578,6 +508,7 @@ impl GpuSolverBeltPipeline {
             _map: map,
             _packed: packed,
             readback,
+            witness_readback,
             _resources: resources,
             submission,
         })
@@ -593,6 +524,7 @@ pub(crate) struct PendingSolverBelts<K> {
     /// Retained until the copy into `readback` has completed.
     _packed: wgpu::Buffer,
     readback: wgpu::Buffer,
+    witness_readback: Option<wgpu::Buffer>,
     _resources: wgpu::BindGroup,
     submission: wgpu::SubmissionIndex,
 }
@@ -606,16 +538,39 @@ impl<K> PendingSolverBelts<K> {
 
     /// Wait for and consume the exact compact payload.
     pub(crate) fn read(self) -> Fallible<SolverBelts> {
+        Ok(self.read_inner()?.0)
+    }
+
+    fn read_qualification(self) -> Fallible<(SolverBelts, [u32; 2])> {
+        let (belts, witness) = self.read_inner()?;
+        Ok((
+            belts,
+            witness.expect("qualification requested its retained-map FMA witness"),
+        ))
+    }
+
+    fn read_inner(self) -> Fallible<(SolverBelts, Option<[u32; 2]>)> {
         let slice = self.readback.slice(..);
         let (mapped, answer) = mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = mapped.send(result);
+        });
+        let witness = self.witness_readback.as_ref().map(|buffer| {
+            let slice = buffer.slice(..);
+            let (mapped, answer) = mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = mapped.send(result);
+            });
+            (slice, answer)
         });
         self.device.poll(wgpu::PollType::Wait {
             submission_index: Some(self.submission),
             timeout: None,
         })?;
         answer.recv()??;
+        if let Some((_, answer)) = &witness {
+            answer.recv()??;
+        }
         let mapped = slice.get_mapped_range();
         let bytes = mapped
             .chunks_exact(size_of::<u32>())
@@ -624,11 +579,25 @@ impl<K> PendingSolverBelts<K> {
         drop(mapped);
         self.readback.unmap();
         debug_assert_eq!(bytes.len(), SolverBelts::BYTES);
-        SolverBelts::from_lenses(LensPair {
+        let belts = SolverBelts::from_lenses(LensPair {
             a: bytes[..RetainedBaseMaps::NODES_PER_LENS].to_vec(),
             b: bytes[RetainedBaseMaps::NODES_PER_LENS..].to_vec(),
         })
-        .map_err(Into::into)
+        .map_err(Box::<dyn Error + Send + Sync>::from)?;
+        let witness = witness.map(|(slice, _)| {
+            let mapped = slice.get_mapped_range();
+            let bits = [
+                u32::from_ne_bytes(mapped[0..4].try_into().unwrap()),
+                u32::from_ne_bytes(mapped[4..8].try_into().unwrap()),
+            ];
+            drop(mapped);
+            self.witness_readback
+                .as_ref()
+                .expect("mapped witness has its buffer")
+                .unmap();
+            bits
+        });
+        Ok((belts, witness))
     }
 }
 
@@ -650,6 +619,7 @@ const THIRD_BITS: u32 = 0x3eaaaaabu;
 @group(0) @binding(1) var source_b: texture_2d<f32>;
 @group(0) @binding(2) var<storage, read> base_maps: array<vec2<f32>>;
 @group(0) @binding(3) var<storage, read_write> output_words: array<u32>;
+@group(0) @binding(4) var<storage, read_write> witness_words: array<u32>;
 
 fn weights(value: f32, maximum: f32) -> vec4<f32> {
     let clamped = clamp(value, 0.0, maximum);
@@ -731,6 +701,10 @@ fn solver_code(index: u32) -> u32 {
             let source_col = col * AREA + dc;
             let third = bitcast<f32>(THIRD_BITS);
             let uv = sample_base(lens, f32(source_row) * third, f32(source_col) * third);
+            if index == COLS + 47u && dr == 1u && dc == 1u {
+                witness_words[0] = bitcast<u32>(uv.x);
+                witness_words[1] = bitcast<u32>(uv.y);
+            }
             sum += sample_source(lens, uv);
         }
     }
@@ -801,12 +775,6 @@ mod tests {
             fixture.expected.bytes(),
             "GPU solver belts differ from the scalar/native schedule on {adapter}"
         );
-
-        // Pin retained-map FMA before source quantization can hide one ULP.
-        let retained_bits = pipeline
-            .probe_retained_fma(&device, &queue, &texture_a, &texture_b, SHADER)
-            .unwrap();
-        assert_eq!(retained_bits, RETAINED_FMA_BITS);
     }
 
     #[test]
@@ -837,6 +805,41 @@ mod tests {
                 Some(GpuQualificationError::SolverByte { .. })
             ),
             "changed arithmetic returned the wrong failure on {adapter}: {error}"
+        );
+    }
+
+    #[test]
+    fn runtime_qualification_uses_production_entry_for_retained_fma() {
+        let (device, queue, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "KJERAG_REQUIRE_GPU is set and there is no GPU to answer with: {why}"
+                );
+                eprintln!("skipping ONE X2 production-entry qualification test: {why}");
+                return;
+            }
+        };
+        let broken = SHADER.replacen(
+            "witness_words[0] = bitcast<u32>(uv.x);",
+            "witness_words[0] = bitcast<u32>(uv.x) + 1u;",
+            1,
+        );
+        assert_ne!(
+            broken, SHADER,
+            "the production discriminator mutation did not find its target"
+        );
+        let error = match GpuSolverBeltPipeline::from_shader(&device, &queue, &broken) {
+            Ok(_) => panic!("changed ONE X2 production discriminator was accepted on {adapter}"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                error.downcast_ref::<GpuQualificationError>(),
+                Some(GpuQualificationError::RetainedMap { .. })
+            ),
+            "changed production discriminator returned the wrong failure on {adapter}: {error}"
         );
     }
 

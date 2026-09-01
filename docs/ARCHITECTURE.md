@@ -252,9 +252,17 @@ or another open cannot impersonate it.
 
 WGSL does not guarantee the fused arithmetic this producer requires. Its lazy
 constructor therefore runs the complete 129,600-byte adversarial CPU/native
-oracle and the retained-map FMA bit probe on the actual graphics device before
-the first selected frame can advance. One differing byte refuses the route
-with its own error. There is no approximate or full-luma CPU fallback.
+oracle and the retained-map FMA bit discriminator on the actual graphics
+device before the first selected frame can advance. `solver_code` writes the
+exact sampled UV it passes to `sample_source` at one adversarial tap into a
+two-word witness sink. Qualification reads that sink after the same complete
+`build_solver_belts` dispatch that produced the byte fixture; ordinary
+submissions bind the same pipeline-owned eight-byte sink but do not read it.
+Overlapping ordinary writes are intentionally unobserved. Output and
+dispatch semantics are unchanged. Qualification therefore uses the exact
+production shader module, pipeline, entry and sampling call rather than
+compiling a lookalike probe. One differing byte or bit pattern refuses the
+route with its own error. There is no approximate or full-luma CPU fallback.
 
 A discontinuous seek builds a new owner and causally replays from frame zero
 to the requested target. The displayed frame is retained until its exact map

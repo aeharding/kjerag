@@ -16,10 +16,18 @@ not a production fallback.
 
 WGSL does not itself promise the required FMA and exceptional-float behavior.
 The lazy production constructor therefore runs the same complete 129,600-byte
-adversarial CPU/native oracle plus the retained-map FMA bit probe on the actual
-graphics device before consuming frame zero. Any difference refuses selected
-playback with the arithmetic error; it neither approximates nor falls back to
-the CPU luma path. This is runtime qualification, not a device allowlist.
+adversarial CPU/native oracle plus the retained-map FMA bit discriminator on
+the actual graphics device before consuming frame zero. Both execute through
+the stored production pipeline and its `build_solver_belts` entry. At one
+adversarial solver tap, `solver_code` writes the exact UV it passes into
+`sample_source` to a two-word witness sink. Qualification reads that sink after
+the same complete dispatch that produces the byte fixture; ordinary
+submissions bind the same pipeline-owned eight-byte sink but do not read it,
+so overlapping ordinary writes are intentionally unobserved and add no
+per-frame witness allocation. Their solver output and dispatch semantics are
+unchanged. Any difference refuses selected playback with the typed arithmetic
+error; it neither approximates nor falls back to the CPU luma path. This is
+runtime qualification, not a device allowlist.
 
 Preparation and commit remain separate capture-owned operations. The GPU wait
 happens with no capture mutex held, a pending token retains the exact imported
@@ -58,8 +66,9 @@ With `KJERAG_REQUIRE_GPU=1`, the target Radeon/Vulkan adapter produced all
 129,600 bytes exactly equal to the CPU scalar oracle over unequal odd-width
 source textures uploaded through 512-byte padded rows, different lens
 patterns, fractional and over-one coordinates, ordered zero/negative/NaN
-sentinels, infinity clamps, both lenses, the retained-map FMA bit pattern and
-a source-FMA discriminator whose selected answer is 190 rather than 189. The
+sentinels, infinity clamps, both lenses, the production-entry retained-map FMA
+bit pattern and a source-FMA discriminator whose selected answer is 190 rather
+than 189. The
 output packs four logical bytes per u32 and compile-time guards pin both total
 and per-lens divisibility. WGSL permits a backend to expand `fma`, and
 exceptional-float handling may vary with finite-math policy, so byte identity
