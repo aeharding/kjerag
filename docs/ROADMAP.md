@@ -3,40 +3,73 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
-**GPU-resident selected ONE X2 parent maps, 2026-09-01, implementation branch
-only [BIT-EXACT ON FORCED RADV; OPAQUE OUTPUT; NO SCENE WIRING]:** the frozen
-per-frame parent preparation now has one paired compute producer on the shared
-`OneXsGpuContext`. Per-frame uploads contain only the two 33-word selected
-model/control packs and 51 sealed pose quaternions. The complete two-lens
-100-by-200 float2 result remains one private A-then-B storage buffer. Parent
-production is now a private child of the resident source owner. Its single
-purpose-specific owner method verifies an expected private `FrameStamp`,
-derives center from the stamp already sealed with the generation, verifies the
-shared GPU context before encoding, advances the inherited `SubmissionLease`
-to the parent command, and returns an opaque frame-bound token retaining the
-entire owner. No flow-wide belt, flight, command, buffer, context, queue or
-submission-index transition is added. The ordinary path has no copy, map,
-poll or wait.
+**Shared-context resident ONE X2 final-map materializer, 2026-09-01,
+integration branch only [UNSELECTED; EXACT TARGET-GPU TWIN; NO SCENE OR
+PERFORMANCE CLAIM]:** the accepted final bilateral materializer now owns the
+one structural `OneXsGpuContext` used by the resident chain. Its production
+entry consumes a generic sealed upstream token, advances that token's existing
+submission lease, performs only GPU copies plus the exact stored compute pass,
+and returns an opaque frame-bound packed-map token. That token retains the
+upstream alpha and source ownership and can create the existing two-storage
+direct type-2 Scene binding without exposing either raw buffer. Scene does not
+construct, store or draw this token yet. Ordinary materialization creates no
+mappable buffer and performs no readback or device poll; the CPU oracle and
+diagnostic copies are test-only. The forced-RADV focused gate matches every
+packed component bit, preserves the accepted arithmetic/order, rejects foreign
+structural contexts and frame identities, and refuses all 20 accepted live
+shader mutations. The materializer is now a private child of the resident belt
+owner, so no flow sibling can name its operand copier, raw command or buffer
+details, materializer, binding or output token. The remaining seam is the
+post-L1 resident producer's implementation of the owner-private sealed operand
+copier and single-lease submit method; there is deliberately no second context,
+lease or CPU reconstruction route.
 
-The WGSL retains the scalar operation order with explicitly materialized
-binary32 operations, correctly rounded software division and integer square
-root. Fixed raster-angle transcendental results are compiled from the same
-frozen scalar expressions into the shader, rather than uploaded per frame.
-On forced RADV PHOENIX, qualification compared all 80,000 output words for a
-cold dispatch, warm pipeline reuse, a one-microsecond clock mutation, a live
-orientation mutation, early/late endpoint-clamp cases and a changed readout:
-all seven pairs were bit-identical to the CPU oracle and both live mutations
-changed the oracle. The admission gate refuses nonlinear quaternion slerp,
-whose native `sin`/`atan` operations are not qualified as bit-portable, before
-encoding. The same pre-encode boundary refuses a same-generation/readable-index
-impostor with a different private frame identity and a foreign GPU context.
-Qualification rejects planted quaternion-order, raster-orientation, scan-axis,
-iteration-count, movement-threshold, FOV, A/B-base, pose-layout, low/high pose
-endpoint clamps, division, square-root and rounding mutations. Readback exists
-only in test code. This
-stage does not wire Scene or select playback. Its remaining seam is a geometry
-owner consuming the opaque token directly into resident geometry/mapMerge;
-there is no public raw-buffer or detached submission API.
+The authenticated receipt in
+`docs/research/gpu-final-map-context-qualification.md` binds clean code commit
+`e620a4cae27f1a51b8998328620594765c277dd7`, tree
+`b7ce05854f507824170c1364ac4bddbc54b110c5`, the fresh retained test binary
+before and after execution, exact forced-Vulkan/RADV command and environment,
+ICD, adapter/driver, source hashes, timestamps and exit status. Its sealed
+pre-run receipt hashes to `98be0bc640364941ab06ba3d5a53e07b07e4bea9155ee5f4ab1f717d9b9d9609`,
+the complete 4/4 run log to
+`34fe395b5f996a26a4b1e5bbc6943207294c03e723d04a556c41c98216df3c86`,
+and the post-run receipt to
+`dc1039b41b68df250f0e9bb10a6e05584c64094b2ab8067d9bf6636eb407f777`.
+
+**Context-bound GPU ONE X2 retained geometry, 2026-09-01, implementation
+branch only [UNSELECTED; NO SCENE WIRING; SEALED TRANSITIONS]:** the
+shared `OneXsGpuContext` now owns a correctness-first geometry pipeline for
+both 1,080-by-60 periodic map merges, the selected directional continuity
+filters, physical validity seed, 9-by-9 erosion and A/B mask unification.
+Static line coordinates upload once. The temporary input boundary uploads the
+two CPU-built 100-by-200 parent maps into private token-owned storage; the
+incoming resident-parent producer can replace only that private owner and
+binding without changing any geometry arithmetic or downstream layout.
+
+The output is one non-cloneable opaque encoded token containing its exact GPU
+context, unfinished command encoder, full frame flight, both parent preimages,
+both retained float2 maps, both physical masks and all bind groups. It exposes
+no raw buffer, queue, submission index, detached flight or ordinary completion
+hook. The geometry stage neither submits nor creates a competing lease. Its
+only production handoff appends exact belt sampling and Gaussian commands to
+that unfinished encoder; the belt owner then performs the one submission and
+mints the chain's sole source-surface lease. A second purpose-specific
+transition binds the token's packed masks directly into the sealed frontend.
+The geometry allocation and imported source owner remain inseparable inside
+that lease through PIS and final materialization. None of the rejected
+separable flight, packed-buffer, generic-submit or completion hooks return.
+
+The physical masks use the frontend's exact packed layout: four U8 codes per
+word, lens A then lens B, followed by its explicit runtime-zero word. Belt
+sampling consumes the retained map directly and the frontend consumes the
+packed masks directly, with no map or mask reupload or layout conversion.
+Construction compares every retained float word and packed mask word with the
+selected CPU oracle on the actual adapter, including signed zero, exceptional
+parent payloads, periodic edges and the native ordered FMA schedule. Four live
+shader mutations cover FMA operand association, the strict directional
+threshold, erosion radius and lens unification. This checkpoint makes no
+playback, performance, Studio-parity, owner-eye or final ownership-readiness
+claim.
 
 **Sealed resident GPU-prepared PIS checkpoint, 2026-09-01, implementation
 branch only [UNSELECTED; L1/L2 AND BOTH DIRECTIONS; NO SCENE OR INTEGRATION
