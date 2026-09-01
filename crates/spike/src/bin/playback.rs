@@ -27,6 +27,13 @@
 //! requested range at [`SHOT_WIDTH`]. It publishes the PNGs and a receipt
 //! together only after the complete range has passed its frame and run checks.
 //!
+//! `measure=START:COUNT pace=off receipt=NEW_FILE bench=0` is narrower: every
+//! warm-up and measured transaction must expose the exact selected ONE X2
+//! direct-map stamp for its current delivery. That is the production route's
+//! public proof that preparation selected the direct native type-2 draw rather
+//! than a generic camera route. A missing or mismatched stamp refuses the
+//! benchmark.
+//!
 //! Timed `shots` land in ./scratch/ (gitignored). Exact target and range
 //! modes write only to their named outputs. Frames of real footage are
 //! personal video and this repo is public.
@@ -1038,11 +1045,25 @@ fn play(
 struct MeasuredFrame {
     index: u64,
     timestamp: Duration,
+    route: MeasuredRoute,
     source_ns: u64,
     primitive_ns: u64,
     prepare_ns: u64,
     draw_ns: u64,
     transaction_ns: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MeasuredRoute {
+    OneX2DirectType2,
+}
+
+impl MeasuredRoute {
+    const fn receipt_name(self) -> &'static str {
+        match self {
+            Self::OneX2DirectType2 => "one-x2-direct-type-2",
+        }
+    }
 }
 
 struct MeasureSamples {
@@ -1256,6 +1277,19 @@ fn draw_measured_frame(
         &gpu.queue,
         OUTPUT.width as f32 / OUTPUT.height as f32,
     );
+    // The pipeline returns a stamp only when DirectOneXs is selected, its
+    // direct type-2 resource is bound and that resource matches the pipeline's
+    // complete display transaction. The scene identities below then bind that
+    // allocation-free route proof to this exact offered and displayed pair.
+    let current = scene.frame_stamp();
+    let direct_map = pipeline.diagnostic_one_xs_direct_frame();
+    let route = require_measured_route(
+        expected,
+        timestamp,
+        scene.displayed_frame(),
+        current.as_ref(),
+        direct_map,
+    )?;
     let prepare_done = Instant::now();
     gpu.render(pipeline)?;
     let draw_done = Instant::now();
@@ -1268,12 +1302,40 @@ fn draw_measured_frame(
     Ok(MeasuredFrame {
         index: expected,
         timestamp,
+        route,
         source_ns: duration_ns(source_done.duration_since(transaction_started))?,
         primitive_ns: duration_ns(primitive_done.duration_since(source_done))?,
         prepare_ns: duration_ns(prepare_done.duration_since(primitive_done))?,
         draw_ns: duration_ns(draw_done.duration_since(prepare_done))?,
         transaction_ns: duration_ns(draw_done.duration_since(transaction_started))?,
     })
+}
+
+fn require_measured_route<T: Eq>(
+    expected: u64,
+    timestamp: Duration,
+    displayed: Option<(u64, Duration)>,
+    current: Option<&T>,
+    direct_map: Option<&T>,
+) -> Fallible<MeasuredRoute> {
+    if displayed != Some((expected, timestamp)) {
+        return Err(format!(
+            "measure frame {expected} was not the exact selected ONE X2 display transaction"
+        )
+        .into());
+    }
+    let current = current
+        .ok_or_else(|| format!("measure frame {expected} has no current aligned-pair identity"))?;
+    let direct_map = direct_map.ok_or_else(|| {
+        format!("measure frame {expected} did not select the ONE X2 direct native type-2 route")
+    })?;
+    if direct_map != current {
+        return Err(format!(
+            "measure frame {expected} selected a ONE X2 map for a different delivery"
+        )
+        .into());
+    }
+    Ok(MeasuredRoute::OneX2DirectType2)
 }
 
 fn duration_ns(duration: Duration) -> Fallible<u64> {
@@ -1307,6 +1369,7 @@ fn measure_receipt(run: MeasureReceipt<'_>) -> Fallible<Vec<u8>> {
                 "index": frame.index,
                 "timestamp_seconds": frame.timestamp.as_secs(),
                 "timestamp_nanoseconds": frame.timestamp.subsec_nanos(),
+                "route": frame.route.receipt_name(),
                 "source_ns": frame.source_ns,
                 "primitive_ns": frame.primitive_ns,
                 "prepare_ns": frame.prepare_ns,
@@ -1317,8 +1380,8 @@ fn measure_receipt(run: MeasureReceipt<'_>) -> Fallible<Vec<u8>> {
         .collect::<Vec<_>>();
     let elapsed_ns = duration_ns(run.interval)?;
     let receipt = json!({
-        "schema": "kjerag.playback-transaction-benchmark.v1",
-        "claim": "unpaced waited source/map/draw transactions after a causal frame-zero warm-up",
+        "schema": "kjerag.playback-transaction-benchmark.v2",
+        "claim": "unpaced waited selected ONE X2 direct native type-2 transactions after a causal frame-zero warm-up",
         "limitations": {
             "studio_parity_claimed": false,
             "realtime_playback_claimed": false,
@@ -1351,6 +1414,19 @@ fn measure_receipt(run: MeasureReceipt<'_>) -> Fallible<Vec<u8>> {
             "render_width": OUTPUT.width,
             "render_height": OUTPUT.height
         },
+        "camera_identity": {
+            "product": "Insta360 ONE X2",
+            "selector": "selected two-lens route with first calibrated lens_type 0x29 (LensTypeOneXS)",
+            "lens_type_hex": "0x29",
+            "lens_type_decimal": 41
+        },
+        "route": {
+            "name": MeasuredRoute::OneX2DirectType2.receipt_name(),
+            "map": "native 200x100 packed type-2 map with copied-pole alpha",
+            "draw": "DirectOneXs",
+            "authentication_scope": "every warm-up and measured transaction required the exact selected map for its current aligned pair after production preparation; failure refused the run",
+            "authentication_cost": "included in prepare_ns and elapsed_ns; allocation-free stamp comparisons only, with no map payload copied"
+        },
         "source": run.sources,
         "build": run.build,
         "gpu": {
@@ -1367,7 +1443,7 @@ fn measure_receipt(run: MeasureReceipt<'_>) -> Fallible<Vec<u8>> {
         "run": {
             "elapsed_ns": elapsed_ns,
             "elapsed_scope": "wall time immediately before the first measured transaction through immediately after the last; includes only sample recording and loop bookkeeping between transactions",
-            "transaction_scope": "source wait, Scene primitive construction, production map preparation and waited GPU draw for one exact frame; excludes sample recording",
+            "transaction_scope": "source wait, Scene primitive construction, selected ONE X2 production map preparation plus exact-route authentication, and waited direct native type-2 GPU draw for one exact frame; excludes sample recording",
             "throughput_frames_per_second": run.run.spec.count as f64
                 / run.interval.as_secs_f64().max(f64::EPSILON),
             "presented": run.stats.presented,
@@ -3060,6 +3136,7 @@ mod tests {
             samples.push(MeasuredFrame {
                 index,
                 timestamp: Duration::from_millis(index),
+                route: MeasuredRoute::OneX2DirectType2,
                 source_ns: index,
                 primitive_ns: index + 1,
                 prepare_ns: index + 2,
@@ -3108,6 +3185,10 @@ mod tests {
         })
         .unwrap();
         let receipt: Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(
+            receipt["schema"],
+            "kjerag.playback-transaction-benchmark.v2"
+        );
         assert_eq!(receipt["request"]["warmup_end_inclusive"], 199);
         assert_eq!(receipt["request"]["start"], 200);
         assert_eq!(receipt["request"]["count"], 3);
@@ -3125,7 +3206,18 @@ mod tests {
         );
         assert_eq!(receipt["frames"].as_array().unwrap().len(), 3);
         assert_eq!(receipt["frames"][0]["index"], 200);
+        assert_eq!(receipt["frames"][0]["route"], "one-x2-direct-type-2");
         assert_eq!(receipt["frames"][2]["index"], 202);
+        assert_eq!(receipt["camera_identity"]["product"], "Insta360 ONE X2");
+        assert_eq!(receipt["camera_identity"]["lens_type_decimal"], 41);
+        assert_eq!(receipt["route"]["name"], "one-x2-direct-type-2");
+        assert_eq!(receipt["route"]["draw"], "DirectOneXs");
+        assert!(
+            receipt["route"]["authentication_scope"]
+                .as_str()
+                .unwrap()
+                .contains("every warm-up and measured transaction")
+        );
         assert_eq!(receipt["source"][1]["lane"], 1);
         assert_eq!(receipt["build"]["runtime_git_commit"], "commit");
         assert_eq!(receipt["gpu"]["vendor_id"], 0x1002);
@@ -3136,6 +3228,51 @@ mod tests {
                 .unwrap()
                 .contains("reverified")
         );
+    }
+
+    #[test]
+    fn measure_route_requires_the_exact_direct_map_for_each_display() {
+        let stamp = 17u64;
+        let timestamp = Duration::from_millis(250);
+        assert_eq!(
+            require_measured_route(
+                8,
+                timestamp,
+                Some((8, timestamp)),
+                Some(&stamp),
+                Some(&stamp),
+            )
+            .unwrap(),
+            MeasuredRoute::OneX2DirectType2
+        );
+
+        let error = require_measured_route(8, timestamp, Some((8, timestamp)), Some(&stamp), None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("did not select"), "{error}");
+
+        let other = 18u64;
+        let error = require_measured_route(
+            8,
+            timestamp,
+            Some((8, timestamp)),
+            Some(&stamp),
+            Some(&other),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("different delivery"), "{error}");
+
+        let error = require_measured_route(
+            8,
+            timestamp,
+            Some((7, timestamp)),
+            Some(&stamp),
+            Some(&stamp),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("exact selected"), "{error}");
     }
 
     #[test]

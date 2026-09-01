@@ -1915,6 +1915,15 @@ impl<T: Clone + Eq> ExactDisplay<T> {
     }
 }
 
+fn exact_direct_one_xs_draw<'a, T: Eq>(
+    flow_draw: FlowDraw,
+    complete: Option<&T>,
+    bound: Option<&'a T>,
+) -> Option<&'a T> {
+    let bound = (flow_draw == FlowDraw::DirectOneXs).then_some(bound)??;
+    (complete == Some(bound)).then_some(bound)
+}
+
 struct MapOracleDraw {
     pipeline: wgpu::RenderPipeline,
     _buffer: wgpu::Buffer,
@@ -2290,6 +2299,23 @@ impl ScenePipeline {
             self.one_xs_display.clear();
             let _ = self.prepare_inner(primitive, device, queue, aspect, false);
         }
+    }
+
+    /// Opaque identity of the native map bound for the next production
+    /// selected ONE X2 draw.
+    ///
+    /// This is an allocation-free instrument observable. It returns a stamp
+    /// only when the selected route is [`FlowDraw::DirectOneXs`], its direct
+    /// type-2 resource owns a bound map, and that map is the same complete
+    /// display transaction the pipeline admitted. It exposes no map payload.
+    pub fn diagnostic_one_xs_direct_frame(&self) -> Option<&FrameStamp> {
+        exact_direct_one_xs_draw(
+            self.flow_draw,
+            self.one_xs_display.complete.as_ref(),
+            self.direct_one_xs_map
+                .as_ref()
+                .and_then(DirectMapDraw::bound_frame),
+        )
     }
 
     /// Prepare through the ordinary picture path and return a diagnostic
@@ -5056,6 +5082,30 @@ mod tests {
         assert_eq!(draw, FlowDraw::Nothing);
         draw = FlowDraw::prepared(true);
         assert_eq!(draw, FlowDraw::Legacy);
+    }
+
+    #[test]
+    fn direct_route_diagnostic_requires_route_resource_and_display_identity() {
+        let complete = 17u64;
+        let bound = 17u64;
+        assert_eq!(
+            exact_direct_one_xs_draw(FlowDraw::DirectOneXs, Some(&complete), Some(&bound),),
+            Some(&bound)
+        );
+
+        assert_eq!(
+            exact_direct_one_xs_draw(FlowDraw::Plain, Some(&complete), Some(&bound)),
+            None
+        );
+        assert_eq!(
+            exact_direct_one_xs_draw::<u64>(FlowDraw::DirectOneXs, Some(&complete), None),
+            None
+        );
+        let other = 18u64;
+        assert_eq!(
+            exact_direct_one_xs_draw(FlowDraw::DirectOneXs, Some(&complete), Some(&other),),
+            None
+        );
     }
 
     #[test]

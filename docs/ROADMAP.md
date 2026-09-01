@@ -124,10 +124,19 @@ timing vector is allocated before the interval begins. Its wall elapsed time
 runs immediately before the first transaction through immediately after the
 last, including only sample recording and loop bookkeeping between transactions;
 each per-frame transaction excludes that bookkeeping. Source, build and GPU
-adapter identities are bound before playback and reverified after timing. This
-is the stable pre/post throughput boundary for the GPU migration. It is not a Studio
-parity, realtime playback, audio or visual-quality result. A real baseline run
-still has to be made through `scripts/quiet.sh` from a clean committed build.
+adapter identities are bound before playback and reverified after timing.
+Every warm-up and measured transaction now also has to expose the bound stamp
+of the exact selected ONE X2 direct-map resource for its current aligned pair
+after preparation. The pipeline supplies that allocation-free stamp only when
+`DirectOneXs`, the bound native type-2 resource and the complete display
+transaction agree. A generic camera route, missing direct resource or
+mismatched delivery refuses the run. Receipt schema v2 names the ONE X2
+lens-type selector, native packed type-2 map and `DirectOneXs` draw, and each
+frame records that authenticated route; its negligible stamp comparisons are
+included in `prepare_ns` and interval throughput and copy no map payload. This
+is the stable pre/post throughput boundary for the GPU migration. It is not a Studio parity,
+realtime playback, audio or visual-quality result. A real baseline run still
+has to be made through `scripts/quiet.sh` from a clean committed build.
 
 **ONE X2 Studio-derived playback, 2026-08-31, shipping branch:** ordinary
 zero-config playback now selects the capture-owned causal ONE X2 route
