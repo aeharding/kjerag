@@ -1815,7 +1815,7 @@ pane_is_clear() {
 
 opens_onto_the_backdrop() {
 	local check="an open with no frame yet draws the backdrop"
-	if [ "$clipboard" = no ]; then
+	if [ "$clipboard_write" = no ]; then
 		skip "$check (no wl-copy)"
 		return
 	fi
