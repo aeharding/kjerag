@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use kjerag_media::FrameStamp;
@@ -7,9 +8,12 @@ use kjerag_meta::{
     OrientationTrack, Quat, Size,
 };
 
-use super::super::resident_qualification_fixture;
+use super::super::geometry_gpu::GpuGeometryPipeline;
+use super::super::pis_frontend_gpu::GpuPisFrontEnd;
+use super::super::{GpuSolverBeltPipeline, SourceTextures};
 use super::*;
 use crate::flow::one_xs::LensPair;
+use crate::flow::one_xs::base_map::one_xs_static_coordinates;
 use crate::flow::one_xs::pis::gpu::GpuPisFlight;
 use crate::projection::tests::{ONE_XS_FRAME, one_xs_lenses};
 
@@ -87,8 +91,6 @@ fn refused<T>(answer: Fallible<T>) -> Box<dyn std::error::Error + Send + Sync> {
 }
 
 fn assert_case(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
     context: &OneXsGpuContext,
     pipeline: &GpuParentMapPipeline,
     builder: &ParentMapBuilder,
@@ -96,8 +98,6 @@ fn assert_case(
     flight: GpuPisFlight,
 ) -> Vec<u32> {
     assert_case_readout(
-        device,
-        queue,
         context,
         pipeline,
         builder,
@@ -109,8 +109,6 @@ fn assert_case(
 
 #[allow(clippy::too_many_arguments)]
 fn assert_case_readout(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
     context: &OneXsGpuContext,
     pipeline: &GpuParentMapPipeline,
     builder: &ParentMapBuilder,
@@ -122,12 +120,11 @@ fn assert_case_readout(
         .prepare(orientation, flight.frame.timestamp(), readout)
         .unwrap();
     let expected = expected_words(&prepared);
-    let (belts, _) = resident_qualification_fixture(device, queue, (), flight.clone()).unwrap();
-    let resident = pipeline
-        .produce(belts, builder, orientation, &flight.frame, readout)
+    let encoded = pipeline
+        .encode(builder, orientation, flight.clone(), readout)
         .unwrap();
-    assert!(resident.matches_frame(&flight.frame));
-    let actual = resident.read_qualification(context).unwrap();
+    assert_eq!(encoded.flight, flight);
+    let actual = encoded.read_qualification(context).unwrap();
     if let Some((word, (&actual, &expected))) = actual
         .iter()
         .zip(&expected)
@@ -162,8 +159,6 @@ fn radv_parent_maps_are_exact_cold_warm_and_after_live_mutations() {
     let builder = ParentMapBuilder::new(&calibration()).unwrap();
     let base_orientation = orientation(1.0);
     let cold = assert_case(
-        &device,
-        &queue,
         &context,
         &pipeline,
         &builder,
@@ -171,8 +166,6 @@ fn radv_parent_maps_are_exact_cold_warm_and_after_live_mutations() {
         flight(7, 41, CENTER),
     );
     let warm = assert_case(
-        &device,
-        &queue,
         &context,
         &pipeline,
         &builder,
@@ -181,8 +174,6 @@ fn radv_parent_maps_are_exact_cold_warm_and_after_live_mutations() {
     );
     assert_eq!(cold, warm);
     let shifted = assert_case(
-        &device,
-        &queue,
         &context,
         &pipeline,
         &builder,
@@ -190,8 +181,6 @@ fn radv_parent_maps_are_exact_cold_warm_and_after_live_mutations() {
         flight(9, 43, CENTER + Duration::from_micros(1)),
     );
     let moved = assert_case(
-        &device,
-        &queue,
         &context,
         &pipeline,
         &builder,
@@ -201,8 +190,6 @@ fn radv_parent_maps_are_exact_cold_warm_and_after_live_mutations() {
     assert_ne!(cold, shifted, "the +1 us live center mutation was inert");
     assert_ne!(cold, moved, "the live orientation mutation was inert");
     let early = assert_case(
-        &device,
-        &queue,
         &context,
         &pipeline,
         &builder,
@@ -210,8 +197,6 @@ fn radv_parent_maps_are_exact_cold_warm_and_after_live_mutations() {
         flight(11, 45, Duration::from_micros(1_970_000)),
     );
     let late = assert_case(
-        &device,
-        &queue,
         &context,
         &pipeline,
         &builder,
@@ -222,8 +207,6 @@ fn radv_parent_maps_are_exact_cold_warm_and_after_live_mutations() {
     let readout_calibration = calibration_with_readout(23.516);
     let readout_builder = ParentMapBuilder::new(&readout_calibration).unwrap();
     let changed_readout = assert_case_readout(
-        &device,
-        &queue,
         &context,
         &pipeline,
         &readout_builder,
@@ -236,7 +219,7 @@ fn radv_parent_maps_are_exact_cold_warm_and_after_live_mutations() {
 }
 
 #[test]
-fn parent_transition_refuses_wrong_flight_foreign_context_and_nonlinear_slerp() {
+fn parent_transition_seals_flight_and_refuses_foreign_geometry_and_nonlinear_slerp() {
     let adapter = match gpu_adapter() {
         Ok(adapter) => adapter,
         Err(_) if std::env::var_os("KJERAG_REQUIRE_GPU").is_none() => return,
@@ -247,42 +230,32 @@ fn parent_transition_refuses_wrong_flight_foreign_context_and_nonlinear_slerp() 
     let pipeline = GpuParentMapPipeline::new(context.clone()).unwrap();
     let builder = ParentMapBuilder::new(&calibration()).unwrap();
     let owner = flight(20, 50, CENTER);
-    let wrong = flight(20, 50, CENTER);
-    let (belts, _) = resident_qualification_fixture(&device, &queue, (), owner.clone()).unwrap();
-    let error = refused(pipeline.produce(
-        belts,
-        &builder,
-        &orientation(1.0),
-        &wrong.frame,
-        calibration().readout(),
-    ));
-    assert!(error.to_string().contains("does not match"));
-    assert_eq!(pipeline.encoded_transitions(), 0);
+    let encoded = pipeline
+        .encode(
+            &builder,
+            &orientation(1.0),
+            owner.clone(),
+            calibration().readout(),
+        )
+        .unwrap();
+    assert_eq!(encoded.flight, owner);
+    assert_eq!(pipeline.encoded_transitions(), 1);
 
     let (foreign_device, foreign_queue) = request_device(&adapter).unwrap();
-    let foreign =
-        GpuParentMapPipeline::new(OneXsGpuContext::new(&foreign_device, &foreign_queue)).unwrap();
-    let (belts, _) = resident_qualification_fixture(&device, &queue, (), owner.clone()).unwrap();
-    let error = refused(foreign.produce(
-        belts,
-        &builder,
-        &orientation(1.0),
-        &owner.frame,
-        calibration().readout(),
-    ));
+    let foreign_context = OneXsGpuContext::new(&foreign_device, &foreign_queue);
+    let foreign_geometry =
+        GpuGeometryPipeline::new(foreign_context, &one_xs_static_coordinates()).unwrap();
+    let error = refused(foreign_geometry.encode_resident_parents(encoded));
     assert!(error.to_string().contains("different device or queue"));
-    assert_eq!(foreign.encoded_transitions(), 0);
 
-    let (belts, _) = resident_qualification_fixture(&device, &queue, (), owner.clone()).unwrap();
-    let error = refused(pipeline.produce(
-        belts,
+    let error = refused(pipeline.encode(
         &builder,
         &orientation(3_000.0),
-        &owner.frame,
+        owner,
         calibration().readout(),
     ));
     assert!(error.to_string().contains("nonlinear interpolation"));
-    assert_eq!(pipeline.encoded_transitions(), 0);
+    assert_eq!(pipeline.encoded_transitions(), 1);
 }
 
 #[test]
@@ -360,24 +333,88 @@ fn qualification_rejects_planted_parent_semantic_mutations() {
         let source = source.replacen(needle, replacement, 1);
         let pipeline = GpuParentMapPipeline::new_with_shader(context.clone(), source).unwrap();
         let owner = flight(100 + number as u64, 100 + number as u64, CENTER);
-        let (belts, _) =
-            resident_qualification_fixture(&device, &queue, (), owner.clone()).unwrap();
-        let resident = pipeline
-            .produce(
-                belts,
-                &builder,
-                &poses,
-                &owner.frame,
-                calibration().readout(),
-            )
+        let encoded = pipeline
+            .encode(&builder, &poses, owner, calibration().readout())
             .unwrap();
-        let actual = resident.read_qualification(&context).unwrap();
+        let actual = encoded.read_qualification(&context).unwrap();
         assert_ne!(
             actual, expected,
             "planted {name} mutation escaped qualification"
         );
         eprintln!("rejected planted parent mutation: {name}");
     }
+}
+
+#[test]
+fn parent_geometry_and_belts_share_one_pre_submission_owner_chain() {
+    let (device, queue, adapter, _) = match gpu() {
+        Ok(gpu) => gpu,
+        Err(_) if std::env::var_os("KJERAG_REQUIRE_GPU").is_none() => return,
+        Err(why) => panic!("GPU required: {why}"),
+    };
+    let context = OneXsGpuContext::new(&device, &queue);
+    let flight = flight(900, 901, CENTER);
+    let parent = GpuParentMapPipeline::new(context.clone())
+        .unwrap()
+        .encode(
+            &ParentMapBuilder::new(&calibration()).unwrap(),
+            &orientation(1.0),
+            flight,
+            calibration().readout(),
+        )
+        .unwrap();
+    let geometry = GpuGeometryPipeline::new(context.clone(), &one_xs_static_coordinates())
+        .unwrap()
+        .encode_resident_parents(parent)
+        .unwrap();
+    let texture = |label| {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            texture.as_image_copy(),
+            &vec![137; 256 * 256],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(256),
+                rows_per_image: Some(256),
+            },
+            texture.size(),
+        );
+        texture
+    };
+    let texture_a = texture("parent geometry belt A");
+    let texture_b = texture("parent geometry belt B");
+    let source_owner = Arc::new(());
+    let belts = geometry
+        .submit_belts(
+            &GpuSolverBeltPipeline::new(context.clone()).unwrap(),
+            SourceTextures {
+                a: &texture_a,
+                b: &texture_b,
+            },
+            Arc::clone(&source_owner),
+        )
+        .unwrap();
+    assert_eq!(Arc::strong_count(&source_owner), 2);
+    belts
+        .prepare_front_end(&GpuPisFrontEnd::new(context).unwrap())
+        .unwrap()
+        .acknowledge_terminal()
+        .unwrap();
+    assert_eq!(Arc::strong_count(&source_owner), 1);
+    eprintln!("ONE X2 GPU parent, geometry and belts completed one owner chain on {adapter}");
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {
@@ -416,6 +453,7 @@ fn gpu_adapter() -> Result<wgpu::Adapter, String> {
 fn request_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::Queue), String> {
     block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("ONE X2 GPU parent qualification"),
+        required_limits: adapter.limits(),
         ..Default::default()
     }))
     .map_err(|error| error.to_string())

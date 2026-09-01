@@ -5,14 +5,13 @@
 //! render device. The output stays opaque and resident. Qualification-only
 //! code may copy it back to compare every bit with the scalar oracle.
 
-use kjerag_media::FrameStamp;
 use kjerag_meta::{OrientationTrack, Readout};
 
 use super::super::base_map::{SELECTED_FLOWSTATE_COLS, SELECTED_FLOWSTATE_ROWS};
 use super::super::gpu_context::OneXsGpuContext;
 use super::super::metal_calc_map::MetalCalcMapParams;
 use super::super::parent::{ParentMapBuilder, PreparedParentMap};
-use super::GpuBlurredBelts;
+use super::super::pis::gpu::GpuPisFlight;
 use crate::Fallible;
 
 const PARAM_WORDS: usize = 33;
@@ -26,37 +25,55 @@ const OUTPUT_WORDS: usize = 2 * LENS_OUTPUT_WORDS;
 /// Its storage and device identity are deliberately private. The GPU geometry
 /// stage will consume this token directly once the shared submission lease is
 /// available on the integration branch.
-struct EncodedParentMaps {
-    command: Option<wgpu::CommandBuffer>,
+pub(super) struct ResidentGpuParentMaps {
     _input: wgpu::Buffer,
-    storage: wgpu::Buffer,
+    pub(super) storage: wgpu::Buffer,
     _resources: wgpu::BindGroup,
 }
 
-impl EncodedParentMaps {
-    fn take_command(&mut self) -> wgpu::CommandBuffer {
-        self.command
-            .take()
-            .expect("encoded parent maps submit exactly once")
-    }
+/// An unfinished parent command stream bound to one exact capture flight.
+/// Only the geometry child may consume it; none of its components has an
+/// accessor or independent submission path.
+#[must_use = "the encoded GPU parent maps have not entered geometry"]
+pub(super) struct EncodedGpuParentMaps {
+    pub(super) context: OneXsGpuContext,
+    pub(super) flight: GpuPisFlight,
+    pub(super) encoder: wgpu::CommandEncoder,
+    pub(super) resident: ResidentGpuParentMaps,
+}
 
+impl EncodedGpuParentMaps {
     #[cfg(test)]
-    fn encode_qualification_readback(
-        &self,
-        device: &wgpu::Device,
-    ) -> (wgpu::CommandBuffer, wgpu::Buffer) {
+    fn read_qualification(mut self, context: &OneXsGpuContext) -> Fallible<Vec<u32>> {
+        self.context.ensure_same(context)?;
         let size = (OUTPUT_WORDS * 4) as u64;
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        let staging = context.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("ONE X2 parent qualification readback"),
             size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("ONE X2 parent qualification readback"),
+        self.encoder
+            .copy_buffer_to_buffer(&self.resident.storage, 0, &staging, 0, size);
+        let submission = context.queue().submit([self.encoder.finish()]);
+        let slice = staging.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |answer| {
+            let _ = sender.send(answer);
         });
-        encoder.copy_buffer_to_buffer(&self.storage, 0, &staging, 0, size);
-        (encoder.finish(), staging)
+        context.device().poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        })?;
+        receiver.recv()??;
+        let mapped = slice.get_mapped_range();
+        let words = mapped
+            .chunks_exact(4)
+            .map(|bytes| u32::from_ne_bytes(bytes.try_into().unwrap()))
+            .collect();
+        drop(mapped);
+        staging.unmap();
+        Ok(words)
     }
 }
 
@@ -116,36 +133,26 @@ impl GpuParentMapPipeline {
         })
     }
 
-    /// The sole parent-producing owner transition. It verifies the expected
-    /// private stamp, derives center from the stamp already sealed in the
-    /// owner, encodes internally, and advances that owner's linear lease.
-    pub(super) fn produce<K>(
+    /// Encode before source sampling and bind the unfinished command stream
+    /// to one exact flight. Center comes only from that flight's private stamp.
+    pub(super) fn encode(
         &self,
-        mut owner: GpuBlurredBelts<K>,
         builder: &ParentMapBuilder,
         orientation: &OrientationTrack,
-        expected: &FrameStamp,
+        flight: GpuPisFlight,
         readout: Readout,
-    ) -> Fallible<GpuResidentParentMaps<K>> {
-        let flight = owner
-            .flight
-            .as_ref()
-            .expect("resident parent owner retains its flight");
-        if &flight.frame != expected {
-            return Err("ONE X2 GPU parent frame does not match its resident source owner".into());
-        }
-        owner.lease.validate_provenance(&self.context)?;
+    ) -> Fallible<EncodedGpuParentMaps> {
         let center = flight.frame.timestamp();
         let prepared = builder.prepare(orientation, center, readout)?;
         prepared.require_linear_gpu_slerp()?;
-        let mut encoded = self.encode(&prepared);
-        owner
-            .lease
-            .submit_after(&self.context, |_| encoded.take_command())?;
-        Ok(GpuResidentParentMaps { owner, encoded })
+        Ok(self.encode_prepared(&prepared, flight))
     }
 
-    fn encode(&self, prepared: &PreparedParentMap) -> EncodedParentMaps {
+    fn encode_prepared(
+        &self,
+        prepared: &PreparedParentMap,
+        flight: GpuPisFlight,
+    ) -> EncodedGpuParentMaps {
         #[cfg(test)]
         self.encode_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -193,57 +200,21 @@ impl GpuParentMapPipeline {
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(25, 13, 2);
         }
-        EncodedParentMaps {
-            command: Some(encoder.finish()),
-            _input: input,
-            storage: output,
-            _resources: bind_group,
+        EncodedGpuParentMaps {
+            context: self.context.clone(),
+            flight,
+            encoder,
+            resident: ResidentGpuParentMaps {
+                _input: input,
+                storage: output,
+                _resources: bind_group,
+            },
         }
     }
 
     #[cfg(test)]
     pub(crate) fn encoded_transitions(&self) -> usize {
         self.encode_count.load(std::sync::atomic::Ordering::Relaxed)
-    }
-}
-
-/// Parent storage remains inseparable from the complete private source owner.
-/// A geometry child will consume this whole token through another owner-only
-/// method; no flow-wide resource or submission component is exposed.
-#[must_use = "the GPU-resident parent maps have not been consumed"]
-pub(super) struct GpuResidentParentMaps<K> {
-    owner: GpuBlurredBelts<K>,
-    encoded: EncodedParentMaps,
-}
-
-#[cfg(test)]
-impl<K> GpuResidentParentMaps<K> {
-    fn matches_frame(&self, expected: &FrameStamp) -> bool {
-        self.owner
-            .flight
-            .as_ref()
-            .is_some_and(|flight| &flight.frame == expected)
-    }
-
-    fn read_qualification(mut self, context: &OneXsGpuContext) -> Fallible<Vec<u32>> {
-        self.owner.lease.validate_provenance(context)?;
-        let (command, staging) = self.encoded.encode_qualification_readback(context.device());
-        self.owner.lease.submit_after(context, |_| command)?;
-        let slice = staging.slice(..);
-        let (sender, receiver) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |answer| {
-            let _ = sender.send(answer);
-        });
-        self.owner.lease.complete()?;
-        receiver.recv()??;
-        let mapped = slice.get_mapped_range();
-        let words = mapped
-            .chunks_exact(4)
-            .map(|bytes| u32::from_ne_bytes(bytes.try_into().unwrap()))
-            .collect();
-        drop(mapped);
-        staging.unmap();
-        Ok(words)
     }
 }
 
