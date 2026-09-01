@@ -601,6 +601,7 @@ mod tests {
         GpuGeometryPipeline::new(context.clone(), &coordinates).unwrap_or_else(|error| {
             panic!("baseline ONE X2 GPU geometry failed on {adapter}: {error}")
         });
+        eprintln!("baseline ONE X2 GPU geometry passed on {adapter}");
 
         let mutations = [
             (
@@ -632,6 +633,7 @@ mod tests {
                 error.to_string().contains("GPU geometry is not"),
                 "mutation {name} returned the wrong refusal on {adapter}: {error}"
             );
+            eprintln!("ONE X2 GPU geometry refused {name} mutation on {adapter}");
         }
     }
 
@@ -655,7 +657,8 @@ mod tests {
             .into_iter()
             .next()
             .ok_or("no Vulkan adapter")?;
-        let name = adapter.get_info().name;
+        let info = adapter.get_info();
+        let name = format!("{} ({})", info.name, info.driver);
         let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("exact ONE X2 GPU geometry"),
             required_features: wgpu::Features::empty(),
