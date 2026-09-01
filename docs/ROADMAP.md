@@ -36,6 +36,20 @@ acknowledged. Scene remains unchanged. The remaining seam is connecting the
 existing post-PIS/final-map private owners into this complete pre-submission
 front half without exposing a new public transition.
 
+The authenticated clean-build receipt is retained under the owner's repository
+at `.agents/gpu-parent-evidence-topology/scratch/gpu-parent-map-evidence/`.
+It binds qualified code commit
+`441078dc6245e56b39748444f04e8454801f6d75`, tree
+`c2cd5536d7a557e09ec2a719adf58db3621a7986`, clean pre/post status, an
+initially absent dedicated target directory, the exact build and test
+environments and commands, Mesa/RADV packages, ICD and loader hashes, source
+hashes, adapter limits, timestamps and exit status. The complete log hashes to
+`8ef951e42492f532c40ccd3b1047f1360b54eb593382910388c1ddf5a6e78a2d`,
+the receipt to
+`19da93bf9d0ad78d0b335c79d76f6b4d40909eefb040a09817fa6e26df2f198d`,
+and the exact test executable before and after the run to
+`b30c547fc9119a0061f121312f63d7562101f64788321b7f9a8f5a5fd952281d`.
+
 **Shared-context resident ONE X2 final-map materializer, 2026-09-01,
 integration branch only [UNSELECTED; EXACT TARGET-GPU TWIN; NO SCENE OR
 PERFORMANCE CLAIM]:** the accepted final bilateral materializer now owns the
