@@ -142,6 +142,61 @@ leave both device validation scopes clean and prove the source owner waits the
 latest valid fence; independently recreated front-end and PIS pipelines on the
 same structural device/queue pair remain accepted.
 
+**GPU-resident warm image-state arithmetic checkpoint, 2026-09-01,
+implementation branch only [UNSELECTED; NO SCENE WIRING; NO PERFORMANCE
+CLAIM]:** a render-private compute stage beneath the private geometry owner
+now consumes its complete sealed geometry/belt aggregate and a capture-owned
+retained reference slot.
+Warm work produces the exact threshold/population motion mask, recursive L1
+and L2 U8 area reductions, and the selected fused 0.7/0.3 next-reference
+planes. Cold work copies both current physical planes exactly and exposes no
+invented motion result. All storage bindings cover complete word-aligned
+buffers, ordinary work has no CPU readback, and the full opaque `GpuPisFlight`
+plus a temporal generation seal every candidate. The stage validates the
+shared `OneXsGpuContext`, privately binds the physical A/B post-Gaussian belt
+within that aggregate, encodes through its inherited linear submission lease,
+and returns the complete geometry, masks, source owner and same lease inside
+its opaque output. Production cannot enter motion from a separable raw belt
+token; that narrower entry exists only in tests.
+
+The next reference remains a private pending successor after the motion
+transaction seals its opaque frame candidate. Motion has no production
+publication method at this boundary: later L2, post, final-map, bind and draw
+installation may still fail. Dropping either the transaction or transferred
+frame candidate clears only its matching flight and leaves the
+allocation-identical prior committed slot and generation unchanged. The future
+capture-owner final install must publish the successor atomically with its
+ready resident draw. The target Radeon 760M/RADV matched the CPU oracle for
+both physical lenses, base/L1/L2 motion and next references; six live shader
+mutations covering lens selection, inclusive change threshold, asymmetric
+low-edge bounds, promotion population, recursive rounding and EMA weight were
+all refused. Cold final-install publication, warm post-motion drop, exact retry
+and warm final-install publication passed in one state regression.
+
+Ordinary cold/warm work does not map, poll, reconstruct CPU images or create a
+second submission owner. The remaining connection is one purpose-specific
+private-owner transition that consumes the whole `GpuMotionFrame` into the
+resident front-end and warm scheduler/post-L1 chain. That transition must bind
+the already-retained geometry mask internally rather than split the geometry
+carrier back into belts and masks. No current image, L1/L2 physical mask,
+geometry mask, flight or lease component is exposed separately for that seam,
+and Scene cannot select it until the downstream transition is qualified.
+
+**Post-commit motion evidence, 2026-09-01:** commit `8c25706` and tree
+`8afa41b9` were clean before and after a build in a new dedicated target. The
+fresh binary did not exist before the forced test; afterwards its SHA-256 was
+`fc6cfabb434f43fd0bc6c4a801e980eca3be6512b025ef1475b151cf5a506aad`.
+All 31 private-owner tests passed under the forced RADV ICD, including final
+install publication, transferred-frame rollback/retry and the exact
+submission-lease drop/panic tests. The forced-run log SHA-256 is
+`4dc5ca1f7830f244cb88483fddf0fd04e8619e6b16b3b4bcc2837a9a413f92b0`;
+the warnings-denied fresh-target gate log is
+`1d4a60ff29741c071ddec8ef42e1fda070f31a3377e561a5e96cf7ff4215a802`.
+The complete source, WGSL, ICD, driver, package, timestamp, command and
+pre/post evidence is tracked in
+`docs/research/gpu-motion-context-qualification.md` (pre-ROADMAP-edit SHA-256
+`af27ac42c5d775fd5574941d143f13a838320a7e4b4ec78c516ea31be72611e5`).
+
 Only cost modes, initial grids, optional hints, descent admission and the
 selected disparity interval are uploaded per stage. Images, physical masks,
 gradients, raw weights, rolling patch sums and five-word source models are

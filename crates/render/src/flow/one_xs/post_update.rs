@@ -141,6 +141,13 @@ impl MotionPyramid {
             level_two: level_two.into_boxed_slice(),
         }
     }
+
+    pub(super) fn bytes(&self, level: Level) -> &[u8] {
+        match level {
+            Level::One => &self.level_one,
+            Level::Two => &self.level_two,
+        }
+    }
 }
 
 fn area_half_u8(source: &[u8], source_rows: usize, source_cols: usize) -> Vec<u8> {

@@ -20,6 +20,12 @@ use super::{GpuBlurredBelts, GpuSolverBeltPipeline, SourceTextures};
 use crate::Fallible;
 use crate::flow::one_xs_belt::{RetainedBaseMaps, base_support_masks};
 
+/// Temporal image state is private beneath the geometry owner. Its production
+/// entry can consume only the complete geometry/belt aggregate.
+#[path = "temporal_gpu.rs"]
+#[allow(dead_code)]
+mod temporal_gpu;
+
 const PARENT_NODES_PER_LENS: usize = SELECTED_FLOWSTATE_ROWS * SELECTED_FLOWSTATE_COLS;
 const RETAINED_NODES_PER_LENS: usize = SELECTED_LINE_ROWS * SELECTED_LINE_COLS;
 const PARENT_BYTES: u64 = (2 * PARENT_NODES_PER_LENS * size_of::<[f32; 2]>()) as u64;
