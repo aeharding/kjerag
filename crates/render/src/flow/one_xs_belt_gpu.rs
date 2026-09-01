@@ -36,7 +36,7 @@ mod map_patch_gpu;
 /// can append belt work and mint the one lease atomically.
 #[path = "one_xs/geometry_gpu.rs"]
 #[allow(dead_code)]
-pub(crate) mod geometry_gpu;
+mod geometry_gpu;
 
 const CODES_PER_WORD: usize = 4;
 const OUTPUT_BYTES: u64 = SolverBelts::BYTES as u64;
