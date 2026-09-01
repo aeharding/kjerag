@@ -67,6 +67,12 @@ pub mod one_xs;
 /// frame through its capture-owned producer.
 pub mod one_xs_belt;
 
+/// Standalone GPU producer for the selected ONE X2 solver belts. It is kept
+/// outside playback until its exact output and resource lifetime contract can
+/// be integrated without weakening the current causal CPU reference.
+#[allow(dead_code)]
+pub(crate) mod one_xs_belt_gpu;
+
 /// Chunk 4, the composition the draw applies: the TWO separately-estimated DIS
 /// fields (lens 0 = r2l `[0xae8]`, lens 1 = l2r `[0xa88]`, §38/§40) carried in
 /// belt/sample pixels and tapered independently. The apply itself — the

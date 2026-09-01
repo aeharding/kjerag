@@ -230,8 +230,8 @@ impl RetainedBaseMaps {
     ///
     /// This is the explicit upload boundary for the inactive GPU instrument;
     /// it does not generate or approximate a retained map.
-    #[cfg(test)]
-    fn bytes(&self) -> &[u8] {
+    #[allow(dead_code)] // Used by the standalone GPU candidate before playback integration.
+    pub(crate) fn bytes(&self) -> &[u8] {
         // `[f32; 2]` has no padding, and every f32 bit pattern is valid. This
         // is the same upload boundary used by `one_xs::Displacement::bytes`.
         unsafe {

@@ -3,6 +3,33 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Standalone GPU ONE X2 solver-belt producer, 2026-09-01, implementation
+branch only [BYTE-EXACT TARGET-GPU TWIN; NOT WIRED INTO PLAYBACK; NO SPEED OR
+STUDIO PARITY CLAIM]:** a render-internal compute pipeline now consumes the
+two R8 source textures and the two retained 1080-by-60 float2 base maps
+directly. Each invocation evaluates four final solver bytes with the selected
+scalar/native base-map and source bilinear schedules, the strict ordered UV
+gate and the exact integer 3-by-3 reduction, then packs those four bytes into
+one storage word. It therefore produces the final two compact 1080-by-60 U8
+belts without allocating the two 3240-by-180 staging images or reading source
+luma through the CPU. The pending token retains the map, bind group, packed
+output, readback and a caller-supplied imported-frame owner through GPU
+completion. Its packed buffer is suitable for a later GPU solver; its readback
+exists for the current CPU bridge and exact oracle gate.
+
+With `KJERAG_REQUIRE_GPU=1`, the target Radeon/Vulkan adapter produced all
+129,600 bytes exactly equal to the CPU scalar oracle over unequal odd-width
+source textures uploaded through 512-byte padded rows, different lens
+patterns, fractional and over-one coordinates, ordered zero/negative/NaN
+sentinels, infinity clamps, both lenses, the retained-map FMA bit pattern and
+a source-FMA discriminator whose selected answer is 190 rather than 189. The output packs
+four logical bytes per u32 and compile-time guards pin both total and per-lens
+divisibility. WGSL permits a backend to expand `fma`, and exceptional-float
+handling may vary with finite-math/flush-to-zero policy, so byte identity on a
+different adapter remains a required gate rather than a source-level promise.
+This branch does not change playback, measure performance or claim any wider
+Studio result.
+
 **ONE X2 GPU migration transaction boundary, 2026-08-31, working branch only
 [STRUCTURAL PREREQUISITE; NO GPU OR PERFORMANCE CLAIM]:** the capture-owned
 `FrameOwner` now separates fallible, non-mutating frame preparation from the
