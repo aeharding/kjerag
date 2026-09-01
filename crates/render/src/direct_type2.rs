@@ -55,8 +55,8 @@ impl ImportedOneXsPicture {
     fn import_for_capture(
         capture: &ResidentSourceCapture,
         layout: &wgpu::BindGroupLayout,
-        uniforms: &wgpu::Buffer,
         sampler: &wgpu::Sampler,
+        reframe: &crate::Reframe,
         frames: Arc<Frames>,
     ) -> Fallible<Self> {
         let context = capture.import_context();
@@ -68,12 +68,19 @@ impl ImportedOneXsPicture {
             dmabuf::import(device, a.descriptor(), frames.size)?,
             dmabuf::import(device, b.descriptor(), frames.size)?,
         ];
-        let picture = bind_picture(device, layout, uniforms, [&planes[0], &planes[1]], sampler);
+        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 resident picture uniforms"),
+            size: std::mem::size_of::<crate::Reframe>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        context.queue().write_buffer(&uniforms, 0, reframe.bytes());
+        let picture = bind_picture(device, layout, &uniforms, [&planes[0], &planes[1]], sampler);
         Ok(Self {
             picture,
             planes,
             frames,
-            uniforms: uniforms.clone(),
+            uniforms,
             context: context.clone(),
             session: capture.source_identity(),
         })
@@ -107,6 +114,57 @@ impl ImportedOneXsPicture {
         pass: &mut wgpu::RenderPass<'_>,
     ) {
         pipeline.draw(pass, &self.picture, map);
+    }
+
+    /// Seal one draw-private Reframe allocation and picture binding around
+    /// this exact imported pair. A later queue write for another pass cannot
+    /// change what this binding samples.
+    pub(crate) fn prepare_resident_draw(
+        &self,
+        layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+        reframe: &crate::Reframe,
+    ) -> ImportedOneXsDrawBinding {
+        let usage = wgpu::BufferUsages::UNIFORM
+            | wgpu::BufferUsages::COPY_DST
+            | if cfg!(test) {
+                wgpu::BufferUsages::COPY_SRC
+            } else {
+                wgpu::BufferUsages::empty()
+            };
+        let uniforms = self
+            .context
+            .device()
+            .create_buffer(&wgpu::BufferDescriptor {
+                label: Some("ONE X2 resident draw-private uniforms"),
+                size: std::mem::size_of::<crate::Reframe>() as u64,
+                usage,
+                mapped_at_creation: false,
+            });
+        self.context
+            .queue()
+            .write_buffer(&uniforms, 0, reframe.bytes());
+        let picture = bind_picture(
+            self.context.device(),
+            layout,
+            &uniforms,
+            [&self.planes[0], &self.planes[1]],
+            sampler,
+        );
+        ImportedOneXsDrawBinding {
+            picture,
+            _uniforms: uniforms,
+        }
+    }
+
+    pub(crate) fn draw_resident_binding(
+        &self,
+        pipeline: &DirectType2Pipeline,
+        binding: &ImportedOneXsDrawBinding,
+        map: &wgpu::BindGroup,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        pipeline.draw(pass, &binding.picture, map);
     }
 
     pub(crate) fn ensure_resident_frame(&self, frame: &FrameStamp) -> Fallible<()> {
@@ -201,6 +259,21 @@ impl ImportedOneXsPicture {
     }
 }
 
+/// Per-render-pass picture resources. The bind group is dropped before its
+/// uniform allocation; the enclosing retired payload keeps both alive through
+/// exact submitted-work completion.
+pub(crate) struct ImportedOneXsDrawBinding {
+    picture: wgpu::BindGroup,
+    _uniforms: wgpu::Buffer,
+}
+
+#[cfg(test)]
+impl ImportedOneXsDrawBinding {
+    pub(crate) fn uniform_for_test(&self) -> wgpu::Buffer {
+        self._uniforms.clone()
+    }
+}
+
 impl ImportedOneXsSource for ImportedOneXsPicture {
     fn ensure_resident_context(&self, context: &OneXsGpuContext) -> Fallible<()> {
         self.context.ensure_same(context)
@@ -233,11 +306,11 @@ impl ResidentSourceCapture {
     pub(crate) fn import_picture(
         &self,
         layout: &wgpu::BindGroupLayout,
-        uniforms: &wgpu::Buffer,
         sampler: &wgpu::Sampler,
+        reframe: &crate::Reframe,
         frames: Arc<Frames>,
     ) -> Fallible<ImportedOneXsPicture> {
-        ImportedOneXsPicture::import_for_capture(self, layout, uniforms, sampler, frames)
+        ImportedOneXsPicture::import_for_capture(self, layout, sampler, reframe, frames)
     }
 }
 
@@ -260,6 +333,8 @@ fn exact_one_xs_lenses<T>(lenses: &[T]) -> Fallible<[&T; 2]> {
 pub(crate) struct DirectType2Pipeline {
     device: wgpu::Device,
     pipeline: wgpu::RenderPipeline,
+    picture_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
     map_layout: wgpu::BindGroupLayout,
 }
 
@@ -307,8 +382,22 @@ impl DirectType2Pipeline {
         Self {
             device: device.clone(),
             pipeline,
+            picture_layout: picture_layout.clone(),
+            sampler: device.create_sampler(&wgpu::SamplerDescriptor {
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }),
             map_layout,
         }
+    }
+
+    pub(crate) fn prepare_resident_picture(
+        &self,
+        source: &ImportedOneXsPicture,
+        reframe: &crate::Reframe,
+    ) -> ImportedOneXsDrawBinding {
+        source.prepare_resident_draw(&self.picture_layout, &self.sampler, reframe)
     }
 
     pub(crate) fn map_layout(&self) -> &wgpu::BindGroupLayout {

@@ -1235,9 +1235,15 @@ mod tests {
             &picture_layout,
             wgpu::TextureFormat::Rgba8Unorm,
         ));
+        let retirement_owner = Arc::new(crate::draw_retirement::IcedDrawRetirements::new(
+            context.device(),
+            2,
+        ));
         let iced_draw =
-            crate::flow::one_xs_belt_gpu::IcedInstalledDrawAdapter::new(context.device());
-        let retirements = iced_draw.retirements();
+            crate::flow::one_xs_belt_gpu::IcedInstalledDrawAdapter::with_shared_retirements(
+                Arc::clone(&retirement_owner),
+            );
+        let retirements = retirement_owner.as_ref();
         let witness = Arc::new(AtomicU8::new(0));
         let install = crate::flow::one_xs_belt_gpu::prepare_resident_install(
             ready,
@@ -1247,8 +1253,6 @@ mod tests {
         .unwrap();
         let installed = install.install().unwrap();
         let reframe = crate::Reframe::blank(1.0, false);
-        installed.write_reframe(&reframe);
-        assert_eq!(read_uniform(&context, &uniforms), reframe.bytes());
         assert_eq!(
             read_uniform(&context, &recreated_uniforms),
             recreated_reframe.bytes()
@@ -1257,7 +1261,11 @@ mod tests {
         assert!(installed_snapshot.ready);
         assert!(!installed_snapshot.pending);
         assert!(installed_snapshot.committed.is_some());
-        assert_eq!(completion.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            completion.load(Ordering::SeqCst),
+            0,
+            "mapped final validity must disarm the exact lease without waiting again"
+        );
 
         // The next real resident source frame must derive every warm input
         // from the exact Cold2 successor just installed above. It traverses
@@ -1625,7 +1633,9 @@ mod tests {
         invalid_terminal
             .inject_inherited_validity_for_test(0)
             .unwrap();
-        let invalid_operands = invalid_terminal.complete_warm_final(&bridge).unwrap();
+        let invalid_completion = Arc::new(AtomicU8::new(0));
+        let mut invalid_operands = invalid_terminal.complete_warm_final(&bridge).unwrap();
+        invalid_operands.observe_final_completion(Arc::clone(&invalid_completion));
         let mut invalid_pending = materializer.materialize_final(invalid_operands).unwrap();
         let invalid_error = loop {
             match invalid_pending.poll() {
@@ -1639,6 +1649,11 @@ mod tests {
             }
         };
         assert!(invalid_error.to_string().contains("is not finite"));
+        assert_eq!(
+            invalid_completion.load(Ordering::SeqCst),
+            0,
+            "semantic validity refusal must disarm mapped completion without waiting"
+        );
         let invalid_snapshot = capture.snapshot();
         assert!(!invalid_snapshot.pending);
         assert!(later_snapshot.same_ready(&invalid_snapshot));
@@ -1713,7 +1728,7 @@ mod tests {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
-        let draw_once = || {
+        let draw_once = |iced_draw: &crate::flow::one_xs_belt_gpu::IcedInstalledDrawAdapter| {
             let mut encoder =
                 context
                     .device()
@@ -1742,15 +1757,27 @@ mod tests {
             context.queue().submit([encoder.finish()])
         };
         iced_draw.prepare_installed(warm_installed, &reframe);
-        let _first_draw = draw_once();
+        let first_draw_uniform = iced_draw.staged_uniform_for_test();
+        assert_eq!(read_uniform(&context, &first_draw_uniform), reframe.bytes());
+        let _first_draw = draw_once(&iced_draw);
+        drop(iced_draw);
+        let iced_draw =
+            crate::flow::one_xs_belt_gpu::IcedInstalledDrawAdapter::with_shared_retirements(
+                Arc::clone(&retirement_owner),
+            );
         let redraw_reframe = crate::Reframe::blank(0.5, true);
         iced_draw.prepare_installed(later_installed, &redraw_reframe);
-        assert_eq!(read_uniform(&context, &uniforms), redraw_reframe.bytes());
+        let second_draw_uniform = iced_draw.staged_uniform_for_test();
+        assert_eq!(
+            read_uniform(&context, &second_draw_uniform),
+            redraw_reframe.bytes()
+        );
+        assert_eq!(read_uniform(&context, &first_draw_uniform), reframe.bytes());
         assert_eq!(
             read_uniform(&context, &recreated_uniforms),
             recreated_reframe.bytes()
         );
-        let second_draw = draw_once();
+        let second_draw = draw_once(&iced_draw);
         let error = iced_draw
             .prepare_redraw(&capture, &reframe)
             .expect_err("full iced retirement admitted a third draw");
@@ -1790,8 +1817,57 @@ mod tests {
             .unwrap();
         assert_eq!(iced_draw.poll_prepare().unwrap(), 2);
         assert!(iced_draw.prepare_redraw(&capture, &reframe).unwrap());
-        assert_eq!(read_uniform(&context, &uniforms), reframe.bytes());
-        let third_draw = draw_once();
+        let screen_uniform = iced_draw.staged_uniform_for_test();
+        assert_eq!(read_uniform(&context, &screen_uniform), reframe.bytes());
+        let screenshot_reframe = crate::Reframe::blank(1.75, true);
+        let mut screenshot = capture
+            .ready_for_draw(retirements)
+            .unwrap()
+            .expect("installed root has a screenshot ready");
+        screenshot.write_reframe(&screenshot_reframe);
+        let screenshot_uniform = screenshot.uniform_for_test();
+        assert_eq!(
+            read_uniform(&context, &screenshot_uniform),
+            screenshot_reframe.bytes()
+        );
+        assert_eq!(
+            read_uniform(&context, &screen_uniform),
+            reframe.bytes(),
+            "screenshot preparation changed the staged window Reframe"
+        );
+        let mut screenshot_encoder =
+            context
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("resident screenshot before window submit"),
+                });
+        let screenshot_view = target.create_view(&Default::default());
+        let mut screenshot_pass =
+            screenshot_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("resident screenshot before window submit"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &screenshot_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        screenshot.arm_and_draw(retirements, &mut screenshot_pass);
+        drop(screenshot_pass);
+        context.queue().submit([screenshot_encoder.finish()]);
+        let third_draw = draw_once(&iced_draw);
+        assert_eq!(read_uniform(&context, &screen_uniform), reframe.bytes());
+        assert_eq!(
+            read_uniform(&context, &screenshot_uniform),
+            screenshot_reframe.bytes()
+        );
         context
             .device()
             .poll(wgpu::PollType::Wait {
@@ -1799,7 +1875,7 @@ mod tests {
                 timeout: None,
             })
             .unwrap();
-        assert_eq!(iced_draw.poll_prepare().unwrap(), 1);
+        assert_eq!(iced_draw.poll_prepare().unwrap(), 2);
         let redraw_snapshot = capture.snapshot();
         assert!(later_snapshot.same_ready(&redraw_snapshot));
         assert!(Arc::ptr_eq(

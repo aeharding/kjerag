@@ -17,7 +17,7 @@ use super::geometry_gpu::temporal_gpu::GpuPairedCadence;
 use super::pis_frontend_gpu::{
     GpuWorkModeBinding, GpuWorkModePipeline, RetainedL2DirectionPixelVec2Buffer,
 };
-use super::{InstalledOneXsDraw, InstalledOneXsReady, ResidentSourceIdentity};
+use super::{InstalledOneXsDraw, InstalledOneXsPass, InstalledOneXsReady, ResidentSourceIdentity};
 use crate::draw_retirement::{DrawRetirementError, IcedDrawRetirements};
 use crate::flow::one_xs::pis::Level;
 
@@ -571,12 +571,24 @@ impl GpuResidentCapture {
         })
     }
 
+    pub(super) fn has_installed_successor(&self) -> Fallible<bool> {
+        let state = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| "ONE X2 resident capture root is poisoned and quarantined")?;
+        if state.quarantined {
+            return Err("ONE X2 resident capture root is quarantined".into());
+        }
+        Ok(state.committed.is_some())
+    }
+
     /// Snapshot the complete installed draw and reserve a fresh retirement
     /// slot. This does not touch committed history and never exposes a piece of
     /// the payload.
     pub(super) fn ready_for_draw(
         &self,
-        retirements: &IcedDrawRetirements<InstalledOneXsDraw>,
+        retirements: &IcedDrawRetirements<InstalledOneXsPass>,
     ) -> Result<Option<InstalledOneXsReady>, DrawRetirementError> {
         let permit = retirements.reserve()?;
         let state = self
@@ -587,13 +599,14 @@ impl GpuResidentCapture {
         Ok(state.ready.as_ref().map(|draw| InstalledOneXsReady {
             draw: Arc::clone(draw),
             permit,
+            pass: None,
         }))
     }
 
     #[cfg(test)]
     pub(super) fn take_ready_for_drop_order_test(
         &self,
-        retirements: &IcedDrawRetirements<InstalledOneXsDraw>,
+        retirements: &IcedDrawRetirements<InstalledOneXsPass>,
     ) -> InstalledOneXsReady {
         let permit = retirements.reserve().unwrap();
         let draw = self
@@ -604,7 +617,11 @@ impl GpuResidentCapture {
             .ready
             .take()
             .expect("drop-order test requires installed ready draw");
-        InstalledOneXsReady { draw, permit }
+        InstalledOneXsReady {
+            draw,
+            permit,
+            pass: None,
+        }
     }
 
     #[cfg(test)]

@@ -3,6 +3,68 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Capture-shared resident transaction facade, 2026-09-01, implementation
+branch only [PRIVATE AND UNSELECTED; FORCED-RADV QUALIFIED; NO SCENE,
+PLAYBACK, PERFORMANCE OR STUDIO-RE CLAIM]:** one open ONE X2 capture now has a
+lazy resident session that owns the exact GPU context, authenticated render
+format, calibration/orientation-derived producers, capture root, direct
+pipeline, picture layout, sampler and bounded draw-retirement queue. Renderer
+attachments share that session and queue but keep their one-redraw staged cell
+local, so destroying and recreating an attachment neither detaches an old
+installed picture from its pipeline nor loses armed decoder-surface retirement
+proof. A changed device/queue or surface format refuses with its failure-site
+error. Scene does not select or construct this facade yet.
+
+The facade owns at most one cold-or-warm final-map continuation. It chooses
+cold start or warm continuation internally, uses the selected direction- and
+level-specific READ intervals, accepts only frame zero followed by exact
+same-decode-epoch adjacency, and refuses a decoded source size that differs
+from calibration before import or GPU work. One nonblocking device poll per
+redraw drives both the four-byte validity callback and draw retirements. While
+work remains pending or retirement admission is full, the old installed ready
+stays draw-capable. Full and in-flight are typed retry states; terminal device,
+mapping, provenance and arithmetic errors retain their original text. Exact
+full `FrameStamp` acknowledgement becomes visible only while the facade lock
+holds root publication and window staging as one transition.
+
+Every screen or screenshot permit seals a separate immutable uniform and
+picture bind group around its exact `Reframe`; the retired payload owns those
+per-pass resources plus the complete installed source/map carrier. Screenshot
+and screen therefore cannot overwrite one another even when their command
+buffers are submitted in the opposite order. The callback that supplies a
+Reframe receives the exact ready stamp selected under the facade-to-root lock
+order, not an offered-frame guess. Screenshot has its own bounded permit and
+authenticates its root snapshot against the facade acknowledgement.
+
+Ordinary success and semantic validity refusal use the completed four-byte map
+callback to disarm the exact latest submission without another wait. An
+unacknowledged `SubmissionLease` destructor never polls or blocks; cancellation,
+unwind, device-poll failure and callback failure/disconnect retain the decoder
+owner for process life and quarantine the facade. Install failure occurs only
+after mapped completion, so it quarantines state but drops its completion-
+proven source normally. Mapped semantic refusal is likewise completion-proven,
+rolls back safely and preserves the prior installed ready. The focused
+forced-RADV lifecycle covers Cold0 to Cold2, first warm and later warm, exact
+acknowledgement timing, invalid-status
+rollback with zero wait, full backpressure, private screen/screenshot
+Reframes, attachment recreation with shared retirement ownership, carrier-
+before-root unwind ordering and predecessor immutability.
+
+This checkpoint deliberately does not implement normal seek/reopen draining.
+Dropping a capture with uncertain callbacks is nonblocking and fail-closed, so
+its decoder owners may remain retained until process exit. Scene integration
+must keep old sessions alive and poll them to empty during normal replacement.
+The first lazy session construction also runs the resident stages' existing
+target-device arithmetic qualifications synchronously. Those constructor-only
+diagnostics perform bulk readbacks and waits; after construction, ordinary
+frame submit/redraw maps only the four-byte validity word and never waits.
+Sharing or caching successful qualifications across capture sessions is a
+later performance task, not part of this correctness checkpoint.
+Existing explicit diagnostic packed-map, alpha and uniform readbacks remain
+test/instrument-only; ordinary playback exposes no raw wgpu handle, mapped
+frame payload or frame-sized CPU transfer. Studio stays the frozen correctness
+oracle, and no optimization reverse engineering was performed.
+
 **Typed GPU-resident warm post-L1 join and atomic continuation, 2026-09-01,
 implementation branch only [PRIVATE AND UNSELECTED; FORCED-RADV QUALIFIED;
 NO SCENE, PERFORMANCE OR STUDIO-RE CLAIM]:** the exact warm L1 terminal now
@@ -40,36 +102,14 @@ frozen correctness oracle; no reverse engineering or optimization was
 performed.
 
 **Iced installed-resident draw adapter, 2026-09-01, implementation branch
-only [PRIVATE AND UNSELECTED; NO PRODUCER, PLAYBACK, PERFORMANCE OR PARITY
-CLAIM]:** `ScenePipeline` now owns one bounded
-`IcedDrawRetirements<InstalledOneXsDraw>` adapter and one mutex-protected
-staged `InstalledOneXsReady`. Every iced prepare checks retirement completion
-without waiting; the empty unselected owner returns before device polling. A
-future resident prepare can either move the capability from an atomic install
-or snapshot the capture root's exact ready allocation with a fresh permit,
-then write that draw's own retained `Reframe`. `ScenePipeline::draw` consumes
-the one-shot capability through `arm_and_draw` on iced's live render pass.
-Replacing a staged but never drawn capability drops its unused permit first.
-Retirement-full remains typed retryable backpressure and leaves no staged
-draw; terminal retirement failures keep their raw error and select no draw.
-
-The existing forced-RADV resident chain now exercises the adapter over two
-real render-pass submissions. It proves repeated redraw of the same installed
-allocation without a history recommit, explicit full backpressure with no
-draw, and updates to the installed picture's old retained uniform after a
-separate pipeline and uniform are created. The separate uniform remains
-unchanged. It also proves continued carrier/source retention through render
-retirement. Carrier-before-root install ordering is unchanged. The adapter is
-owned by one `ScenePipeline`; this checkpoint does not preserve it across
-pipeline destruction or recreation. A later capture-shared facade must keep
-retirement ownership alive across recreation so fail-closed pending payloads
-cannot accumulate decoder surfaces.
-
-No resident producer is connected to Scene, so normal selected ONE X2
-playback still uses its existing CPU-retained/direct-map path. This change
-does not touch warm-join code, expose a wgpu or dmabuf handle, wait in ordinary
-code, read back frame data, add a fallback or perform optimization reverse
-engineering. Studio remains the frozen correctness oracle.
+only [SUPERSEDED BY THE CAPTURE-SHARED FACADE ABOVE; PRIVATE AND UNSELECTED;
+NO PRODUCER, PLAYBACK, PERFORMANCE OR PARITY CLAIM]:** this earlier checkpoint
+established bounded render-pass retirement, one-shot iced staging and typed
+full backpressure. The capture-shared facade above replaces its pipeline-local
+ownership and shared-uniform assumptions with capture-stable retirement and
+draw-private picture resources. No resident producer is connected to Scene,
+so normal selected ONE X2 playback still uses its existing
+CPU-retained/direct-map path.
 
 **Allocation-identical installed warm prior and temporal continuation,
 2026-09-01, implementation branch only [PRIVATE AND UNSELECTED; THROUGH WARM

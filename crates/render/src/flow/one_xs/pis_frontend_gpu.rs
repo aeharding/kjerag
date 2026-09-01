@@ -1833,7 +1833,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_frame_early_drop_waits_for_latest_front_end_submission() {
+    fn prepared_frame_early_drop_never_waits_or_releases_source_owner() {
         let (device, queue, adapter) = match gpu() {
             Ok(gpu) => gpu,
             Err(why) => {
@@ -1866,16 +1866,15 @@ mod tests {
         let frame = front.prepare(belts, &masks).unwrap();
         assert_eq!(state.load(Ordering::SeqCst), 0);
         drop(frame);
-        assert_eq!(state.load(Ordering::SeqCst), 2);
-        assert_eq!(
-            answer.recv().unwrap(),
-            2,
-            "owner preceded latest front-end wait"
+        assert_eq!(state.load(Ordering::SeqCst), 0);
+        assert!(
+            matches!(answer.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "cancelled prepared frame returned its uncertain source owner"
         );
     }
 
     #[test]
-    fn sealed_front_end_refuses_foreign_context_before_gpu_work_and_waits_owner() {
+    fn sealed_front_end_refuses_foreign_context_and_quarantines_owner_without_wait() {
         let ((device, queue), (foreign_device, foreign_queue), adapter) = match gpu_pairs() {
             Ok(gpu) => gpu,
             Err(why) if std::env::var_os("KJERAG_REQUIRE_GPU").is_none() => {
@@ -1915,8 +1914,8 @@ mod tests {
         );
         assert!(block_on(source_scope.pop()).is_none());
         assert!(block_on(foreign_scope.pop()).is_none());
-        assert_eq!(state.load(Ordering::SeqCst), 2);
-        assert_eq!(answer.recv().unwrap(), 2, "owner preceded producer fence");
+        assert_eq!(state.load(Ordering::SeqCst), 0);
+        assert!(matches!(answer.try_recv(), Err(mpsc::TryRecvError::Empty)));
     }
 
     #[test]
@@ -1966,8 +1965,8 @@ mod tests {
         );
         assert!(block_on(source_scope.pop()).is_none());
         assert!(block_on(foreign_scope.pop()).is_none());
-        assert_eq!(state.load(Ordering::SeqCst), 2);
-        assert_eq!(answer.recv().unwrap(), 2, "owner preceded front-end fence");
+        assert_eq!(state.load(Ordering::SeqCst), 0);
+        assert!(matches!(answer.try_recv(), Err(mpsc::TryRecvError::Empty)));
     }
 
     fn no_patch_dynamic(

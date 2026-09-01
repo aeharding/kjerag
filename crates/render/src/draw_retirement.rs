@@ -137,6 +137,21 @@ impl<P> IcedDrawRetirements<P> {
         self.lock().poll()
     }
 
+    /// Collect callbacks after another owner has already driven this exact
+    /// device once. This is used by the capture-wide resident transaction so
+    /// its validity word and draw retirements share one nonblocking device
+    /// poll per redraw.
+    pub(crate) fn collect_after_external_poll(&self) -> Fallible<usize> {
+        self.lock().collect_completed()
+    }
+
+    /// A shared device poll failed while resident draws may still be in
+    /// flight. Keep every uncertain payload for process life without replacing
+    /// the failure site's original error.
+    pub(crate) fn quarantine_after_external_poll_failure(&self) {
+        self.lock().quarantine_all();
+    }
+
     pub(crate) fn arm_and_draw<'pass>(
         &self,
         permit: DrawPermit,
@@ -349,6 +364,13 @@ impl<P> DrawRetirements<P> {
             }
         }
 
+        self.collect_completed()
+    }
+
+    fn collect_completed(&mut self) -> Fallible<usize> {
+        if self.failed {
+            return Err("ONE X2 draw retirement is quarantined".into());
+        }
         let mut released = 0;
         let count = self.pending.len();
         for _ in 0..count {

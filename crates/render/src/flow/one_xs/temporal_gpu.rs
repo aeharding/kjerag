@@ -266,7 +266,7 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuColdPriorPublicLevelTwo {
 }
 
 impl GpuColdPriorPublicLevelTwo {
-    pub(super) fn new(context: OneXsGpuContext) -> Self {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn new(context: OneXsGpuContext) -> Self {
         Self {
             cadence: GpuPairedCadence::cold_root(),
             calculation: 0,
@@ -1267,7 +1267,7 @@ impl<C> GpuMotionTransaction<C> {
 }
 
 impl<K> GpuMotionTransaction<GpuGeometryBelts<K>> {
-    pub(super) fn submit_resident_cold0(
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn submit_resident_cold0(
         self,
         front_end: &GpuPisFrontEnd,
         solver: &GpuPisPipeline,
@@ -1290,7 +1290,7 @@ impl<K> GpuMotionTransaction<GpuGeometryBelts<K>> {
     /// terminals on this transaction's source submission lease. The caller
     /// supplies controls only; the prior-public allocations and cadence are
     /// derived from the reservation that already owns this motion result.
-    pub(super) fn submit_resident_warm(
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn submit_resident_warm(
         self,
         front_end: &GpuPisFrontEnd,
         solver: &GpuPisPipeline,
@@ -2083,7 +2083,7 @@ mod tests {
     }
 
     #[test]
-    fn test_only_successor_install_leaves_ready_unpublished_and_drop_retries_exactly() {
+    fn test_only_successor_install_retries_root_and_quarantines_dropped_source() {
         let (device, queue, adapter) = match gpu() {
             Ok(gpu) => gpu,
             Err(why) => {
@@ -2139,7 +2139,7 @@ mod tests {
             first.bytes()
         );
         drop(cold_frame);
-        assert_eq!(Arc::strong_count(&first_owner), 1);
+        assert_eq!(Arc::strong_count(&first_owner), 2);
 
         let second_flight = flight(2, 2);
         let second_reservation = capture.reserve(second_flight.frame.clone()).unwrap();
@@ -2162,7 +2162,7 @@ mod tests {
         assert!(warm_frame.level(Level::One).is_some());
         assert!(warm_frame.level(Level::Two).is_some());
         drop(warm_frame);
-        assert_eq!(Arc::strong_count(&dropped_owner), 1);
+        assert_eq!(Arc::strong_count(&dropped_owner), 2);
         {
             let state = capture.snapshot();
             assert_eq!(state.generation, generation + 1);
@@ -2249,11 +2249,11 @@ mod tests {
             assert!(!state.ready);
         }
         drop(frame);
-        assert_eq!(Arc::strong_count(&recovered_owner), 1);
+        assert_eq!(Arc::strong_count(&recovered_owner), 2);
     }
 
     #[test]
-    fn every_motion_boundary_retires_the_carrier_before_root_rollback() {
+    fn every_motion_cancellation_rolls_back_root_without_waiting_or_releasing_carrier() {
         #[derive(Clone, Copy, Debug)]
         enum Boundary {
             TransactionDrop,
@@ -2349,20 +2349,11 @@ mod tests {
                 }
             }
 
-            let (wait_observed, pending_observed, prior_strong_count) = answer.recv().unwrap();
-            assert_eq!(
-                wait_observed, 2,
-                "{boundary:?} released its carrier before poll"
-            );
             assert!(
-                pending_observed,
-                "{boundary:?} rolled the root back before retiring its carrier"
+                matches!(answer.try_recv(), Err(mpsc::TryRecvError::Empty)),
+                "{boundary:?} returned its uncertain source carrier"
             );
-            assert!(
-                prior_strong_count >= 3,
-                "{boundary:?} released its reservation's prior before carrier retirement"
-            );
-            assert_eq!(wait_state.load(Ordering::SeqCst), 2);
+            assert_eq!(wait_state.load(Ordering::SeqCst), 0);
             assert!(!capture.snapshot().pending);
         }
     }
@@ -2402,7 +2393,7 @@ mod tests {
                 .contains("crossed a different device or queue"),
             "{error}"
         );
-        assert_eq!(Arc::strong_count(&owner), 1);
+        assert_eq!(Arc::strong_count(&owner), 2);
         let state = capture.snapshot();
         assert_eq!(state.generation, 1);
         assert!(!state.pending);

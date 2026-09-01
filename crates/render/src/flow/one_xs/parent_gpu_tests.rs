@@ -482,7 +482,7 @@ fn parent_geometry_and_belts_share_one_pre_submission_owner_chain() {
     assert!(error.to_string().contains("in-flight frame"), "{error}");
     assert_eq!(resident.parent.encoded_transitions(), 1);
     drop(belts);
-    assert_eq!(Arc::strong_count(&source_owner), 1);
+    assert_eq!(Arc::strong_count(&source_owner), 2);
     assert!(!capture.snapshot().pending);
     eprintln!("ONE X2 GPU parent, geometry and belts retained one root reservation on {adapter}");
 }

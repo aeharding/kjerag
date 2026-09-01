@@ -3212,7 +3212,7 @@ mod tests {
             assert!(terminal.submit_l2_bridge(chosen_bridge, post).is_err());
             assert_eq!(
                 answer.recv().unwrap(),
-                2,
+                0,
                 "foreign {foreign_part} released post first"
             );
         }
@@ -3242,7 +3242,7 @@ mod tests {
         );
         assert_eq!(
             answer.recv().unwrap(),
-            2,
+            0,
             "foreign L1 solver released post first"
         );
         eprintln!("ONE X2 resident foreign-context drop order passed on {adapter}");

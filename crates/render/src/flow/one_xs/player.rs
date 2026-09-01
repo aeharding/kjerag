@@ -389,7 +389,7 @@ fn planar_flow(planes: &[f32], nodes: usize) -> Vec<[f32; 2]> {
         .collect()
 }
 
-fn validate_position(
+pub(super) fn validate_position(
     previous: Option<u64>,
     offered: u64,
     same_decode_epoch: bool,

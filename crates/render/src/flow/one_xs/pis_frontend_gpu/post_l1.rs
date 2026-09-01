@@ -978,7 +978,11 @@ impl<P: GpuPriorPublicLevelTwo> GpuFinalOperands<P> {
             .post
             .resident_identity()?
             .ok_or("ONE X2 final install lost its capture root identity")?;
-        let geometry = self.prepared.belts.lease.complete_into_owner()?;
+        let geometry = self
+            .prepared
+            .belts
+            .lease
+            .complete_into_owner_after_mapped_validity()?;
         let (source, geometry) = geometry.into_installed_parts();
         // Every refusal retains the root inside `self`; the separately
         // extracted source local is then dropped before `self`. Success takes
@@ -998,6 +1002,16 @@ impl<P: GpuPriorPublicLevelTwo> GpuFinalOperands<P> {
             },
             candidate,
         })
+    }
+}
+
+#[cfg(test)]
+impl<P: GpuPriorPublicLevelTwo> GpuFinalOperands<P> {
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn observe_final_completion(
+        &mut self,
+        completion: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    ) {
+        self.prepared.belts.lease.observe(completion);
     }
 }
 
@@ -1121,6 +1135,10 @@ impl<P: GpuPriorPublicLevelTwo> resident::Operands for GpuFinalOperands<P> {
             .belts
             .lease
             .submit_after(producer, |_| command)
+    }
+
+    fn acknowledge_mapped_completion(&mut self) -> Fallible<()> {
+        self.prepared.belts.lease.acknowledge_mapped_completion()
     }
 }
 

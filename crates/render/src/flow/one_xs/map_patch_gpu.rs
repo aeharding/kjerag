@@ -203,6 +203,7 @@ pub(super) mod resident {
             producer: &OneXsGpuContext,
             command: wgpu::CommandBuffer,
         ) -> Fallible<()>;
+        fn acknowledge_mapped_completion(&mut self) -> Fallible<()>;
     }
 }
 
@@ -390,33 +391,77 @@ pub(super) enum ValidityPoll<O: Operands> {
     Ready(GpuPackedMapFrame<O>),
 }
 
+pub(super) enum ClassifiedValidityPoll<O: Operands> {
+    Pending(PendingGpuPackedMapFrame<O>),
+    Ready(GpuPackedMapFrame<O>),
+    Refused(Box<dyn Error + Send + Sync>),
+    Quarantined(Box<dyn Error + Send + Sync>),
+}
+
 impl<O: Operands> PendingGpuPackedMapFrame<O> {
     /// Drive callbacks once without waiting and consume the result if ready.
     pub(super) fn poll(self) -> Fallible<ValidityPoll<O>> {
-        self.context
+        if let Err(error) = self
+            .context
             .device()
             .poll(wgpu::PollType::Poll)
-            .map_err(Box::<dyn std::error::Error + Send + Sync>::from)?;
-        match self.mapped.try_recv() {
-            Err(mpsc::TryRecvError::Empty) => Ok(ValidityPoll::Pending(self)),
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Err("ONE X2 GPU validity mapping callback disconnected".into())
+            .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
+        {
+            self.quarantine_uncertain();
+            return Err(error);
+        }
+        match self.finish_after_poll_classified() {
+            ClassifiedValidityPoll::Pending(pending) => Ok(ValidityPoll::Pending(pending)),
+            ClassifiedValidityPoll::Ready(ready) => Ok(ValidityPoll::Ready(ready)),
+            ClassifiedValidityPoll::Refused(error) | ClassifiedValidityPoll::Quarantined(error) => {
+                Err(error)
             }
-            Ok(Err(error)) => Err(error.into()),
-            Ok(Ok(())) => self.finish().map(ValidityPoll::Ready),
         }
     }
 
-    fn finish(self) -> Fallible<GpuPackedMapFrame<O>> {
+    /// Consume the callback state after the capture façade has already driven
+    /// this exact device once for the redraw.
+    pub(super) fn finish_after_poll(self) -> Fallible<ValidityPoll<O>> {
+        match self.finish_after_poll_classified() {
+            ClassifiedValidityPoll::Pending(pending) => Ok(ValidityPoll::Pending(pending)),
+            ClassifiedValidityPoll::Ready(ready) => Ok(ValidityPoll::Ready(ready)),
+            ClassifiedValidityPoll::Refused(error) | ClassifiedValidityPoll::Quarantined(error) => {
+                Err(error)
+            }
+        }
+    }
+
+    pub(super) fn finish_after_poll_classified(self) -> ClassifiedValidityPoll<O> {
+        match self.mapped.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => ClassifiedValidityPoll::Pending(self),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.quarantine_uncertain();
+                ClassifiedValidityPoll::Quarantined(
+                    "ONE X2 GPU validity mapping callback disconnected".into(),
+                )
+            }
+            Ok(Err(error)) => {
+                self.quarantine_uncertain();
+                ClassifiedValidityPoll::Quarantined(error.into())
+            }
+            Ok(Ok(())) => self.finish_classified(),
+        }
+    }
+
+    fn finish_classified(mut self) -> ClassifiedValidityPoll<O> {
+        if let Err(error) = self.upstream.acknowledge_mapped_completion() {
+            self.quarantine_uncertain();
+            return ClassifiedValidityPoll::Quarantined(error);
+        }
         let bytes = self.validity.slice(..).get_mapped_range();
         let status = u32::from_ne_bytes(bytes[..size_of::<u32>()].try_into().unwrap());
         drop(bytes);
         self.validity.unmap();
         let validity = decode_validity(status);
         if !matches!(validity, ResidentValidity::Success) {
-            return Err(Box::new(validity));
+            return ClassifiedValidityPoll::Refused(Box::new(validity));
         }
-        Ok(GpuPackedMapFrame {
+        ClassifiedValidityPoll::Ready(GpuPackedMapFrame {
             upstream: self.upstream,
             frame: self.frame,
             packed: self.packed,
@@ -426,6 +471,14 @@ impl<O: Operands> PendingGpuPackedMapFrame<O> {
             #[cfg(test)]
             input_readback: self.input_readback,
         })
+    }
+
+    /// A failed device poll or map callback cannot prove whether the latest
+    /// submission still references the decoder owner. Retain the complete
+    /// carrier/root aggregate for process life without invoking its blocking
+    /// exceptional Drop path.
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn quarantine_uncertain(self) {
+        std::mem::forget(self);
     }
 
     #[cfg(test)]
@@ -709,6 +762,10 @@ impl<P> GpuPackedMapFrame<GpuFinalOperands<P>>
 where
     P: GpuPriorPublicLevelTwo + Send + Sync + 'static,
 {
+    pub(super) fn frame_stamp(&self) -> &FrameStamp {
+        &self.frame
+    }
+
     pub(super) fn install_context(&self) -> OneXsGpuContext {
         self.context.clone()
     }
@@ -1477,6 +1534,10 @@ impl resident::Operands for TestResidentOperands {
             return Err(error.into());
         }
         self.context.queue().submit([command]);
+        Ok(())
+    }
+
+    fn acknowledge_mapped_completion(&mut self) -> Fallible<()> {
         Ok(())
     }
 }
