@@ -21,6 +21,18 @@ shader mutations. The remaining seam is the post-L1 resident producer's
 implementation of the sealed operand copier and single-lease submit method;
 there is deliberately no second context, lease or CPU reconstruction route.
 
+The authenticated receipt in
+`docs/research/gpu-final-map-context-qualification.md` binds clean code commit
+`e620a4cae27f1a51b8998328620594765c277dd7`, tree
+`b7ce05854f507824170c1364ac4bddbc54b110c5`, the fresh retained test binary
+before and after execution, exact forced-Vulkan/RADV command and environment,
+ICD, adapter/driver, source hashes, timestamps and exit status. Its sealed
+pre-run receipt hashes to `98be0bc640364941ab06ba3d5a53e07b07e4bea9155ee5f4ab1f717d9b9d9609`,
+the complete 4/4 run log to
+`34fe395b5f996a26a4b1e5bbc6943207294c03e723d04a556c41c98216df3c86`,
+and the post-run receipt to
+`dc1039b41b68df250f0e9bb10a6e05584c64094b2ab8067d9bf6636eb407f777`.
+
 **Sealed resident GPU-prepared PIS checkpoint, 2026-09-01, implementation
 branch only [UNSELECTED; L1/L2 AND BOTH DIRECTIONS; NO SCENE OR INTEGRATION
 READINESS CLAIM]:** the qualified paired GPU PIS kernel has a concrete
