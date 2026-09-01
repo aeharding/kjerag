@@ -71,6 +71,12 @@ pub mod l2_seed;
 /// The selected bilateral map materializer.
 pub mod map_patch;
 
+/// Device-resident final bilateral-map materializer.
+///
+/// Its input boundary is sealed to the selected ONE X2 resident chain. Scene
+/// does not consume the resulting opaque map token yet.
+pub(crate) mod map_patch_gpu;
+
 /// The selected finite-coordinate pre-filter map merge.
 pub mod base_map;
 
