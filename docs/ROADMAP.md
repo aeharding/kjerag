@@ -9,9 +9,9 @@ real paired ONE X2 delivery through dmabuf import, the exact prepared retained
 maps, compact GPU solver belts, capture-owned scalar commit, direct-map upload
 and scene acknowledgement. Its adjacent-frame arm substitutes an opaque
 delivery identity with the same reported index and timestamp after GPU submit,
-proves the receipt is rejected while the completed owner and direct draw remain
-unchanged with no legacy fallback, then proves the ordinary production entry
-point can commit that exact successor. It runs only when
+proves the receipt is rejected while the completed owner and bound direct-map
+resource remain unchanged with no legacy fallback, then proves the ordinary
+production entry point can commit that exact successor. It runs only when
 `KJERAG_ONE_X2_TEST_MEDIA` names either half of a paired capture and a dmabuf
 Vulkan device is available, and its explicit invocation goes through
 `scripts/quiet.sh`; the normal GPU arithmetic twin remains the

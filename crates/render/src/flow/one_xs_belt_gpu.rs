@@ -821,6 +821,16 @@ mod tests {
                 return;
             }
         };
+        if let Err(error) = GpuSolverBeltPipeline::new(&device, &queue) {
+            assert!(
+                std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                "KJERAG_REQUIRE_GPU is set and {adapter} fails the baseline ONE X2 GPU qualification: {error}"
+            );
+            eprintln!(
+                "skipping production-entry mutation on an adapter that fails baseline qualification: {adapter}: {error}"
+            );
+            return;
+        }
         let broken = SHADER.replacen(
             "witness_words[0] = bitcast<u32>(uv.x);",
             "witness_words[0] = bitcast<u32>(uv.x) + 1u;",
