@@ -398,8 +398,9 @@ enum OneXsPreparation {
 /// The exact old owner and prepared geometry leased out of one capture.
 ///
 /// Future staged GPU PIS work may retain this value across all of its waits.
-/// Until [`Self::commit_with_solver`] succeeds, aborting it restores the exact box
-/// that was installed before the reservation; no estimator clone is involved.
+/// Until [`Self::commit_prepared_with_solver`] succeeds, aborting it restores
+/// the exact box that was installed before the reservation; no estimator clone
+/// is involved.
 struct OneXsReservation {
     capture: Arc<OneXsCapture>,
     flight: GpuPisFlight,
@@ -700,9 +701,10 @@ impl OneXsReservation {
 
     /// Run a fallible paired solver while retaining the outer reservation.
     ///
-    /// `FrameOwner::commit_with_solver` restores the exact old estimator on
-    /// every solver and stamp error. Returning this reservation lets the
-    /// capture restore that owner and its allocation-identical ready map.
+    /// `FrameOwner::commit_prepared_with_solver` restores the exact old
+    /// estimator on every solver and stamp error. Returning this reservation
+    /// lets the capture restore that owner and its allocation-identical ready
+    /// map.
     fn commit_prepared_with_solver<S: PairedPisSolver>(
         mut self,
         controls: PairedControlInputs,

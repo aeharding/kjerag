@@ -486,12 +486,6 @@ pub(crate) trait PairedPisSolver {
     fn solve(&mut self, request: PairedSolveRequest) -> Result<PairedPatchGrids, Self::Error>;
 }
 
-/// Temporary adapter for the current CPU-prepared producer boundary.
-///
-/// This is deliberately separate from [`PairedPisSolver`]. The eventual GPU
-/// estimator frame implements the dynamic solver contract directly and owns
-/// its device preparation from construction; it must not accept, ignore or
-/// redundantly rebuild these CPU `LevelInputs`.
 /// A returned sparse grid did not belong to its submitted direction/level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SolveStampError {

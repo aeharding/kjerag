@@ -265,7 +265,7 @@ impl PairOwner {
     }
 }
 
-/// A failed cold start with both consumed arguments returned intact.
+/// A prepared advance rejected before mutating the borrowed owner.
 pub(crate) enum AdvanceFailure<E> {
     Continuity(ContinuityError),
     Solver(PairSolveError<E>),

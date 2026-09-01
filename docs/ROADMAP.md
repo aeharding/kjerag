@@ -105,9 +105,10 @@ typed prepared source models as the temporary producer boundary, then consume
 only fallibly admitted directional `PatchGrid` results from the GPU kernel.
 Each reservation mints an exact generation plus opaque `FrameStamp`; each
 stage completion must return that complete flight and `PairSolveStage` before
-the typed grids can enter `commit_with_solver`. Pipeline, readback, receipt and
-solver-stamp failures occur before commit, surface their original error and
-restore the allocation-identical old owner and ready map without a CPU retry.
+the typed grids can enter `commit_prepared_with_solver`. Pipeline, readback,
+receipt and solver-stamp failures occur before commit, surface their original
+error and restore the allocation-identical old owner and ready map without a
+CPU retry.
 An install failure occurs after the scalar owner has advanced, so it instead
 keeps the prior ready display and makes the lineage terminal while retaining
 the advanced owner only in its exact slot or quarantine. It does not falsely
