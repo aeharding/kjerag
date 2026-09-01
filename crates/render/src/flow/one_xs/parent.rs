@@ -49,7 +49,7 @@ pub struct ParentMapBuilder {
 }
 
 /// Exact binary32 inputs shared by the scalar oracle and resident GPU stage.
-pub(super) struct PreparedParentMap {
+pub(in crate::flow) struct PreparedParentMap {
     pub(super) parameters: LensPair<MetalCalcMapParams>,
     pub(super) poses: [[f32; 4]; POSE_COUNT],
 }
@@ -116,6 +116,24 @@ impl PreparedParentMap {
             a: diagnostic_metal_calc_map(&self.parameters.a, &self.poses),
             b: diagnostic_metal_calc_map(&self.parameters.b, &self.poses),
         }
+    }
+
+    /// Native `sin`/`atan` are not a bit-portable GPU contract. Selected GPU
+    /// playback therefore admits only the same near-quaternion linear branch
+    /// that has been qualified bit-for-bit on the active adapter.
+    pub(super) fn require_linear_gpu_slerp(&self) -> Result<(), ParentMapError> {
+        if self.poses.windows(2).any(|pair| {
+            let dot = pair[0][0] * pair[1][0]
+                + pair[0][1] * pair[1][1]
+                + pair[0][2] * pair[1][2]
+                + pair[0][3] * pair[1][3];
+            dot.abs() <= 0.9995
+        }) {
+            return Err(fail(
+                "selected ONE X2 GPU parent poses require unqualified nonlinear interpolation",
+            ));
+        }
+        Ok(())
     }
 }
 

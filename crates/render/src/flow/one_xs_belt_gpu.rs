@@ -13,10 +13,11 @@ use std::sync::mpsc;
 use std::{error::Error, fmt};
 
 use super::one_xs::gpu_context::OneXsGpuContext;
+use super::one_xs::parent_gpu::{EncodedParentMaps, GpuParentMapPipeline};
 use super::one_xs::pis::gpu::GpuPisFlight;
 use super::one_xs::pis_frontend_gpu::{GpuPisFrontEnd, GpuPreparedFrame};
 use super::one_xs::temporal::{BlurredBelts, gaussian_blur};
-use super::one_xs::{Lens, LensPair};
+use super::one_xs::{Lens, LensPair, ParentMapBuilder};
 use super::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sample_source_belts};
 use crate::Fallible;
 
@@ -1112,6 +1113,46 @@ pub(crate) struct GpuBlurredBelts<K> {
 }
 
 impl<K> GpuBlurredBelts<K> {
+    /// Bind one parent pair to this exact generation and private frame stamp.
+    /// Identity and context refusals precede parent allocation and encoding.
+    #[allow(dead_code)] // selected geometry transition lands on the integration branch
+    pub(in crate::flow) fn produce_parent_maps(
+        mut self,
+        pipeline: &GpuParentMapPipeline,
+        builder: &ParentMapBuilder,
+        orientation: &kjerag_meta::OrientationTrack,
+        expected: &GpuPisFlight,
+        readout: kjerag_meta::Readout,
+    ) -> Fallible<GpuResidentParentMaps<K>> {
+        if self.flight.as_ref() != Some(expected) {
+            return Err("ONE X2 GPU parent frame does not match its resident source flight".into());
+        }
+        let context = pipeline.context_for_resident_transition();
+        self.lease.validate_provenance(context)?;
+        let prepared = pipeline.prepare_resident_transition(
+            builder,
+            orientation,
+            expected.frame.timestamp(),
+            readout,
+        )?;
+        let mut encoded = pipeline.encode_resident_transition(&prepared);
+        self.lease
+            .submit_after(context, |_| encoded.take_command())?;
+        let flight = self
+            .flight
+            .take()
+            .expect("GPU parent maps transfer their flight exactly once");
+        Ok(GpuResidentParentMaps {
+            flight,
+            lease: self.lease,
+            _packed: self.packed,
+            _producer_map: self._producer_map,
+            _horizontal: self._horizontal,
+            _belt_resources: self._resources,
+            encoded,
+        })
+    }
+
     /// The only resident producer-to-front-end transition. Context refusal
     /// happens before allocation, binding, encoding or submission; success
     /// moves the exact flight and the sole linear lease into one opaque frame.
@@ -1150,6 +1191,49 @@ impl<K> GpuBlurredBelts<K> {
         state: std::sync::Arc<std::sync::atomic::AtomicU8>,
     ) {
         self.lease.observe(state);
+    }
+}
+
+/// Frame-bound parent maps plus the sole inherited source submission lease.
+/// There is intentionally no buffer, context, queue, or submission accessor;
+/// a geometry owner must add another purpose-specific consuming transition.
+#[must_use = "the GPU-resident parent maps have not been consumed"]
+#[allow(dead_code)] // consumed by the coming resident geometry transition
+pub(crate) struct GpuResidentParentMaps<K> {
+    flight: GpuPisFlight,
+    lease: SubmissionLease<K>,
+    _packed: wgpu::Buffer,
+    _producer_map: wgpu::Buffer,
+    _horizontal: wgpu::Buffer,
+    _belt_resources: wgpu::BindGroup,
+    encoded: EncodedParentMaps,
+}
+
+#[cfg(test)]
+impl<K> GpuResidentParentMaps<K> {
+    pub(crate) fn flight(&self) -> &GpuPisFlight {
+        &self.flight
+    }
+
+    pub(crate) fn read_qualification(mut self, context: &OneXsGpuContext) -> Fallible<Vec<u32>> {
+        self.lease.validate_provenance(context)?;
+        let (command, staging) = self.encoded.encode_qualification_readback(context.device());
+        self.lease.submit_after(context, |_| command)?;
+        let slice = staging.slice(..);
+        let (sender, receiver) = mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |answer| {
+            let _ = sender.send(answer);
+        });
+        self.lease.complete()?;
+        receiver.recv()??;
+        let mapped = slice.get_mapped_range();
+        let words = mapped
+            .chunks_exact(4)
+            .map(|bytes| u32::from_ne_bytes(bytes.try_into().unwrap()))
+            .collect();
+        drop(mapped);
+        staging.unmap();
+        Ok(words)
     }
 }
 

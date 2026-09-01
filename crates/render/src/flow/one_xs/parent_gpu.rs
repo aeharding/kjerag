@@ -26,11 +26,38 @@ const OUTPUT_WORDS: usize = 2 * LENS_OUTPUT_WORDS;
 /// Its storage and device identity are deliberately private. The GPU geometry
 /// stage will consume this token directly once the shared submission lease is
 /// available on the integration branch.
-pub(crate) struct ResidentParentMaps {
-    /// Visible only to the enclosing ONE X2 resident chain.
-    pub(super) context: OneXsGpuContext,
-    /// A-then-B row-major float2 bits, never exposed outside the chain.
-    pub(super) storage: wgpu::Buffer,
+pub(in crate::flow) struct EncodedParentMaps {
+    command: Option<wgpu::CommandBuffer>,
+    _input: wgpu::Buffer,
+    storage: wgpu::Buffer,
+    _resources: wgpu::BindGroup,
+}
+
+impl EncodedParentMaps {
+    pub(in crate::flow) fn take_command(&mut self) -> wgpu::CommandBuffer {
+        self.command
+            .take()
+            .expect("encoded parent maps submit exactly once")
+    }
+
+    #[cfg(test)]
+    pub(in crate::flow) fn encode_qualification_readback(
+        &self,
+        device: &wgpu::Device,
+    ) -> (wgpu::CommandBuffer, wgpu::Buffer) {
+        let size = (OUTPUT_WORDS * 4) as u64;
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 parent qualification readback"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ONE X2 parent qualification readback"),
+        });
+        encoder.copy_buffer_to_buffer(&self.storage, 0, &staging, 0, size);
+        (encoder.finish(), staging)
+    }
 }
 
 /// Reusable pipeline for the selected parent arithmetic on one GPU context.
@@ -38,10 +65,16 @@ pub(crate) struct GpuParentMapPipeline {
     context: OneXsGpuContext,
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
+    #[cfg(test)]
+    encode_count: std::sync::atomic::AtomicUsize,
 }
 
 impl GpuParentMapPipeline {
     pub(crate) fn new(context: OneXsGpuContext) -> Fallible<Self> {
+        Self::new_with_shader(context, shader_source())
+    }
+
+    fn new_with_shader(context: OneXsGpuContext, shader: String) -> Fallible<Self> {
         let device = context.device();
         let storage = |binding, read_only| wgpu::BindGroupLayoutEntry {
             binding,
@@ -62,7 +95,6 @@ impl GpuParentMapPipeline {
             bind_group_layouts: &[&layout],
             immediate_size: 0,
         });
-        let shader = shader_source();
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ONE X2 GPU parent maps"),
             source: wgpu::ShaderSource::Wgsl(shader.into()),
@@ -79,22 +111,36 @@ impl GpuParentMapPipeline {
             context,
             pipeline,
             layout,
+            #[cfg(test)]
+            encode_count: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
-    /// Submit one pair without waiting, polling, mapping, or reading it back.
-    pub(crate) fn produce(
+    pub(in crate::flow) fn context_for_resident_transition(&self) -> &OneXsGpuContext {
+        &self.context
+    }
+
+    /// Prepare the sealed scalar inputs. Submission belongs to the inherited
+    /// resident-frame lease, never to this arithmetic module.
+    pub(in crate::flow) fn prepare_resident_transition(
         &self,
         builder: &ParentMapBuilder,
         orientation: &OrientationTrack,
         center: Duration,
         readout: Readout,
-    ) -> Result<ResidentParentMaps, ParentMapError> {
+    ) -> Result<PreparedParentMap, ParentMapError> {
         let prepared = builder.prepare(orientation, center, readout)?;
-        Ok(self.dispatch(&prepared))
+        prepared.require_linear_gpu_slerp()?;
+        Ok(prepared)
     }
 
-    fn dispatch(&self, prepared: &PreparedParentMap) -> ResidentParentMaps {
+    pub(in crate::flow) fn encode_resident_transition(
+        &self,
+        prepared: &PreparedParentMap,
+    ) -> EncodedParentMaps {
+        #[cfg(test)]
+        self.encode_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let words = pack(prepared);
         debug_assert_eq!(words.len(), INPUT_WORDS);
         let device = self.context.device();
@@ -139,11 +185,17 @@ impl GpuParentMapPipeline {
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(25, 13, 2);
         }
-        self.context.queue().submit([encoder.finish()]);
-        ResidentParentMaps {
-            context: self.context.clone(),
+        EncodedParentMaps {
+            command: Some(encoder.finish()),
+            _input: input,
             storage: output,
+            _resources: bind_group,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn encoded_transitions(&self) -> usize {
+        self.encode_count.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

@@ -8,20 +8,33 @@ only [BIT-EXACT ON FORCED RADV; OPAQUE OUTPUT; NO SCENE WIRING]:** the frozen
 per-frame parent preparation now has one paired compute producer on the shared
 `OneXsGpuContext`. Per-frame uploads contain only the two 33-word selected
 model/control packs and 51 sealed pose quaternions. The complete two-lens
-100-by-200 float2 result remains one private A-then-B storage buffer; the
-ordinary producer submits and returns without copy, map, poll or wait.
+100-by-200 float2 result remains one private A-then-B storage buffer. Parent
+production is now a purpose-specific consuming transition from exact
+`GpuBlurredBelts`: it verifies the private `FrameStamp`, generation and shared
+GPU context before encoding, advances the inherited `SubmissionLease` to the
+parent command, and returns an opaque frame-bound token retaining that lease
+and all source resources. It neither submits independently nor exposes a
+buffer, context, queue or submission index. The ordinary path has no copy,
+map, poll or wait.
 
 The WGSL retains the scalar operation order with explicitly materialized
 binary32 operations, correctly rounded software division and integer square
 root. Fixed raster-angle transcendental results are compiled from the same
 frozen scalar expressions into the shader, rather than uploaded per frame.
 On forced RADV PHOENIX, qualification compared all 80,000 output words for a
-cold dispatch, warm pipeline reuse, a one-microsecond clock mutation and a
-live orientation mutation: all four pairs were bit-identical to the CPU
-oracle. Readback exists only in the test module. This stage does not wire
-Scene or select playback. Its remaining seam is transfer of the opaque token
-into the resident geometry/mapMerge chain under that chain's inherited
-submission lease; there is no public raw-buffer or detached submission API.
+cold dispatch, warm pipeline reuse, a one-microsecond clock mutation, a live
+orientation mutation, early/late endpoint-clamp cases and a changed readout:
+all seven pairs were bit-identical to the CPU oracle and both live mutations
+changed the oracle. The admission gate refuses nonlinear quaternion slerp,
+whose native `sin`/`atan` operations are not qualified as bit-portable, before
+encoding. The same pre-encode boundary refuses a same-generation/readable-index
+impostor with a different private frame identity and a foreign GPU context.
+Qualification rejects planted quaternion-order, raster-orientation, scan-axis,
+iteration-count, movement-threshold, FOV, A/B-base, pose-layout, division,
+square-root and rounding mutations. Readback exists only in test code. This
+stage does not wire Scene or select playback. Its remaining seam is a geometry
+owner consuming the opaque token directly into resident geometry/mapMerge;
+there is no public raw-buffer or detached submission API.
 
 **Sealed resident GPU-prepared PIS checkpoint, 2026-09-01, implementation
 branch only [UNSELECTED; L1/L2 AND BOTH DIRECTIONS; NO SCENE OR INTEGRATION
