@@ -1606,11 +1606,15 @@ mod tests {
 
     #[test]
     fn submission_lease_drop_during_outer_unwind_is_process_safe() {
-        let helper = "flow::one_xs_belt_gpu::tests::submission_lease_double_unwind_child";
+        let module = module_path!();
+        let module = module
+            .split_once("::")
+            .map_or(module, |(_, test_path)| test_path);
+        let helper = format!("{module}::submission_lease_double_unwind_child");
         let output = std::process::Command::new(
             std::env::current_exe().expect("the test harness has an executable path"),
         )
-        .args(["--exact", helper, "--nocapture"])
+        .args(["--exact", &helper, "--nocapture"])
         .env(DOUBLE_UNWIND_CHILD, "1")
         .output()
         .expect("could not start the isolated double-unwind helper");
