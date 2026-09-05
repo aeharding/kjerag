@@ -233,7 +233,7 @@ pub(crate) struct GpuPreparedFrame<K> {
 /// It contains no prepared buffer, base, flight, queue or submission handle.
 pub(crate) struct PreparedPisDispatch<'a> {
     pub(crate) stage: PairSolveStage,
-    pub(crate) pipeline: &'a wgpu::ComputePipeline,
+    pub(crate) pipeline: &'a crate::flow::one_xs::pis::gpu::GpuPisPipeline,
     pub(crate) layout: &'a wgpu::BindGroupLayout,
     pub(crate) u32s: Vec<u32>,
     pub(crate) f32s: Vec<f32>,
@@ -469,15 +469,9 @@ impl<K> GpuPreparedFrame<K> {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("ONE X2 resident paired GPU PIS"),
                 });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ONE X2 resident paired GPU PIS directions"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(dispatch.pipeline);
-            pass.set_bind_group(0, &resources, &[]);
-            pass.dispatch_workgroups(2, 1, 1);
-        }
+        dispatch
+            .pipeline
+            .encode(&mut encoder, &resources, dispatch.stage.level());
         self.belts
             .lease
             .submit_after(&self.context, |_| encoder.finish())?;

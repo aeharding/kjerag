@@ -564,6 +564,7 @@ impl Player {
     /// The frame that belongs on screen at `now`, or `None` when the picture
     /// must not change. Call it on every redraw; it is the whole clock.
     pub fn pump(&mut self, now: Instant) -> Fallible<Option<Arc<Frames>>> {
+        let sequential = self.presenter.policy == PresentationPolicy::EveryFrame;
         let (notes, failure, ended, replay_target) = (
             &self.notes,
             &mut self.failure,
@@ -576,10 +577,11 @@ impl Player {
             loop {
                 match notes.try_recv() {
                     // Ordinary scrub landings may show an overtaken epoch as
-                    // forward progress. A causal replay may not: its fresh
-                    // frame-zero owner belongs only to the newest restart.
+                    // forward progress. A sequential stitch consumer may not:
+                    // its fresh owner belongs only to the newest restart,
+                    // whether replaying from zero or seeking directly.
                     Ok(Note::Frames(tag, _))
-                        if replay_target.is_some() && !epochs.is_newest(tag) =>
+                        if (sequential || replay_target.is_some()) && !epochs.is_newest(tag) =>
                     {
                         continue;
                     }
@@ -1788,6 +1790,31 @@ mod tests {
                 (3000, Accuracy::Exact),
             ]
         );
+    }
+
+    #[test]
+    fn sequential_seek_rejects_superseded_drag_landings() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::EveryFrame)
+        );
+        bench.player.seek(Cue::Index(1000), Accuracy::Keyframe);
+        bench.player.seek(Cue::Index(3000), Accuracy::Keyframe);
+        bench.player.seek(Cue::Index(3000), Accuracy::Exact);
+        let now = Instant::now();
+        bench.decoded(1, 990);
+        bench.decoded(2, 2990);
+        assert_eq!(
+            bench.redraw(now),
+            None,
+            "old drag landings cannot initialize the new stitch root"
+        );
+        assert!(bench.player.is_seeking());
+        bench.decoded(3, 3000);
+        assert_eq!(bench.redraw(now), Some(3000));
+        assert!(!bench.player.is_seeking());
     }
 
     /// A seek is a request to leave the position on screen, and the read that

@@ -33,14 +33,20 @@ struct LaneScore {
 @group(0) @binding(6) var<storage, read> prepared_weight_bits: array<u32>;
 @group(0) @binding(7) var<storage, read> prepared_patch_sum_bits: array<u32>;
 @group(0) @binding(8) var<storage, read> prepared_model_bits: array<u32>;
+struct Wavefront { phase: u32, sweep: u32, diagonal: u32, unused: u32 }
+@group(1) @binding(0) var<uniform> wave: Wavefront;
 var<private> word_base: u32;
 var<private> float_base: u32;
 var<private> output_base: u32;
-var<workgroup> lane_sums: array<f32, 32>;
-var<workgroup> lane_square_sums: array<f32, 32>;
-var<workgroup> lane_survivors: array<u32, 32>;
-var<workgroup> selected_seeds: array<vec2<f32>, 8>;
-var<workgroup> selected_scores: array<f32, 8>;
+var<workgroup> lane_sums: array<f32, 16>;
+var<workgroup> lane_square_sums: array<f32, 16>;
+var<workgroup> lane_survivors: array<u32, 16>;
+var<workgroup> candidate_seeds: array<vec2<f32>, 4>;
+var<workgroup> candidate_present: array<u32, 4>;
+var<workgroup> selected_seeds: array<vec2<f32>, 1>;
+var<workgroup> selected_scores: array<f32, 1>;
+var<workgroup> descent_values: array<vec4<f32>, 64>;
+var<workgroup> descent_active: array<u32, 1>;
 
 const PATCH_SIZE = 8u;
 const PATCH_STRIDE = 3u;
@@ -302,7 +308,10 @@ fn source_model(cell: u32) -> SourceModel {
     );
 }
 
-fn descent_step(cell: u32, flow: vec2<f32>, model: SourceModel) -> DescentStep {
+// Sampling has no cross-pixel dependency. The sixteen lanes prepare its
+// values together; one lane retains the original row-major FMA accumulation.
+fn prepare_descent_samples(cell: u32, flow: vec2<f32>, slot: u32, lane: u32, enabled: bool) {
+    if !enabled { return; }
     let patch_row = cell / patch_cols();
     let patch_col = cell % patch_cols();
     let source_row = patch_row * PATCH_STRIDE;
@@ -319,36 +328,49 @@ fn descent_step(cell: u32, flow: vec2<f32>, model: SourceModel) -> DescentStep {
     var reciprocal_sum = 0.0;
     if patch_sum > 0.0 { reciprocal_sum = div_rn(1.0, patch_sum); }
     let weighted = local_word(word(13u) + patch_row) != 0u;
+    for (var pixel = lane; pixel < 64u; pixel += 16u) {
+        let row = pixel / 8u;
+        let col = pixel % 8u;
+        let source_at = (source_row + row) * cols() + source_col + col;
+        if mask_at(source_mask_offset, source_at) == 0u || mask_at(target_mask_offset, target_index(plan, row, col)) == 0u {
+            descent_values[slot * 64u + pixel] = vec4<f32>(0.0);
+            continue;
+        }
+        let row0 = clamped_index(plan.base_row + i32(row), rows());
+        let col0 = clamped_index(plan.base_col + i32(col), cols());
+        let row1 = clamped_index(plan.base_row + i32(row) + 1, rows());
+        let col1 = clamped_index(plan.base_col + i32(col) + 1, cols());
+        let top_right = mul_rn(image_at(target_offset, row0, col1), plan.coefficients.y);
+        let top = fma_rn(image_at(target_offset, row0, col0), plan.coefficients.x, top_right);
+        let bottom_left = fma_rn(image_at(target_offset, row1, col0), plan.coefficients.z, top);
+        let target_sample = fma_rn(image_at(target_offset, row1, col1), plan.coefficients.w, bottom_left);
+        let difference = sub_rn(target_sample, image_at(source_offset, source_row + row, source_col + col));
+        var residual = difference;
+        if weighted {
+            let normalized_weight = mul_rn(weight_at(source_at), reciprocal_sum);
+            residual = mul_rn(difference, normalized_weight);
+        }
+        let gradient = gradient_at(source_at);
+        descent_values[slot * 64u + pixel] = vec4<f32>(residual, gradient.x, gradient.y, 1.0);
+    }
+}
+
+fn accumulate_descent(model: SourceModel, slot: u32) -> DescentStep {
     var sum = 0.0;
     var sum_sq = 0.0;
     var rhs_col = 0.0;
     var rhs_row = 0.0;
     var survivors = 0u;
-    for (var row = 0u; row < PATCH_SIZE; row++) {
-        for (var col = 0u; col < PATCH_SIZE; col++) {
-            let source_at = (source_row + row) * cols() + source_col + col;
-            if mask_at(source_mask_offset, source_at) == 0u || mask_at(target_mask_offset, target_index(plan, row, col)) == 0u { continue; }
-            let row0 = clamped_index(plan.base_row + i32(row), rows());
-            let col0 = clamped_index(plan.base_col + i32(col), cols());
-            let row1 = clamped_index(plan.base_row + i32(row) + 1, rows());
-            let col1 = clamped_index(plan.base_col + i32(col) + 1, cols());
-            let top_right = mul_rn(image_at(target_offset, row0, col1), plan.coefficients.y);
-            let top = fma_rn(image_at(target_offset, row0, col0), plan.coefficients.x, top_right);
-            let bottom_left = fma_rn(image_at(target_offset, row1, col0), plan.coefficients.z, top);
-            let target_sample = fma_rn(image_at(target_offset, row1, col1), plan.coefficients.w, bottom_left);
-            let difference = sub_rn(target_sample, image_at(source_offset, source_row + row, source_col + col));
-            var residual = difference;
-            if weighted {
-                let normalized_weight = mul_rn(weight_at(source_at), reciprocal_sum);
-                residual = mul_rn(difference, normalized_weight);
-            }
-            let gradient = gradient_at(source_at);
-            rhs_col = fma_rn(residual, gradient.x, rhs_col);
-            sum = add_rn(sum, residual);
-            rhs_row = fma_rn(residual, gradient.y, rhs_row);
-            sum_sq = fma_rn(residual, residual, sum_sq);
-            survivors += 1u;
-        }
+    for (var pixel = 0u; pixel < 64u; pixel++) {
+        let sample = descent_values[slot * 64u + pixel];
+        if sample.w == 0.0 { continue; }
+        let residual = sample.x;
+        let gradient = sample.yz;
+        rhs_col = fma_rn(residual, gradient.x, rhs_col);
+        sum = add_rn(sum, residual);
+        rhs_row = fma_rn(residual, gradient.y, rhs_row);
+        sum_sq = fma_rn(residual, residual, sum_sq);
+        survivors += 1u;
     }
     if survivors == 0u {
         return DescentStep(vec2<f32>(0.0), SENTINEL);
@@ -476,117 +498,138 @@ fn write_qualification_probes(local_index: u32) {
     }
 }
 
-@compute @workgroup_size(32)
+// Each patch's four candidates are independent until the ordered selection.
+// Give each candidate the same four reduction lanes as before, concurrently.
+@compute @workgroup_size(16)
 fn solve_pis_wavefront(
     @builtin(workgroup_id) group: vec3<u32>,
-    @builtin(local_invocation_index) local_index: u32,
+    @builtin(local_invocation_index) local_lane: u32,
 ) {
+    let local_index = local_lane;
     if group.x >= words[1] || words[0] != 0x50495301u { return; }
     let descriptor = 2u + 3u * group.x;
     word_base = words[descriptor];
     float_base = words[descriptor + 1u];
     output_base = words[descriptor + 2u];
-    write_qualification_probes(local_index);
 
-    let slot = local_index >> 2u;
+    let slot = 0u;
+    let candidate = (local_index >> 2u) & 3u;
     let lane = local_index & 3u;
-    for (var cell = local_index; cell < patches(); cell += 32u) {
-        store_flow(cell, flow_at(word(18u), cell));
+    if wave.phase == 0u {
+        if group.y == 0u { write_qualification_probes(local_index); }
+        for (var cell = group.y * 16u + local_index; cell < patches(); cell += 128u) {
+            store_flow(cell, flow_at(word(18u), cell));
+        }
+        return;
     }
-    storageBarrier();
-    workgroupBarrier();
 
     let diagonal_count = patch_rows() + patch_cols() - 1u;
-    for (var sweep = 0u; sweep < 2u; sweep++) {
-        for (var diagonal_ordinal = 0u; diagonal_ordinal < diagonal_count; diagonal_ordinal++) {
-            let diagonal = select(diagonal_ordinal, diagonal_count - 1u - diagonal_ordinal, sweep != 0u);
-            var col_min = 0u;
-            if diagonal >= patch_rows() { col_min = diagonal - (patch_rows() - 1u); }
-            let col_max = min(patch_cols() - 1u, diagonal);
-            let active_count = col_max - col_min + 1u;
-            let participating = slot < active_count;
-            let col = col_min + slot;
-            let row = diagonal - col;
-            let cell = row * patch_cols() + col;
+    let sweep = wave.sweep;
+    let diagonal_ordinal = wave.diagonal;
+    let diagonal = select(diagonal_ordinal, diagonal_count - 1u - diagonal_ordinal, sweep != 0u);
+    var col_min = 0u;
+    if diagonal >= patch_rows() { col_min = diagonal - (patch_rows() - 1u); }
+    let col_max = min(patch_cols() - 1u, diagonal);
+    let active_count = col_max - col_min + 1u;
+    let participating = group.y < active_count;
+    let col = col_min + group.y;
+    let row = diagonal - col;
+    let cell = row * patch_cols() + col;
 
-            if participating && lane == 0u {
-                selected_seeds[slot] = stored_flow(cell);
-                selected_scores[slot] = SENTINEL;
+    var candidate_flow = vec2<f32>(0.0);
+    var present = participating;
+    if participating {
+        if candidate == 0u {
+            candidate_flow = stored_flow(cell);
+        } else if candidate == 1u {
+            present = word(6u) != 0u;
+            candidate_flow = flow_at(word(19u), cell);
+        } else if candidate == 2u {
+            if sweep == 0u {
+                present = col > 0u;
+                if present { candidate_flow = stored_flow(cell - 1u); }
+            } else {
+                present = col + 1u < patch_cols();
+                if present { candidate_flow = stored_flow(cell + 1u); }
             }
-            workgroupBarrier();
-
-            for (var candidate = 0u; candidate < 4u; candidate++) {
-                var candidate_flow = vec2<f32>(0.0);
-                var present = participating;
-                if participating {
-                    if candidate == 0u {
-                        candidate_flow = stored_flow(cell);
-                    } else if candidate == 1u {
-                        present = word(6u) != 0u;
-                        candidate_flow = flow_at(word(19u), cell);
-                    } else if candidate == 2u {
-                        if sweep == 0u {
-                            present = col > 0u;
-                            if present { candidate_flow = stored_flow(cell - 1u); }
-                        } else {
-                            present = col + 1u < patch_cols();
-                            if present { candidate_flow = stored_flow(cell + 1u); }
-                        }
-                    } else {
-                        if sweep == 0u {
-                            present = row > 0u;
-                            if present { candidate_flow = stored_flow(cell - patch_cols()); }
-                        } else {
-                            present = row + 1u < patch_rows();
-                            if present { candidate_flow = stored_flow(cell + patch_cols()); }
-                        }
-                    }
-                }
-
-                let lane_score = candidate_lane_score(cell, candidate_flow, lane, present);
-                lane_sums[local_index] = lane_score.sum;
-                lane_square_sums[local_index] = lane_score.sum_sq;
-                lane_survivors[local_index] = lane_score.survivors;
-                workgroupBarrier();
-
-                if participating && present && lane == 0u {
-                    let base = slot * 4u;
-                    let survivors = (lane_survivors[base] + lane_survivors[base + 1u]) + (lane_survivors[base + 2u] + lane_survivors[base + 3u]);
-                    var score = SENTINEL;
-                    if survivors >= 9u {
-                        let sum = add_rn(add_rn(lane_sums[base], lane_sums[base + 1u]), add_rn(lane_sums[base + 2u], lane_sums[base + 3u]));
-                        let sum_sq = add_rn(add_rn(lane_square_sums[base], lane_square_sums[base + 1u]), add_rn(lane_square_sums[base + 2u], lane_square_sums[base + 3u]));
-                        score = sub_rn(sum_sq, div_rn(mul_rn(sum, sum), f32(survivors)));
-                    }
-                    if candidate == 0u || score < selected_scores[slot] {
-                        selected_seeds[slot] = candidate_flow;
-                        selected_scores[slot] = score;
-                    }
-                }
-                workgroupBarrier();
+        } else {
+            if sweep == 0u {
+                present = row > 0u;
+                if present { candidate_flow = stored_flow(cell - patch_cols()); }
+            } else {
+                present = row + 1u < patch_rows();
+                if present { candidate_flow = stored_flow(cell + patch_cols()); }
             }
+        }
+    }
 
-            if participating && lane == 0u {
-                let seed = selected_seeds[slot];
-                var current = seed;
-                var previous = SENTINEL;
-                if word(8u) != 0u {
-                    let model = source_model(cell);
-                    for (var descent = 0u; descent < 6u; descent++) {
-                        let step = descent_step(cell, current, model);
-                        current = vec2<f32>(sub_rn(current.x, step.delta.x), sub_rn(current.y, step.delta.y));
-                        if step.residual >= previous { break; }
-                        previous = step.residual;
-                    }
-                }
-                if terminal_distance_exceeds_eight(current, seed) || disparity_rejects(current) {
-                    store_flow(cell, seed);
-                } else {
-                    store_flow(cell, current);
-                }
+    let lane_score = candidate_lane_score(cell, candidate_flow, lane, present);
+    lane_sums[local_index] = lane_score.sum;
+    lane_square_sums[local_index] = lane_score.sum_sq;
+    lane_survivors[local_index] = lane_score.survivors;
+    if lane == 0u {
+        candidate_seeds[slot * 4u + candidate] = candidate_flow;
+        candidate_present[slot * 4u + candidate] = u32(present);
+    }
+    workgroupBarrier();
+
+    if participating && candidate == 0u && lane == 0u {
+        selected_seeds[slot] = stored_flow(cell);
+        selected_scores[slot] = SENTINEL;
+        // Keep candidate order and strict tie selection unchanged.
+        for (var candidate = 0u; candidate < 4u; candidate++) {
+            if candidate_present[slot * 4u + candidate] == 0u { continue; }
+            let base = slot * 16u + candidate * 4u;
+            let survivors = (lane_survivors[base] + lane_survivors[base + 1u]) + (lane_survivors[base + 2u] + lane_survivors[base + 3u]);
+            var score = SENTINEL;
+            if survivors >= 9u {
+                let sum = add_rn(add_rn(lane_sums[base], lane_sums[base + 1u]), add_rn(lane_sums[base + 2u], lane_sums[base + 3u]));
+                let sum_sq = add_rn(add_rn(lane_square_sums[base], lane_square_sums[base + 1u]), add_rn(lane_square_sums[base + 2u], lane_square_sums[base + 3u]));
+                score = sub_rn(sum_sq, div_rn(mul_rn(sum, sum), f32(survivors)));
             }
-            storageBarrier();
-            workgroupBarrier();
+            if candidate == 0u || score < selected_scores[slot] {
+                selected_seeds[slot] = candidate_seeds[slot * 4u + candidate];
+                selected_scores[slot] = score;
+            }
+        }
+
+    }
+    if candidate == 0u && lane == 0u {
+        descent_active[slot] = u32(participating && word(8u) != 0u);
+        selected_scores[slot] = SENTINEL;
+    }
+    workgroupBarrier();
+
+    let seed = selected_seeds[slot];
+    var model: SourceModel;
+    if participating && candidate == 0u && lane == 0u {
+        model = source_model(cell);
+    }
+    // All lanes traverse the same barriers. Each patch stops its own
+    // arithmetic at the original comparison, after storing that step.
+    for (var descent = 0u; descent < 6u; descent++) {
+        // One workgroup owns one patch, so its completed descent no
+        // longer has to wait through the other patches' six rounds.
+        if workgroupUniformLoad(&descent_active[slot]) == 0u { break; }
+        prepare_descent_samples(cell, selected_seeds[slot], slot, local_index & 15u, descent_active[slot] != 0u);
+        workgroupBarrier();
+        if candidate == 0u && lane == 0u && descent_active[slot] != 0u {
+            let step = accumulate_descent(model, slot);
+            let current = selected_seeds[slot];
+            selected_seeds[slot] = vec2<f32>(sub_rn(current.x, step.delta.x), sub_rn(current.y, step.delta.y));
+            if step.residual >= selected_scores[slot] {
+                descent_active[slot] = 0u;
+            }
+            selected_scores[slot] = step.residual;
+        }
+        workgroupBarrier();
+    }
+    if participating && candidate == 0u && lane == 0u {
+        let current = selected_seeds[slot];
+        if terminal_distance_exceeds_eight(current, seed) || disparity_rejects(current) {
+            store_flow(cell, seed);
+        } else {
+            store_flow(cell, current);
         }
     }
 }

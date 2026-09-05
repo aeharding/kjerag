@@ -2,9 +2,9 @@
 //!
 //! CPU code admits [`Input`], [`InitialGrid`], [`HintGrid`] and
 //! [`DescentAdmission`] at their existing typed boundary, then serializes an
-//! explicit `u32`/`f32` storage contract. One 32-lane workgroup owns each
-//! direction, advances the native in-place passes by anti-diagonal, and assigns
-//! four lanes to each active patch's native candidate reduction. Construction
+//! explicit `u32`/`f32` storage contract. One 16-lane workgroup owns each
+//! patch, with four lanes per candidate and cooperative descent sampling.
+//! Ordered anti-diagonal dispatches preserve the in-place dependencies. Construction
 //! qualifies this same paired production entry against both CPU directions on
 //! the actual adapter.
 
@@ -358,6 +358,9 @@ pub(crate) struct GpuPisPipeline {
     context: OneXsGpuContext,
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
+    wavefront: wgpu::BindGroup,
+    wavefront_stride: u32,
+    max_diagonals: u32,
     /// Legacy CPU-oracle submissions do not read the prepared bindings.
     oracle_placeholder: wgpu::Buffer,
 }
@@ -535,7 +538,7 @@ impl GpuPisPipeline {
         let packed = PackedPair::new(a, b)?;
         Ok(PreparedPisDispatch {
             stage,
-            pipeline: &self.pipeline,
+            pipeline: self,
             layout: &self.layout,
             u32s: packed.u32s,
             f32s: packed.f32s,
@@ -607,7 +610,7 @@ impl GpuPisPipeline {
         u32s.extend(b);
         Ok(ResidentPisDispatch {
             stage,
-            pipeline: &self.pipeline,
+            pipeline: self,
             layout: &self.layout,
             u32s,
             direction_float_words,
@@ -651,9 +654,51 @@ impl GpuPisPipeline {
                 storage(8, true),
             ],
         });
+        let wavefront_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ONE X2 PIS wavefront schedule"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(16),
+                },
+                count: None,
+            }],
+        });
+        let wavefront_stride = device.limits().min_uniform_buffer_offset_alignment.max(16);
+        let max_diagonals = (Level::One.patch_rows() + Level::One.patch_cols() - 1) as u32;
+        let words_per_step = (wavefront_stride / 4) as usize;
+        let mut steps = vec![0u32; (1 + 2 * max_diagonals) as usize * words_per_step];
+        for sweep in 0..2u32 {
+            for diagonal in 0..max_diagonals {
+                let at = (1 + sweep * max_diagonals + diagonal) as usize * words_per_step;
+                steps[at..at + 4].copy_from_slice(&[1, sweep, diagonal, 0]);
+            }
+        }
+        let wavefront_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ONE X2 immutable PIS wavefront schedule"),
+            size: (steps.len() * 4) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&wavefront_buffer, 0, &u32_bytes(&steps));
+        let wavefront = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ONE X2 PIS wavefront schedule"),
+            layout: &wavefront_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &wavefront_buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(16),
+                }),
+            }],
+        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ONE X2 paired GPU PIS"),
-            bind_group_layouts: &[&layout],
+            bind_group_layouts: &[&layout, &wavefront_layout],
             immediate_size: 0,
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -678,12 +723,44 @@ impl GpuPisPipeline {
             context,
             pipeline,
             layout,
+            wavefront,
+            wavefront_stride,
+            max_diagonals,
             oracle_placeholder,
         };
         if qualify {
             built.qualify(&device, &queue)?;
         }
         Ok(built)
+    }
+
+    /// Independent patches on one anti-diagonal run on separate workgroups.
+    /// Dispatch barriers make their writes visible to the next diagonal; the
+    /// two sweep orders and every patch's arithmetic remain unchanged.
+    pub(crate) fn encode(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        resources: &wgpu::BindGroup,
+        level: Level,
+    ) {
+        let diagonals = (level.patch_rows() + level.patch_cols() - 1) as u32;
+        // wgpu compute usage scopes and storage-write barriers are per dispatch,
+        // including when consecutive dispatches use the same bind group.
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("ONE X2 PIS wavefront"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, resources, &[]);
+        for step in 0..=2 * diagonals {
+            let schedule = if step == 0 {
+                0
+            } else {
+                1 + ((step - 1) / diagonals) * self.max_diagonals + (step - 1) % diagonals
+            };
+            pass.set_bind_group(1, &self.wavefront, &[schedule * self.wavefront_stride]);
+            pass.dispatch_workgroups(2, 8, 1);
+        }
     }
 
     /// Execute both native directions at one level. Inputs have already passed
@@ -822,15 +899,7 @@ impl GpuPisPipeline {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("ONE X2 paired GPU PIS"),
         });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ONE X2 paired GPU PIS direction"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &resources, &[]);
-            pass.dispatch_workgroups(2, 1, 1);
-        }
+        self.encode(&mut encoder, &resources, packed.level);
         encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, output_size);
         let submission = queue.submit([encoder.finish()]);
         let slice = readback.slice(..);
@@ -1129,7 +1198,7 @@ impl GpuPisPipeline {
 
 pub(crate) struct ResidentPisDispatch<'a> {
     pub(crate) stage: PairSolveStage,
-    pub(crate) pipeline: &'a wgpu::ComputePipeline,
+    pub(crate) pipeline: &'a GpuPisPipeline,
     pub(crate) layout: &'a wgpu::BindGroupLayout,
     pub(crate) u32s: Vec<u32>,
     pub(crate) direction_float_words: usize,
@@ -1970,7 +2039,11 @@ mod tests {
                 "present = word(6u) != 0u;",
                 "present = true;",
             ),
-            ("descent admission", "if word(8u) != 0u {", "if true {"),
+            (
+                "descent admission",
+                "participating && word(8u) != 0u",
+                "participating && true",
+            ),
             (
                 "zero-survivor descent",
                 "return DescentStep(vec2<f32>(0.0), SENTINEL);",
@@ -1979,8 +2052,8 @@ mod tests {
             ("six-step descent limit", "descent < 6u", "descent < 5u"),
             (
                 "write before stop",
-                "if step.residual >= previous { break; }",
-                "if step.residual >= previous { current = seed; break; }",
+                "if step.residual >= selected_scores[slot] {",
+                "if step.residual >= selected_scores[slot] { selected_seeds[slot] = seed;",
             ),
             (
                 "runtime-zero materialization",

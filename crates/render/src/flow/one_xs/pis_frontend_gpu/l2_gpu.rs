@@ -950,15 +950,9 @@ impl<K> GpuPreparedFrame<K> {
             pass.set_bind_group(0, hint_resources, &[]);
             pass.dispatch_workgroups(L2_PATCHES.div_ceil(64) as u32, 2, 1);
         }
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ONE X2 resident paired L2 GPU PIS"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(dispatch.pipeline);
-            pass.set_bind_group(0, &resources, &[]);
-            pass.dispatch_workgroups(2, 1, 1);
-        }
+        dispatch
+            .pipeline
+            .encode(&mut encoder, &resources, dispatch.stage.level());
         joined
             .prepared
             .as_mut()
@@ -1143,15 +1137,9 @@ impl<K, P: GpuResidentLevelTwoPost> GpuL2BridgeOutput<K, P> {
             pass.set_bind_group(0, hint_resources, &[]);
             pass.dispatch_workgroups(L1_PATCHES.div_ceil(64) as u32, 2, 1);
         }
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ONE X2 resident paired L1 GPU PIS"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(dispatch.pipeline);
-            pass.set_bind_group(0, &resources, &[]);
-            pass.dispatch_workgroups(2, 1, 1);
-        }
+        dispatch
+            .pipeline
+            .encode(&mut encoder, &resources, dispatch.stage.level());
         self._prepared
             .belts
             .lease

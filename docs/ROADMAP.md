@@ -3,7 +3,58 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
-**Native GPU playback integration checkpoint, 2026-09-05, issue #182:**
+**Owner priority clarification, 2026-09-05, issue #182:** the goal is very
+performant stitching that looks like Studio, not perfect reproduction.
+`MANDATES.md` records the ruling. Prioritize ordinary playback speed and real
+scrubber latency; exact numerical comparisons remain diagnostics rather than
+the goal. Full-rate playback and audio are still unfinished. The earlier
+53-check harness did not physically scrub to an unseen late frame and did not
+establish responsive seeking. Visual changes require rendered-sequence review
+and the owner's branch test; main remains unchanged.
+
+**Playback/scrubber branch work, 2026-09-05, issue #182:** native GPU PIS
+candidate scoring and descent sampling now run cooperatively per patch,
+with ordered anti-diagonal dispatches in one compute pass. Arithmetic and
+candidate tie order remain unchanged; the paired GPU and mutation tests pass.
+Ordinary window playback improves from about 22 to 26 fps on the reported
+29.970 fps capture. Audio underruns remain. This is not full-rate playback.
+
+User seeks now initialize fresh temporal state at the decoder landing,
+sharing immutable, already-qualified GPU kernels. This deliberately changes
+post-seek history versus uninterrupted frame-zero playback, and still needs
+owner visual acceptance. Drag previews use keyframes; release lands exactly.
+Superseded decoder epochs cannot initialize the fresh stitch root. The real
+pointer-drag UI check reaches and holds 207.908 s within five wall seconds,
+including pointer setup, drag and observation, rather than replaying the
+prefix for minutes. Exact release, backward steps and forward warm-state
+continuation also pass through real decode/GPU regression tests.
+
+The optional Scene review test saves all 61 frames 6339..6399 starting with
+the cold landing, plus each frame's actual packed and alpha maps. Evidence
+is `scratch/scrub-post-seek-f6339-6399/` and the adjacent
+`scrub-post-seek-riser-review.mp4`. Sampled output frames were inspected;
+this is a review artifact, not a byte-identity, computed-trace or owner-eye
+parity verdict. The native exact riser view at 212.512 s also lands within
+the two-second observation window. Broader optimization RE stays frozen.
+
+The full native UI gate passes **54 checks, zero failed**, now including
+physical scrubbing to unseen late content as well as exact/backward seeks.
+The tested app SHA-256 is
+`cda781336f2737788f8d21934be15d14d6bd610035c57fda215d2cffecb06744`.
+Logs are `scratch/scrub-uitest-retest.log` and `scratch/uitest/`. The first
+run exposed a harness accounting error: its sound-stop check included a
+normal play report from the allowed import-retry window before the stop.
+The observation baseline now starts after the actual stopped marker; no
+runtime audio improvement is claimed from that test correction. Workspace
+format, warnings-denied all-target clippy, name/source/diff checks pass.
+The final forced-RADV workspace gate with real-media tests enabled passes
+1108 tests, zero failures, 30 ignored (`scratch/scrub-workspace-tests-final.log`).
+Installed-Flatpak testing and owner acceptance remain outstanding.
+
+**Earlier native GPU integration checkpoint, 2026-09-05, issue #182:**
+The newer scrubber work above supersedes this checkpoint's seek usability
+implication: its exact/backward seek tests covered only a tiny prefix.
+
 the real ONE X2 player passes all 53 headless UI checks, including exact
 and backward seeks, screenshots, file drops, transient import recovery,
 terminal import failure holding the last picture, and reopening afterward.

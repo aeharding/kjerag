@@ -4,6 +4,7 @@
 //! ```sh
 //! cargo run --release -p kjerag-spike --bin pointer -- 1280 720 640 360
 //! cargo run --release -p kjerag-spike --bin pointer -- 1280 720 1252 696 click
+//! cargo run --release -p kjerag-spike --bin pointer -- 1280 720 350 696 drag 858 696
 //! ```
 //!
 //! The four numbers are the output's width and height and the place in it,
@@ -53,6 +54,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [width, height, x, y] = place(&args)?;
     let click = args.get(4).is_some_and(|arg| arg == "click");
+    let drag = if args.get(4).is_some_and(|arg| arg == "drag") {
+        Some([
+            args.get(5)
+                .ok_or("drag needs destination x and y")?
+                .parse::<u32>()?,
+            args.get(6)
+                .ok_or("drag needs destination x and y")?
+                .parse::<u32>()?,
+        ])
+    } else {
+        None
+    };
 
     let connection = Connection::connect_to_env()?;
     let mut queue = connection.new_event_queue();
@@ -76,12 +89,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     pointer.frame();
     queue.roundtrip(&mut found)?;
 
-    if click {
+    if click || drag.is_some() {
         sleep(HELD);
         pointer.button(at(), BTN_LEFT, wl_pointer::ButtonState::Pressed);
         pointer.frame();
         queue.roundtrip(&mut found)?;
         sleep(HELD);
+        if let Some([to_x, to_y]) = drag {
+            // Multiple pointer updates while held exercise the real slider's
+            // keyframe previews before the exact release, not a seek API.
+            for step in 1..=20i64 {
+                let blend = |from: u32, to: u32| {
+                    (i64::from(from) + (i64::from(to) - i64::from(from)) * step / 20) as u32
+                };
+                pointer.motion_absolute(at(), blend(x, to_x), blend(y, to_y), width, height);
+                pointer.frame();
+                queue.roundtrip(&mut found)?;
+                sleep(Duration::from_millis(25));
+            }
+        }
         pointer.button(at(), BTN_LEFT, wl_pointer::ButtonState::Released);
         pointer.frame();
         queue.roundtrip(&mut found)?;
@@ -101,7 +127,7 @@ fn place(args: &[String]) -> Result<[u32; 4], String> {
         .filter_map(|arg| arg.parse().ok())
         .collect();
     read.try_into()
-        .map_err(|_| "usage: pointer <width> <height> <x> <y> [click]".to_owned())
+        .map_err(|_| "usage: pointer <width> <height> <x> <y> [click | drag <x> <y>]".to_owned())
 }
 
 /// A timestamp for an event. The protocol wants milliseconds on a monotonic

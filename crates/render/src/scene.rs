@@ -306,6 +306,20 @@ fn exact_selected_display<T: Eq>(current: &T, shown: Option<&T>, same_capture: b
     same_capture && shown == Some(current)
 }
 
+fn resident_frame_view<'a>(
+    stamp: &FrameStamp,
+    capture: &ResidentCaptureFacade,
+    views: [Option<&'a View>; 3],
+) -> Option<&'a View> {
+    views.into_iter().flatten().find(|view| {
+        view.frames.stamp() == *stamp
+            && view
+                .resident_one_xs
+                .as_ref()
+                .is_some_and(|owner| owner.same_capture(capture))
+    })
+}
+
 /// A file on screen: its calibration, and where its frames come from.
 struct Show {
     /// Containers in the exact decoder lane order admitted at open.
@@ -373,6 +387,7 @@ struct OneXsCapture {
 
 #[derive(Clone, Copy, Debug)]
 struct OneXsReplay {
+    accuracy: Accuracy,
     target: u64,
     position: Duration,
     playing: bool,
@@ -1502,9 +1517,9 @@ impl Scene {
         };
         if current_ready == Some(true)
             && frames.as_ref().is_some_and(|frame| {
-                show.replay
-                    .borrow()
-                    .is_some_and(|replay| replay.target == frame.index)
+                show.replay.borrow().is_some_and(|replay| {
+                    replay.accuracy == Accuracy::Keyframe || replay.target == frame.index
+                })
             })
         {
             // Decoder landing is not completion. Retire the exposed seek only
@@ -1594,7 +1609,7 @@ impl Scene {
         let selected = self
             .show
             .as_mut()
-            .map(|show| show.replay_to(Cue::Time(to), false))
+            .map(|show| show.seek_to(Cue::Time(to), accuracy))
             .transpose();
         match selected {
             Ok(Some(true)) => return,
@@ -1929,6 +1944,12 @@ impl Scene {
             camera,
             view: self.show.as_ref().and_then(|show| show.view(held)),
             resident_capture: self.show.as_ref().and_then(|show| show.one_xs.clone()),
+            resident_target: self.show.as_ref().and_then(|show| {
+                show.replay
+                    .borrow()
+                    .filter(|replay| replay.accuracy == Accuracy::Exact)
+                    .map(|replay| replay.target)
+            }),
             sampling: self.sampling.get(),
             flow: self.flow.get(),
             shutter: self.shutter.clone(),
@@ -2002,9 +2023,47 @@ impl Show {
         })
     }
 
-    /// Route an exposed selected-capture jump through the causal replay
-    /// state machine. All callers of `Scene::seek` arrive here, including
-    /// scrub updates, releases, relative jumps and pasted views.
+    /// Start stitching on the decoder's seek landing. The estimator's cold
+    /// calculation uses that frame's real geometry, timestamp and pixels;
+    /// no old temporal state crosses the new decoder epoch. This deliberately
+    /// trades uninterrupted-from-zero history for responsive user seeking.
+    fn seek_to(&mut self, to: Cue, accuracy: Accuracy) -> Fallible<bool> {
+        let Some(capture) = self.one_xs.clone() else {
+            return Ok(false);
+        };
+        let Playing { frames, source } = self.playing.get_mut();
+        let Source::Live(player) = source else {
+            return Ok(false);
+        };
+        let target = to
+            .index(player.timing())
+            .min(player.timing().frames.saturating_sub(1));
+        if self
+            .replay
+            .borrow()
+            .is_some_and(|seek| seek.target == target && seek.accuracy == accuracy)
+        {
+            return Ok(true);
+        }
+        let playing = self
+            .replay
+            .borrow()
+            .map_or_else(|| player.is_playing(), |seek| seek.playing);
+        self.one_xs = Some(capture.restarted()?);
+        *frames = None;
+        self.replay.replace(Some(OneXsReplay {
+            accuracy,
+            target,
+            position: player.timing().time_of(target),
+            playing,
+        }));
+        player.pause(Instant::now());
+        player.seek(Cue::Index(target), accuracy);
+        Ok(true)
+    }
+
+    /// Route a selected-capture forward step through the causal replay
+    /// state machine. User jumps and drag updates use `seek_to` instead.
     fn replay_to(&mut self, to: Cue, allow_forward: bool) -> Fallible<bool> {
         let Some(capture) = self.one_xs.clone() else {
             return Ok(false);
@@ -2054,23 +2113,20 @@ impl Show {
             target,
         );
         if start == ReplayStart::FrameZero {
-            let calibration = self
-                .one_xs_calibration
+            self.one_xs_calibration
                 .as_ref()
                 .ok_or("ONE X2 playback lost its capture calibration")?;
             // Replace the Arc. The retained old View continues to name the
             // old completed capture and can never submit its nonzero frame to
             // this fresh frame-zero owner.
-            self.one_xs = Some(ResidentCaptureFacade::new(
-                calibration.clone(),
-                self.held.orientation.clone(),
-            ));
+            self.one_xs = Some(capture.restarted()?);
             // Do not let the acknowledgement gate wait for a surface from
             // the lineage just retired. The last complete display remains in
             // `Shown` and may be restored until new frame zero completes.
             *frames = None;
         }
         self.replay.replace(Some(OneXsReplay {
+            accuracy: Accuracy::Exact,
             target,
             position: player.timing().time_of(target),
             playing,
@@ -2105,7 +2161,11 @@ impl Show {
         let target = index
             .saturating_add_signed(by)
             .min(player.timing().frames.saturating_sub(1));
-        self.replay_to(Cue::Index(target), by == 1 && !was_replaying)
+        if by == 1 && !was_replaying {
+            self.replay_to(Cue::Index(target), true)
+        } else {
+            self.seek_to(Cue::Index(target), Accuracy::Exact)
+        }
     }
 }
 
@@ -2283,6 +2343,8 @@ pub struct ScenePrimitive {
     view: Option<View>,
     /// Current live lineage even while replay has cleared its offered frame.
     resident_capture: Option<ResidentCaptureFacade>,
+    /// Replay input is not a new displayed position until this target lands.
+    resident_target: Option<u64>,
     /// How the pass samples a magnified picture, which is a property of the
     /// redraw rather than of the frame in it.
     sampling: Sampling,
@@ -2378,6 +2440,8 @@ pub struct ScenePipeline {
     /// The selected capture attachment and older attachments still proving
     /// GPU completion after seek/reopen replacement.
     resident_one_xs: Option<(ResidentCaptureFacade, ResidentSceneFacade)>,
+    /// Exact last completed input while a seek keeps the previous display.
+    resident_completed_view: Option<View>,
     retired_one_xs: Vec<(ResidentCaptureFacade, ResidentSceneFacade)>,
     resident_draw: ResidentDrawSelection,
     pipeline: wgpu::RenderPipeline,
@@ -2757,6 +2821,7 @@ impl ScenePipeline {
         Self {
             one_xs_gpu,
             resident_one_xs: None,
+            resident_completed_view: None,
             retired_one_xs: Vec::new(),
             resident_draw: ResidentDrawSelection::None,
             pipeline,
@@ -2956,6 +3021,7 @@ impl ScenePipeline {
             if let Some(old) = self.resident_one_xs.take() {
                 self.retired_one_xs.push(old);
             }
+            self.resident_completed_view = None;
             let mut index = 0;
             while index < self.retired_one_xs.len() {
                 match self.retired_one_xs[index]
@@ -3008,6 +3074,7 @@ impl ScenePipeline {
                 .is_some_and(|(current, _)| !current.same_capture(capture));
             if changed && let Some(old) = self.resident_one_xs.take() {
                 self.retired_one_xs.push(old);
+                self.resident_completed_view = None;
             }
             if self.resident_one_xs.is_none() {
                 let attachment = capture.attach_renderer(self.one_xs_gpu.clone(), self.format)?;
@@ -3082,50 +3149,41 @@ impl ScenePipeline {
                 &self.one_xs_gpu,
                 self.format,
                 |stamp| {
-                    let view = offered
-                        .filter(|view| {
-                            view.frames.stamp() == *stamp
-                                && view
-                                    .resident_one_xs
-                                    .as_ref()
-                                    .is_some_and(|owner| owner.same_capture(capture))
-                        })
-                        .or_else(|| {
-                            shown.as_ref().filter(|view| {
-                                view.frames.stamp() == *stamp
-                                    && view
-                                        .resident_one_xs
-                                        .as_ref()
-                                        .is_some_and(|owner| owner.same_capture(capture))
-                            })
-                        })
-                        .ok_or("ONE X2 resident ready has no exact capture view")?;
+                    let view = resident_frame_view(
+                        stamp,
+                        capture,
+                        [
+                            offered,
+                            shown.as_ref(),
+                            self.resident_completed_view.as_ref(),
+                        ],
+                    )
+                    .ok_or("ONE X2 resident ready has no exact capture view")?;
                     Ok(self.resident_reframe(primitive, view, aspect))
                 },
             )?;
             match prepared {
                 ResidentPrepare::Staged { installed } => {
-                    let view = offered
-                        .filter(|view| {
-                            view.frames.stamp() == installed
-                                && view
-                                    .resident_one_xs
-                                    .as_ref()
-                                    .is_some_and(|owner| owner.same_capture(capture))
-                        })
-                        .or_else(|| {
-                            shown.as_ref().filter(|view| {
-                                view.frames.stamp() == installed
-                                    && view
-                                        .resident_one_xs
-                                        .as_ref()
-                                        .is_some_and(|owner| owner.same_capture(capture))
-                            })
-                        })
-                        .ok_or("ONE X2 staged frame has no exact capture view")?;
-                    primitive.shown.keep(view);
+                    let view = resident_frame_view(
+                        &installed,
+                        capture,
+                        [
+                            offered,
+                            shown.as_ref(),
+                            self.resident_completed_view.as_ref(),
+                        ],
+                    )
+                    .cloned()
+                    .ok_or("ONE X2 staged frame has no exact capture view")?;
                     debug_assert!(capture.acknowledged(&installed)?);
-                    self.resident_draw = ResidentDrawSelection::Active;
+                    self.resident_completed_view = Some(view.clone());
+                    if primitive
+                        .resident_target
+                        .is_none_or(|target| installed.index() == target)
+                    {
+                        primitive.shown.keep(&view);
+                        self.resident_draw = ResidentDrawSelection::Active;
+                    }
                 }
                 ResidentPrepare::Pending { .. } | ResidentPrepare::Retry { .. } => primitive
                     .resident_refresh
@@ -6557,6 +6615,7 @@ mod tests {
     #[test]
     fn terminal_stop_retires_the_scene_owned_replay() {
         let replay = RefCell::new(Some(OneXsReplay {
+            accuracy: Accuracy::Exact,
             target: 100,
             position: Duration::from_secs(4),
             playing: true,
@@ -7301,6 +7360,168 @@ mod tests {
         assert_eq!(map.frame(), &exact);
         assert_eq!(map.pis_backend(), PisBackend::Gpu);
         scene.pause(Instant::now());
+    }
+
+    /// Real slider request order over ordinary decode and resident drawing.
+    #[test]
+    fn selected_one_x2_seek_lands_without_replaying_the_prefix() {
+        let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").map(PathBuf::from) else {
+            eprintln!("skipping selected seek: set KJERAG_ONE_X2_TEST_MEDIA");
+            return;
+        };
+        let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
+        let mut scene = Scene::open(&path).unwrap();
+        scene.set_muted(true);
+        let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let first = wait_for_new_scene_frame(&scene, None);
+        let original =
+            prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &first);
+        scene.pause(Instant::now());
+
+        // Ordinary slider updates, including a release to the SAME target as
+        // its keyframe preview. Only the last decoder epoch may reach drawing.
+        let (target, expected) = {
+            let playing = scene.show.as_ref().unwrap().playing.borrow();
+            let Source::Live(player) = &playing.source else {
+                unreachable!()
+            };
+            let timing = player.timing();
+            let expected = Cue::Time(Duration::from_secs_f64(212.512))
+                .index(timing)
+                .min(timing.frames.saturating_sub(2));
+            (timing.time_of(expected), expected)
+        };
+        scene.seek(Duration::from_secs(80), Accuracy::Keyframe);
+        scene.seek(target, Accuracy::Keyframe);
+        scene.seek(target, Accuracy::Exact);
+        assert!(scene.is_seeking());
+        assert_eq!(
+            scene.displayed_frame_stamp(),
+            Some(first.clone()),
+            "seek must hold the old picture"
+        );
+        let landing = wait_for_new_scene_frame(&scene, Some(&first));
+        assert_eq!(
+            landing.index(),
+            expected,
+            "first offered pair must be the destination, not frame zero"
+        );
+        let restart =
+            prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &landing);
+        assert!(!restart.same_capture(&original));
+        scene.pump(Instant::now());
+        assert!(!scene.is_seeking());
+        assert!(!scene.is_playing());
+        assert_eq!(scene.displayed_frame_stamp(), Some(landing.clone()));
+
+        scene.step(Instant::now(), 1);
+        let next = wait_for_new_scene_frame(&scene, Some(&landing));
+        assert_eq!(next.index(), landing.index() + 1);
+        let continued =
+            prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &next);
+        assert!(
+            continued.same_capture(&restart),
+            "forward step must keep warm history"
+        );
+        scene.pump(Instant::now());
+
+        scene.step(Instant::now(), -1);
+        let back = wait_for_new_scene_frame(&scene, Some(&next));
+        assert_eq!(back.index(), landing.index());
+        let backward =
+            prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &back);
+        assert!(!backward.same_capture(&continued));
+        scene.pump(Instant::now());
+        assert!(!scene.is_seeking());
+    }
+
+    /// Optional visual evidence for the deliberate seek-history difference.
+    /// Writes the cold landing AND every following frame through the normal
+    /// screenshot path. No prefix replay, hidden warmup or substituted map.
+    #[test]
+    fn selected_one_x2_post_seek_review_sequence() {
+        use std::io::Write;
+        let Some(output) = std::env::var_os("KJERAG_SEEK_REVIEW_DIR").map(PathBuf::from) else {
+            return;
+        };
+        let path = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").expect("review needs real footage");
+        std::fs::create_dir(&output).expect("review output must be a new directory");
+        let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
+        let mut scene = Scene::open(Path::new(&path)).unwrap();
+        scene.set_muted(true);
+        scene.pause(Instant::now());
+        scene.set_horizon(Horizon::Locked);
+        let target = {
+            let playing = scene.show.as_ref().unwrap().playing.borrow();
+            let Source::Live(player) = &playing.source else {
+                unreachable!()
+            };
+            assert!(
+                player.timing().frames > 6399,
+                "review fixture is shorter than the owner interval"
+            );
+            player.timing().time_of(6339)
+        };
+        scene.seek(target, Accuracy::Exact);
+        let camera = Camera {
+            yaw: 71.13f32.to_radians(),
+            pitch: -13.99f32.to_radians(),
+            fov: 57.95f32.to_radians(),
+        };
+        let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let mut previous = None;
+        for index in 6339..=6399 {
+            let frame = wait_for_new_scene_frame(&scene, previous.as_ref());
+            assert_eq!(frame.index(), index);
+            prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &frame);
+            scene.pump(Instant::now());
+            let (send, receive) = std::sync::mpsc::channel();
+            scene.capture(Request {
+                width: 1280,
+                then: Box::new(move |shot| {
+                    let _ = send.send(shot);
+                }),
+            });
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let shot = loop {
+                pipeline.prepare(&scene.primitive(camera), &device, &queue, 16.0 / 9.0);
+                if let Ok(shot) = receive.recv_timeout(Duration::from_millis(10)) {
+                    break shot.unwrap();
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "review screenshot did not complete"
+                );
+            };
+            assert_eq!(shot.index, index);
+            let map = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
+            assert_eq!(map.frame(), &frame);
+            std::fs::write(
+                output.join(format!("frame-{index:010}.packed-f32le.bin")),
+                map.packed().bytes(),
+            )
+            .unwrap();
+            std::fs::write(
+                output.join(format!("frame-{index:010}.alpha-f32le.bin")),
+                map.alpha().bytes(),
+            )
+            .unwrap();
+            let mut file = std::io::BufWriter::new(
+                std::fs::File::create(output.join(format!("frame-{index:010}.ppm"))).unwrap(),
+            );
+            write!(file, "P6\n{} {}\n255\n", shot.width, shot.height).unwrap();
+            for pixel in shot.rgba.chunks_exact(4) {
+                file.write_all(&pixel[..3]).unwrap();
+            }
+            eprintln!(
+                "seek-review: frame {index} time {:.6}",
+                shot.time.as_secs_f64()
+            );
+            previous = Some(frame);
+            if index < 6399 {
+                scene.step(Instant::now(), 1);
+            }
+        }
     }
 
     /// Opt-in real-media comparison of the earliest resident numeric stage.

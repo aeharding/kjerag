@@ -4,7 +4,21 @@ Owner rulings for the seam/flow work. They override convenience and my own judgm
 **Read at the start of every session, and before every claim, merge, or "it's done".**
 When a result and one of these conflict, the mandate wins.
 
-## 1. Faithful to Studio at the video boundary — no exceptions
+## Current goal, owner clarification 2026-09-05
+
+"our end goal is very performant stitching that is studio-like (doesnt need to be perfect)"
+
+This supersedes the earlier requirement for perfect Studio reproduction below.
+Prioritize smooth playback, responsive seeking and Studio-like visible stitching.
+Numerical identity is a useful diagnostic, not a shipping requirement. Simpler
+arithmetic, scheduling and temporal restart choices may be evaluated against the
+existing oracle without reverse engineering every difference. Do not silently
+accept visible defects or claim an unreviewed tradeoff is approved: real rendered
+sequences, the reported riser defect and the owner's eye remain the quality gate.
+Keep the readable reference implementation and existing evidence for comparison.
+Broader optimization reverse engineering remains frozen.
+
+## 1. Earlier exact-parity standard (superseded where inconsistent above)
 For the same supported input, view, time and user-visible settings, correctness with Studio is
 required at the stitched video result, not as identity of internal execution. Every
 output-affecting semantic mechanism, constant, threshold, kernel, boundary condition and cadence

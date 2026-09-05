@@ -141,10 +141,10 @@ struct ResidentSourceFrontPipeline {
     root: resident_frame_gpu::GpuResidentCapture,
     parent_inputs: ParentMapBuilder,
     orientation: OrientationTrack,
-    parent: GpuResidentFramePipeline,
-    geometry: geometry_gpu::GpuGeometryPipeline,
-    belts: GpuSolverBeltPipeline,
-    final_map: map_patch_gpu::GpuMapMaterializer,
+    parent: Arc<GpuResidentFramePipeline>,
+    geometry: Arc<geometry_gpu::GpuGeometryPipeline>,
+    belts: Arc<GpuSolverBeltPipeline>,
+    final_map: Arc<map_patch_gpu::GpuMapMaterializer>,
 }
 
 #[allow(dead_code)]
@@ -177,15 +177,32 @@ impl ResidentSourceFrontPipeline {
             root: resident_frame_gpu::GpuResidentCapture::new_bound(context.clone(), identity),
             parent_inputs,
             orientation,
-            parent: GpuResidentFramePipeline::new(context.clone())?,
-            geometry: geometry_gpu::GpuGeometryPipeline::new(
+            parent: Arc::new(GpuResidentFramePipeline::new(context.clone())?),
+            geometry: Arc::new(geometry_gpu::GpuGeometryPipeline::new(
                 context.clone(),
                 resources.static_coordinates(),
                 &support,
-            )?,
-            belts: GpuSolverBeltPipeline::new(context.clone())?,
-            final_map: map_patch_gpu::GpuMapMaterializer::new(context, &resources)?,
+            )?),
+            belts: Arc::new(GpuSolverBeltPipeline::new(context.clone())?),
+            final_map: Arc::new(map_patch_gpu::GpuMapMaterializer::new(context, &resources)?),
         })
+    }
+
+    /// Fresh temporal ownership, but the same already-qualified, immutable
+    /// camera resources and GPU programs. No decoded picture or map is reused.
+    fn restarted(&self) -> Self {
+        let identity = ResidentSourceIdentity::new();
+        Self {
+            context: self.context.clone(),
+            identity: identity.clone(),
+            root: resident_frame_gpu::GpuResidentCapture::new_bound(self.context.clone(), identity),
+            parent_inputs: self.parent_inputs.clone(),
+            orientation: self.orientation.clone(),
+            parent: self.parent.clone(),
+            geometry: self.geometry.clone(),
+            belts: self.belts.clone(),
+            final_map: self.final_map.clone(),
+        }
     }
 
     fn begin_parent(&self, frame: FrameStamp) -> Fallible<parent_gpu::EncodedGpuParentMaps> {
@@ -446,6 +463,9 @@ struct ResidentCaptureState {
     session: Option<Arc<ResidentCaptureSession>>,
     transaction: ResidentTransaction,
     installed: Option<FrameStamp>,
+    /// A user seek starts a fresh estimator on the decoder's landing frame.
+    /// Ordinary opens still require frame zero; successors remain adjacent.
+    seek_restart: bool,
 }
 
 /// Capture-owned execution and draw resources. The picture layout, sampler,
@@ -457,10 +477,10 @@ struct ResidentCaptureSession {
     format: wgpu::TextureFormat,
     source_size: kjerag_meta::Size,
     capture: ResidentSourceCapture,
-    motion: geometry_gpu::temporal_gpu::GpuMotionStage,
-    front: pis_frontend_gpu::GpuPisFrontEnd,
-    solver: super::pis::gpu::GpuPisPipeline,
-    bridge: pis_frontend_gpu::GpuL2PostPisBridge,
+    motion: Arc<geometry_gpu::temporal_gpu::GpuMotionStage>,
+    front: Arc<pis_frontend_gpu::GpuPisFrontEnd>,
+    solver: Arc<super::pis::gpu::GpuPisPipeline>,
+    bridge: Arc<pis_frontend_gpu::GpuL2PostPisBridge>,
     picture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     direct: Arc<DirectType2Pipeline>,
@@ -521,11 +541,15 @@ impl ResidentCaptureSession {
         ));
         Ok(Self {
             capture: ResidentSourceCapture::new(context.clone(), calibration, orientation)?,
-            motion: geometry_gpu::temporal_gpu::GpuMotionStage::new(context.clone())?,
-            front: pis_frontend_gpu::GpuPisFrontEnd::new(context.clone())?,
-            solver: super::pis::gpu::GpuPisPipeline::new(context.clone())?,
-            bridge: pis_frontend_gpu::GpuL2PostPisBridge::new(context.clone())
-                .map_err(|error| error.to_string())?,
+            motion: Arc::new(geometry_gpu::temporal_gpu::GpuMotionStage::new(
+                context.clone(),
+            )?),
+            front: Arc::new(pis_frontend_gpu::GpuPisFrontEnd::new(context.clone())?),
+            solver: Arc::new(super::pis::gpu::GpuPisPipeline::new(context.clone())?),
+            bridge: Arc::new(
+                pis_frontend_gpu::GpuL2PostPisBridge::new(context.clone())
+                    .map_err(|error| error.to_string())?,
+            ),
             picture_layout,
             sampler,
             direct,
@@ -539,6 +563,30 @@ impl ResidentCaptureSession {
             format,
             source_size: calibration.dimension,
         })
+    }
+
+    fn restarted(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            format: self.format,
+            source_size: self.source_size,
+            capture: ResidentSourceCapture {
+                pipeline: self.capture.pipeline.restarted(),
+            },
+            motion: self.motion.clone(),
+            front: self.front.clone(),
+            solver: self.solver.clone(),
+            bridge: self.bridge.clone(),
+            picture_layout: self.picture_layout.clone(),
+            sampler: self.sampler.clone(),
+            direct: self.direct.clone(),
+            retirements: Arc::new(IcedDrawRetirements::new(
+                self.context.device(),
+                IcedInstalledDrawAdapter::RETIREMENT_CAPACITY,
+            )),
+            #[cfg(test)]
+            cold_blurred_probe: Mutex::new(None),
+        }
     }
 
     fn ensure_renderer(
@@ -703,9 +751,33 @@ impl ResidentCaptureFacade {
                     session: None,
                     transaction: ResidentTransaction::Idle,
                     installed: None,
+                    seek_restart: false,
                 }),
             }),
         }
+    }
+
+    pub(crate) fn restarted(&self) -> Fallible<Self> {
+        let state = self.state()?;
+        if matches!(state.transaction, ResidentTransaction::Quarantined) {
+            return Err("ONE X2 resident transaction facade is quarantined".into());
+        }
+        let session = state
+            .session
+            .as_ref()
+            .map(|session| Arc::new(session.restarted()));
+        Ok(Self {
+            inner: Arc::new(ResidentCaptureFacadeInner {
+                calibration: self.inner.calibration.clone(),
+                orientation: self.inner.orientation.clone(),
+                state: Mutex::new(ResidentCaptureState {
+                    session,
+                    transaction: ResidentTransaction::Idle,
+                    installed: None,
+                    seek_restart: true,
+                }),
+            }),
+        })
     }
 
     /// Attach one renderer generation without making renderer lifetime the
@@ -1015,7 +1087,9 @@ impl ResidentSceneFacade {
                 )
                 .into());
             }
-            validate_resident_sequence(state.installed.as_ref(), &stamp)?;
+            if !state.seek_restart || state.installed.is_some() {
+                validate_resident_sequence(state.installed.as_ref(), &stamp)?;
+            }
             state.transaction = ResidentTransaction::Starting;
         }
         let mut start = ResidentStartGuard::quarantine(Arc::clone(&self.capture.inner));
@@ -3934,6 +4008,57 @@ mod tests {
         ));
         assert_eq!(second.acknowledged().unwrap(), None);
 
+        let restart = facade.restarted().unwrap();
+        let restarted = restart.state().unwrap().session.as_ref().unwrap().clone();
+        assert!(!facade.same_capture(&restart));
+        assert!(!Arc::ptr_eq(&first_session, &restarted));
+        assert!(!Arc::ptr_eq(
+            &first_session.retirements,
+            &restarted.retirements
+        ));
+        assert!(Arc::ptr_eq(&first_session.front, &restarted.front));
+        assert!(Arc::ptr_eq(&first_session.solver, &restarted.solver));
+        assert!(Arc::ptr_eq(&first_session.motion, &restarted.motion));
+        assert!(Arc::ptr_eq(&first_session.bridge, &restarted.bridge));
+        assert!(Arc::ptr_eq(
+            &first_session.capture.pipeline.geometry,
+            &restarted.capture.pipeline.geometry
+        ));
+        assert!(
+            !first_session
+                .capture
+                .source_identity()
+                .matches(&restarted.capture.source_identity())
+        );
+        let first_reservation = first_session
+            .capture
+            .pipeline
+            .root
+            .reserve(FrameStamp::for_test(0, Duration::ZERO, None))
+            .unwrap();
+        let restart_reservation = restarted
+            .capture
+            .pipeline
+            .root
+            .reserve(FrameStamp::for_test(0, Duration::ZERO, None))
+            .unwrap();
+        assert!(
+            !first_reservation
+                .identity()
+                .matches(&restart_reservation.identity())
+        );
+        first_reservation.abort().unwrap();
+        restart_reservation.abort().unwrap();
+        assert!(restart.installed_stamp().unwrap().is_none());
+        assert!(
+            !restarted
+                .capture
+                .pipeline
+                .root
+                .has_installed_successor()
+                .unwrap()
+        );
+
         let error = facade
             .attach_renderer(context.clone(), wgpu::TextureFormat::Rgba8UnormSrgb)
             .err()
@@ -4019,6 +4144,26 @@ mod tests {
             error.to_string(),
             "ONE X2 resident transaction facade is quarantined"
         );
+        assert_eq!(
+            facade.restarted().unwrap_err().to_string(),
+            error.to_string()
+        );
+    }
+
+    #[test]
+    fn unbound_seek_restart_stays_lazy_and_admits_only_a_new_lineage() {
+        let facade = ResidentCaptureFacade::new(
+            Arc::new(session_calibration(20.0, 0.0)),
+            session_orientation(1.0),
+        );
+        assert!(!facade.state().unwrap().seek_restart);
+        let restart = facade.restarted().unwrap();
+        let state = restart.state().unwrap();
+        assert!(state.seek_restart);
+        assert!(state.session.is_none());
+        assert!(state.installed.is_none());
+        assert!(matches!(state.transaction, ResidentTransaction::Idle));
+        assert!(!facade.same_capture(&restart));
     }
 
     #[test]

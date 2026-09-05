@@ -743,6 +743,7 @@ with_media() {
 	if [ "$paused" = yes ]; then
 		holds_the_command_line_view
 		selected_one_x2_holds_a_backward_seek
+		selected_one_x2_scrubber_reaches_unseen_content
 	else
 		skip "the command-line view selects and holds its exact frame (pause failed)"
 		skip "the selected ONE X2 holds a backward seek (pause failed)"
@@ -1368,11 +1369,46 @@ wait_for_displayed_view() {
 
 # This UI check is intentionally limited to what the ordinary app exposes: a
 # backward request lands on and holds the requested displayed picture. The
-# fresh-owner and frame-zero-through-target causal guarantees are covered by
-# the Scene/Player replay tests and authenticated playback receipt; a `view:`
-# line alone cannot prove them, so this check does not claim that it can.
+# fresh-owner and newest-epoch guarantees are covered by Scene/Player tests;
+# a `view:` line alone cannot prove them, so this check does not claim that it can.
 ONE_X2_SEEK_MEDIA=/home/aeharding/Videos/Insta/VID_20251018_191318_00_002.insv
 ONE_X2_SEEK_TIME=0.100
+
+# Regression for the owner's unusable scrubber: actual mouse motion with the
+# button held, not clipboard navigation. The preceding check leaves the
+# player paused near zero. This must reach an unseen late picture promptly.
+selected_one_x2_scrubber_reaches_unseen_content() {
+	[ "$media" = "$ONE_X2_SEEK_MEDIA" ] || return
+	local check="the real scrubber reaches unseen late content within ten seconds"
+	local started=$SECONDS stamp seconds artifact
+	seconds=$(sed -n 's/^media:.*, \([0-9.]*\) s$/\1/p' "$log" | head -1)
+	poke 350 "$CONTROL_ROW"
+	if ! env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		"$poker" 1280 720 350 "$CONTROL_ROW" drag 858 "$CONTROL_ROW" 2>>"$log"; then
+		fail "$check" "the virtual pointer drag failed" "log: $log"
+		return
+	fi
+	while [ $((SECONDS - started)) -lt 10 ]; do
+		view_lines=$(grep -c '^view:' "$log")
+		key -k i
+		alive || lost "$check"
+		[ "$(grep -c '^view:' "$log")" -gt "$view_lines" ] || continue
+		stamp=$(view_line | sed -n 's/.* time=\([0-9.]*\) .*/\1/p')
+		# The 1280-wide stock rail spans x=220..1058. Allow layout/rounding
+		# variation but never confuse the slider label with the shown frame.
+		if LC_ALL=C awk -v t="$stamp" -v d="$seconds" \
+			'BEGIN { exit !(d > 0 && t / d > 0.74 && t / d < 0.79) }'; then
+			artifact=$(grab scrubber-late)
+			if still_picture scrubber-late-held; then
+				pass "$check (shown $stamp s after $((SECONDS - started)) s; $artifact)"
+			else
+				fail "$check" "the paused drag did not hold its destination" "log: $log"
+			fi
+			return
+		fi
+	done
+	fail "$check" "latest displayed time: ${stamp:-none}, requested about 76% of $seconds s" "log: $log"
+}
 
 selected_one_x2_holds_a_backward_seek() {
 	[ "$media" = "$ONE_X2_SEEK_MEDIA" ] || return
@@ -2106,6 +2142,9 @@ stalls() {
 	# arrives is the clock stopped, and the sound follows the clock: this is
 	# how the harness sees silence without a microphone.
 	check="a stopped file stops its sound too"
+	# Reports during the two-second import retry window precede the stop.
+	# Baseline here, after observing the stopped line, not before injection.
+	reports=$(grep -c '^play:' "$log")
 	sleep "$REPORT"
 	if [ "$(grep -c '^play:' "$log")" -gt "$reports" ]; then
 		fail "$check" "the clock ran on for $REPORT s after the picture died" \

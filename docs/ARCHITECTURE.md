@@ -296,9 +296,14 @@ At most one nonblocking device poll, when callback or retirement work exists,
 drives the active attachment and every normally draining attachment replaced by seek or reopen. Callback collection and
 retirement never wait. Completion-proven owners release normally; uncertain
 owners remain fail-closed without blocking or repeatedly scheduling the new
-lineage. A discontinuous seek creates a new capture facade and causally replays
-from frame zero to the requested target while the old exact display may remain
-visible. The displayed frame is retained until its exact map
+lineage. A discontinuous user seek creates a new temporal root on the decoder's
+landing frame, sharing immutable GPU kernels but no old history. Drag updates
+request keyframes; release requests the exact destination. Sequential consumers
+reject superseded decoder epochs before they can initialize that new root.
+This intentionally differs from uninterrupted frame-zero history, following the
+owner's 2026-09-05 priority of performant Studio-like stitching over perfect
+reproduction. A single forward step keeps the adjacent warm state. The old
+display remains visible until the destination's source-specific map
 is acknowledged. The direct type-2 draw consumes the native map and alpha
 without routing through the legacy seam-band displacement.
 
