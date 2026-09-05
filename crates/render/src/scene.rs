@@ -2881,6 +2881,7 @@ impl ScenePipeline {
         queue: &wgpu::Queue,
         aspect: f32,
     ) {
+        self.report_device(device);
         primitive
             .resident_refresh
             .store(false, AtomicOrdering::Release);
@@ -3248,6 +3249,13 @@ impl ScenePipeline {
         (self.live.len(), RETAINED)
     }
 
+    fn report_device(&mut self, device: &wgpu::Device) {
+        if !self.reported {
+            self.reported = true;
+            println!("device: {}", dmabuf::device_report(device));
+        }
+    }
+
     fn prepare_inner(
         &mut self,
         primitive: &ScenePrimitive,
@@ -3259,10 +3267,7 @@ impl ScenePipeline {
         // Every preparation is a new picture transaction, even if it happens
         // to draw the same delivered pair through identical values.
         self.prepared_picture = None;
-        if !self.reported {
-            self.reported = true;
-            println!("device: {}", dmabuf::device_report(device));
-        }
+        self.report_device(device);
         if let Some(view) = &primitive.view {
             self.show(device, view, primitive);
         }

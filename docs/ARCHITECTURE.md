@@ -58,6 +58,15 @@ The shell is libcosmic, which pins wgpu 28, so `render` is written against
 28 and owns the one module that wgpu 30 would delete
 (`crates/render/src/dmabuf.rs`).
 
+The shell's pinned `iced_wgpu` renderer is locally patched to request the
+adapter's supported storage-buffer count. Its fixed default of eight caused
+the resident ONE X2 pipeline to panic at startup in the window, despite
+passing headless checks whose devices requested adapter limits. This is only
+device configuration: no renderer arithmetic or stitch layout changes.
+`vendor/iced_wgpu/KJERAG.md` records the source, license and removal condition.
+The selected capture session checks its fifteen-buffer requirement before
+pipeline construction and reports an ordinary failure when it is unavailable.
+
 `Size` and `Fallible` live in `media`: they are frame types, and `render`
 depends on `media` rather than the other way round. `render` re-exports both
 and adds the `Extent` trait, which is the `wgpu::Extent3d` half of `Size`

@@ -1,0 +1,84 @@
+# Workspace inheritance expanded from the pinned iced workspace.
+# See KJERAG.md for provenance and the one renderer change.
+[package]
+name = "iced_wgpu"
+description = "A renderer for iced on top of wgpu"
+version = "0.14.0"
+edition = "2024"
+authors = ["Héctor Ramón Jiménez <hector@hecrj.dev>"]
+license = "MIT"
+repository = "https://github.com/iced-rs/iced"
+homepage = "https://iced.rs"
+categories = ["gui"]
+keywords = ["gui", "ui", "graphics", "interface", "widgets"]
+publish = false
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+all-features = true
+
+[features]
+default = ["wgpu/default"]
+geometry = ["iced_graphics/geometry", "lyon"]
+image = ["iced_graphics/image"]
+svg = ["iced_graphics/svg", "resvg/text"]
+web-colors = ["iced_graphics/web-colors"]
+webgl = ["wgpu/webgl"]
+strict-assertions = []
+wayland = ["cctk"]
+
+[dependencies]
+iced_debug = { git = "https://github.com/pop-os/libcosmic", rev = "dc1cf9f00cbe2902a52166492654bb9fee8a73d1" }
+iced_graphics = { git = "https://github.com/pop-os/libcosmic", rev = "dc1cf9f00cbe2902a52166492654bb9fee8a73d1" }
+bitflags = "2.5"
+bytemuck = { version = "1.0", features = ["derive"] }
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+glam = "0.25"
+cryoglyph = { git = "https://github.com/iced-rs/cryoglyph.git", rev = "e429a025df36ab8145708acb309080ae3deec17a" }
+guillotiere = "0.6"
+log = "0.4"
+rustc-hash = "2.0"
+thiserror = "2"
+wgpu = { version = "28.0", default-features = false, features = ["std", "wgsl"] }
+lyon = { version = "1.0", optional = true }
+resvg = { version = "0.45", optional = true }
+
+[target.'cfg(all(unix, not(target_os = "macos"), not(target_os = "redox")))'.dependencies]
+rustix = { version = "0.38", features = ["fs"] }
+raw-window-handle = "0.6"
+cctk = { git = "https://github.com/pop-os/cosmic-protocols", package = "cosmic-client-toolkit", rev = "32283d7", optional = true }
+wayland-protocols = { version = "0.32.1", features = ["staging"] }
+wayland-backend = { version = "0.3.3", features = ["client_system"] }
+wayland-client = "0.31.2"
+wayland-sys = { version = "0.31.1", features = ["dlopen"] }
+as-raw-xcb-connection = "1.0.1"
+tiny-xlib = "0.2.3"
+x11rb = { version = "0.13.1", features = ["allow-unsafe-code", "dl-libxcb", "dri3", "randr"] }
+
+[build-dependencies]
+build_helpers = { git = "https://github.com/pop-os/libcosmic", rev = "dc1cf9f00cbe2902a52166492654bb9fee8a73d1" }
+
+[lints.rust]
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused_results = "deny"
+
+[lints.clippy]
+type-complexity = "allow"
+map-entry = "allow"
+large-enum-variant = "allow"
+result_large_err = "allow"
+semicolon_if_nothing_returned = "deny"
+trivially-copy-pass-by-ref = "deny"
+default_trait_access = "deny"
+match-wildcard-for-single-variants = "deny"
+redundant-closure-for-method-calls = "deny"
+filter_map_next = "deny"
+manual_let_else = "deny"
+unused_async = "deny"
+from_over_into = "deny"
+needless_borrow = "deny"
+new_without_default = "deny"
+useless_conversion = "deny"
+
+[lints.rustdoc]
+broken_intra_doc_links = "forbid"

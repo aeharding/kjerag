@@ -456,6 +456,21 @@ struct TestColdBlurredProbe {
     l1_terminals: Vec<wgpu::Buffer>,
 }
 
+fn require_resident_device_limits(limits: &wgpu::Limits) -> Fallible<()> {
+    // Warm post-L1 has the largest selected layout: fifteen storage buffers.
+    // Check before any pipeline construction so a UI device with insufficient
+    // requested limits reports through Scene's ordinary failure path, not wgpu's
+    // uncaptured-validation panic. No CPU fallback is selected here.
+    let available = limits.max_storage_buffers_per_shader_stage;
+    if available < 15 {
+        return Err(format!(
+            "ONE X2 stitching needs 15 GPU storage buffers per shader stage, but this device allows {available}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 impl ResidentCaptureSession {
     /// Lazily construct one capture session. The existing resident stage
     /// constructors synchronously qualify arithmetic on this target device;
@@ -467,6 +482,7 @@ impl ResidentCaptureSession {
         calibration: &CalibrationSet,
         orientation: OrientationTrack,
     ) -> Fallible<Self> {
+        require_resident_device_limits(&context.device().limits())?;
         let picture_layout = crate::scene::bind_group_layout(context.device());
         let sampler = context.device().create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Linear,
@@ -3494,6 +3510,31 @@ fn blur_vertical(@builtin(global_invocation_id) id: vec3<u32>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resident_device_limits_refuse_ui_defaults_before_pipeline_construction() {
+        for available in [0, 8, 11, 14] {
+            let limits = wgpu::Limits {
+                max_storage_buffers_per_shader_stage: available,
+                ..wgpu::Limits::default()
+            };
+            assert_eq!(
+                super::require_resident_device_limits(&limits)
+                    .unwrap_err()
+                    .to_string(),
+                format!(
+                    "ONE X2 stitching needs 15 GPU storage buffers per shader stage, but this device allows {available}"
+                )
+            );
+        }
+        for available in [15, 16, 32] {
+            let limits = wgpu::Limits {
+                max_storage_buffers_per_shader_stage: available,
+                ..wgpu::Limits::default()
+            };
+            super::require_resident_device_limits(&limits).unwrap();
+        }
+    }
+
     use std::future::Future;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU8, Ordering};

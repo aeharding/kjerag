@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["vendor/iced_wgpu"]
 # Plain `cargo run` starts the app, as it did before the split. Everything
 # else is reached with `-p`, and the gates use `--workspace` so no member is
 # skipped (AGENTS.md).
@@ -120,3 +121,9 @@ features = ["wgpu"]
 # stays on the fork as the readable name for it.
 [patch.crates-io]
 wgpu = { git = "https://github.com/aeharding/wgpu", rev = "fb66f36c5cf1135c11523767652ea7a809b3e598" }
+
+# iced's fixed device descriptor otherwise caps shader widgets at eight
+# storage buffers, even on capable hardware. Only device-limit negotiation
+# differs from the pinned renderer. See vendor/iced_wgpu/KJERAG.md.
+[patch."https://github.com/pop-os/libcosmic"]
+iced_wgpu = { path = "vendor/iced_wgpu" }

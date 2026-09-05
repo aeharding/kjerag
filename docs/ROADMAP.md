@@ -3,6 +3,38 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Resident range verified; real-window device limit found, 2026-09-05:**
+implementation commit `7c2b287d84cef120f473f30c650e50bc41120d44` consumed
+source frames 0 through 6399 on the selected GPU path (6400 GPU, zero CPU,
+zero dropped or starved) and saved the owner's frames 6339 through 6399.
+All 61 rendered PNGs, packed maps, alpha maps and computed seam-trace PNGs
+are byte-identical to the earlier owner-approved `9054e547e4ea` range.
+The actual riser render was inspected. This proves that interval against
+that approved baseline, not whole-file Studio parity or a new owner-eye pass.
+Durable receipts and logs are in the integration worktree's
+`scratch/gpu-resident-7c2b287d-{f6339-6399,trace-f6339-6399}/` and adjacent
+logs. The range's 14.6 fps includes instrument waits/readbacks and is not
+a real-window performance measurement. Concurrent test load also produced
+an audio underrun, so this run does not establish continuous audio playback.
+
+The actual player then failed at startup: iced requested only eight storage
+buffers per shader stage, while the prepared-source layout needs eleven and
+warm post-L1 needs fifteen. Headless instruments requested adapter limits and
+did not expose this integration error. A local patch to the pinned
+`iced_wgpu` crate requests the adapter's supported storage count, with no
+other renderer or shader changes. A selected-session preflight reports a
+normal raw playback error below fifteen instead of a wgpu validation panic.
+The lock file and Flatpak source list are regenerated together. The real
+window now opens and renders; exact/backward seeks, stills, clipboard views
+and file drops pass. Its first steady playback report was 22.6 fps with audio
+underruns, not full-rate playback. Failure injection exposed a separate
+resident integration regression: transient pre-submit import errors quarantine
+the capture and lose the held picture. That remains to fix and retest. The
+existing device report also lived only in legacy preparation; it now runs
+through the common preparation entry without changing the import check.
+Installed-Flatpak playback and owner-eye review remain pending. Broader Studio
+optimization RE remains frozen.
+
 **Resident camera-mask correction, 2026-09-05, implementation branch only:**
 the selected resident geometry omitted the frozen CPU path's conditioned
 400-by-400 camera support. On the owner's frame zero the physical mask's
@@ -18,8 +50,8 @@ UVs that exercise camera clearing independently of erosion. Radeon tests reject
 omitting camera support or changing either row boundary. Separate bilateral
 tests cover the adjacent f32 values around the promoted-f64 `1e-8` threshold
 and reject the naive rounded-f32 comparison. Normal playback adds no per-frame
-CPU maps or readback. The complete rendered range, computed trace and owner-eye
-gate remain pending; first-frame internal identity alone is not video parity.
+CPU maps or readback. The complete rendered range and computed trace are now
+verified as recorded above; owner-eye review of the GPU branch remains pending.
 
 **Resident cold frame-zero causal locator, 2026-09-01, diagnostic branch
 only [CFG(TEST), ENV-GATED, REAL MEDIA; NO PRODUCTION OR PARITY CLAIM]:** an
