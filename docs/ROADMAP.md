@@ -3,6 +3,33 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Native GPU playback integration checkpoint, 2026-09-05, issue #182:**
+the real ONE X2 player passes all 53 headless UI checks, including exact
+and backward seeks, screenshots, file drops, transient import recovery,
+terminal import failure holding the last picture, and reopening afterward.
+The GPU device-limit patch is committed as `7d0b312e`. The subsequent
+pre-submit recovery change distinguishes temporary OS/Vulkan resource
+exhaustion from invalid inputs, device loss or errors after submission.
+Only a failed source import can return to idle for retry; the exact offered
+frame, installed acknowledgement and GPU root are preserved. Scene uses its
+existing two-second import-failure window and keeps staging the installed
+picture. Errors after GPU submission remain fail-closed. No arithmetic,
+temporal cadence or normal successful-frame sequence changes.
+
+Evidence: `scratch/resident-import-recovery-uitest-pass-20260905.log`
+and `scratch/uitest/` in the integration worktree; the pre-fix captures
+are retained separately. Unit tests cover raw OS/Vulkan error classification
+and repeated retry preserving the same next source. The native app's tested
+SHA-256 is `4b35fe80cacecc1e10f3d69a485c0f0b1d61635e966873915f9acd5dc6572b67`.
+Steady playback still reports about 22 fps and audio underruns. Passing
+the UI checks does not establish full-rate playback or stable audio.
+The full workspace test gate passes on forced RADV with real-media tests
+enabled, as do format, workspace/all-target clippy and name/source/diff gates.
+The vendored compositor's device-limit regression also passes separately.
+The final logs are `scratch/resident-import-recovery-{workspace-tests,clippy}-final-20260905.log`.
+Installed-Flatpak testing, final GPU-branch owner review and further speed
+work remain; no such compromise is accepted and main is unchanged.
+
 **Resident range verified; real-window device limit found, 2026-09-05:**
 implementation commit `7c2b287d84cef120f473f30c650e50bc41120d44` consumed
 source frames 0 through 6399 on the selected GPU path (6400 GPU, zero CPU,
@@ -29,8 +56,9 @@ window now opens and renders; exact/backward seeks, stills, clipboard views
 and file drops pass. Its first steady playback report was 22.6 fps with audio
 underruns, not full-rate playback. Failure injection exposed a separate
 resident integration regression: transient pre-submit import errors quarantine
-the capture and lose the held picture. That remains to fix and retest. The
-existing device report also lived only in legacy preparation; it now runs
+the capture and lose the held picture. The checkpoint above repairs and
+retests that boundary. The existing device report also lived only in legacy
+preparation; it now runs
 through the common preparation entry without changing the import check.
 Installed-Flatpak playback and owner-eye review remain pending. Broader Studio
 optimization RE remains frozen.

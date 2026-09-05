@@ -280,6 +280,9 @@ pub(crate) enum ResidentSubmit {
     Submitted,
     AlreadyInstalled(FrameStamp),
     Retry(ResidentRetry),
+    /// No source reached a GPU submission. Keep the installed picture and
+    /// retry this same offered frame under Scene's existing import timeout.
+    ImportFailed(String),
 }
 
 #[derive(Clone, Debug)]
@@ -386,6 +389,28 @@ impl ResidentStartGuard {
 
     fn disarm(&mut self) {
         self.armed = false;
+    }
+
+    fn failed_import(mut self, error: Box<dyn Error + Send + Sync>) -> Fallible<ResidentSubmit> {
+        let retry = crate::dmabuf::retryable_import_error(error.as_ref());
+        {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .map_err(|_| "ONE X2 resident capture state is poisoned")?;
+            state.transaction = if retry {
+                ResidentTransaction::Idle
+            } else {
+                ResidentTransaction::Quarantined
+            };
+        }
+        self.disarm();
+        if retry {
+            Ok(ResidentSubmit::ImportFailed(error.to_string()))
+        } else {
+            Err(error)
+        }
     }
 }
 
@@ -547,17 +572,10 @@ impl ResidentCaptureSession {
         )
     }
 
-    fn submit(
-        &self,
-        frames: Arc<Frames>,
-        reframe: &crate::Reframe,
-    ) -> Fallible<ResidentPendingMap> {
+    fn submit(&self, source: ImportedOneXsPicture) -> Fallible<ResidentPendingMap> {
         let warm = self.capture.pipeline.root.has_installed_successor()?;
         #[cfg(test)]
-        let frame = frames.stamp();
-        let source =
-            self.capture
-                .import_picture(&self.picture_layout, &self.sampler, reframe, frames)?;
+        let frame = source.resident_frame();
         let source = source.submit_resident_front(&self.capture)?;
         #[cfg(test)]
         if !warm && std::env::var_os("KJERAG_ONE_X2_COLD_STAGE_PROBE").is_some() {
@@ -1001,7 +1019,20 @@ impl ResidentSceneFacade {
             state.transaction = ResidentTransaction::Starting;
         }
         let mut start = ResidentStartGuard::quarantine(Arc::clone(&self.capture.inner));
-        let pending = session.submit(frames, reframe);
+        // A failed import owns no submitted work and has not reserved the
+        // resident root. Only this boundary can retry resource exhaustion.
+        // Once submit starts, every failure keeps the existing fail-closed
+        // handling for uncertain GPU work and exact causal state.
+        let source = match session.capture.import_picture(
+            &session.picture_layout,
+            &session.sampler,
+            reframe,
+            frames,
+        ) {
+            Ok(source) => source,
+            Err(error) => return start.failed_import(error),
+        };
+        let pending = session.submit(source);
         let mut state = self.capture.state()?;
         match pending {
             Ok(pending) => {
@@ -4020,6 +4051,41 @@ mod tests {
             }
         }));
         assert!(unwind.is_err());
+        assert!(matches!(
+            facade.state().unwrap().transaction,
+            ResidentTransaction::Quarantined
+        ));
+    }
+
+    #[test]
+    fn retryable_import_preserves_installed_acknowledgement_and_allows_the_same_source() {
+        let facade = ResidentCaptureFacade::new(
+            Arc::new(session_calibration(20.0, 0.0)),
+            session_orientation(1.0),
+        );
+        let installed = FrameStamp::for_test(0, Duration::ZERO, None);
+        let offered = FrameStamp::for_test(1, Duration::from_millis(33), Some(&installed));
+        facade.state().unwrap().installed = Some(installed.clone());
+        for _ in 0..3 {
+            facade.state().unwrap().transaction = ResidentTransaction::Starting;
+            let error = std::io::Error::from_raw_os_error(libc::EMFILE);
+            let expected = error.to_string();
+            let result = ResidentStartGuard::quarantine(Arc::clone(&facade.inner))
+                .failed_import(error.into())
+                .unwrap();
+            assert!(matches!(result, ResidentSubmit::ImportFailed(error) if error == expected));
+            let state = facade.state().unwrap();
+            assert!(matches!(state.transaction, ResidentTransaction::Idle));
+            assert_eq!(state.installed.as_ref(), Some(&installed));
+            validate_resident_sequence(state.installed.as_ref(), &offered).unwrap();
+        }
+        // The exceptional retry is restricted to resource failure before
+        // submission. Invalid source data still keeps the fail-closed path.
+        facade.state().unwrap().transaction = ResidentTransaction::Starting;
+        let error = ResidentStartGuard::quarantine(Arc::clone(&facade.inner))
+            .failed_import("invalid source descriptor".into())
+            .unwrap_err();
+        assert_eq!(error.to_string(), "invalid source descriptor");
         assert!(matches!(
             facade.state().unwrap().transaction,
             ResidentTransaction::Quarantined

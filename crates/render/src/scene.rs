@@ -3060,8 +3060,18 @@ impl ScenePipeline {
                 view.frames.clone(),
                 &reframe,
             )? {
-                ResidentSubmit::Submitted
-                | ResidentSubmit::AlreadyInstalled(_)
+                ResidentSubmit::Submitted => primitive.stalled.landed(),
+                ResidentSubmit::ImportFailed(error) => {
+                    primitive.stalled.failed(
+                        Instant::now(),
+                        error,
+                        primitive.shown.get().is_some(),
+                    );
+                    primitive
+                        .resident_refresh
+                        .store(true, AtomicOrdering::Release);
+                }
+                ResidentSubmit::AlreadyInstalled(_)
                 | ResidentSubmit::Retry(ResidentRetry::InFlight)
                 | ResidentSubmit::Retry(ResidentRetry::DrawRetirementFull) => {}
             }
@@ -5829,7 +5839,15 @@ mod tests {
             .split_once("pub(crate) fn arm_and_draw")
             .unwrap()
             .0;
-        assert!(submit.contains("session.submit(frames, reframe)"));
+        let (import, submitted) = submit
+            .split_once("let pending = session.submit(source);")
+            .expect("the selected path consumes the imported source on GPU");
+        assert!(import.contains("session.capture.import_picture("));
+        assert!(import.contains("Err(error) => return start.failed_import(error)"));
+        assert!(
+            !submitted.contains("failed_import"),
+            "the pre-submit import retry must not catch a GPU submission failure"
+        );
         assert!(prepare.contains("finish_after_poll_classified"));
         assert!(prepare.contains("prepare_installed"));
         for (method, body) in [("submit_frame", submit), ("prepare_redraw_inner", prepare)] {

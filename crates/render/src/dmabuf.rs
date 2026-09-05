@@ -108,6 +108,22 @@ pub fn device_report(device: &wgpu::Device) -> String {
     }
 }
 
+/// Resource exhaustion can clear while the current picture stays on screen.
+/// This classification is only valid before an imported source is submitted.
+/// Invalid descriptors, unsupported formats and device loss are not retries.
+pub(crate) fn retryable_import_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    if let Some(error) = error.downcast_ref::<std::io::Error>() {
+        return matches!(
+            error.raw_os_error(),
+            Some(libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::EAGAIN | libc::EINTR)
+        );
+    }
+    matches!(
+        error.downcast_ref::<vk::Result>().copied(),
+        Some(vk::Result::ERROR_OUT_OF_HOST_MEMORY | vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)
+    )
+}
+
 /// Import one DRM_PRIME descriptor as two sampled textures.
 pub fn import(device: &wgpu::Device, desc: &AVDRMFrameDescriptor, luma: Size) -> Fallible<Planes> {
     if let Some(name) = missing_extension(device)? {
@@ -421,6 +437,37 @@ fn dup_fd(fd: c_int) -> Fallible<OwnedFd> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_pre_submit_resource_errors_are_retryable() {
+        for code in [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::ENOMEM,
+            libc::EAGAIN,
+            libc::EINTR,
+        ] {
+            assert!(super::retryable_import_error(
+                &std::io::Error::from_raw_os_error(code)
+            ));
+        }
+        for code in [libc::EBADF, libc::EINVAL, libc::EACCES] {
+            assert!(!super::retryable_import_error(
+                &std::io::Error::from_raw_os_error(code)
+            ));
+        }
+        for error in [
+            vk::Result::ERROR_OUT_OF_HOST_MEMORY,
+            vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+        ] {
+            assert!(super::retryable_import_error(&error));
+        }
+        assert!(!super::retryable_import_error(
+            &vk::Result::ERROR_DEVICE_LOST
+        ));
+        let descriptor_error: Box<dyn std::error::Error> = "invalid source descriptor".into();
+        assert!(!super::retryable_import_error(descriptor_error.as_ref()));
+    }
+
     use super::*;
 
     /// Straight from drm_fourcc.h: a typo here would silently pick the wrong
