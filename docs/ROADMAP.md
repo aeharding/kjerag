@@ -21,6 +21,11 @@ input (model, masks, work mode, admission and disparity), not post-L1 history
 or final-map assembly. The probe stops at the first unequal semantic producer;
 ordinary builds and playback APIs are unchanged.
 
+The diagnostic L1 seed readback now retains the producer's per-plane stride
+and removes alignment padding before comparing the four logical planes. A
+padding-poison regression verifies all plane boundaries. The original Cold0
+L2 failure precedes this seed comparison and is unchanged by the correction.
+
 **Selected ONE X2 Scene resident cutover, 2026-09-01, implementation branch
 only [NORMAL LIVE PATH; POST-QUALIFICATION NONBLOCKING; NO PERFORMANCE OR
 STUDIO-RE CLAIM]:** an ordinary supported ONE X2 open now branches before

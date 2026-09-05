@@ -1160,6 +1160,8 @@ impl<K, P: GpuResidentLevelTwoPost> GpuL2BridgeOutput<K, P> {
         let l2_terminal = self._terminal.clone();
         #[cfg(test)]
         let l1_initial = self.seeds.buffer.clone();
+        #[cfg(test)]
+        let l1_initial_plane_stride_words = self.seeds.plane_stride / 4;
         let GpuL2BridgeOutput {
             receipt: _,
             seeds: _,
@@ -1197,6 +1199,8 @@ impl<K, P: GpuResidentLevelTwoPost> GpuL2BridgeOutput<K, P> {
             l2_terminal,
             #[cfg(test)]
             l1_initial,
+            #[cfg(test)]
+            l1_initial_plane_stride_words,
         })
     }
 
@@ -1223,14 +1227,20 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) struct GpuL1PreparedTerminal<
     l2_terminal: wgpu::Buffer,
     #[cfg(test)]
     l1_initial: wgpu::Buffer,
+    #[cfg(test)]
+    l1_initial_plane_stride_words: u64,
 }
 
 #[cfg(test)]
 impl<K, P: GpuResidentLevelTwoPost> GpuL1PreparedTerminal<K, P> {
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn cold_input_buffers_for_test(
         &self,
-    ) -> (wgpu::Buffer, wgpu::Buffer) {
-        (self.l2_terminal.clone(), self.l1_initial.clone())
+    ) -> (wgpu::Buffer, wgpu::Buffer, u64) {
+        (
+            self.l2_terminal.clone(),
+            self.l1_initial.clone(),
+            self.l1_initial_plane_stride_words,
+        )
     }
 
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn post_for_test(&self) -> &P {
@@ -1289,6 +1299,8 @@ impl<K, P: GpuResidentLevelTwoPost> GpuL1PreparedTerminal<K, P> {
                 l2_terminal: _,
             #[cfg(test)]
                 l1_initial: _,
+            #[cfg(test)]
+                l1_initial_plane_stride_words: _,
         } = self;
         let result = terminal.prepared.acknowledge_terminal();
         drop(post);

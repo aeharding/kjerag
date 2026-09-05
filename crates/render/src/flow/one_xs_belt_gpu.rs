@@ -433,6 +433,7 @@ struct TestColdBlurredProbe {
     packed: wgpu::Buffer,
     cold0_l2_terminal: Option<wgpu::Buffer>,
     cold0_l1_initial: Option<wgpu::Buffer>,
+    cold0_l1_initial_plane_stride_words: Option<u64>,
     l1_terminals: Vec<wgpu::Buffer>,
 }
 
@@ -537,6 +538,7 @@ impl ResidentCaptureSession {
                 packed: source.blurred_buffer_for_test(),
                 cold0_l2_terminal: None,
                 cold0_l1_initial: None,
+                cold0_l1_initial_plane_stride_words: None,
                 l1_terminals: Vec::with_capacity(3),
             });
         }
@@ -569,7 +571,8 @@ impl ResidentCaptureSession {
             let probing = std::env::var_os("KJERAG_ONE_X2_COLD_STAGE_PROBE").is_some();
             #[cfg(test)]
             let cold = if probing {
-                let (cold0_l2_terminal, cold0_l1_initial) = cold0.cold0_input_buffers_for_test();
+                let (cold0_l2_terminal, cold0_l1_initial, cold0_l1_initial_plane_stride_words) =
+                    cold0.cold0_input_buffers_for_test();
                 let cold0_terminal = cold0.l1_terminal_buffer_for_test();
                 let cold_after0 = cold0.complete(&self.bridge)?;
                 let (cold_after1, cold1_terminal) =
@@ -585,6 +588,8 @@ impl ResidentCaptureSession {
                     .ok_or("ONE X2 cold stage probe lost its blurred owner")?;
                 probe.cold0_l2_terminal = Some(cold0_l2_terminal);
                 probe.cold0_l1_initial = Some(cold0_l1_initial);
+                probe.cold0_l1_initial_plane_stride_words =
+                    Some(cold0_l1_initial_plane_stride_words);
                 probe.l1_terminals = vec![cold0_terminal, cold1_terminal, cold2_terminal];
                 cold
             } else {
@@ -798,9 +803,13 @@ impl ResidentCaptureFacade {
             .cold0_l1_initial
             .as_ref()
             .ok_or("ONE X2 Cold0 probe lost its L1 initial")?;
+        let initial_stride = probe
+            .cold0_l1_initial_plane_stride_words
+            .ok_or("ONE X2 Cold0 probe lost its L1 initial plane stride")?;
+        let initial_words = read_word_probe(&session.context, initial)?;
         Ok(Some((
             read_word_probe(&session.context, l2)?,
-            read_word_probe(&session.context, initial)?,
+            compact_l1_initial_planes(&initial_words, initial_stride)?,
         )))
     }
 
@@ -1899,6 +1908,26 @@ fn read_word_probe(context: &OneXsGpuContext, source: &wgpu::Buffer) -> Fallible
     drop(mapped);
     readback.unmap();
     Ok(words)
+}
+
+#[cfg(test)]
+fn compact_l1_initial_planes(words: &[u32], plane_stride_words: u64) -> Fallible<Vec<u32>> {
+    let stride = usize::try_from(plane_stride_words)?;
+    let logical = super::pis::Level::One.patches();
+    if stride < logical || words.len() != 4 * stride {
+        return Err(format!(
+            "ONE X2 Cold0 L1 initial allocation is {} words with plane stride {stride}, expected four planes of at least {logical} words",
+            words.len()
+        )
+        .into());
+    }
+    Ok((0..4)
+        .flat_map(|plane| {
+            words[plane * stride..plane * stride + logical]
+                .iter()
+                .copied()
+        })
+        .collect())
 }
 
 const CODES_PER_WORD: usize = 4;
@@ -3412,6 +3441,29 @@ mod tests {
     use crate::projection::tests::{ONE_XS_FRAME, one_xs_lenses};
 
     const SESSION_CENTER: Duration = Duration::from_micros(2_000_000);
+
+    #[test]
+    fn cold_l1_initial_probe_compacts_plane_padding() {
+        let logical = crate::flow::one_xs::pis::Level::One.patches();
+        let stride = logical + 16;
+        let mut allocation = vec![0xdead_beefu32; 4 * stride];
+        for plane in 0..4 {
+            for word in 0..logical {
+                allocation[plane * stride + word] = ((plane as u32) << 24) | word as u32;
+            }
+        }
+
+        let compact = compact_l1_initial_planes(&allocation, stride as u64).unwrap();
+        assert_eq!(compact.len(), 4 * logical);
+        for plane in 0..4 {
+            assert_eq!(compact[plane * logical], (plane as u32) << 24);
+            assert_eq!(
+                compact[(plane + 1) * logical - 1],
+                ((plane as u32) << 24) | (logical - 1) as u32
+            );
+        }
+        assert!(!compact.contains(&0xdead_beef));
+    }
 
     #[allow(dead_code)]
     fn mode_neutral_final_install_typechecks<P>(

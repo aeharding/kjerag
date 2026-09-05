@@ -623,6 +623,8 @@ impl GpuWarmPostL1Pipeline {
                 l2_terminal: _,
             #[cfg(test)]
                 l1_initial: _,
+            #[cfg(test)]
+                l1_initial_plane_stride_words: _,
         } = input;
         for (part, resource, words) in [
             ("paired L1 terminal", &terminal._output, PATCH_WORDS),
@@ -1322,7 +1324,7 @@ impl<K> GpuCold0Terminal<K> {
     #[cfg(test)]
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn cold0_input_buffers_for_test(
         &self,
-    ) -> (wgpu::Buffer, wgpu::Buffer) {
+    ) -> (wgpu::Buffer, wgpu::Buffer, u64) {
         self.terminal.cold_input_buffers_for_test()
     }
 }
@@ -1512,6 +1514,8 @@ fn complete_cold_tail<K>(
             l2_terminal: _,
         #[cfg(test)]
             l1_initial: _,
+        #[cfg(test)]
+            l1_initial_plane_stride_words: _,
     } = input;
     let mut guard = ColdTailGuard {
         terminal: Some(terminal),
