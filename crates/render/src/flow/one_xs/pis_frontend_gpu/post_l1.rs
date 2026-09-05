@@ -1327,6 +1327,11 @@ impl<K> GpuCold0Terminal<K> {
     ) -> (wgpu::Buffer, wgpu::Buffer, u64) {
         self.terminal.cold_input_buffers_for_test()
     }
+
+    #[cfg(test)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn shared_masks_for_test(&self) -> wgpu::Buffer {
+        self.terminal.terminal.prepared.shared_masks_for_test()
+    }
 }
 
 impl<K, O: ColdLoopOrdinal> GpuColdLoop<K, O> {

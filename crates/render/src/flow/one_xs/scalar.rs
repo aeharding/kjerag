@@ -1053,6 +1053,11 @@ impl MaskPyramid {
             Level::Two => self.level_two.clone(),
         }
     }
+
+    #[cfg(test)]
+    pub(super) fn level_two_for_test(&self) -> LensPair<Vec<u8>> {
+        self.level(Level::Two)
+    }
 }
 
 #[derive(Clone)]

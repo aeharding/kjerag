@@ -4,8 +4,9 @@
 //! This stage consumes the resident two-lens 100-by-200 parent token, then
 //! performs both 1,080-by-60 periodic `mapMerge`
 //! kernels, the selected directional continuity filters and the physical
-//! mask seed, 9-by-9 erosion and A/B unification. Static coordinates are
-//! uploaded once at construction. The result has no ordinary readback.
+//! mask seed, 9-by-9 erosion, camera support and A/B unification. Static
+//! coordinates and conditioned camera support are uploaded once at
+//! construction. The result has no ordinary readback.
 
 use super::super::base_map::{
     FlowstateRoi, SELECTED_FLOWSTATE_COLS, SELECTED_FLOWSTATE_ROWS, SELECTED_LINE_COLS,
@@ -19,7 +20,7 @@ use super::pis_frontend_gpu::{GpuPisFrontEnd, GpuPreparedFrame};
 use super::resident_frame_gpu::GpuResidentReservation;
 use super::{GpuBlurredBelts, GpuSolverBeltPipeline, SourceTextures};
 use crate::Fallible;
-use crate::flow::one_xs_belt::{RetainedBaseMaps, base_support_masks};
+use crate::flow::one_xs_belt::{CAMERA_MASK_SIZE, CameraMaskSupport, RetainedBaseMaps};
 
 /// Temporal image state is private beneath the geometry owner. Its production
 /// entry can consume only the complete geometry/belt aggregate.
@@ -148,6 +149,11 @@ pub(crate) struct GpuGeometryBelts<K> {
 }
 
 impl<K> GpuGeometryBelts<K> {
+    #[cfg(test)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn physical_masks_for_test(&self) -> wgpu::Buffer {
+        self.masks.clone()
+    }
+
     /// Consume the complete geometry-backed belt token into the exact resident
     /// front end. The packed physical masks bind directly without reupload.
     pub(crate) fn prepare_front_end(
@@ -237,19 +243,22 @@ pub(crate) struct GpuGeometryPipeline {
     mask: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     static_coordinates: wgpu::Buffer,
+    camera_support: wgpu::Buffer,
 }
 
 impl GpuGeometryPipeline {
     pub(crate) fn new(
         context: OneXsGpuContext,
         coordinates: &LensPair<StaticLineCoordinates>,
+        support: &CameraMaskSupport,
     ) -> Fallible<Self> {
-        Self::from_shader(context, coordinates, SHADER)
+        Self::from_shader(context, coordinates, support, SHADER)
     }
 
     fn from_shader(
         context: OneXsGpuContext,
         coordinates: &LensPair<StaticLineCoordinates>,
+        support: &CameraMaskSupport,
         shader: &str,
     ) -> Fallible<Self> {
         validate_static(coordinates)?;
@@ -271,6 +280,7 @@ impl GpuGeometryPipeline {
                 storage(1, true),
                 storage(2, false),
                 storage(3, false),
+                storage(4, true),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -301,6 +311,24 @@ impl GpuGeometryPipeline {
         context
             .queue()
             .write_buffer(&static_coordinates, 0, &pair_bytes(coordinates));
+        use wgpu::util::DeviceExt;
+        let mut support_bytes = super::super::Lens::ALL
+            .into_iter()
+            .flat_map(|lens| support.conditioned_pixels(lens))
+            .flat_map(|value| value.to_ne_bytes())
+            .collect::<Vec<_>>();
+        // A runtime zero prevents contraction across the scalar sampler's
+        // separately rounded operations, as in the qualified PIS frontend.
+        support_bytes.extend(0u32.to_ne_bytes());
+        assert_eq!(
+            support_bytes.len(),
+            (2 * CAMERA_MASK_SIZE * CAMERA_MASK_SIZE + 1) * 4
+        );
+        let camera_support = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ONE X2 capture-static conditioned camera support"),
+            contents: &support_bytes,
+            usage: wgpu::BufferUsages::STORAGE,
+        });
         let built = Self {
             context: context.clone(),
             merge: pipeline("merge_maps"),
@@ -308,8 +336,9 @@ impl GpuGeometryPipeline {
             mask: pipeline("build_masks"),
             layout,
             static_coordinates,
+            camera_support,
         };
-        built.qualify(coordinates)?;
+        built.qualify(coordinates, support)?;
         Ok(built)
     }
 
@@ -422,6 +451,10 @@ impl GpuGeometryPipeline {
                     binding: 3,
                     resource: masks.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.camera_support.as_entire_binding(),
+                },
             ],
         });
         for pipeline in [&self.merge, &self.filter, &self.mask] {
@@ -456,9 +489,13 @@ impl GpuGeometryPipeline {
         })
     }
 
-    fn qualify(&self, coordinates: &LensPair<StaticLineCoordinates>) -> Fallible<()> {
+    fn qualify(
+        &self,
+        coordinates: &LensPair<StaticLineCoordinates>,
+        support: &CameraMaskSupport,
+    ) -> Fallible<()> {
         let parents = qualification_parents(coordinates);
-        let expected = cpu_oracle(coordinates, &parents)?;
+        let expected = cpu_oracle(coordinates, &parents, support)?;
         for (name, covered) in [
             (
                 "NaN",
@@ -480,7 +517,21 @@ impl GpuGeometryPipeline {
                 .into());
             }
         }
-        let encoded = self.encode_inner(&parents, None)?;
+        self.compare_qualification(&parents, &expected)?;
+        // The original merge fixture lies largely inside camera support.
+        // Valid corner UVs make the camera stage clear the outer rows while
+        // preserving the middle, independently of validity and erosion.
+        let corner_parents = qualification_corner_parents();
+        let expected = cpu_oracle(coordinates, &corner_parents, support)?;
+        self.compare_qualification(&corner_parents, &expected)
+    }
+
+    fn compare_qualification(
+        &self,
+        parents: &LensPair<FlowstateRoi>,
+        expected: &(Vec<u32>, Vec<u32>),
+    ) -> Fallible<()> {
+        let encoded = self.encode_inner(parents, None)?;
         let geometry = encoded.submit_for_qualification(&self.context)?;
         let (actual_maps, actual_masks) = diagnostic_readback(&self.context, &geometry)?;
         if let Some(index) = actual_maps
@@ -613,9 +664,25 @@ fn qualification_parents(coordinates: &LensPair<StaticLineCoordinates>) -> LensP
     }
 }
 
+fn qualification_corner_parents() -> LensPair<FlowstateRoi> {
+    let make = || {
+        FlowstateRoi::from_row_major_values(
+            SELECTED_FLOWSTATE_ROWS,
+            SELECTED_FLOWSTATE_COLS,
+            vec![[0.001, 0.001]; PARENT_NODES_PER_LENS],
+        )
+        .unwrap()
+    };
+    LensPair {
+        a: make(),
+        b: make(),
+    }
+}
+
 fn cpu_oracle(
     coordinates: &LensPair<StaticLineCoordinates>,
     parents: &LensPair<FlowstateRoi>,
+    support: &CameraMaskSupport,
 ) -> Fallible<(Vec<u32>, Vec<u32>)> {
     let maps = filter_fisheye_line_pair(LensPair {
         a: map_merge(&coordinates.a, &parents.a)?,
@@ -630,7 +697,7 @@ fn cpu_oracle(
         .chunks_exact(4)
         .map(|b| u32::from_ne_bytes(b.try_into().unwrap()))
         .collect();
-    let masks = base_support_masks(&retained);
+    let (masks, _) = support.apply(&retained);
     let mut mask_words = vec![0u32; MASK_WORDS];
     for (lens, mask) in [&masks.a, &masks.b].into_iter().enumerate() {
         for (index, value) in mask.iter().copied().enumerate() {
@@ -701,6 +768,7 @@ const SENTINEL: f32 = -20.0;
 @group(0) @binding(1) var<storage, read> parents: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read_write> retained: array<vec2<f32>>;
 @group(0) @binding(3) var<storage, read_write> masks: array<u32>;
+@group(0) @binding(4) var<storage, read> camera_support: array<u32>;
 
 @compute @workgroup_size(64)
 fn merge_maps(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -754,6 +822,37 @@ fn filter_rows(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 fn valid(v: vec2<f32>) -> bool { return v.x > 0.0 && v.x <= 1.0 && v.y > 0.0 && v.y <= 1.0; }
 
+fn support_rn(value: f32) -> f32 {
+  return bitcast<f32>(bitcast<u32>(value) ^ camera_support[320000u]);
+}
+
+fn support_lerp(a: f32, b: f32, t: f32) -> f32 {
+  let delta = support_rn(fma(b, 1.0, -a));
+  let product = support_rn(fma(delta, t, -0.0));
+  return support_rn(fma(a, 1.0, product));
+}
+
+fn support_at(lens: u32, row: u32, col: u32) -> f32 {
+  return bitcast<f32>(camera_support[lens * 160000u + row * 400u + col]);
+}
+
+fn camera_clears(lens: u32, uv: vec2<f32>) -> bool {
+  let col = clamp(support_rn(uv.x * 400.0), 0.0, 399.0);
+  let row = clamp(support_rn(uv.y * 400.0), 0.0, 399.0);
+  let c0 = u32(col);
+  let r0 = u32(row);
+  let c1 = min(c0 + 1u, 399u);
+  let r1 = min(r0 + 1u, 399u);
+  let dx = support_rn(col - f32(c0));
+  let dy = support_rn(row - f32(r0));
+  let top = support_lerp(support_at(lens, r0, c0), support_at(lens, r0, c1), dx);
+  let bottom = support_lerp(support_at(lens, r1, c0), support_at(lens, r1, c1), dx);
+  let sample = support_lerp(top, bottom, dy);
+  // CPU promotes the f32 sample to f64 for `< 1e-8`. The nearest
+  // f32 lies below that literal, so equality with these bits clears too.
+  return sample <= bitcast<f32>(0x322bcc77u);
+}
+
 @compute @workgroup_size(64)
 fn build_masks(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (gid.x == 2u * MASK_WORDS_PER_LENS) {
@@ -778,6 +877,9 @@ fn build_masks(@builtin(global_invocation_id) gid: vec3<u32>) {
         let at = r * COLS + c;
         both = both && valid(retained[at]) && valid(retained[RETAINED_NODES + at]);
       }
+    }
+    if (both && (row < 216u || row >= 864u)) {
+      both = !camera_clears(0u, retained[local]) && !camera_clears(1u, retained[RETAINED_NODES + local]);
     }
     packed = packed | (select(0u, 255u, both) << (8u * byte));
   }
@@ -804,6 +906,51 @@ mod tests {
     use temporal_gpu::{GpuColdPriorPublicLevelTwo, GpuMotionStage};
 
     #[test]
+    fn camera_support_threshold_and_bilateral_mask_match_cpu() {
+        let (context, _, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(reason) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "GPU required: {reason}"
+                );
+                eprintln!("skipping camera support GPU test: {reason}");
+                return;
+            }
+        };
+        let coordinates = one_xs_static_coordinates();
+        let below = f32::from_bits(0x322b_cc76);
+        let nearest = f32::from_bits(0x322b_cc77);
+        let above = f32::from_bits(0x322b_cc78);
+        for values in [
+            [below, above],
+            [nearest, above],
+            [above, nearest],
+            [above, above],
+        ] {
+            let support = CameraMaskSupport::filled_for_test(values);
+            GpuGeometryPipeline::new(context.clone(), &coordinates, &support).unwrap_or_else(
+                |error| panic!("camera threshold {values:?} on {adapter}: {error}"),
+            );
+            let (_, masks) =
+                cpu_oracle(&coordinates, &qualification_corner_parents(), &support).unwrap();
+            let cleared = values.iter().any(|v| f64::from(*v) < 1e-8_f64);
+            assert_eq!(masks[0], if cleared { 0 } else { u32::MAX });
+            assert_eq!(masks[216 * COLS / 4], u32::MAX);
+            assert_eq!(
+                masks[..MASK_WORDS_PER_LENS],
+                masks[MASK_WORDS_PER_LENS..2 * MASK_WORDS_PER_LENS]
+            );
+        }
+        let support = CameraMaskSupport::filled_for_test([nearest, above]);
+        let changed = SHADER.replace("sample <= bitcast<f32>", "sample < bitcast<f32>");
+        let error = GpuGeometryPipeline::from_shader(context, &coordinates, &support, &changed)
+            .err()
+            .expect("rounded-f32 threshold mutation passed");
+        assert!(error.to_string().contains("physical mask"));
+    }
+
+    #[test]
     fn retained_geometry_matches_cpu_and_rejects_semantic_mutations() {
         let (context, _, adapter) = match gpu() {
             Ok(gpu) => gpu,
@@ -817,7 +964,8 @@ mod tests {
             }
         };
         let coordinates = one_xs_static_coordinates();
-        let geometry_pipeline = GpuGeometryPipeline::new(context.clone(), &coordinates)
+        let support = CameraMaskSupport::for_test();
+        let geometry_pipeline = GpuGeometryPipeline::new(context.clone(), &coordinates, &support)
             .unwrap_or_else(|error| {
                 panic!("baseline ONE X2 GPU geometry failed on {adapter}: {error}")
             });
@@ -840,15 +988,23 @@ mod tests {
                 "both = both && valid(retained[at]) && valid(retained[RETAINED_NODES + at]);",
                 "both = both && valid(retained[at]);",
             ),
+            (
+                "camera support omission",
+                "if (both && (row < 216u || row >= 864u))",
+                "if (false)",
+            ),
+            ("camera top range", "row < 216u", "row < 215u"),
+            ("camera bottom range", "row >= 864u", "row >= 865u"),
         ];
         for (name, from, to) in mutations {
             let changed = SHADER.replacen(from, to, 1);
             assert_ne!(changed, SHADER, "mutation {name} did not alter the shader");
-            let error = GpuGeometryPipeline::from_shader(context.clone(), &coordinates, &changed)
-                .err()
-                .unwrap_or_else(|| {
-                    panic!("changed ONE X2 GPU geometry {name} was accepted on {adapter}")
-                });
+            let error =
+                GpuGeometryPipeline::from_shader(context.clone(), &coordinates, &support, &changed)
+                    .err()
+                    .unwrap_or_else(|| {
+                        panic!("changed ONE X2 GPU geometry {name} was accepted on {adapter}")
+                    });
             assert!(
                 error.to_string().contains("GPU geometry is not"),
                 "mutation {name} returned the wrong refusal on {adapter}: {error}"
@@ -946,9 +1102,10 @@ mod tests {
         )
         .unwrap();
         let coordinates = resources.static_coordinates().clone();
-        let geometry = GpuGeometryPipeline::new(context.clone(), &coordinates).unwrap();
+        let support = CameraMaskSupport::for_test();
+        let geometry = GpuGeometryPipeline::new(context.clone(), &coordinates, &support).unwrap();
         let parents = qualification_parents(&coordinates);
-        let expected_base = cpu_oracle(&coordinates, &parents).unwrap().0;
+        let expected_base = cpu_oracle(&coordinates, &parents, &support).unwrap().0;
         let parent_bytes = pair_bytes(&parents);
         let parent_words = parent_bytes
             .chunks_exact(4)

@@ -7363,6 +7363,63 @@ mod tests {
         let expected_final = owner
             .cold_final_inputs_for_test(&luma)
             .expect("CPU frame-zero final inputs failed");
+        let (actual_physical_masks, actual_shared_masks) = capture
+            .diagnostic_cold_masks(&exact)
+            .expect("resident cold mask probe readback failed")
+            .expect("resident cold mask probe was not retained");
+        let compare_mask = |stage: &str, lens: char, actual: &[u8], expected: &[u8]| {
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                "resident {stage} lens {lens} length differs"
+            );
+            if let Some(index) = actual.iter().zip(expected).position(|(a, b)| a != b) {
+                panic!(
+                    "resident {stage} first differs at lens {lens} row {} column {} (byte {index} of {}): GPU {}, CPU {}",
+                    index / COLS,
+                    index % COLS,
+                    actual.len(),
+                    actual[index],
+                    expected[index],
+                );
+            }
+            println!(
+                "cold-stage-probe: {stage} lens {lens} exact, {} bytes",
+                actual.len()
+            );
+        };
+        let retained_nodes = ROWS * COLS;
+        compare_mask(
+            "physical mask",
+            'A',
+            &actual_physical_masks[..retained_nodes],
+            &expected_final.physical_masks.a,
+        );
+        compare_mask(
+            "physical mask",
+            'B',
+            &actual_physical_masks[retained_nodes..],
+            &expected_final.physical_masks.b,
+        );
+        let l1_pixels = (ROWS / 2) * (COLS / 2);
+        let l2_pixels = (ROWS / 4) * (COLS / 4);
+        let shared_l2 = &actual_shared_masks[2 * l1_pixels..2 * l1_pixels + 2 * l2_pixels];
+        let shared_l2_u8 = shared_l2
+            .iter()
+            .map(|value| *value as u8)
+            .collect::<Vec<_>>();
+        compare_mask(
+            "shared L2 mask",
+            'A',
+            &shared_l2_u8[..l2_pixels],
+            &expected_final.shared_l2_masks.a,
+        );
+        compare_mask(
+            "shared L2 mask",
+            'B',
+            &shared_l2_u8[l2_pixels..],
+            &expected_final.shared_l2_masks.b,
+        );
         let (actual_cold0_l2, actual_cold0_initial) = capture
             .diagnostic_cold0_pis_inputs(&exact)
             .expect("resident Cold0 PIS input probe readback failed")

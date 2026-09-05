@@ -136,6 +136,8 @@ pub(crate) struct ColdFinalInputsForTest {
     pub lens_b_base: Vec<u32>,
     pub lens_a_public: Vec<u32>,
     pub lens_b_public: Vec<u32>,
+    pub physical_masks: LensPair<Vec<u8>>,
+    pub shared_l2_masks: LensPair<Vec<u8>>,
     pub cold0_l2_terminal: Vec<u32>,
     pub cold0_l1_initial: Vec<u32>,
     pub l1_terminals: Vec<Vec<u32>>,
@@ -459,6 +461,7 @@ impl FrameOwner {
         let prepared = self.prepare(frame.frame(), frame.size())?;
         let blurred = prepared.sample_blurred_belts(frame)?;
         let inputs = ColdInputs::from_blurred_belts_and_masks(blurred, prepared.masks.clone());
+        let shared_l2_masks = super::scalar::MaskPyramid::build(&inputs).level_two_for_test();
         let ColdPreparedSchedule { controls, solver } = ColdPreparedSchedule::from_cpu(&inputs);
         let mut solver = RecordingColdSolver {
             cpu: solver,
@@ -506,6 +509,8 @@ impl FrameOwner {
                 transition.candidate_next.a_to_b_public.dcol(),
                 transition.candidate_next.a_to_b_public.drow(),
             ),
+            physical_masks: prepared.masks.clone(),
+            shared_l2_masks,
             cold0_l2_terminal: solver
                 .cold0_l2_terminal
                 .expect("cold CPU oracle did not retain its Cold0 L2 terminal"),

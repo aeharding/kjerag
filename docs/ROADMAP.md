@@ -3,6 +3,24 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Resident camera-mask correction, 2026-09-05, implementation branch only:**
+the selected resident geometry omitted the frozen CPU path's conditioned
+400-by-400 camera support. On the owner's frame zero the physical mask's
+first byte was GPU 255 versus CPU 0. Adding the existing camera support,
+uploaded once per capture and sampled on GPU in rows [0,216) and [864,1080),
+makes both physical/shared-L2 masks, Cold0 L2, its L1 seed, all three cold L1
+terminals and both final public fields exact against the CPU frame owner.
+The real-media before/after logs remain in the diagnostic worktree's
+`scratch/resident-cold-stage-probe/`, dated 20260905.
+
+Qualification now compares camera-conditioned masks and includes valid corner
+UVs that exercise camera clearing independently of erosion. Radeon tests reject
+omitting camera support or changing either row boundary. Separate bilateral
+tests cover the adjacent f32 values around the promoted-f64 `1e-8` threshold
+and reject the naive rounded-f32 comparison. Normal playback adds no per-frame
+CPU maps or readback. The complete rendered range, computed trace and owner-eye
+gate remain pending; first-frame internal identity alone is not video parity.
+
 **Resident cold frame-zero causal locator, 2026-09-01, diagnostic branch
 only [CFG(TEST), ENV-GATED, REAL MEDIA; NO PRODUCTION OR PARITY CLAIM]:** an
 opt-in probe now compares one exact decoded frame-zero delivery through the

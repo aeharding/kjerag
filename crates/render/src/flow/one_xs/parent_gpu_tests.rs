@@ -248,8 +248,12 @@ fn parent_transition_seals_flight_and_refuses_foreign_geometry_and_nonlinear_sle
 
     let (foreign_device, foreign_queue) = request_device(&adapter).unwrap();
     let foreign_context = OneXsGpuContext::new(&foreign_device, &foreign_queue);
-    let foreign_geometry =
-        GpuGeometryPipeline::new(foreign_context, &one_xs_static_coordinates()).unwrap();
+    let foreign_geometry = GpuGeometryPipeline::new(
+        foreign_context,
+        &one_xs_static_coordinates(),
+        &crate::flow::one_xs_belt::CameraMaskSupport::for_test(),
+    )
+    .unwrap();
     let error = refused(foreign_geometry.encode_resident_parents(encoded));
     assert!(error.to_string().contains("different device or queue"));
 
@@ -424,10 +428,14 @@ fn parent_geometry_and_belts_share_one_pre_submission_owner_chain() {
             calibration().readout(),
         )
         .unwrap();
-    let geometry = GpuGeometryPipeline::new(context.clone(), &one_xs_static_coordinates())
-        .unwrap()
-        .encode_resident_parents(parent)
-        .unwrap();
+    let geometry = GpuGeometryPipeline::new(
+        context.clone(),
+        &one_xs_static_coordinates(),
+        &crate::flow::one_xs_belt::CameraMaskSupport::for_test(),
+    )
+    .unwrap()
+    .encode_resident_parents(parent)
+    .unwrap();
     let texture = |label| {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),

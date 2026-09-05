@@ -366,6 +366,11 @@ impl<K> GpuPreparedTerminal<K> {
 }
 
 impl<K> GpuPreparedFrame<K> {
+    #[cfg(test)]
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn shared_masks_for_test(&self) -> wgpu::Buffer {
+        self.shared_masks.clone()
+    }
+
     fn bind_pis_level<D, L>(&self) -> PisPreparedBinding<'_, D, L>
     where
         D: PisDirection,

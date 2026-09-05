@@ -297,7 +297,7 @@ impl Error for BaseMapShapeError {}
 // -------------------------------- static ONE X2 camera mask (§140)
 
 /// Studio's selected ONE X2 camera-mask raster is 400 by 400 per lens.
-const CAMERA_MASK_SIZE: usize = 400;
+pub(crate) const CAMERA_MASK_SIZE: usize = 400;
 
 const HALF_FIELD_DEG: f32 = 100.0;
 const EXPAND_DEG: f32 = 98.0;
@@ -443,6 +443,34 @@ pub(crate) struct CameraMaskSupport {
 }
 
 impl CameraMaskSupport {
+    /// Capture-static conditioned field, uploaded once by resident geometry.
+    pub(crate) fn conditioned_pixels(&self, lens: Lens) -> &[f32] {
+        &self.pixels[lens.index()]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self::from_reframe(&Reframe::new(
+            &crate::projection::tests::one_xs_lenses(),
+            crate::projection::tests::ONE_XS_FRAME,
+            crate::Camera::default(),
+            crate::Held::default(),
+            1.0,
+            false,
+            crate::Sampling::default(),
+        ))
+        .unwrap()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn filled_for_test(values: [f32; 2]) -> Self {
+        let mut support = Self::for_test();
+        for (pixels, value) in support.pixels.iter_mut().zip(values) {
+            pixels.fill(value);
+        }
+        support
+    }
+
     pub(crate) fn from_reframe(reframe: &Reframe) -> Result<Self, CameraMaskError> {
         if !reframe.is_one_xs_pair() {
             return Err(CameraMaskError::NotOneXsPair);

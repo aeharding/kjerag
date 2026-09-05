@@ -17,6 +17,8 @@ use super::parent::ParentMapBuilder;
 use super::pis::gpu::GpuPisFlight;
 use super::resources::OneXsResources;
 use super::temporal::{BlurredBelts, gaussian_blur};
+#[cfg(test)]
+use super::{COLS, ROWS};
 use super::{Lens, LensPair};
 use crate::Fallible;
 use crate::direct_type2::DirectType2Pipeline;
@@ -154,6 +156,20 @@ impl ResidentSourceFrontPipeline {
     ) -> Fallible<Self> {
         let parent_inputs = ParentMapBuilder::new(calibration)?;
         let resources = OneXsResources::new(&calibration.lenses)?;
+        let support = crate::flow::one_xs_belt::CameraMaskSupport::from_reframe(
+            &crate::projection::Reframe::new(
+                &calibration.lenses,
+                kjerag_media::Size {
+                    width: calibration.dimension.width,
+                    height: calibration.dimension.height,
+                },
+                crate::Camera::default(),
+                crate::Held::default(),
+                1.0,
+                false,
+                crate::Sampling::default(),
+            ),
+        )?;
         let identity = ResidentSourceIdentity::new();
         Ok(Self {
             context: context.clone(),
@@ -165,6 +181,7 @@ impl ResidentSourceFrontPipeline {
             geometry: geometry_gpu::GpuGeometryPipeline::new(
                 context.clone(),
                 resources.static_coordinates(),
+                &support,
             )?,
             belts: GpuSolverBeltPipeline::new(context.clone())?,
             final_map: map_patch_gpu::GpuMapMaterializer::new(context, &resources)?,
@@ -431,6 +448,8 @@ struct ResidentCaptureSession {
 struct TestColdBlurredProbe {
     frame: FrameStamp,
     packed: wgpu::Buffer,
+    physical_masks: wgpu::Buffer,
+    shared_masks: Option<wgpu::Buffer>,
     cold0_l2_terminal: Option<wgpu::Buffer>,
     cold0_l1_initial: Option<wgpu::Buffer>,
     cold0_l1_initial_plane_stride_words: Option<u64>,
@@ -536,6 +555,8 @@ impl ResidentCaptureSession {
             *probe = Some(TestColdBlurredProbe {
                 frame,
                 packed: source.blurred_buffer_for_test(),
+                physical_masks: source.physical_masks_for_test(),
+                shared_masks: None,
                 cold0_l2_terminal: None,
                 cold0_l1_initial: None,
                 cold0_l1_initial_plane_stride_words: None,
@@ -560,6 +581,8 @@ impl ResidentCaptureSession {
                     .materialize_final(operands)?,
             )))
         } else {
+            #[cfg(test)]
+            let probing = std::env::var_os("KJERAG_ONE_X2_COLD_STAGE_PROBE").is_some();
             let cold0 = motion.submit_resident_cold0(
                 &self.front,
                 &self.solver,
@@ -568,7 +591,16 @@ impl ResidentCaptureSession {
                 controls,
             )?;
             #[cfg(test)]
-            let probing = std::env::var_os("KJERAG_ONE_X2_COLD_STAGE_PROBE").is_some();
+            if probing {
+                let mut probe = self
+                    .cold_blurred_probe
+                    .lock()
+                    .map_err(|_| "ONE X2 cold stage probe is poisoned")?;
+                probe
+                    .as_mut()
+                    .ok_or("ONE X2 cold stage probe lost its geometry owner")?
+                    .shared_masks = Some(cold0.shared_masks_for_test());
+            }
             #[cfg(test)]
             let cold = if probing {
                 let (cold0_l2_terminal, cold0_l1_initial, cold0_l1_initial_plane_stride_words) =
@@ -746,6 +778,36 @@ impl ResidentCaptureFacade {
             return Err("ONE X2 cold blurred stage probe names a different frame".into());
         }
         read_blurred_probe(&session.context, &probe.packed).map(Some)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn diagnostic_cold_masks(
+        &self,
+        frame: &FrameStamp,
+    ) -> Fallible<Option<(Vec<u8>, Vec<u32>)>> {
+        let Some(session) = self.state()?.session.clone() else {
+            return Ok(None);
+        };
+        let probe = session
+            .cold_blurred_probe
+            .lock()
+            .map_err(|_| "ONE X2 cold mask probe is poisoned")?;
+        let Some(probe) = probe.as_ref() else {
+            return Ok(None);
+        };
+        if &probe.frame != frame {
+            return Err("ONE X2 cold mask probe names a different frame".into());
+        }
+        let packed = read_word_probe(&session.context, &probe.physical_masks)?;
+        let mut physical = Vec::with_capacity(2 * ROWS * COLS);
+        for word in packed.into_iter().take(2 * ROWS * COLS / 4) {
+            physical.extend(word.to_ne_bytes());
+        }
+        let shared = probe
+            .shared_masks
+            .as_ref()
+            .ok_or("ONE X2 cold mask probe lost its shared masks")?;
+        Ok(Some((physical, read_word_probe(&session.context, shared)?)))
     }
 
     #[cfg(test)]
@@ -1833,6 +1895,11 @@ impl ResidentImportedFront {
     #[cfg(test)]
     fn blurred_buffer_for_test(&self) -> wgpu::Buffer {
         self.inner.belts.packed.clone()
+    }
+
+    #[cfg(test)]
+    fn physical_masks_for_test(&self) -> wgpu::Buffer {
+        self.inner.physical_masks_for_test()
     }
 
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn prepare_motion(
