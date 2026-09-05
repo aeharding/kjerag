@@ -313,6 +313,23 @@ an independent offscreen pass; it never calls the window draw. Explicit seam
 diagnostics may authenticate that same installed identity and read back packed
 map and alpha bytes, but that bulk transfer and wait are instrument-only.
 
+The type-2 picture consumer uses the GPU's linear sampler within each imported
+lens. A filter footprint crossing the two-texture atlas join still uses four
+explicit loads, since clamping either separate texture would change that join.
+The recovered box filter and native map remain unchanged. Pixels whose alpha
+is exactly zero or one read only the contributing lens. Hardware subpixel
+filtering can differ from software interpolation by small rounding amounts;
+bit identity of rendered RGB is no longer required by the owner's current
+performance goal. Real-sequence review remains required.
+
+The owner's 240 fps target is interactive view rendering during playback, not
+240 new source pictures from a 29.970 fps file. Completed source/map pairs are
+already reusable for view redraws, but processing shares the render queue and
+can still delay them. The offscreen `view-rate` diagnostic reports paused
+redraw capacity separately from changing-view playback and its tail latencies.
+It waits for each GPU draw and has no compositor; its results do not prove
+native-window presentation at 240 Hz.
+
 The first lazy resident-session construction runs the existing target-device
 arithmetic qualifications synchronously. Those constructor-only probes perform
 bulk readbacks and waits. Once the session exists, normal frame submit, redraw,

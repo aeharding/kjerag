@@ -18,6 +18,27 @@ sequences, the reported riser defect and the owner's eye remain the quality gate
 Keep the readable reference implementation and existing evidence for comparison.
 Broader optimization reverse engineering remains frozen.
 
+### Player performance target, owner clarification 2026-09-05
+
+"we need to do at least 240fps on this computer", clarified as "when I play
+back in player", not an isolated stitching-kernel benchmark. Target responsive
+240 fps view rendering during actual playback on this machine (about 4.17 ms
+per display frame), while presenting source video at its recorded cadence and
+keeping audio synchronized. A 29.970 fps source does not contain 240 distinct
+video frames per second; do not claim repeated pictures as faster decoding or
+invent interpolation as a requirement. Reuse each completed source frame's
+stitch result across view redraws. Report output resolution, display refresh
+limits and frame-time spikes as well as throughput. Isolated measurements guide
+optimization but cannot establish this actual-player target. Full-rate 30 fps
+video playback is necessary for this clip, not sufficient for completion.
+
+Read-only display inspection found the active internal panel at 2256x1504,
+59.999 Hz, with no advertised 240 Hz mode. The coordinator disclosed this to
+the owner. Keep the 4.17 ms rendering-capacity target, but do not promise 240
+distinct visible updates on a 60 Hz panel or busy-redraw an idle view solely
+to inflate an fps counter. Smooth native presentation must use the display's
+actual cadence. This hardware limit does not excuse video or audio stalls.
+
 ## 1. Earlier exact-parity standard (superseded where inconsistent above)
 For the same supported input, view, time and user-visible settings, correctness with Studio is
 required at the stitched video result, not as identity of internal execution. Every

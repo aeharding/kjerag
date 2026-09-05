@@ -3,6 +3,50 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Player performance target, 2026-09-05, issue #182:** the owner requires at
+least 240 fps "when I play back in player". The working interpretation is
+240 fps interactive view rendering during playback, with source frames at
+their recorded cadence and synchronized audio. Reuse completed stitching for
+view redraws, not eight redundant solves per 29.970 fps source frame. The
+display-frame budget is about 4.17 ms; report resolution, presentation limits
+and tail frame times. Kernel-only throughput is diagnostic, not acceptance.
+The latest 26 fps measurement counts video presentation, not view redraws;
+240 fps interactive playback has not been demonstrated. Current source-video
+throughput and audio underruns already fall short even before that higher gate.
+Read-only `cosmic-randr list` finds the active internal panel at 2256x1504,
+59.999 Hz, with no 240 Hz mode. This has been disclosed to the owner: 240 fps
+rendering capacity cannot be called 240 distinct visible updates on this panel.
+Keep the rendering budget without burning idle redraws. No display setting changed.
+
+**First high-refresh rendering optimization, 2026-09-05:** the selected
+type-2 consumer now uses hardware linear filtering within each separate lens,
+retains manual sampling across the atlas join, and avoids sampling a lens with
+exactly zero contribution. No seam-map, solver or temporal change. On the
+Radeon 760M at 2560x1440, `view-rate` changing-view diagnostics improve from
+181 to 290 completed redraws/s paused (median 5.46 to 3.39 ms) and from 78 to
+124 redraws/s during playback. These are offscreen, per-draw GPU-wait timings,
+NOT native-window fps or a 240 fps pass. Playback still has a 19.92 ms p95 and
+46.77 ms p99, advances source video at 26.75 fps and records audio underruns.
+The paused optimized run also has 15 of 581 draws over the 4.17 ms budget.
+
+The same 61-frame cold-start riser review has byte-identical packed and alpha
+maps to the preceding checkpoint. RGB differs by at most one 8-bit code in
+0.3701% of channels across that sequence. The exact 6369 side-by-side was
+inspected; `scratch/view-rate-filter-riser-review.mp4` is the owner review
+artifact, not a new owner verdict. Hardware sampler regression covers both
+lenses, the join, outside clamp edges and the unchanged box filter, with worst
+difference 0.519 code values on its high-contrast fixture. Seven focused GPU
+tests pass. Detailed measurements are `scratch/view-rate-{baseline,filter}-1440p.log`.
+The native UI gate passes 54 checks, zero failed, on player SHA-256
+`4dc9c8d7970ec7d42fb602521ffe01ea38c823e2ea4c9981aa095a08c4b6d579`
+(`scratch/view-rate-filter-uitest.log`). Workspace/all-target clippy,
+format and name/source/diff checks pass. The full forced-RADV workspace gate
+passes 1109 tests, zero failures, 30 ignored, including enabled real-media tests
+(`scratch/view-rate-filter-workspace.log`). Installed Flatpak and owner review
+remain pending. The next
+performance bottleneck remains in-flight stitching and its playback scheduling;
+240 fps interactive playback has not been demonstrated.
+
 **Owner priority clarification, 2026-09-05, issue #182:** the goal is very
 performant stitching that looks like Studio, not perfect reproduction.
 `MANDATES.md` records the ruling. Prioritize ordinary playback speed and real

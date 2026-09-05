@@ -769,6 +769,15 @@ fn type2_atlas_load(a: texture_2d<f32>, b: texture_2d<f32>, p: vec2<i32>) -> vec
 fn type2_atlas_linear(a: texture_2d<f32>, b: texture_2d<f32>, uv: vec2<f32>) -> vec4<f32> {
   let dims = textureDimensions(a);
   let p = uv * vec2<f32>(f32(2u * dims.x), f32(dims.y)) - vec2<f32>(0.5);
+  // The atlas is two imported textures, not a physically joined image.
+  // Hardware filtering is valid inside either lens, including the outside
+  // clamp edges. Only a footprint straddling the join needs four loads.
+  if p.x <= f32(dims.x - 1u) {
+    return textureSampleLevel(a, type2_sampler, vec2<f32>(uv.x * 2.0, uv.y), 0.0);
+  }
+  if p.x >= f32(dims.x) {
+    return textureSampleLevel(b, type2_sampler, vec2<f32>(uv.x * 2.0 - 1.0, uv.y), 0.0);
+  }
   let base = vec2<i32>(floor(p));
   let f = fract(p);
   let top = mix(type2_atlas_load(a, b, base), type2_atlas_load(a, b, base + vec2<i32>(1, 0)), f.x);
@@ -820,9 +829,16 @@ fn fs(in: Type2VsOut) -> @location(0) vec4<f32> {
   if view.w <= 0.0 { return vec4<f32>(0.0); }
   let map = type2_mesh(reframe.view_to_body * view.xyz);
   if map.covered <= 0.5 { return vec4<f32>(0.0); }
-  let b = type2_ycbcr(map.packed.zw);
-  let a = type2_ycbcr(map.packed.xy);
-  let rgb = mix(b, a, map.alpha);
+  var rgb: vec3<f32>;
+  if map.alpha == 0.0 {
+    rgb = type2_ycbcr(map.packed.zw);
+  } else if map.alpha == 1.0 {
+    rgb = type2_ycbcr(map.packed.xy);
+  } else {
+    let b = type2_ycbcr(map.packed.zw);
+    let a = type2_ycbcr(map.packed.xy);
+    rgb = mix(b, a, map.alpha);
+  }
   let linear = select(
     rgb / 12.92,
     pow((rgb + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)),
@@ -831,6 +847,9 @@ fn fs(in: Type2VsOut) -> @location(0) vec4<f32> {
   return vec4<f32>(select(rgb, linear, reframe.linearize > 0.5), 1.0);
 }
 "#;
+
+#[cfg(test)]
+mod sampling_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1126,7 +1145,7 @@ mod tests {
         }
     }
 
-    fn gpu() -> Result<(wgpu::Device, wgpu::Queue), String> {
+    pub(super) fn gpu() -> Result<(wgpu::Device, wgpu::Queue), String> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..Default::default()
