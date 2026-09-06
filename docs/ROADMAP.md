@@ -14,6 +14,26 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Further performance trials rejected, 2026-09-06:** halving L1 batches from
+eight to four dispatches gave contradictory X4 paired results and only modest
+X2 differences. A separate exact separable-mask prototype passed all five
+geometry tests, including new radius/packed-lane mutations, but showed no
+repeatable capacity benefit for its extra pass and 64,800-byte buffer; X2
+throughput and redraw p95/p99 regressed in both pairs. Both prototypes are
+removed. Their eight-run comparisons, source patches and binaries remain in
+ignored `scratch/gpu-lookahead-batch4-20260906-01/` and
+`scratch/gpu-mask-separable-20260906-01/`. The verified worker/lookahead native
+player is unchanged. No new Studio export or RE, or inherited native/pixel
+verification for the rejected prototypes, is claimed. The 4.17 ms target
+remains unmet.
+
+Read-only counters with all Kjerag jobs stopped also found substantial desktop
+GPU work: the compositor's graphics counter advanced about 2.592 seconds over
+5.024 wall seconds, while overall GPU-busy readings were 55–56 percent. No
+applications or settings were changed. This is shared-load context, not a
+diagnosed COSMIC bug, an attribution of benchmark stalls, or grounds to accept
+the rejected candidates. The owner does not want known COSMIC issues fixed.
+
 **Bounded worker and due-frame lookahead candidate, 2026-09-06:** the shared
 resident stitch chain now runs on one capture-shared worker. Only the fine L1
 solver is split into six paced command buffers; the UI never waits for that
