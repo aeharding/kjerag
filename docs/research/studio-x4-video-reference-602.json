@@ -235,6 +235,66 @@
     "runtime_cap_and_mirror_still_unverified": true,
     "production_source_and_native_binary_unchanged": true
   },
+  "native_parent_map_capture": {
+    "producer": "Mac Studio 6.0.2, one ordinary short AI-on 360 export transaction",
+    "worker_arm64_sha256": "0a34f593198a0a7a29239ccded91231af3d7bc94e04213c67a2d44a04076a452",
+    "private_report_sha256": "2434526dc453e004f36bbc264bde43b129b73919b55fbd580a51eb3956a8b92b",
+    "observer_sha256": "7e7690fefdc31d1a04bb73f3fd7d2a3a2e716cdc124abd04c29e9ecce543761d",
+    "status": "captured",
+    "transaction": "call 0, return 0, call 1, return 1, Wait return 0, Wait return 1; same controller, caller stack and thread; parent descriptor and lens ownership revalidated",
+    "sites_worker_relative": {
+      "call": "0x17f2d80",
+      "return": "0x17f2d84",
+      "wait_return": "0x17f2dc8"
+    },
+    "finished_output_boundary": "each matching Wait return, after native GPU completion and texture download; not the earlier submission return",
+    "half_shape": {"rows": 100, "columns": 200, "outer_stride": 200},
+    "all_three_breakpoints_deleted": true,
+    "detached": true,
+    "report_and_map_hashes_match_between_hosts": true,
+    "lenses": [
+      {
+        "ordinal": 0,
+        "map_bytes": 160000,
+        "map_sha256": "f479b3d93da1ed63cd346650164747d4dbc416a9a79d100b8828b4108a0fee5b",
+        "pose_bytes": 1632,
+        "pose_sha256": "adcede59126c3394ab346a4e84c6fe65f62c328b009475abb5dee3ae1317dca4",
+        "gpu_half_fov_radians": 2.094395160675049,
+        "gpu_flip": 1,
+        "scalar_replay": {
+          "jointly_valid_nodes": 16431,
+          "validity_differences": 0,
+          "max_source_pixel_error": 0.001862478,
+          "rms_source_pixel_error": 0.000592628
+        }
+      },
+      {
+        "ordinal": 1,
+        "map_bytes": 160000,
+        "map_sha256": "7d5e8d4f0c24f4eb8aa2d7e9758c58504ab6a6eefe2bb591b00a43bc19ac1622",
+        "pose_bytes": 1632,
+        "pose_sha256": "30f04c8aadb337eb84bb26ffff399a6171045b8afaadf6b5523e1f04f40a356a",
+        "gpu_half_fov_radians": 2.094395160675049,
+        "gpu_flip": 1,
+        "scalar_replay": {
+          "jointly_valid_nodes": 16421,
+          "validity_differences": 0,
+          "max_source_pixel_error": 0.001844824,
+          "rms_source_pixel_error": 0.000562617
+        }
+      }
+    ],
+    "pose_comparison": {
+      "count_per_lens": 51,
+      "qwm_same_bits_between_lenses": true,
+      "lens_1_time_minus_lens_0_seconds": -0.000178161077656114,
+      "initial_composed_quaternion": "f32(qci_f64 * pose[25]_f64 * qwm_f64), all four lanes reproduced exactly for both lenses",
+      "initial_vs_raw_lens_rotation_degrees": [0.001222796, 0.001223497],
+      "scope": "small measured per-lens center residual, not a diagnosed cause of the broad image defect"
+    },
+    "replay_scope": "scalar f32 model-6 calculation using actual captured GPU parameters and narrowed native pose batches; not selected-player, exact source-frame, final-consumer or visible stitching parity",
+    "production_source_and_native_binary_unchanged": true
+  },
   "limitations": [
     "A recorded project setting does not identify the exclusive runtime stitching algorithm.",
     "This is the default X4 setting, not the earlier ONE X2 Optical Flow On setting.",

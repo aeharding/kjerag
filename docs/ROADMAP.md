@@ -106,6 +106,28 @@ source or native binary changed. The next distinction is Studio's actual
 parent output versus a later stitching correction, not another blind mounting
 or flow-parameter substitution.
 
+That direct parent-map observation is now complete for one ordinary Mac 6.0.2
+export transaction. The observer binds both lens calls, their returns and
+their later GPU-wait returns before reading finished UV. It captures the
+actual 100x200 map per lens, all kernel-semantic parameters and both 51-pose
+batches. A scalar replay of those exact inputs agrees with the finished
+native maps within **0.001863 source pixel**, with identical sentinel validity
+on both lenses. This verifies the model-6 projector calculation for the
+captured input, not the selected player or the final stitched video.
+
+The captured cap is 120 degrees and the horizontal mirror is +1 on both
+lenses. The two pose schedules differ by 0.178161 ms; their center-composed
+rotations differ from the raw lens quaternions by about 0.001223 degrees.
+That small residual is real but does not explain the visible broad offset.
+All three observer breakpoints were removed and the exporter detached. The
+maps, poses, report and observer are preserved in ignored
+`scratch/x4-parent-map-20260906-01/`; native report/map hashes match between
+hosts and the reference manifest records the boundary. No source-frame
+association or final-consumer-map identity was captured. Investigation now
+moves downstream of the verified projector; do not reacquire these camera
+inputs or treat more calibration variants as a fix. Production source and
+the native player are unchanged, and owner acceptance remains outstanding.
+
 The zero-flow roundtrip through the real CPU map merge, filtering and final
 materialization contributes at most 0.182 source pixel in the neutral X4
 fixture. This rules out broad deformation from that roundtrip without flow;
