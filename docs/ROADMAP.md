@@ -30,7 +30,22 @@ The exact April file is now on the Mac with matching source hashes, active in
 Studio for a bounded ordinary output comparison. The fresh X4 project has
 Optical Flow off, AI Stitching and Image Fusion on; preserve those defaults
 for the first reference rather than assume the earlier ONE X2 Flow On setup.
-Broader RE stays frozen; no matching X4 reference image exists yet.
+Broader RE stays frozen. An ordinary default-setting X4 360 export is now
+captured and copied to durable storage on both hosts, with matching video and
+project hashes recorded in `docs/research/studio-x4-video-reference-602.json`.
+The saved roughcut is leftTrim 34538, rightTrim 19301, totalFrames 53940;
+the actual output has 102 frames at 30000/1001, 7680x3840, lasting 3.4034 s.
+The target-candidate panorama is now registered to the owner's field of view
+using only a common rotation (Studio v360 yaw 90.90, pitch -2.30, roll -0.37)
+at the same 63.63-degree horizontal FOV and 1280x720 output. Actual pixels show
+Studio's broadly straight horizon where the current Kjerag final bends through
+the central join. The same distinction is visible in neighboring Studio frames.
+Independent source/output frame association remains pending: export index 31
+is an index-derived candidate, while the fixed-view 30/31/32 comparison favors
+30. This permits a near-time shape comparison, not an exact-frame parity claim.
+The earlier fractional accessibility-slider readback was NOT proof of a seek
+to 1153.452 s. Acquisition was recovered using guarded physical clicks and
+the saved project range. No production fix or owner acceptance is claimed.
 The zero-flow roundtrip through the real CPU map merge, filtering and final
 materialization contributes at most 0.182 source pixel in the neutral X4
 fixture. This rules out broad deformation from that roundtrip without flow;

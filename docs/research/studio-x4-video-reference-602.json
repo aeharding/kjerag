@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "status": "ordinary output captured and owner field of view registered; exact source/output frame association pending",
+  "producer": {
+    "application": "Insta360 Studio",
+    "version": "6.0.2",
+    "export_route": "ordinary UI, 360 Video, Match Source 7680x3840, Match Source Frame Rate 30000/1001, H.265, Original 180 Mbps"
+  },
+  "source": {
+    "name": "VID_20260410_185407_00_004.insv",
+    "bytes": 37937664334,
+    "sha256": "ddb8dee812541dc231cca91cd99beed67c2e010ffbeab260568d4a5b3006cfc3",
+    "owner_target_frame_index": 34569,
+    "owner_target_seconds": "1153.452300",
+    "owner_view_degrees": {
+      "yaw": 132.05,
+      "pitch": 3.55,
+      "horizontal_fov": 63.63,
+      "horizon_locked": true
+    }
+  },
+  "artifacts": {
+    "video": {
+      "name": "VID_20260410_185407_00_004.mp4",
+      "bytes": 79674872,
+      "sha256": "9926504109a37b64836fb8af2d7b80ad5d4b6adf0de232d1cde9b8c7954b9d35"
+    },
+    "project": {
+      "name": "x4-default-short360-project.insprj",
+      "bytes": 12919,
+      "sha256": "c853887c7720db6256063c81add75cc5a473322fbc8fd1b583ea9b3c6c5b0e20"
+    }
+  },
+  "project_settings": {
+    "roughcut": {
+      "leftTrim": 34538,
+      "rightTrim": 19301,
+      "totalFrames": 53940
+    },
+    "enableAIStitching": true,
+    "enableOpticalFlowStitching": false,
+    "enableDynamicStitching": false,
+    "enableImageFusionStitching": true,
+    "enableStab": true,
+    "enableDirectionalLock": true,
+    "optimizedOffset": ""
+  },
+  "media": {
+    "codec_name": "hevc",
+    "profile": "Main",
+    "width": 7680,
+    "height": 3840,
+    "pix_fmt": "yuvj420p",
+    "color_range": "pc",
+    "color_space": "bt709",
+    "color_transfer": "bt709",
+    "color_primaries": "bt709",
+    "chroma_location": "left",
+    "projection": "equirectangular",
+    "frame_rate": "30000/1001",
+    "time_base": "1/30000",
+    "start_pts": 0,
+    "duration_ts": 102102,
+    "duration_seconds": "3.403400",
+    "nb_frames": 102
+  },
+  "packet_grid": {
+    "count": 102,
+    "first_pts": 0,
+    "last_pts": 101101,
+    "step": 1001,
+    "duration": 1001,
+    "dts_equals_pts": true
+  },
+  "frame_association": {
+    "candidate_export_frame_for_owner_target": 31,
+    "basis": "owner source index minus saved roughcut leftTrim; 102 output frames are consistent with inclusive source endpoints 34538 through 34639",
+    "independent_pixel_authentication": "pending; fixed-rotation comparisons of export frames 30, 31 and 32 favor 30, not the index-derived candidate 31"
+  },
+  "view_registration": {
+    "operation": "common panorama rotation only; no lens, seam or field-of-view fit",
+    "ffmpeg_v360": "input=equirect:output=flat:yaw=90.90:pitch=-2.30:roll=-0.37:rorder=ypr:h_fov=63.63:v_fov=38.474775649129:w=1280:h=720:interp=line",
+    "reference_export_frame": 31,
+    "registered_image": {
+      "name": "registered-owner-view.png",
+      "sha256": "95a9ba7f1f0d56f485c4731fd84c3e8f20ada4e40c781b115a54e9ed26955540"
+    },
+    "visual_observation": "Studio horizon is broadly straight where current Kjerag final bends through the central join; neighboring Studio frames show the same distinction"
+  },
+  "limitations": [
+    "A recorded project setting does not identify the exclusive runtime stitching algorithm.",
+    "This is the default X4 setting, not the earlier ONE X2 Optical Flow On setting.",
+    "The first snapshot taken during UI recovery is not a matching-time or matching-view reference.",
+    "Accessibility slider value writes did not reliably seek Studio; acquisition used physical clicks and verified saved trim fields.",
+    "Registration permits a near-time same-field-of-view shape comparison, not a pixel-exact frame-parity verdict.",
+    "No stitching fix, exact frame identity, whole-video parity or owner acceptance is established by this manifest."
+  ]
+}
