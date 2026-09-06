@@ -14,6 +14,38 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Lazy draw-filter fallback declined, 2026-09-06:** replacing the final eager
+selection with conditional fallback sampling passed a frozen-old-shader
+bit-exact check across the atlas interiors, join and clamp edges. Manual
+interpolation coverage and the shader layout guard also passed. The tiny
+shader change did not demonstrate a dependable cross-camera capacity benefit:
+both X2 pairs improved modestly, but X4's first candidate run regressed sharply
+and its second improved throughput while slightly worsening p95/p99. Paused
+X4 throughput was lower in both pairs. Logical removal of a texture-sampling
+call was not proof of hardware savings, and no cause is assigned to the large
+first-run difference. The shader change and its candidate-only frozen reference
+are removed. The normal capacity binary again matches the retained checkpoint;
+the native player was never changed. No actual-sequence, native or full-suite
+gate is claimed for this rejected candidate. Evidence is preserved in
+`scratch/gpu-box-lazy-fallback-20260906-01/`.
+
+**L2 callback pacing declined, 2026-09-06:** the earlier-level solve was tested
+with the same callback chunking as L1. The real Scene regression observed 15
+cold L2 submissions, none on a cached redraw and five additional warm
+submissions, alongside unchanged L1 counts. Two alternating pairs per camera
+used the corrected nonblocking completion diagnostic. Both X4 runs and the
+first X2 run lost throughput and sharply worsened redraw tails; the second X2
+run improved substantially (432.96 redraws/s, p99 4.008 ms versus 417.41 and
+5.392 ms). Picture-arrival p99 worsened in all four pairs. This does not
+establish a reliable cross-camera benefit, and the cause of the bimodal X2
+result is not identified. All 360 source changes and zero accounting failures
+were retained in every run. The L2 change and its trial-only counter coverage
+are removed; L1 callback pacing remains. The normal capacity binary was rebuilt
+and its hash matches the prior checkpoint. The native player was never rebuilt
+with this trial and remains unchanged. No full suite, native or pixel gate is
+claimed for the rejected candidate. Evidence remains in
+`scratch/gpu-callback-l2-20260906-01/`.
+
 **Callback-paced worker candidate, 2026-09-06:** pinned wgpu holds a fence read
 lock throughout `Device::poll(Wait)`, while every `Queue::submit` needs the
 same fence's write lock. This explains how an off-thread wait can block UI
