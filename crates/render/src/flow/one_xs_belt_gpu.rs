@@ -29,6 +29,10 @@ use crate::stitch_camera::StitchCamera;
 use kjerag_media::{FrameStamp, Frames};
 use kjerag_meta::{CalibrationSet, OrientationTrack, Readout};
 
+#[path = "one_xs/resident_worker.rs"]
+mod resident_worker;
+use resident_worker::{ResidentStitchWorker, ResidentWork};
+
 /// One admitted capture's immutable camera interpretation and CPU resources.
 ///
 /// Constructing this is the live admission boundary. Parent geometry, static
@@ -394,10 +398,34 @@ enum ResidentReadyMap {
     Warm(Box<WarmReady>),
 }
 
+impl ResidentReadyMap {
+    fn frame(&self) -> &FrameStamp {
+        match self {
+            Self::Cold(map) => map.frame_stamp(),
+            Self::Warm(map) => map.frame_stamp(),
+        }
+    }
+}
+
+enum ResidentPublication<'a> {
+    Immediate,
+    Due(Option<&'a FrameStamp>),
+}
+
+impl ResidentPublication<'_> {
+    fn permits(&self, ready: &FrameStamp) -> bool {
+        match self {
+            Self::Immediate => true,
+            Self::Due(due) => due.is_some_and(|due| due == ready),
+        }
+    }
+}
+
 #[allow(dead_code)]
 enum ResidentTransaction {
     Idle,
     Starting,
+    Working(ResidentWork),
     Pending(ResidentPendingMap),
     Ready(ResidentReadyMap),
     Quarantined,
@@ -414,8 +442,9 @@ impl ResidentTransaction {
         match self {
             Self::Pending(ResidentPendingMap::Cold(pending)) => (*pending).quarantine_uncertain(),
             Self::Pending(ResidentPendingMap::Warm(pending)) => (*pending).quarantine_uncertain(),
-            // Ready has already acknowledged mapped completion. Every other
-            // state has no uncertain submission carrier.
+            // Dropping Working closes its result receiver. The worker still
+            // owns the source and quarantines an undeliverable pending map.
+            // Ready has already acknowledged mapped completion.
             other => drop(other),
         }
     }
@@ -503,8 +532,9 @@ struct ResidentCaptureState {
     session: Option<Arc<ResidentCaptureSession>>,
     transaction: ResidentTransaction,
     installed: Option<FrameStamp>,
-    /// Last pair actually submitted, not merely offered by Scene. Permits one
-    /// following decoded pair to wait without starting a second GPU solve.
+    /// Last pair accepted by the stitch worker, not merely offered by Scene.
+    /// Historical admission, not readiness or permission to publish. A full
+    /// worker queue must not advance this stamp.
     submitted: Option<FrameStamp>,
     /// A user seek starts a fresh estimator on the decoder's landing frame.
     /// Ordinary opens still require frame zero; successors remain adjacent.
@@ -517,6 +547,7 @@ struct ResidentCaptureState {
 /// that created it when iced recreates its renderer pipeline.
 struct ResidentCaptureSession {
     context: OneXsGpuContext,
+    worker: Arc<ResidentStitchWorker>,
     format: wgpu::TextureFormat,
     source_size: kjerag_meta::Size,
     capture: ResidentSourceCapture,
@@ -571,6 +602,7 @@ impl ResidentCaptureSession {
         orientation: OrientationTrack,
     ) -> Fallible<Self> {
         require_resident_device_limits(&context.device().limits())?;
+        let context = context.with_worker_pacing();
         let picture_layout = crate::scene::bind_group_layout(context.device());
         let sampler = context.device().create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Linear,
@@ -607,6 +639,7 @@ impl ResidentCaptureSession {
             )),
             #[cfg(test)]
             cold_blurred_probe: Mutex::new(None),
+            worker: Arc::new(ResidentStitchWorker::new(&context)?),
             context,
             format,
             source_size: profile.source_size,
@@ -616,6 +649,7 @@ impl ResidentCaptureSession {
     fn restarted(&self) -> Self {
         Self {
             context: self.context.clone(),
+            worker: self.worker.clone(),
             format: self.format,
             source_size: self.source_size,
             capture: ResidentSourceCapture {
@@ -897,6 +931,15 @@ impl ResidentCaptureFacade {
         Ok(self.state()?.installed.clone())
     }
 
+    #[cfg(test)]
+    pub(crate) fn prepared_stamp_for_test(&self) -> Fallible<Option<FrameStamp>> {
+        let state = self.state()?;
+        Ok(match &state.transaction {
+            ResidentTransaction::Ready(ready) => Some(ready.frame().clone()),
+            _ => None,
+        })
+    }
+
     /// Explicit instrument-only bulk readback of the exact installed resident
     /// result. Ordinary prepare and draw never call this path.
     pub(crate) fn diagnostic_installed_map(
@@ -1096,11 +1139,13 @@ impl ResidentSceneFacade {
         if matches!(state.transaction, ResidentTransaction::Quarantined) {
             return false;
         }
-        matches!(state.transaction, ResidentTransaction::Pending(_))
-            || state
-                .session
-                .as_ref()
-                .is_some_and(|session| !session.retirements.is_empty())
+        matches!(
+            state.transaction,
+            ResidentTransaction::Working(_) | ResidentTransaction::Pending(_)
+        ) || state
+            .session
+            .as_ref()
+            .is_some_and(|session| !session.retirements.is_empty())
     }
 
     pub(crate) fn quarantine_after_external_poll_failure(&self) {
@@ -1166,14 +1211,19 @@ impl ResidentSceneFacade {
             Ok(source) => source,
             Err(error) => return start.failed_import(error),
         };
-        let pending = session.submit(source);
+        let work = session.worker.try_submit(session.clone(), source);
         let mut state = self.capture.state()?;
-        match pending {
-            Ok(pending) => {
+        match work {
+            Ok(Some(work)) => {
                 state.submitted = Some(stamp);
-                state.transaction = ResidentTransaction::Pending(pending);
+                state.transaction = ResidentTransaction::Working(work);
                 start.disarm();
                 Ok(ResidentSubmit::Submitted)
+            }
+            Ok(None) => {
+                state.transaction = ResidentTransaction::Idle;
+                start.disarm();
+                Ok(ResidentSubmit::Retry(ResidentRetry::InFlight))
             }
             Err(error) => {
                 state.transaction = ResidentTransaction::Quarantined;
@@ -1192,16 +1242,29 @@ impl ResidentSceneFacade {
         format: wgpu::TextureFormat,
         reframe_for: impl Fn(&FrameStamp) -> Fallible<crate::Reframe>,
     ) -> Fallible<ResidentPrepare> {
-        self.prepare_redraw_inner(context, format, false, reframe_for)
+        self.prepare_redraw_inner(
+            context,
+            format,
+            false,
+            ResidentPublication::Immediate,
+            reframe_for,
+        )
     }
 
     pub(crate) fn prepare_redraw_after_external_poll(
         &self,
         context: &OneXsGpuContext,
         format: wgpu::TextureFormat,
+        due: Option<&FrameStamp>,
         reframe_for: impl Fn(&FrameStamp) -> Fallible<crate::Reframe>,
     ) -> Fallible<ResidentPrepare> {
-        self.prepare_redraw_inner(context, format, true, reframe_for)
+        self.prepare_redraw_inner(
+            context,
+            format,
+            true,
+            ResidentPublication::Due(due),
+            reframe_for,
+        )
     }
 
     fn prepare_redraw_inner(
@@ -1209,6 +1272,7 @@ impl ResidentSceneFacade {
         context: &OneXsGpuContext,
         format: wgpu::TextureFormat,
         externally_polled: bool,
+        publication: ResidentPublication<'_>,
         reframe_for: impl Fn(&FrameStamp) -> Fallible<crate::Reframe>,
     ) -> Fallible<ResidentPrepare> {
         let session = self.capture.bind_session(context.clone(), format)?;
@@ -1218,6 +1282,17 @@ impl ResidentSceneFacade {
             std::mem::replace(&mut state.transaction, ResidentTransaction::Starting)
         };
         let mut prepare_start = ResidentStartGuard::rollback(Arc::clone(&self.capture.inner));
+        let transaction = match transaction {
+            ResidentTransaction::Working(work) => match work.collect() {
+                Ok(transaction) => transaction,
+                Err(error) => {
+                    self.capture.state()?.transaction = ResidentTransaction::Quarantined;
+                    prepare_start.disarm();
+                    return Err(error);
+                }
+            },
+            other => other,
+        };
         let (transaction, externally_polled) = match transaction {
             ResidentTransaction::Pending(pending) => {
                 if !externally_polled {
@@ -1322,7 +1397,11 @@ impl ResidentSceneFacade {
         let mut state = self.capture.state()?;
         state.transaction = transaction;
         prepare_start.disarm();
-        if matches!(state.transaction, ResidentTransaction::Ready(_)) {
+        let publish_ready = match &state.transaction {
+            ResidentTransaction::Ready(ready) => publication.permits(ready.frame()),
+            _ => false,
+        };
+        if publish_ready {
             let permit = match session.retirements.reserve() {
                 Ok(permit) => permit,
                 Err(DrawRetirementError::Full) => {
@@ -1392,7 +1471,10 @@ impl ResidentSceneFacade {
             drop(state);
             return Ok(ResidentPrepare::Staged { installed });
         }
-        let pending = matches!(state.transaction, ResidentTransaction::Pending(_));
+        let pending = matches!(
+            state.transaction,
+            ResidentTransaction::Working(_) | ResidentTransaction::Pending(_)
+        );
         let installed = state.installed.clone();
         let Some(installed_frame) = installed.as_ref() else {
             drop(state);
@@ -1499,6 +1581,17 @@ impl ResidentSceneFacade {
             eprintln!("{error}");
             return Ok(ResidentDrain::FailClosedRetained);
         }
+        let transaction = match transaction {
+            ResidentTransaction::Working(work) => match work.collect() {
+                Ok(transaction) => transaction,
+                Err(error) => {
+                    self.capture.state()?.transaction = ResidentTransaction::Quarantined;
+                    eprintln!("{error}");
+                    return Ok(ResidentDrain::FailClosedRetained);
+                }
+            },
+            other => other,
+        };
         let transaction = match transaction {
             ResidentTransaction::Pending(pending) => match pending {
                 ResidentPendingMap::Cold(pending) => classify_retired_cold(*pending)?,
@@ -2978,7 +3071,7 @@ enum InjectedWait {
 }
 
 impl ExactSubmission {
-    fn wait(self) -> Fallible<()> {
+    fn wait(&self) -> Fallible<()> {
         match self {
             Self::Device {
                 context,
@@ -2995,7 +3088,7 @@ impl ExactSubmission {
                 let result = context
                     .device()
                     .poll(wgpu::PollType::Wait {
-                        submission_index: Some(index),
+                        submission_index: Some(index.clone()),
                         timeout: None,
                     })
                     .map(|_| ())
@@ -3155,6 +3248,56 @@ impl<K> SubmissionLease<K> {
             .as_mut()
             .ok_or("ONE X2 GPU submission lease was already completed")?;
         completion.submit_after(producer, encode)
+    }
+
+    fn submit_paced_after<F>(&mut self, producer: &OneXsGpuContext, encode: F) -> Fallible<()>
+    where
+        F: FnOnce(&wgpu::Device) -> wgpu::CommandBuffer,
+    {
+        // Reject a foreign device/queue before a worker can wait on work that
+        // the proposed producer does not own.
+        self.validate_provenance(producer)?;
+        // Pace the predecessor, then advance the proof to the successor.
+        self.wait_retaining_for_worker()?;
+        let completion = self
+            .completion
+            .as_mut()
+            .ok_or("ONE X2 GPU submission lease was already completed")?;
+        completion.submit_after(producer, encode)
+    }
+
+    /// Pace only the resident worker while retaining both the completion proof
+    /// and source ownership for the next same-queue submission.
+    fn wait_retaining_for_worker(&mut self) -> Fallible<()> {
+        let should_wait = match self.completion.as_ref() {
+            Some(ExactSubmission::Device { context, .. }) => context.is_worker_thread(),
+            #[cfg(test)]
+            Some(ExactSubmission::Injected { .. }) => false,
+            None => false,
+        };
+        if !should_wait {
+            return Ok(());
+        }
+        self.wait_retaining()
+    }
+
+    fn wait_retaining(&mut self) -> Fallible<()> {
+        let Some(completion) = self.completion.as_ref() else {
+            return Err("ONE X2 GPU submission lease was already completed".into());
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| completion.wait())) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => {
+                self.completion.take();
+                self.quarantine_owner();
+                Err(error)
+            }
+            Err(payload) => {
+                self.completion.take();
+                self.quarantine_owner();
+                std::panic::resume_unwind(payload)
+            }
+        }
     }
 
     #[cfg(test)]
@@ -3717,6 +3860,196 @@ mod tests {
     const SESSION_CENTER: Duration = Duration::from_micros(2_000_000);
 
     #[test]
+    fn worker_pacing_marker_is_shared_only_by_the_paced_context_clones() {
+        let (device, queue, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "KJERAG_REQUIRE_GPU is set and there is no GPU to answer with: {why}"
+                );
+                eprintln!("skipping ONE X2 worker pacing identity test: {why}");
+                return;
+            }
+        };
+        let ordinary = OneXsGpuContext::new(&device, &queue);
+        let paced = ordinary.with_worker_pacing();
+        let worker_context = paced.clone();
+        let (start, ready) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ready.recv().unwrap();
+            worker_context.is_worker_thread()
+        });
+        paced
+            .register_worker_thread(worker.thread().id())
+            .unwrap_or_else(|error| panic!("worker registration failed on {adapter}: {error}"));
+        assert!(!ordinary.is_worker_thread());
+        assert!(
+            !paced.is_worker_thread(),
+            "the registering thread must not pace"
+        );
+        assert_eq!(
+            paced
+                .register_worker_thread(std::thread::current().id())
+                .unwrap_err()
+                .to_string(),
+            "ONE X2 GPU worker thread was already registered"
+        );
+        start.send(()).unwrap();
+        assert!(
+            worker.join().unwrap(),
+            "the registered worker clone did not pace"
+        );
+    }
+
+    #[test]
+    fn worker_paces_only_explicit_successor_and_leaves_ordinary_final_pending() {
+        let (device, queue, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "KJERAG_REQUIRE_GPU is set and there is no GPU to answer with: {why}"
+                );
+                eprintln!("skipping ONE X2 worker pre-submit pacing test: {why}");
+                return;
+            }
+        };
+        let context = OneXsGpuContext::new(&device, &queue).with_worker_pacing();
+        let worker_context = context.clone();
+        let (start, ready) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ready.recv().unwrap();
+            let first = worker_context.queue().submit([worker_context
+                .device()
+                .create_command_encoder(&Default::default())
+                .finish()]);
+            let first_completed = Arc::new(AtomicU8::new(0));
+            worker_context.queue().on_submitted_work_done({
+                let first_completed = Arc::clone(&first_completed);
+                move || first_completed.store(1, Ordering::SeqCst)
+            });
+            let owner = Arc::new(());
+            let retained = Arc::downgrade(&owner);
+            let mut lease = SubmissionLease::new(worker_context.clone(), first, owner);
+            let waited = Arc::new(AtomicU8::new(0));
+            let submitted = Arc::new(AtomicU8::new(0));
+            lease.observe(Arc::clone(&waited));
+            lease.observe_submit(Arc::clone(&submitted));
+
+            assert_eq!(waited.load(Ordering::SeqCst), 0, "first submit waited");
+            assert_eq!(
+                first_completed.load(Ordering::SeqCst),
+                0,
+                "lease construction drove the first completion callback"
+            );
+            let source = worker_context
+                .device()
+                .create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("ONE X2 pacing final-copy source"),
+                    size: 4,
+                    usage: wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: true,
+                });
+            source
+                .slice(..)
+                .get_mapped_range_mut()
+                .copy_from_slice(&0x1234_5678_u32.to_ne_bytes());
+            source.unmap();
+            let mapped = worker_context
+                .device()
+                .create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("ONE X2 pacing final-copy mapping"),
+                    size: 4,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+            lease
+                .submit_paced_after(&worker_context, |device| {
+                    assert_eq!(
+                        waited.load(Ordering::SeqCst),
+                        2,
+                        "successor encoded before its predecessor completed"
+                    );
+                    assert_eq!(first_completed.load(Ordering::SeqCst), 1);
+                    device.create_command_encoder(&Default::default()).finish()
+                })
+                .unwrap();
+            assert_eq!(submitted.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                waited.load(Ordering::SeqCst),
+                2,
+                "paced successor was waited after submission"
+            );
+            lease
+                .submit_after(&worker_context, |device| {
+                    let mut encoder = device.create_command_encoder(&Default::default());
+                    encoder.copy_buffer_to_buffer(&source, 0, &mapped, 0, 4);
+                    encoder.finish()
+                })
+                .unwrap();
+            assert_eq!(submitted.load(Ordering::SeqCst), 2);
+            assert_eq!(
+                waited.load(Ordering::SeqCst),
+                2,
+                "ordinary final submission paced its predecessor"
+            );
+            assert!(retained.upgrade().is_some(), "pacing released the owner");
+
+            let slice = mapped.slice(..);
+            let (sent, received) = mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sent.send(result);
+            });
+            worker_context
+                .device()
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
+                .unwrap();
+            received.recv().unwrap().unwrap();
+            assert_eq!(&*slice.get_mapped_range(), &0x1234_5678_u32.to_ne_bytes());
+            mapped.unmap();
+            assert_eq!(
+                waited.load(Ordering::SeqCst),
+                2,
+                "mapped completion performed another lease wait"
+            );
+            lease.acknowledge_mapped_completion().unwrap();
+            let owner = lease.complete_into_owner_after_mapped_validity().unwrap();
+            assert!(
+                retained.upgrade().is_some(),
+                "mapped completion did not return the exact owner"
+            );
+            drop(owner);
+            assert!(retained.upgrade().is_none(), "mapped owner was retained");
+        });
+        context
+            .register_worker_thread(worker.thread().id())
+            .unwrap_or_else(|error| panic!("worker registration failed on {adapter}: {error}"));
+        start.send(()).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn resident_publication_requires_the_exact_due_delivery() {
+        let due = FrameStamp::for_test(41, Duration::from_secs(2), None);
+        let same_delivery = due.clone();
+        let same_fields_other_delivery = FrameStamp::for_test(41, Duration::from_secs(2), None);
+        let wrong = FrameStamp::for_test(42, Duration::from_secs(3), Some(&due));
+
+        assert!(!ResidentPublication::Due(None).permits(&due));
+        assert!(ResidentPublication::Due(Some(&due)).permits(&same_delivery));
+        assert!(
+            !ResidentPublication::Due(Some(&due)).permits(&same_fields_other_delivery),
+            "readable frame fields authorized a foreign delivery"
+        );
+        assert!(!ResidentPublication::Due(Some(&due)).permits(&wrong));
+        assert!(ResidentPublication::Immediate.permits(&wrong));
+    }
+
+    #[test]
     fn cold_l1_initial_probe_compacts_plane_padding() {
         let logical = crate::flow::one_xs::pis::Level::One.patches();
         let stride = logical + 16;
@@ -4142,6 +4475,7 @@ mod tests {
             &restarted.retirements
         ));
         assert!(Arc::ptr_eq(&first_session.front, &restarted.front));
+        assert!(Arc::ptr_eq(&first_session.worker, &restarted.worker));
         assert!(Arc::ptr_eq(&first_session.solver, &restarted.solver));
         assert!(Arc::ptr_eq(&first_session.motion, &restarted.motion));
         assert!(Arc::ptr_eq(&first_session.bridge, &restarted.bridge));
@@ -4290,6 +4624,65 @@ mod tests {
         assert!(state.installed.is_none());
         assert!(matches!(state.transaction, ResidentTransaction::Idle));
         assert!(!facade.same_capture(&restart));
+    }
+
+    #[test]
+    fn bound_restart_drains_the_exact_old_working_receiver_only() {
+        let (device, queue, _foreign_device, _foreign_queue, adapter) = match gpu_pair() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "KJERAG_REQUIRE_GPU is set and there is no GPU to answer with: {why}"
+                );
+                eprintln!("skipping ONE X2 Working restart test: {why}");
+                return;
+            }
+        };
+        let context = OneXsGpuContext::new(&device, &queue);
+        let facade = ResidentCaptureFacade::new(
+            resident_profile(session_calibration(20.0, 0.0)),
+            session_orientation(1.0),
+        );
+        let attachment = facade
+            .attach_renderer(context, wgpu::TextureFormat::Rgba8Unorm)
+            .unwrap_or_else(|error| panic!("resident facade failed on {adapter}: {error}"));
+        let original_session = facade.state().unwrap().session.as_ref().unwrap().clone();
+        let (result, work) = ResidentWork::waiting_for_test();
+        facade.state().unwrap().transaction = ResidentTransaction::Working(work);
+
+        let restart = facade.restarted().unwrap();
+        let restarted_session = restart.state().unwrap().session.as_ref().unwrap().clone();
+        assert!(Arc::ptr_eq(
+            &original_session.worker,
+            &restarted_session.worker
+        ));
+        assert!(
+            !original_session
+                .capture
+                .source_identity()
+                .matches(&restarted_session.capture.source_identity())
+        );
+
+        assert_eq!(
+            attachment.drain_replaced_after_external_poll().unwrap(),
+            ResidentDrain::Pending
+        );
+        result
+            .send(Err("injected retired worker failure".into()))
+            .unwrap_or_else(|_| panic!("old Working receiver was discarded during restart"));
+        assert_eq!(
+            attachment.drain_replaced_after_external_poll().unwrap(),
+            ResidentDrain::FailClosedRetained
+        );
+        assert!(matches!(
+            facade.state().unwrap().transaction,
+            ResidentTransaction::Quarantined
+        ));
+        assert!(matches!(
+            restart.state().unwrap().transaction,
+            ResidentTransaction::Idle
+        ));
     }
 
     #[test]
@@ -4675,6 +5068,89 @@ mod tests {
             state.load(Ordering::SeqCst),
             7,
             "disarmed lease waited again during drop"
+        );
+    }
+
+    #[test]
+    fn submission_lease_wait_retaining_preserves_owner_and_completion_proof() {
+        let state = Arc::new(AtomicU8::new(0));
+        let owner = Arc::new(());
+        let retained = Arc::downgrade(&owner);
+        let mut lease = SubmissionLease::injected(
+            Arc::clone(&owner),
+            InjectedWait::Success,
+            Arc::clone(&state),
+        );
+
+        lease.wait_retaining().unwrap();
+        assert_eq!(state.load(Ordering::SeqCst), 2);
+        drop(owner);
+        assert!(retained.upgrade().is_some(), "pacing released the owner");
+
+        lease.acknowledge_mapped_completion().unwrap();
+        let returned = lease.complete_into_owner_after_mapped_validity().unwrap();
+        drop(returned);
+        assert!(retained.upgrade().is_none());
+        assert_eq!(
+            state.load(Ordering::SeqCst),
+            2,
+            "acknowledgement waited twice"
+        );
+    }
+
+    #[test]
+    fn submission_lease_wait_retaining_error_quarantines_once() {
+        let state = Arc::new(AtomicU8::new(0));
+        let owner = Arc::new(());
+        let retained = Arc::downgrade(&owner);
+        let mut lease =
+            SubmissionLease::injected(owner.clone(), InjectedWait::Error, Arc::clone(&state));
+
+        let error = lease.wait_retaining().unwrap_err();
+        assert_eq!(error.to_string(), "injected ONE X2 submission poll failure");
+        assert_eq!(state.load(Ordering::SeqCst), 2);
+        assert!(lease.completion.is_none());
+        drop(lease);
+        drop(owner);
+        assert!(
+            retained.upgrade().is_some(),
+            "pacing error released the owner"
+        );
+        assert_eq!(
+            state.load(Ordering::SeqCst),
+            2,
+            "drop waited after quarantine"
+        );
+    }
+
+    #[test]
+    fn submission_lease_wait_retaining_panic_quarantines_once() {
+        let state = Arc::new(AtomicU8::new(0));
+        let owner = Arc::new(());
+        let retained = Arc::downgrade(&owner);
+        let mut lease =
+            SubmissionLease::injected(owner.clone(), InjectedWait::Panic, Arc::clone(&state));
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = lease.wait_retaining();
+        }))
+        .expect_err("injected pacing panic was not preserved");
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"injected ONE X2 submission poll panic")
+        );
+        assert_eq!(state.load(Ordering::SeqCst), 1);
+        assert!(lease.completion.is_none());
+        drop(lease);
+        drop(owner);
+        assert!(
+            retained.upgrade().is_some(),
+            "pacing panic released the owner"
+        );
+        assert_eq!(
+            state.load(Ordering::SeqCst),
+            1,
+            "drop waited after quarantine"
         );
     }
 

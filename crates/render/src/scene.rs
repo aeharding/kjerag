@@ -1498,20 +1498,15 @@ impl Scene {
                 Next::Never
             };
         };
-        // Sequential playback never drops a pair. Distinguish a submitted
-        // input from an installed display: playing may queue one successor
-        // behind the former, whereas seeks/steps must finish the latter.
+        // Sequential playback never drops a pair. Decode lookahead is separate
+        // from promotion, which must finish the current installed display.
         // Gate on the exact offered delivery, never a frame index or `Shown`.
         // The initial None remains open so frame zero can be offered.
         let capture_owned = show.one_xs.is_some();
-        let (current_ready, current_accepted) = match (show.one_xs.as_ref(), frames.as_ref()) {
+        let current_ready = match (show.one_xs.as_ref(), frames.as_ref()) {
             (Some(capture), Some(frame)) => {
-                match capture.acknowledged(&frame.stamp()).and_then(|ready| {
-                    capture
-                        .accepted(&frame.stamp())
-                        .map(|accepted| (ready, accepted))
-                }) {
-                    Ok((ready, accepted)) => (Some(ready), Some(accepted)),
+                match capture.acknowledged(&frame.stamp()) {
+                    Ok(ready) => Some(ready),
                     Err(error) => {
                         // Capture-state loss is deterministic. Stop immediately
                         // with its raw error and never ask the player for a frame
@@ -1524,7 +1519,7 @@ impl Scene {
                     }
                 }
             }
-            _ => (None, None),
+            _ => None,
         };
         if current_ready == Some(true)
             && frames.as_ref().is_some_and(|frame| {
@@ -1544,17 +1539,11 @@ impl Scene {
                 player.play();
             }
         }
-        // During playback, one following pair may wait behind the submitted
-        // transaction. Seek/step completion still requires the installed map.
-        // Preparation retains that submitted pair's exact view, installs it,
-        // then submits its successor in the SAME redraw, with one GPU solve
-        // in flight at a time. There is no extra compositor turn between them.
-        let advance_ready = if player.is_playing() && show.replay.borrow().is_none() {
-            current_accepted
-        } else {
-            current_ready
-        };
-        if one_xs_frame_waiting(ONE_XS_PLAYBACK_ENABLED, capture_owned, advance_ready) {
+        // The decoded successor can already be stitching before it is due.
+        // Do not promote another due frame until the current one is installed:
+        // publication below is authorized by this exact current delivery, and
+        // must never strand an unfinished predecessor behind a newer stamp.
+        if one_xs_frame_waiting(ONE_XS_PLAYBACK_ENABLED, capture_owned, current_ready) {
             return Next::Refresh;
         }
         let offered_new_frame = match player.pump(now) {
@@ -1582,7 +1571,10 @@ impl Scene {
         // against frames that will never arrive.
         if player.is_ended() {
             player.pause(now);
-            return if current_ready == Some(false) || resident_refresh {
+            return if current_ready == Some(false)
+                || resident_refresh
+                || (capture_owned && offered_new_frame)
+            {
                 Next::Refresh
             } else {
                 Next::Never
@@ -1594,7 +1586,9 @@ impl Scene {
             // that adds a whole source-frame interval to every transaction.
             resident_refresh
                 || show.replay.borrow().is_some()
-                || (capture_owned && offered_new_frame),
+                || (capture_owned
+                    && (offered_new_frame
+                        || (player.is_playing() && player.next_decoded().is_none()))),
             player.is_playing(),
             player.is_seeking(),
             player.next_due(),
@@ -1977,6 +1971,7 @@ impl Scene {
         ScenePrimitive {
             camera,
             view: self.show.as_ref().and_then(|show| show.view(held)),
+            resident_next: self.show.as_ref().and_then(|show| show.next_view(held)),
             resident_capture: self.show.as_ref().and_then(|show| show.one_xs.clone()),
             resident_target: self.show.as_ref().and_then(|show| {
                 show.replay
@@ -2031,9 +2026,24 @@ impl Show {
 
     fn view(&self, held: Holding) -> Option<View> {
         let frames = self.playing.borrow().frames.clone()?;
+        Some(self.view_for(frames, held))
+    }
+
+    fn next_view(&self, held: Holding) -> Option<View> {
+        if self.one_xs.is_none() || self.replay.borrow().is_some() {
+            return None;
+        }
+        let frames = match &self.playing.borrow().source {
+            Source::Live(player) => player.next_decoded()?,
+            Source::Stepped(_) => return None,
+        };
+        Some(self.view_for(frames, held))
+    }
+
+    fn view_for(&self, frames: Arc<Frames>, held: Holding) -> View {
         let at = self.held.instant(&frames, held.clock);
         let world_from_body = held.forced.unwrap_or_else(|| self.held.orientation.at(at));
-        Some(View {
+        View {
             held: Held {
                 body_from_world: match held.horizon {
                     Horizon::Locked => world_from_body.conjugate(),
@@ -2051,7 +2061,7 @@ impl Show {
             frames,
             one_xs: None,
             resident_one_xs: self.one_xs.clone(),
-        })
+        }
     }
 
     /// Start stitching on the decoder's seek landing. The estimator's cold
@@ -2366,6 +2376,8 @@ struct Calibrated {
 pub struct ScenePrimitive {
     camera: Camera,
     view: Option<View>,
+    /// Decoded but not yet due. This may be prepared, never published early.
+    resident_next: Option<View>,
     /// Current live lineage even while replay has cleared its offered frame.
     resident_capture: Option<ResidentCaptureFacade>,
     /// Replay input is not a new displayed position until this target lands.
@@ -3093,6 +3105,8 @@ impl ScenePipeline {
             .view
             .as_ref()
             .filter(|view| view.resident_one_xs.is_some());
+        let due = offered.map(|view| view.frames.stamp());
+        let next = primitive.resident_next.as_ref();
         if let Some(capture) = primitive.resident_capture.as_ref() {
             let changed = self
                 .resident_one_xs
@@ -3136,12 +3150,14 @@ impl ScenePipeline {
             let prepared = attachment.prepare_redraw_after_external_poll(
                 &self.one_xs_gpu,
                 self.format,
+                due.as_ref(),
                 |stamp| {
                     let view = resident_frame_view(
                         stamp,
                         capture,
                         [
                             offered,
+                            next,
                             submitted.as_ref(),
                             shown.as_ref(),
                             self.resident_completed_view.as_ref(),
@@ -3158,6 +3174,7 @@ impl ScenePipeline {
                         capture,
                         [
                             offered,
+                            next,
                             submitted.as_ref(),
                             shown.as_ref(),
                             self.resident_completed_view.as_ref(),
@@ -3182,11 +3199,11 @@ impl ScenePipeline {
             }
         }
 
-        // Install/stage the predecessor before submitting its waiting successor.
-        // The staged immutable draw remains frame-specific while the next solve
-        // runs; neither submission nor completion waits for another redraw.
+        // Only the due stamp above can authorize publication. Once installed,
+        // prepare its already-decoded successor while continuing to draw this
+        // picture. A late due frame takes priority over speculative lookahead.
         if !primitive.stalled.stopped()
-            && let Some(view) = offered
+            && let Some(due_view) = offered
             && let Some((capture, attachment)) = self.resident_one_xs.as_ref()
             && capture.same_capture(
                 primitive
@@ -3195,11 +3212,17 @@ impl ScenePipeline {
                     .expect("selected Scene has a current capture"),
             )
             && capture.same_capture(
-                view.resident_one_xs
+                due_view
+                    .resident_one_xs
                     .as_ref()
                     .expect("selected view has capture"),
             )
         {
+            let view = if capture.acknowledged(&due_view.frames.stamp())? {
+                next.unwrap_or(due_view)
+            } else {
+                due_view
+            };
             let reframe = self.resident_reframe(primitive, view, aspect);
             match attachment.submit_frame(
                 &self.one_xs_gpu,
@@ -3240,6 +3263,7 @@ impl ScenePipeline {
             && let ResidentPrepare::Staged { .. } = attachment.prepare_redraw_after_external_poll(
                 &self.one_xs_gpu,
                 self.format,
+                shown.as_ref().map(|view| view.frames.stamp()).as_ref(),
                 |stamp| {
                     let view = shown
                         .as_ref()
@@ -5936,10 +5960,14 @@ mod tests {
             .unwrap()
             .0;
         let (import, submitted) = submit
-            .split_once("let pending = session.submit(source);")
-            .expect("the selected path consumes the imported source on GPU");
+            .split_once("let work = session.worker.try_submit(session.clone(), source);")
+            .expect("the selected path sends the exact imported source to its worker");
         assert!(import.contains("session.capture.import_picture("));
         assert!(import.contains("Err(error) => return start.failed_import(error)"));
+        assert!(submitted.contains("ResidentTransaction::Working(work)"));
+        let worker = include_str!("flow/one_xs/resident_worker.rs");
+        assert!(worker.contains("job.session.submit(job.source)"));
+        assert!(worker.contains("self.jobs.try_send(Job"));
         assert!(
             !submitted.contains("failed_import"),
             "the pre-submit import retry must not catch a GPU submission failure"
@@ -7377,6 +7405,59 @@ mod tests {
     }
 
     #[test]
+    fn final_resident_offer_keeps_redrawing_until_its_map_is_acknowledged() {
+        let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").map(PathBuf::from) else {
+            return;
+        };
+        let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
+        let mut scene = Scene::open(&path).unwrap();
+        scene.set_muted(true);
+        scene.pause(Instant::now());
+        let (last, previous_time) = scene
+            .player(|player| {
+                let last = player.timing().frames - 1;
+                (last, player.timing().time_of(last - 1))
+            })
+            .unwrap();
+        scene.seek(previous_time, Accuracy::Exact);
+        let previous = wait_for_new_scene_frame(&scene, None);
+        assert_eq!(previous.index(), last - 1);
+        let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let capture = prepare_and_draw_exact_resident_frame(
+            &scene,
+            &mut pipeline,
+            &device,
+            &queue,
+            &previous,
+        );
+        scene.pump(Instant::now());
+        assert!(!scene.is_seeking());
+        // A settled paused draw has no pending-source wake to mask the EOF
+        // decision's stale pre-pump acknowledgement of the preceding frame.
+        pipeline.prepare(&scene.primitive(Camera::default()), &device, &queue, 1.0);
+        assert!(!scene.resident_refresh.load(AtomicOrdering::Acquire));
+        scene.play();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let final_frame = loop {
+            let next = scene.pump(Instant::now());
+            if let Some(frame) = scene.frame_stamp()
+                && frame.index() == last
+            {
+                assert_eq!(scene.player(Player::is_ended), Some(true));
+                assert_eq!(next, Next::Refresh, "EOF lost the final map wakeup");
+                break frame;
+            }
+            assert!(!matches!(next, Next::Stopped(_)));
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        };
+        assert!(!capture.acknowledged(&final_frame).unwrap());
+        prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &final_frame);
+        assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&final_frame));
+        assert_eq!(scene.pump(Instant::now()), Next::Never);
+    }
+
+    #[test]
     fn selected_one_x2_overlap_is_bounded_and_survives_renderer_recreation() {
         let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").map(PathBuf::from) else {
             return;
@@ -7393,49 +7474,168 @@ mod tests {
         assert!(!capture.acknowledged(&first).unwrap());
 
         scene.play();
-        let late = Instant::now() + Duration::from_secs(1);
+        // Even if a later source is due, an unfinished current delivery must
+        // not be stranded by promotion to a newer publication-authority stamp.
+        for _ in 0..3 {
+            assert_eq!(
+                scene.pump(Instant::now() + Duration::from_secs(1)),
+                Next::Refresh
+            );
+            assert_eq!(scene.frame_stamp().as_ref(), Some(&first));
+        }
+        prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &first);
+        let second = wait_for_new_scene_frame(&scene, Some(&first));
+        let before_due = Instant::now();
+        prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &second);
+
+        // Hold the presentation clock input before the next source is due,
+        // while allowing real worker/GPU progress on that decoded successor.
         let deadline = Instant::now() + Duration::from_secs(10);
-        let second = loop {
-            assert!(!matches!(scene.pump(late), Next::Stopped(_)));
-            if let Some(frame) = scene.frame_stamp()
-                && frame != first
-            {
-                break frame;
+        let future = loop {
+            assert!(!matches!(scene.pump(before_due), Next::Stopped(_)));
+            let primitive = scene.primitive(Camera::default());
+            if let Some(next) = primitive.resident_next.as_ref() {
+                break next.frames.stamp();
             }
             assert!(Instant::now() < deadline);
             std::thread::yield_now();
         };
-        assert_eq!(second.index(), first.index() + 1);
-        assert!(!capture.accepted(&second).unwrap());
-        for _ in 0..5 {
-            assert_eq!(scene.pump(late), Next::Refresh);
-            assert_eq!(
-                scene.frame_stamp().as_ref(),
-                Some(&second),
-                "only one waiting successor is allowed"
-            );
-        }
-        assert!(scene.displayed_frame_stamp().is_none());
-
-        // The in-flight view must not disappear with the old renderer, even
-        // though Scene now offers the successor instead of that exact source.
-        drop(pipeline);
-        let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        assert_eq!(future.index(), second.index() + 1);
         loop {
             pipeline.prepare(&scene.primitive(Camera::default()), &device, &queue, 1.0);
-            if capture.accepted(&second).unwrap() {
+            assert_eq!(scene.frame_stamp().as_ref(), Some(&second));
+            assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&second));
+            if capture.prepared_stamp_for_test().unwrap().as_ref() == Some(&future) {
                 break;
             }
             assert!(Instant::now() < deadline);
             std::thread::yield_now();
         }
-        assert!(capture.acknowledged(&first).unwrap());
-        assert!(!capture.acknowledged(&second).unwrap());
-        assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
-        draw_resident_test_pass(&pipeline, &device, &queue);
+        assert!(capture.accepted(&future).unwrap());
+        assert!(!capture.acknowledged(&future).unwrap());
+
+        // Pausing hides media lookahead but does not lose its already-prepared
+        // source owner. Recreating the renderer must still draw the old frame.
+        scene.pause(before_due);
+        assert!(scene.primitive(Camera::default()).resident_next.is_none());
+        drop(pipeline);
+        let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        for _ in 0..3 {
+            pipeline.prepare(&scene.primitive(Camera::default()), &device, &queue, 1.0);
+            assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&second));
+            assert!(capture.acknowledged(&second).unwrap());
+            assert!(!capture.acknowledged(&future).unwrap());
+            draw_resident_test_pass(&pipeline, &device, &queue);
+        }
+
+        // Only Player's subsequent due promotion authorizes atomic publication
+        // of this same opaque delivery and its precomputed map.
+        scene.play();
+        let promoted = wait_for_new_scene_frame(&scene, Some(&second));
+        assert_eq!(promoted, future);
         scene.pause(Instant::now());
+        prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &future);
+        assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&future));
+    }
+
+    #[test]
+    fn seek_retires_a_prefetched_ready_without_publishing_it() {
+        let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").map(PathBuf::from) else {
+            return;
+        };
+        let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
+        let mut scene = Scene::open(&path).unwrap();
+        scene.set_muted(true);
+        scene.pause(Instant::now());
+        let first = wait_for_new_scene_frame(&scene, None);
+        let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let old_capture =
+            prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &first);
+
+        scene.play();
+        let second = wait_for_new_scene_frame(&scene, Some(&first));
+        let before_due = Instant::now();
         prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &second);
+
+        // Let the actual decoded successor finish without advancing the logical
+        // presentation time. It is accepted and Ready, but is not publication
+        // authority until Player promotes this exact delivery.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let future = loop {
+            assert!(!matches!(scene.pump(before_due), Next::Stopped(_)));
+            let primitive = scene.primitive(Camera::default());
+            let Some(next) = primitive.resident_next.as_ref() else {
+                assert!(Instant::now() < deadline);
+                std::thread::yield_now();
+                continue;
+            };
+            let stamp = next.frames.stamp();
+            pipeline.prepare(&primitive, &device, &queue, 1.0);
+            if old_capture.prepared_stamp_for_test().unwrap().as_ref() == Some(&stamp) {
+                break stamp;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        };
+        assert!(old_capture.accepted(&future).unwrap());
+        assert!(!old_capture.acknowledged(&future).unwrap());
         assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&second));
+
+        let (destination, destination_time) = scene
+            .player(|player| {
+                let destination = (future.index() + 30).min(player.timing().frames - 1);
+                (destination, player.timing().time_of(destination))
+            })
+            .unwrap();
+        assert_ne!(destination, future.index());
+        scene.seek(destination_time, Accuracy::Exact);
+        let replacement = scene.show.as_ref().unwrap().one_xs.clone().unwrap();
+        assert!(!replacement.same_capture(&old_capture));
+        assert!(!replacement.accepted(&future).unwrap());
+
+        // Replacing the capture drains the speculative Ready without exposing
+        // it. Until the new seek landing installs, the exact old display remains
+        // drawable through the retired attachment.
+        for _ in 0..3 {
+            pipeline.prepare(&scene.primitive(Camera::default()), &device, &queue, 1.0);
+            assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&second));
+            assert_ne!(scene.displayed_frame_stamp().as_ref(), Some(&future));
+            assert!(!replacement.accepted(&future).unwrap());
+            assert!(matches!(
+                pipeline.resident_draw,
+                ResidentDrawSelection::Retired(_)
+            ));
+            draw_resident_test_pass(&pipeline, &device, &queue);
+        }
+
+        let landing = wait_for_new_scene_frame(&scene, None);
+        assert_eq!(landing.index(), destination);
+        assert_ne!(landing, future);
+        assert!(!replacement.accepted(&future).unwrap());
+        prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &landing);
+        assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&landing));
+        assert_ne!(scene.displayed_frame_stamp().as_ref(), Some(&future));
+
+        // The old attachment may retain the submitted display until its real
+        // draw retires. Poll and draw normally until that exact capture drains.
+        let drain_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            pipeline.prepare(&scene.primitive(Camera::default()), &device, &queue, 1.0);
+            draw_resident_test_pass(&pipeline, &device, &queue);
+            if !pipeline
+                .retired_one_xs
+                .iter()
+                .any(|(capture, _)| capture.same_capture(&old_capture))
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < drain_deadline,
+                "retired prefetched capture did not drain"
+            );
+            std::thread::yield_now();
+        }
+        assert!(!replacement.accepted(&future).unwrap());
     }
 
     /// discovery and exact lens ordering just as it does for ordinary opens.

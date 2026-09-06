@@ -99,7 +99,7 @@ fn redraw(
     gpu: &Gpu,
     target: &Offscreen,
     camera: Camera,
-) -> Fallible<(Duration, Duration)> {
+) -> Fallible<(Duration, Duration, Instant)> {
     let began = Instant::now();
     if let Next::Stopped(stall) = scene.pump(Instant::now()) {
         return Err(stall.to_string().into());
@@ -114,7 +114,16 @@ fn redraw(
     );
     let prepared = Instant::now();
     target.render(&gpu.device, &gpu.queue, pipeline)?;
-    Ok((prepared - began, prepared.elapsed()))
+    let completed = Instant::now();
+    Ok((prepared - began, completed - prepared, completed))
+}
+
+fn clock_minus_pts_ms(clock: Duration, pts: Duration) -> f64 {
+    if clock >= pts {
+        (clock - pts).as_secs_f64() * 1000.0
+    } else {
+        -(pts - clock).as_secs_f64() * 1000.0
+    }
 }
 
 fn measure(
@@ -129,6 +138,8 @@ fn measure(
     let mut timings = Vec::new();
     let mut prepare_timings = Vec::new();
     let mut completion_timings = Vec::new();
+    let mut display_ages = Vec::new();
+    let mut arrival_lateness = Vec::new();
     let first = scene.displayed_frame().ok_or("view-rate has no picture")?;
     let mut last = first;
     let mut changes = 0;
@@ -139,17 +150,23 @@ fn measure(
         // Bounded movement across the reported riser, not repeated identical
         // uniforms or a render aimed forever away from the seam.
         let yaw = camera.yaw + (began.elapsed().as_secs_f32() * 2.0).sin() * 0.2;
-        let (prepare, completion) = redraw(scene, pipeline, gpu, target, Camera { yaw, ..camera })?;
+        let (prepare, completion, completed) =
+            redraw(scene, pipeline, gpu, target, Camera { yaw, ..camera })?;
         timings.push(start.elapsed().as_secs_f64() * 1000.0);
         prepare_timings.push(prepare.as_secs_f64() * 1000.0);
         completion_timings.push(completion.as_secs_f64() * 1000.0);
         let displayed = scene
             .displayed_frame()
             .ok_or("view-rate lost its picture")?;
+        let display_age = clock_minus_pts_ms(scene.position(completed), displayed.1);
+        display_ages.push(display_age);
         if displayed.0 != last.0 {
             if displayed.0 != last.0 + 1 {
                 return Err("view-rate skipped a displayed source frame".into());
             }
+            // The retained identity changes in prepare, but this is sampled at
+            // the first completed redraw that could actually contain it.
+            arrival_lateness.push(display_age);
             changes += 1;
             last = displayed;
         }
@@ -164,9 +181,19 @@ fn measure(
     timings.sort_by(f64::total_cmp);
     prepare_timings.sort_by(f64::total_cmp);
     completion_timings.sort_by(f64::total_cmp);
+    display_ages.sort_by(f64::total_cmp);
+    arrival_lateness.sort_by(f64::total_cmp);
     let summary = |values: &[f64]| {
         let q = |p: f64| values[((values.len() - 1) as f64 * p).round() as usize];
         json!({"median": q(0.5), "p95": q(0.95), "p99": q(0.99), "max": q(1.0)})
+    };
+    let signed_summary = |values: &[f64]| {
+        if values.is_empty() {
+            return json!({"samples": 0, "min": null, "median": null, "p95": null, "p99": null, "max": null});
+        }
+        let q = |p: f64| values[((values.len() - 1) as f64 * p).round() as usize];
+        json!({"samples": values.len(), "min": q(0.0), "median": q(0.5),
+            "p95": q(0.95), "p99": q(0.99), "max": q(1.0)})
     };
     println!(
         "{}",
@@ -179,6 +206,11 @@ fn measure(
             // independent percentiles to reconstruct the redraw percentile.
             "pump_prepare_ms": summary(&prepare_timings),
             "draw_and_queue_completion_ms": summary(&completion_timings),
+            // Signed presentation-clock position minus displayed frame PTS.
+            // Audio follows this clock, but these are not compositor, sound
+            // device, or physical output-latency measurements.
+            "clock_minus_displayed_pts_ms": signed_summary(&display_ages),
+            "first_completed_redraw_arrival_lateness_ms": signed_summary(&arrival_lateness),
             "redraws_over_budget": timings.iter().filter(|ms| **ms > 1000.0 / HZ).count(),
             "source_changes": changes, "source_frames_per_second": changes as f64 / elapsed,
             "source_seconds_advanced": (last.1 - first.1).as_secs_f64(),
@@ -186,4 +218,21 @@ fn measure(
             "player_stats": format!("{:?}", scene.stats().map(|stats| stats.since(initial_stats)))})
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clock_relative_age_keeps_either_sign() {
+        assert_eq!(
+            clock_minus_pts_ms(Duration::from_millis(20), Duration::from_millis(30)),
+            -10.0
+        );
+        assert_eq!(
+            clock_minus_pts_ms(Duration::from_millis(30), Duration::from_millis(20)),
+            10.0
+        );
+    }
 }

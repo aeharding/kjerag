@@ -351,25 +351,37 @@ There is no calibration step, setup ritual or quality toggle. The Optical
 Flow setting controls only the legacy solver and does not select or modify
 this route.
 
-The player changes to `PresentationPolicy::SequentialRealtime` and one capture-owned
-resident facade starts at frame zero. Scene branches to this route before legacy
-prepare, import or draw. A renderer attachment binds the same capture-owned GPU
-session across pipeline recreation, submits the exact offered decoded pair and
-stages only an installed result carrying the same opaque `FrameStamp` and capture
-identity. Pending work and full render-retirement admission leave the prior exact
-shown ready drawable; there is no legacy recovery route.
+The player changes to `PresentationPolicy::SequentialRealtime` and one
+capture-owned resident facade starts at frame zero. Scene branches to this route
+before legacy prepare, import or draw. Admission and publication stay on the UI
+thread; a capture-shared stitch worker owns the exact imported pair while it runs
+the existing typed GPU chain. Its bounded channel permits one executing job and
+one queued job across capture restarts, while each facade owns one exact `Working`
+result receiver. UI preparation only tries those channels and polls the device;
+it never waits for the worker. A full channel leaves the source unsubmitted for
+a later redraw.
 
 The source/audio clock does not reanchor on each source frame. The original
-slow-clock `EveryFrame` policy remains available to diagnostics. During playing,
-one decoded successor may wait behind the exact submitted pair. Preparation
-installs/stages the completed predecessor before submitting that waiting pair
-in the same redraw, with only one GPU stitch in flight. This removes the extra
-compositor round trip per source frame without a GPU wait or dropping input.
-The submitted pair's exact view is retained in a Scene-owned shared slot, so
-renderer recreation cannot lose it when Scene already offers the successor.
-Seeking and stepping still wait for installation, not submission. Completion
-redraw requests do not prevent this bounded decoder progress, and EOF keeps
-redrawing until its final submitted map has installed.
+slow-clock `EveryFrame` policy remains available to diagnostics. During ordinary
+play, `Player` keeps the current due frame and exposes at most one already-decoded
+successor without presenting it or moving the clock. Once the current frame is
+installed, Scene may start that successor's stitch before its PTS is due. GPU
+completion alone cannot publish it: preparation keeps a completed future result
+`Ready`, continues staging the prior installed draw, and installs only when
+Player's current delivery supplies the exact same opaque `FrameStamp`. Player
+does not promote another frame until its current one is acknowledged. Thus
+decode, stitching and presentation lookahead stay bounded without treating
+submission as display or dropping causal input.
+
+The capture-owned session and Scene's exact submitted/completed views survive a
+renderer-pipeline recreation on the same device and queue. Pausing hides decoded
+lookahead from preparation but does not discard a job or completed future result;
+resuming returns publication authority to Player's due delivery. Seeking and
+stepping still require installation, create a new causal root where required and
+drain the replaced facade without reusing uncertain source surfaces. At EOF the
+clock stops, but redraws continue until the last offered transaction installs.
+Pending work and full render-retirement admission always leave the prior exact
+shown result drawable; there is no legacy recovery route.
 
 Selected PIS uses independent 16-patch-row stripes. Vertical candidates do not
 cross stripe boundaries; this is an explicit propagation approximation, not
@@ -393,13 +405,14 @@ channel by CPU samples within 1/64 output pixel, plus the original arithmetic
 tolerance. Actual-footage review remains a separate owner gate.
 
 At most one nonblocking device poll, when callback or retirement work exists,
-drives the active attachment and every normally draining attachment replaced by seek or reopen. Callback collection and
-retirement never wait. Completion-proven owners release normally; uncertain
-owners remain fail-closed without blocking or repeatedly scheduling the new
-lineage. A discontinuous user seek creates a new temporal root on the decoder's
-landing frame, sharing immutable GPU kernels but no old history. Drag updates
-request keyframes; release requests the exact destination. Sequential consumers
-reject superseded decoder epochs before they can initialize that new root.
+drives the active attachment and every normally draining attachment replaced by
+seek or reopen. Callback collection and retirement never wait. Completion-proven
+owners release normally; uncertain owners remain fail-closed without blocking or
+repeatedly scheduling the new lineage. A discontinuous user seek creates a new
+temporal root on the decoder's landing frame, sharing immutable GPU kernels but
+no old history. Drag updates request keyframes; release requests the exact
+destination. Sequential consumers reject superseded decoder epochs before they
+can initialize that new root.
 This intentionally differs from uninterrupted frame-zero history, following the
 owner's 2026-09-05 priority of performant Studio-like stitching over perfect
 reproduction. A single forward step keeps the adjacent warm state. The old
@@ -432,9 +445,15 @@ native-window presentation at 240 Hz.
 
 The first lazy resident-session construction runs the existing target-device
 arithmetic qualifications synchronously. Those constructor-only probes perform
-bulk readbacks and waits. Once the session exists, normal frame submit, redraw,
-draw and retirement perform no bulk readback or wait; only the four-byte
-validity callback crosses to CPU. The bulk legacy CPU stitch implementation is
+bulk readbacks and waits. Once the session exists, the UI-side submit, redraw,
+draw and retirement paths perform no bulk readback or wait; only the four-byte
+validity callback crosses to CPU. The worker splits the unchanged fine L1
+solver's 47 dispatches into six command buffers of at most eight dispatches and
+waits between those L1 chunks so view work can enter the shared queue. The
+prefix, post-L1 and final-map commands remain normally queued, and final validity
+mapping is registered without a worker wait. These are command and scheduling
+boundaries only: shader arithmetic, dispatch order, buffers, estimator state and
+map construction are unchanged. The bulk legacy CPU stitch implementation is
 retained solely as the frozen oracle and explicit diagnostic surface; small
 control, pose, identity and lifecycle state remains on CPU.
 

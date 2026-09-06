@@ -14,6 +14,44 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Bounded worker and due-frame lookahead candidate, 2026-09-06:** the shared
+resident stitch chain now runs on one capture-shared worker. Only the fine L1
+solver is split into six paced command buffers; the UI never waits for that
+worker. One already-decoded successor can stitch before its presentation time,
+but its completed map remains private until Player promotes the exact same
+opaque delivery. Pause, renderer recreation and seek replacement retain the
+correct source owners; EOF keeps drawing until its final map installs. Shader
+arithmetic, solver dispatch order and temporal calculations are unchanged.
+
+All 93 X4 and 183 X2 actual Scene artifacts are byte-identical to the bilateral
+mask checkpoint, and root viewed both new final frames. Real GPU tests cover
+future Ready withholding across pause/recreation, exact due publication, final
+EOF installation, and seeking away from a prefetched Ready through complete
+retirement. Final workspace gates pass 1163 tests with 30 ignored, plus full
+clippy/fmt/name/Cargo-source checks. The rebuilt branch player passes all 48
+native-window checks at the exact X4 view; four paired-file drop checks are
+inapplicable. Root viewed its capture, byte-identical to the prior checkpoint.
+Evidence is in `scratch/gpu-lookahead-final-20260906-01/`.
+
+The same 2560x1440 diagnostic binary as the L1-paced trial is reproduced byte
+for byte. Its two baseline/candidate pairs per camera reduced median first-draw
+arrival lateness from 13.6–16.2 ms to 4.4–5.4 ms and redraw p99 from
+12.7–14.4 ms to 7.7–11.2 ms. **This is not a general capacity pass:** average
+redraw throughput fell on both cameras, X4 measured 239.8–247.8 redraws/s, more
+draws exceeded 4.17 ms, and X4 arrival p99 worsened to 26.8–30.5 ms. All eight
+runs retained 360 consecutive source changes and zero reported drops,
+starvation and audio underruns. These are offscreen completed redraws, not
+native presentation or physical audio latency. The 240 fps frame-time target
+and owner branch acceptance remain open; these defects are not accepted
+tradeoffs.
+
+Both broader worker pacing and completely unpaced L1 submission were tested
+and rejected. Broader pacing added picture delay; removing L1 pacing reduced
+throughput and worsened redraw p95/p99 in all four paired comparisons, with
+X4 arrival p99 rising from 8.7–9.3 to 23.9–27.5 ms in that separate run set.
+Their binaries, full records and limits remain in ignored scratch. No new
+Studio export, profiling probe or optimization RE was needed. Main is unchanged.
+
 **Bilateral mask work consolidated, 2026-09-06:** geometry now evaluates each
 joint two-lens mask word once and writes both output sections, instead of
 repeating the identical 9-by-9 validity and support calculation. Workgroups

@@ -416,6 +416,25 @@ impl Player {
         Some(self.presenter.current.as_ref()?.index)
     }
 
+    /// The exact decoded successor already waiting for its presentation time.
+    ///
+    /// This is available only to sequential realtime playback. Reading it
+    /// does not present the frame, move the media/audio clock or satisfy a
+    /// seek; [`Self::pump`] remains the sole authority that promotes it when
+    /// its timestamp is due. The shared owner lets a causal consumer prepare
+    /// work for that same delivery without copying or taking it away from the
+    /// presenter.
+    pub fn next_decoded(&self) -> Option<Arc<Frames>> {
+        if self.presenter.policy != PresentationPolicy::SequentialRealtime
+            || !self.is_playing()
+            || self.is_seeking()
+            || self.replay_target.is_some()
+        {
+            return None;
+        }
+        self.presenter.peeked.as_ref().map(Arc::clone)
+    }
+
     /// A seek has been asked for and the frame it asked for is not on screen
     /// yet. A paused caller has to keep redrawing while this is true, because
     /// there is no clock running to tell it the picture will change.
@@ -575,6 +594,10 @@ impl Player {
     /// must not change. Call it on every redraw; it is the whole clock.
     pub fn pump(&mut self, now: Instant) -> Fallible<Option<Arc<Frames>>> {
         let sequential = self.presenter.policy.is_sequential();
+        let prefetch_successor = self.presenter.policy == PresentationPolicy::SequentialRealtime
+            && self.presenter.clock.is_playing()
+            && !self.epochs.is_seeking()
+            && self.replay_target.is_none();
         let (notes, failure, ended, replay_target) = (
             &self.notes,
             &mut self.failure,
@@ -583,7 +606,7 @@ impl Player {
         );
         let epochs = &mut self.epochs;
         let owed = epochs.is_seeking();
-        let shown = self.presenter.advance(now, owed, || {
+        let mut next = || {
             loop {
                 match notes.try_recv() {
                     // Ordinary scrub landings may show an overtaken epoch as
@@ -636,7 +659,11 @@ impl Player {
                     }
                 }
             }
-        });
+        };
+        let shown = self.presenter.advance(now, owed, &mut next);
+        if shown.is_some() && prefetch_successor && self.presenter.peeked.is_none() {
+            self.presenter.peeked = next().map(Arc::new);
+        }
         if let (Some(target), Some(frames)) = (*replay_target, shown.as_ref()) {
             if frames.index < target {
                 // Keep a paused clock moving and preserve EveryFrame's one
@@ -781,7 +808,7 @@ struct Presenter {
     policy: PresentationPolicy,
     current: Option<Arc<Frames>>,
     /// Pulled from the queue, not due yet.
-    peeked: Option<Frames>,
+    peeked: Option<Arc<Frames>>,
     stats: Stats,
 }
 
@@ -828,7 +855,7 @@ impl Presenter {
         }
         let mut shown = None;
 
-        while let Some(frames) = self.peeked.take().or_else(&mut next) {
+        while let Some(frames) = self.peeked.take().or_else(|| next().map(Arc::new)) {
             // The landing is the new position, so the clock moves to it. What
             // follows it in the same pump is ordinary playback and is paced.
             if owed {
@@ -897,14 +924,13 @@ impl Presenter {
         true
     }
 
-    fn present(&mut self, now: Instant, frames: Frames) -> Arc<Frames> {
+    fn present(&mut self, now: Instant, frames: Arc<Frames>) -> Arc<Frames> {
         let late = self.clock.position(now).saturating_sub(frames.timestamp);
         self.stats.worst_late = self.stats.worst_late.max(late);
         self.stats.presented += 1;
         if self.policy == PresentationPolicy::EveryFrame {
             self.clock.anchor(now, frames.timestamp);
         }
-        let frames = Arc::new(frames);
         self.current = Some(frames.clone());
         frames
     }
@@ -1687,6 +1713,180 @@ mod tests {
             bench.player.presenter.policy,
             PresentationPolicy::EveryFrame
         );
+    }
+
+    #[test]
+    fn sequential_realtime_exposes_and_promotes_the_exact_decoded_successor() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        bench.decoded(0, 1);
+
+        let first = bench.player.pump(start).unwrap().unwrap();
+        assert_eq!(first.index, 0);
+        let reading = bench.player.presenter.clock.reading;
+        let stats = bench.player.stats();
+        let successor = bench
+            .player
+            .next_decoded()
+            .expect("the queued successor was not exposed");
+        assert_eq!(successor.index, 1);
+        let successor_stamp = successor.stamp();
+        assert_ne!(successor_stamp, frame(1).stamp());
+        assert_eq!(bench.player.index(), Some(0));
+        assert_eq!(bench.player.presenter.clock.reading, reading);
+        assert_eq!(bench.player.stats(), stats);
+
+        assert!(bench.player.pump(start + HZ_60).unwrap().is_none());
+        assert_eq!(bench.player.index(), Some(0));
+        assert_eq!(bench.player.stats().presented, 1);
+        let promoted = bench.player.pump(start + NTSC).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&promoted, &successor));
+        assert_eq!(promoted.stamp(), successor_stamp);
+        assert_eq!(bench.player.index(), Some(1));
+        assert_eq!(bench.player.stats().presented, 2);
+    }
+
+    #[test]
+    fn sequential_realtime_later_pump_fills_a_successor_that_arrived_late() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        assert_eq!(bench.redraw(start), Some(0));
+        assert!(bench.player.next_decoded().is_none());
+
+        bench.decoded(0, 1);
+        assert_eq!(bench.redraw(start + HZ_60), None);
+        assert_eq!(
+            bench.player.next_decoded().map(|frames| frames.index),
+            Some(1)
+        );
+        assert_eq!(bench.player.index(), Some(0));
+        assert_eq!(bench.player.stats().presented, 1);
+    }
+
+    #[test]
+    fn paused_sequential_realtime_does_not_expose_or_pull_a_successor() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        let now = Instant::now();
+        bench.decoded(0, 0);
+        bench.decoded(0, 1);
+
+        assert_eq!(bench.redraw(now), Some(0));
+        assert!(bench.player.next_decoded().is_none());
+        assert!(bench.player.presenter.peeked.is_none());
+        assert_eq!(bench.redraw(now + NTSC), None);
+        assert_eq!(bench.player.index(), Some(0));
+    }
+
+    #[test]
+    fn seek_clears_a_sequential_realtime_successor() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let now = Instant::now();
+        bench.decoded(0, 0);
+        bench.decoded(0, 1);
+        assert_eq!(bench.redraw(now), Some(0));
+        assert_eq!(
+            bench.player.next_decoded().map(|frames| frames.index),
+            Some(1)
+        );
+
+        bench.player.seek(Cue::Index(900), Accuracy::Exact);
+        assert!(bench.player.presenter.peeked.is_none());
+        assert!(bench.player.next_decoded().is_none());
+        assert!(bench.player.is_seeking());
+    }
+
+    #[test]
+    fn every_frame_does_not_prefetch_or_expose_a_successor() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::EveryFrame)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        bench.decoded(0, 1);
+
+        assert_eq!(bench.redraw(start), Some(0));
+        assert!(bench.player.presenter.peeked.is_none());
+        assert!(bench.player.next_decoded().is_none());
+        assert_eq!(bench.redraw(start), None);
+        assert_eq!(bench.redraw(start + NTSC), Some(1));
+        assert_eq!(bench.player.stats().presented, 2);
+        assert_eq!(bench.player.stats().dropped, 0);
+    }
+
+    #[test]
+    fn sequential_realtime_eof_waits_for_the_peeked_final_frame() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        bench.decoded(0, 1);
+        bench.notes.send(Note::Ended(0)).unwrap();
+
+        assert_eq!(bench.redraw(start), Some(0));
+        assert!(!bench.player.is_ended());
+        assert_eq!(
+            bench.player.next_decoded().map(|frames| frames.index),
+            Some(1)
+        );
+        assert_eq!(bench.redraw(start + NTSC), Some(1));
+        assert!(bench.player.is_ended());
+    }
+
+    #[test]
+    fn sequential_realtime_prefetch_surfaces_failure_after_presenting_current_frame() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        bench.decoded(0, 0);
+        bench
+            .notes
+            .send(Note::Failed("exact prefetched decoder failure".into()))
+            .unwrap();
+
+        let error = bench.player.pump(Instant::now()).unwrap_err();
+        assert_eq!(error.to_string(), "exact prefetched decoder failure");
+        assert_eq!(bench.player.index(), Some(0));
+        assert_eq!(bench.player.stats().presented, 1);
+        assert_eq!(bench.player.stats().dropped, 0);
+        assert!(bench.player.next_decoded().is_none());
     }
 
     #[test]
