@@ -4,9 +4,10 @@
 //! [`DescentAdmission`] at their existing typed boundary, then serializes an
 //! explicit `u32`/`f32` storage contract. One 16-lane workgroup owns each
 //! patch, with four lanes per candidate and cooperative descent sampling.
-//! Ordered anti-diagonal dispatches preserve the in-place dependencies. Construction
-//! qualifies this same paired production entry against both CPU directions on
-//! the actual adapter.
+//! Ordered anti-diagonal dispatches preserve dependencies within the chosen
+//! schedule: global for the frozen reference, independent row stripes for
+//! selected playback. Construction qualifies the same paired production entry
+//! against both directions of its readable CPU schedule on the actual adapter.
 
 use std::error::Error;
 use std::fmt;
@@ -15,9 +16,10 @@ use std::sync::mpsc;
 
 use kjerag_media::FrameStamp;
 
+use super::solve_with_descent_admission;
 use super::{
     AtoB, BtoA, CostMode, DescentAdmission, Direction, DisparityInterval, Flow, HintGrid,
-    InitialGrid, Input, Level, PisDirection, solve_with_descent_admission,
+    InitialGrid, Input, Level, PisDirection,
 };
 use crate::Fallible;
 use crate::flow::one_xs::gpu_context::OneXsGpuContext;
@@ -361,6 +363,7 @@ pub(crate) struct GpuPisPipeline {
     wavefront: wgpu::BindGroup,
     wavefront_stride: u32,
     max_diagonals: u32,
+    stripe_rows: u32,
     /// Legacy CPU-oracle submissions do not read the prepared bindings.
     oracle_placeholder: wgpu::Buffer,
 }
@@ -387,6 +390,13 @@ impl GpuPisPipeline {
     /// Build and qualify the actual production shader entry on this device.
     pub(crate) fn new(context: OneXsGpuContext) -> Fallible<Self> {
         Self::from_shader(context, SHADER, true)
+    }
+
+    /// Independent spatial stripes for the interactive player. This is not
+    /// Studio's global propagation schedule; qualify against the readable
+    /// striped CPU variant, retaining `new` as the exact global reference.
+    pub(crate) fn new_striped(context: OneXsGpuContext, stripe_rows: u32) -> Fallible<Self> {
+        Self::from_shader_striped(context, SHADER, true, stripe_rows)
     }
 
     #[cfg(test)]
@@ -628,6 +638,18 @@ impl GpuPisPipeline {
     }
 
     fn from_shader(context: OneXsGpuContext, shader: &str, qualify: bool) -> Fallible<Self> {
+        Self::from_shader_striped(context, shader, qualify, u32::MAX)
+    }
+
+    fn from_shader_striped(
+        context: OneXsGpuContext,
+        shader: &str,
+        qualify: bool,
+        stripe_rows: u32,
+    ) -> Fallible<Self> {
+        if stripe_rows == 0 {
+            return Err("ONE X2 propagation stripe must contain at least one patch row".into());
+        }
         let device = context.device().clone();
         let queue = context.queue().clone();
         let storage = |binding, read_only| wgpu::BindGroupLayoutEntry {
@@ -668,13 +690,16 @@ impl GpuPisPipeline {
             }],
         });
         let wavefront_stride = device.limits().min_uniform_buffer_offset_alignment.max(16);
-        let max_diagonals = (Level::One.patch_rows() + Level::One.patch_cols() - 1) as u32;
+        let max_diagonals = (Level::One.patch_rows().min(stripe_rows as usize)
+            + Level::One.patch_cols()
+            - 1) as u32;
         let words_per_step = (wavefront_stride / 4) as usize;
         let mut steps = vec![0u32; (1 + 2 * max_diagonals) as usize * words_per_step];
+        steps[3] = stripe_rows;
         for sweep in 0..2u32 {
             for diagonal in 0..max_diagonals {
                 let at = (1 + sweep * max_diagonals + diagonal) as usize * words_per_step;
-                steps[at..at + 4].copy_from_slice(&[1, sweep, diagonal, 0]);
+                steps[at..at + 4].copy_from_slice(&[1, sweep, diagonal, stripe_rows]);
             }
         }
         let wavefront_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -726,6 +751,7 @@ impl GpuPisPipeline {
             wavefront,
             wavefront_stride,
             max_diagonals,
+            stripe_rows,
             oracle_placeholder,
         };
         if qualify {
@@ -743,7 +769,9 @@ impl GpuPisPipeline {
         resources: &wgpu::BindGroup,
         level: Level,
     ) {
-        let diagonals = (level.patch_rows() + level.patch_cols() - 1) as u32;
+        let diagonals =
+            (level.patch_rows().min(self.stripe_rows as usize) + level.patch_cols() - 1) as u32;
+        let stripes = level.patch_rows().div_ceil(self.stripe_rows as usize) as u32;
         // wgpu compute usage scopes and storage-write barriers are per dispatch,
         // including when consecutive dispatches use the same bind group.
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -759,7 +787,7 @@ impl GpuPisPipeline {
                 1 + ((step - 1) / diagonals) * self.max_diagonals + (step - 1) % diagonals
             };
             pass.set_bind_group(1, &self.wavefront, &[schedule * self.wavefront_stride]);
-            pass.dispatch_workgroups(2, 8, 1);
+            pass.dispatch_workgroups(2, 8, stripes);
         }
     }
 
@@ -990,6 +1018,22 @@ impl GpuPisPipeline {
         assert_descent_fixture_coverage()
     }
 
+    fn reference<D: PisDirection>(
+        &self,
+        input: &Input<D>,
+        initial: InitialGrid<D>,
+        hint: Option<&HintGrid<D>>,
+        admission: DescentAdmission,
+    ) -> Fallible<super::PatchGrid<D>> {
+        Ok(super::solve_striped_with_descent_admission(
+            input,
+            initial,
+            hint,
+            admission,
+            self.stripe_rows as usize,
+        )?)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn qualify_case(
         &self,
@@ -1010,18 +1054,10 @@ impl GpuPisPipeline {
         }
         let a_hint_ref = a_uses_hint.then_some(&a_hint);
         let b_hint_ref = b_uses_hint.then_some(&b_hint);
-        let expected_a = solve_with_descent_admission(
-            &a_input,
-            clone_initial(&a_initial),
-            a_hint_ref,
-            a_admission,
-        )?;
-        let expected_b = solve_with_descent_admission(
-            &b_input,
-            clone_initial(&b_initial),
-            b_hint_ref,
-            b_admission,
-        )?;
+        let expected_a =
+            self.reference(&a_input, clone_initial(&a_initial), a_hint_ref, a_admission)?;
+        let expected_b =
+            self.reference(&b_input, clone_initial(&b_initial), b_hint_ref, b_admission)?;
         let actual = self.solve_pair_mode(
             device,
             queue,
@@ -1065,13 +1101,13 @@ impl GpuPisPipeline {
                 .into());
             }
         }
-        let expected_a = solve_with_descent_admission(
+        let expected_a = self.reference(
             &a_input,
             clone_initial(&a_initial),
             Some(&a_hint),
             DescentAdmission::NoPatches,
         )?;
-        let expected_b = solve_with_descent_admission(
+        let expected_b = self.reference(
             &b_input,
             clone_initial(&b_initial),
             Some(&b_hint),
@@ -1124,13 +1160,13 @@ impl GpuPisPipeline {
         let b_initial = initial_grid(level, &initial_flows);
         let a_hint = HintGrid::from_row_major(level, hint_flows.clone()).unwrap();
         let b_hint = HintGrid::from_row_major(level, hint_flows).unwrap();
-        let expected_a = solve_with_descent_admission(
+        let expected_a = self.reference(
             &a_input,
             clone_initial(&a_initial),
             Some(&a_hint),
             DescentAdmission::NoPatches,
         )?;
-        let expected_b = solve_with_descent_admission(
+        let expected_b = self.reference(
             &b_input,
             clone_initial(&b_initial),
             Some(&b_hint),
@@ -1167,13 +1203,13 @@ impl GpuPisPipeline {
         let flows = vec![Flow::ZERO; level.patches()];
         let a_initial = initial_grid(level, &flows);
         let b_initial = initial_grid(level, &flows);
-        let expected_a = solve_with_descent_admission(
+        let expected_a = self.reference(
             &a_input,
             clone_initial(&a_initial),
             None,
             DescentAdmission::EveryPatch,
         )?;
-        let expected_b = solve_with_descent_admission(
+        let expected_b = self.reference(
             &b_input,
             clone_initial(&b_initial),
             None,
@@ -1915,6 +1951,10 @@ const SHADER: &str = include_str!("pis.wgsl");
 pub(crate) const DIRECT_TEST_SHADER: &str = SHADER;
 
 #[cfg(test)]
+#[path = "division_tests.rs"]
+mod division_tests;
+
+#[cfg(test)]
 mod tests {
     use std::future::Future;
 
@@ -1997,6 +2037,34 @@ mod tests {
         GpuPisPipeline::new(OneXsGpuContext::new(&device, &queue)).unwrap_or_else(|error| {
             panic!("paired GPU PIS qualification failed on {adapter}: {error}")
         });
+    }
+
+    #[test]
+    fn striped_gpu_matches_its_cpu_reference_including_partial_last_stripes() {
+        let (device, queue, adapter) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                assert!(std::env::var_os("KJERAG_REQUIRE_GPU").is_none(), "{error}");
+                eprintln!("skipping striped PIS reference: {error}");
+                return;
+            }
+        };
+        for rows in [1, 16, 23] {
+            GpuPisPipeline::new_striped(OneXsGpuContext::new(&device, &queue), rows)
+                .unwrap_or_else(|error| panic!("{rows}-row striped PIS on {adapter}: {error}"));
+        }
+        let broken = SHADER.replacen("present = local_row > 0u;", "present = row > 0u;", 1);
+        assert_ne!(broken, SHADER);
+        assert!(
+            GpuPisPipeline::from_shader_striped(
+                OneXsGpuContext::new(&device, &queue),
+                &broken,
+                true,
+                16,
+            )
+            .is_err(),
+            "cross-stripe propagation escaped qualification"
+        );
     }
 
     #[test]
@@ -2188,7 +2256,7 @@ mod tests {
         }
     }
 
-    fn gpu() -> Result<(wgpu::Device, wgpu::Queue, String), String> {
+    pub(super) fn gpu() -> Result<(wgpu::Device, wgpu::Queue, String), String> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..Default::default()

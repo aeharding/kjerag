@@ -1,8 +1,8 @@
 //! High-refresh view diagnostic through the player's resident Scene path.
 //!
 //! Run through scripts/quiet.sh: view-rate <file.insv> [width] [height] [time].
-//! The paused phase measures redraw capacity; the playing phase asks for 240
-//! changing views/s while ordinary decoding and stitching run. These are NOT
+//! Both phases measure uncapped changing-view capacity, first paused then
+//! with ordinary decoding and stitching running. These are NOT
 //! native-window fps: compositor/input/presentation are absent, and each draw
 //! waits for GPU completion rather than pipelining several display frames.
 //! No pixel/map readback occurs inside either timed phase.
@@ -103,7 +103,6 @@ fn measure(
     camera: Camera,
     playing: bool,
 ) -> Fallible<()> {
-    let period = Duration::from_secs_f64(1.0 / HZ);
     let duration = Duration::from_secs(if playing { 12 } else { 2 });
     let mut timings = Vec::new();
     let first = scene.displayed_frame().ok_or("view-rate has no picture")?;
@@ -128,10 +127,6 @@ fn measure(
             changes += 1;
             last = displayed;
         }
-        if playing {
-            // No catch-up burst after a missed deadline.
-            std::thread::sleep(period.saturating_sub(start.elapsed()));
-        }
     }
     let elapsed = began.elapsed().as_secs_f64();
     if playing && changes == 0 {
@@ -144,7 +139,7 @@ fn measure(
     let quantile = |p: f64| timings[((timings.len() - 1) as f64 * p).round() as usize];
     println!(
         "{}",
-        json!({"phase": if playing { "playing-240-requested" } else { "paused-unpaced" },
+        json!({"phase": if playing { "playing-unpaced" } else { "paused-unpaced" },
             "seconds": elapsed, "redraws": timings.len(),
             "completed_redraws_per_second": timings.len() as f64 / elapsed,
             "redraw_ms": {"median": quantile(0.5), "p95": quantile(0.95),

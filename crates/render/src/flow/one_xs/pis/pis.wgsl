@@ -33,7 +33,7 @@ struct LaneScore {
 @group(0) @binding(6) var<storage, read> prepared_weight_bits: array<u32>;
 @group(0) @binding(7) var<storage, read> prepared_patch_sum_bits: array<u32>;
 @group(0) @binding(8) var<storage, read> prepared_model_bits: array<u32>;
-struct Wavefront { phase: u32, sweep: u32, diagonal: u32, unused: u32 }
+struct Wavefront { phase: u32, sweep: u32, diagonal: u32, stripe_rows: u32 }
 @group(1) @binding(0) var<uniform> wave: Wavefront;
 var<private> word_base: u32;
 var<private> float_base: u32;
@@ -61,8 +61,9 @@ fn sub_rn(a: f32, b: f32) -> f32 { return materialize(fma(-1.0, b, a)); }
 fn fma_rn(a: f32, b: f32, c: f32) -> f32 { return materialize(fma(a, b, c)); }
 
 // WGSL permits implementation-defined division precision.  The selected CPU
-// boundary requires correctly-rounded binary32, so quotient bits are formed
-// with a 24-step restoring division and RN-even rounding.
+// boundary requires correctly-rounded binary32. Estimate a normalized integer
+// quotient with hardware division, then correct its EXACT integer remainder.
+// The exponent, subnormals and RN-even rounding still use integer arithmetic.
 fn div_f32_bits(a: u32, b: u32) -> u32 {
     let sign = (a ^ b) & 0x80000000u;
     let a_abs = a & 0x7fffffffu;
@@ -105,14 +106,40 @@ fn div_f32_bits(a: u32, b: u32) -> u32 {
         remainder <<= 1u;
         quotient_exponent -= 1;
     }
-    var quotient = 0u;
-    for (var step = 0u; step < 24u; step++) {
-        let bit = 23u - step;
-        if remainder >= mb {
-            remainder -= mb;
-            quotient |= 1u << bit;
+    let numerator = remainder;
+    var quotient = u32((f32(numerator) / f32(mb)) * 8388608.0);
+    // WGSL bounds this normal division to 2.5 ULP. Both inputs convert
+    // exactly, and multiplying by 2^23 is exact, so the quotient estimate
+    // is within a few integer units. The true signed remainder is therefore
+    // much smaller than 2^31: modular u32 arithmetic recovers it exactly
+    // without a 48-bit product. See WGSL accuracy-of-concrete-expressions.
+    var residue = bitcast<i32>((numerator << 23u) - quotient * mb);
+    for (var correction = 0u; correction < 4u; correction++) {
+        if residue < 0 {
+            quotient -= 1u;
+            residue += i32(mb);
+        } else if u32(residue) >= mb {
+            quotient += 1u;
+            residue -= i32(mb);
+        } else {
+            break;
         }
-        if step != 23u { remainder <<= 1u; }
+    }
+    if residue >= 0 && u32(residue) < mb {
+        remainder = u32(residue);
+    } else {
+        // Retain the restoring reference when an estimate needs more than
+        // four corrections. Conforming hardware does not take this path.
+        quotient = 0u;
+        remainder = numerator;
+        for (var step = 0u; step < 24u; step++) {
+            let bit = 23u - step;
+            if remainder >= mb {
+                remainder -= mb;
+                quotient |= 1u << bit;
+            }
+            if step != 23u { remainder <<= 1u; }
+        }
     }
 
     if quotient_exponent >= -126 {
@@ -516,6 +543,7 @@ fn solve_pis_wavefront(
     let candidate = (local_index >> 2u) & 3u;
     let lane = local_index & 3u;
     if wave.phase == 0u {
+        if group.z != 0u { return; }
         if group.y == 0u { write_qualification_probes(local_index); }
         for (var cell = group.y * 16u + local_index; cell < patches(); cell += 128u) {
             store_flow(cell, flow_at(word(18u), cell));
@@ -523,17 +551,22 @@ fn solve_pis_wavefront(
         return;
     }
 
-    let diagonal_count = patch_rows() + patch_cols() - 1u;
+    let stripe_rows = min(wave.stripe_rows, patch_rows());
+    let row_start = group.z * stripe_rows;
+    let local_rows = min(stripe_rows, patch_rows() - row_start);
+    let diagonal_count = local_rows + patch_cols() - 1u;
+    if wave.diagonal >= diagonal_count { return; }
     let sweep = wave.sweep;
     let diagonal_ordinal = wave.diagonal;
     let diagonal = select(diagonal_ordinal, diagonal_count - 1u - diagonal_ordinal, sweep != 0u);
     var col_min = 0u;
-    if diagonal >= patch_rows() { col_min = diagonal - (patch_rows() - 1u); }
+    if diagonal >= local_rows { col_min = diagonal - (local_rows - 1u); }
     let col_max = min(patch_cols() - 1u, diagonal);
     let active_count = col_max - col_min + 1u;
     let participating = group.y < active_count;
     let col = col_min + group.y;
-    let row = diagonal - col;
+    let local_row = diagonal - col;
+    let row = row_start + local_row;
     let cell = row * patch_cols() + col;
 
     var candidate_flow = vec2<f32>(0.0);
@@ -554,10 +587,10 @@ fn solve_pis_wavefront(
             }
         } else {
             if sweep == 0u {
-                present = row > 0u;
+                present = local_row > 0u;
                 if present { candidate_flow = stored_flow(cell - patch_cols()); }
             } else {
-                present = row + 1u < patch_rows();
+                present = local_row + 1u < local_rows;
                 if present { candidate_flow = stored_flow(cell + patch_cols()); }
             }
         }

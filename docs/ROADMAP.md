@@ -3,6 +3,63 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Active-playback capacity checkpoint, 2026-09-05, issue #182:** the final
+uncapped 2560x1440 Scene/ScenePipeline test completes **329.96 redraws/s**
+with stitching active, versus 510.54 paused. It advances every displayed
+source frame (360 changes, 12.012 media seconds in 12.001 wall seconds) with
+zero audio underruns. This clears 240 fps on average in the offscreen
+capacity diagnostic, NOT a 4.17 ms frame-time or native-presentation gate:
+playing median is 2.018 ms, p95 10.056 ms, p99 15.598 ms and max 52.040 ms;
+366 of 3960 draws exceed budget. Evidence: `scratch/240-overlap-final-1440p.log`,
+view-rate SHA-256 `71d142ece122825a3619806c27d01dd05b9c2fcd7fbed7011a984dec88ac02b6`.
+
+Flat views now rasterize the native sphere triangles on hardware; curved views
+retain the original ray shader. PIS uses independent 16-row stripes with an
+exact striped CPU qualification, while retaining the global reference.
+This deliberately cuts vertical propagation at stripe borders and is **not
+owner-accepted visual parity**. An integer-corrected hardware division estimate
+keeps exact binary32 outputs; 67,300 edge/random pairs and a forced restoring
+fallback pass bitwise checks. No broader Studio RE or export was needed.
+
+The first faster-GPU native tests still ran at 22–24 source fps and accumulated
+video lag. Smaller stripes, mailbox presentation and a wakeup-only change did
+not fix that. The completed-stitch diagnostic reached 30 fps only by waiting
+14–26 ms; that temporary blocking path and its logging are removed. The actual
+handoff now allows one decoded successor to wait behind the submitted pair,
+then installs/stages the predecessor and submits its successor in the same
+redraw. Only one GPU stitch runs at once, every input remains sequential, and
+the submitted view survives renderer recreation independently of the new offer.
+Seek/step completion still requires installation. `SequentialRealtime` keeps
+the audio/video clock continuous; the slow-clock policy remains a reference.
+
+A roughly 55-second native run now reports around 30 source admissions/s after
+startup, with zero dropped/starved frames or audio underruns. It has dips to
+28.6 and catch-up to 31.8; worst cumulative source-admission lateness reaches
+422 ms, so jitter and transient video lag remain work, not accepted tradeoffs.
+These native media counters are not swapchain fps. Evidence:
+`scratch/240-native-play/overlapped.log`, native SHA-256
+`97f7695c4df96911d3df16b9e20356d06dc0f8d8296bc66d07cc5b6bec41b991`.
+
+All 61 cold-seek review frames 6339..6399, packed maps and alpha maps are
+byte-identical before/after the division and handoff changes. The striped/mesh
+picture itself differs from the preceding global-solver branch; sampled actual
+pixels were viewed and the labeled `scratch/240-final-riser-comparison.mp4`
+was sent as a local review link. No new computed-trace or owner-eye verdict is
+claimed. The owner has explicitly been asked about the stripe/raster tradeoffs;
+main remains unchanged and PR #183 stays draft pending branch testing.
+
+Full forced-RADV/real-media workspace gate: **1115 passed, zero failed,
+30 ignored** (`scratch/240-overlap-workspace.log`). Workspace/all-target
+warnings-denied clippy, format, name/source and diff checks pass. The new
+real-media overlap regression proves one waiting successor, no third admission,
+ordered exact drawing and renderer recreation. The full native UI gate passes
+**54 checks, zero failed** (`scratch/240-final-uitest.log`), including the
+actual late-clip pointer scrub to 207.908 s, exact/backward seeks, pause/resume,
+screenshots, file drops, transient/stuck import failures and reopening.
+The UI-tested native SHA-256 is
+`3670ee1a8a93f45e87cded6e620cf0fa859300d2c9af16a825d85099f9e43a7b`.
+Installed-Flatpak testing and owner acceptance remain outstanding.
+
 **Player performance target, 2026-09-05, issue #182:** the owner requires at
 least 240 fps "when I play back in player". The working interpretation is
 240 fps interactive view rendering during playback, with source frames at
@@ -17,6 +74,10 @@ Read-only `cosmic-randr list` finds the active internal panel at 2256x1504,
 59.999 Hz, with no 240 Hz mode. This has been disclosed to the owner: 240 fps
 rendering capacity cannot be called 240 distinct visible updates on this panel.
 Keep the rendering budget without burning idle redraws. No display setting changed.
+**Subsequent owner confirmation:** "240fps regardless of display", "capacity".
+The acceptance target is sustained rendering capacity with stitching active,
+not paused-view throughput. Display refresh does not limit the benchmark or
+justify lowering the target. Actual source playback and audio must stay smooth.
 
 **First high-refresh rendering optimization, 2026-09-05:** the selected
 type-2 consumer now uses hardware linear filtering within each separate lens,

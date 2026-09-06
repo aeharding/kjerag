@@ -284,13 +284,43 @@ There is no calibration step, setup ritual or quality toggle. The Optical
 Flow setting controls only the legacy solver and does not select or modify
 this route.
 
-The player changes to `PresentationPolicy::EveryFrame` and one capture-owned
+The player changes to `PresentationPolicy::SequentialRealtime` and one capture-owned
 resident facade starts at frame zero. Scene branches to this route before legacy
 prepare, import or draw. A renderer attachment binds the same capture-owned GPU
 session across pipeline recreation, submits the exact offered decoded pair and
 stages only an installed result carrying the same opaque `FrameStamp` and capture
 identity. Pending work and full render-retirement admission leave the prior exact
 shown ready drawable; there is no legacy recovery route.
+
+The source/audio clock does not reanchor on each source frame. The original
+slow-clock `EveryFrame` policy remains available to diagnostics. During playing,
+one decoded successor may wait behind the exact submitted pair. Preparation
+installs/stages the completed predecessor before submitting that waiting pair
+in the same redraw, with only one GPU stitch in flight. This removes the extra
+compositor round trip per source frame without a GPU wait or dropping input.
+The submitted pair's exact view is retained in a Scene-owned shared slot, so
+renderer recreation cannot lose it when Scene already offers the successor.
+Seeking and stepping still wait for installation, not submission. Completion
+redraw requests do not prevent this bounded decoder progress, and EOF keeps
+redrawing until its final submitted map has installed.
+
+Selected PIS uses independent 16-patch-row stripes. Vertical candidates do not
+cross stripe boundaries; this is an explicit propagation approximation, not
+Studio's global schedule. The global scalar/GPU reference remains available,
+and selected GPU construction qualifies exactly against its striped CPU twin.
+Binary32 division now estimates a normalized quotient on hardware and corrects
+the exact integer remainder before the unchanged RN-even/exponent handling.
+The bounded estimate follows [WGSL's division accuracy contract](https://www.w3.org/TR/WGSL/#accuracy-of-concrete-expressions);
+integer residual correction replaces the ordinary 24-step restoring loop.
+Edge/random and forced-fallback tests compare complete output bits to CPU.
+
+Flat perspective views rasterize the native 100-by-50 sphere triangles directly,
+sampling packed maps at vertices and alpha after perspective interpolation.
+Curved/ball projections retain the ray-based shader; no intermediate panorama
+is introduced. Native fixed-function interpolation is not bit-identical to
+ray intersections. Regression requires exact coverage and bounds each mapped
+channel by CPU samples within 1/64 output pixel, plus the original arithmetic
+tolerance. Actual-footage review remains a separate owner gate.
 
 At most one nonblocking device poll, when callback or retirement work exists,
 drives the active attachment and every normally draining attachment replaced by seek or reopen. Callback collection and

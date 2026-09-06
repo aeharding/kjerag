@@ -368,6 +368,15 @@ pub struct Mesh {
 }
 
 impl Mesh {
+    /// Subpixel reference queries for the fixed-function rasterizer regression.
+    #[cfg(test)]
+    pub(crate) fn sample_view(&self, reframe: &Reframe, alpha: &[f32], uv: [f32; 2]) -> DensePixel {
+        match reframe.view_ray(uv) {
+            Some(view) => self.sample(mesh_ray(normalize(reframe.body_ray(view))), alpha),
+            None => DensePixel::EMPTY,
+        }
+    }
+
     pub fn new(map: &CapturedMap) -> Self {
         let mut vertices = Vec::with_capacity(VERTICES);
         for r in 0..=STACKS {

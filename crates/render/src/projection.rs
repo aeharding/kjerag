@@ -1569,6 +1569,10 @@ impl Reframe {
         self.screen.ray(uv)
     }
 
+    pub(crate) fn is_rectilinear(&self) -> bool {
+        self.screen.shrink == 1.0
+    }
+
     /// How much of this ray each lens shows, and where in its frame.
     ///
     /// Each lens stakes a [`claim`] on the ray and the claims are normalized

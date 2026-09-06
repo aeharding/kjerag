@@ -39,6 +39,12 @@ distinct visible updates on a 60 Hz panel or busy-redraw an idle view solely
 to inflate an fps counter. Smooth native presentation must use the display's
 actual cadence. This hardware limit does not excuse video or audio stalls.
 
+The owner then explicitly clarified "240fps regardless of display", "capacity",
+and confirmed sustained rendering capacity with stitching active, not just
+paused-view rendering. Display refresh is therefore not a blocker or an excuse
+to lower this performance target. Measure uncapped capacity and frame-time
+spikes during actual source playback; keep the 4.17 ms rendered-frame budget.
+
 ## 1. Earlier exact-parity standard (superseded where inconsistent above)
 For the same supported input, view, time and user-visible settings, correctness with Studio is
 required at the stitched video result, not as identity of internal execution. Every

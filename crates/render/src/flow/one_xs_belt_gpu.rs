@@ -463,6 +463,9 @@ struct ResidentCaptureState {
     session: Option<Arc<ResidentCaptureSession>>,
     transaction: ResidentTransaction,
     installed: Option<FrameStamp>,
+    /// Last pair actually submitted, not merely offered by Scene. Permits one
+    /// following decoded pair to wait without starting a second GPU solve.
+    submitted: Option<FrameStamp>,
     /// A user seek starts a fresh estimator on the decoder's landing frame.
     /// Ordinary opens still require frame zero; successors remain adjacent.
     seek_restart: bool,
@@ -545,7 +548,12 @@ impl ResidentCaptureSession {
                 context.clone(),
             )?),
             front: Arc::new(pis_frontend_gpu::GpuPisFrontEnd::new(context.clone())?),
-            solver: Arc::new(super::pis::gpu::GpuPisPipeline::new(context.clone())?),
+            // Independent 16-row stripes increase GPU occupancy. This is an
+            // explicit scheduling approximation, not global Studio propagation.
+            solver: Arc::new(super::pis::gpu::GpuPisPipeline::new_striped(
+                context.clone(),
+                16,
+            )?),
             bridge: Arc::new(
                 pis_frontend_gpu::GpuL2PostPisBridge::new(context.clone())
                     .map_err(|error| error.to_string())?,
@@ -751,6 +759,7 @@ impl ResidentCaptureFacade {
                     session: None,
                     transaction: ResidentTransaction::Idle,
                     installed: None,
+                    submitted: None,
                     seek_restart: false,
                 }),
             }),
@@ -774,6 +783,7 @@ impl ResidentCaptureFacade {
                     session,
                     transaction: ResidentTransaction::Idle,
                     installed: None,
+                    submitted: None,
                     seek_restart: true,
                 }),
             }),
@@ -827,6 +837,11 @@ impl ResidentCaptureFacade {
     /// renderer attachment. Readable indices alone never authorize reuse.
     pub(crate) fn acknowledged(&self, frame: &FrameStamp) -> Fallible<bool> {
         Ok(self.state()?.installed.as_ref() == Some(frame))
+    }
+
+    pub(crate) fn accepted(&self, frame: &FrameStamp) -> Fallible<bool> {
+        let state = self.state()?;
+        Ok(state.installed.as_ref() == Some(frame) || state.submitted.as_ref() == Some(frame))
     }
 
     pub(crate) fn same_capture(&self, other: &Self) -> bool {
@@ -1110,6 +1125,7 @@ impl ResidentSceneFacade {
         let mut state = self.capture.state()?;
         match pending {
             Ok(pending) => {
+                state.submitted = Some(stamp);
                 state.transaction = ResidentTransaction::Pending(pending);
                 start.disarm();
                 Ok(ResidentSubmit::Submitted)

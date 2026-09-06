@@ -54,6 +54,16 @@ pub enum PresentationPolicy {
     /// synchronous stage advances one frame at a time instead of continually
     /// trying to catch up.
     EveryFrame,
+    /// Present every frame in order without shifting the media/audio clock.
+    /// Used by the resident stitcher once it can keep pace. A late render can
+    /// catch up on following redraws; it cannot silently slow the sound clock.
+    SequentialRealtime,
+}
+
+impl PresentationPolicy {
+    fn is_sequential(self) -> bool {
+        matches!(self, Self::EveryFrame | Self::SequentialRealtime)
+    }
 }
 
 /// What playback did, for the report the app prints and the instrument
@@ -564,7 +574,7 @@ impl Player {
     /// The frame that belongs on screen at `now`, or `None` when the picture
     /// must not change. Call it on every redraw; it is the whole clock.
     pub fn pump(&mut self, now: Instant) -> Fallible<Option<Arc<Frames>>> {
-        let sequential = self.presenter.policy == PresentationPolicy::EveryFrame;
+        let sequential = self.presenter.policy.is_sequential();
         let (notes, failure, ended, replay_target) = (
             &self.notes,
             &mut self.failure,
@@ -835,7 +845,7 @@ impl Presenter {
             if shown.replace(frames).is_some() {
                 self.stats.dropped += 1;
             }
-            if self.policy == PresentationPolicy::EveryFrame {
+            if self.policy.is_sequential() {
                 break;
             }
             // Paused, one frame is a picture rather than playback.
@@ -1113,6 +1123,37 @@ mod tests {
         assert_eq!(presenter.stats.presented, 3);
         assert_eq!(presenter.stats.dropped, 0);
         assert_eq!(presenter.stats.starved, 0);
+    }
+
+    #[test]
+    fn sequential_realtime_keeps_due_times_and_catches_up_without_dropping() {
+        let mut presenter = Presenter::with_policy(
+            NTSC,
+            Arc::new(Beat::default()),
+            PresentationPolicy::SequentialRealtime,
+        );
+        presenter.clock.play();
+        let start = Instant::now();
+        let mut next = 0;
+        for index in 0..100 {
+            // A small render delay must not accumulate into slower playback.
+            let delay = Duration::from_millis(u64::from(index % 3));
+            let now = start + NTSC * index + delay;
+            let frame = presenter.advance(now, false, feed(&mut next)).unwrap();
+            assert_eq!(frame.index, u64::from(index));
+            assert_eq!(presenter.clock.position(now), NTSC * index + delay);
+        }
+        let late = start + NTSC * 103 + Duration::from_millis(2);
+        for index in 100..=103 {
+            let frame = presenter.advance(late, false, feed(&mut next)).unwrap();
+            assert_eq!(frame.index, index);
+        }
+        assert!(presenter.advance(late, false, feed(&mut next)).is_none());
+        assert_eq!(presenter.stats.dropped, 0);
+        assert_eq!(
+            presenter.clock.position(late),
+            NTSC * 103 + Duration::from_millis(2)
+        );
     }
 
     #[test]
@@ -1794,27 +1835,28 @@ mod tests {
 
     #[test]
     fn sequential_seek_rejects_superseded_drag_landings() {
-        let mut bench = Bench::new();
-        assert!(
-            bench
-                .player
-                .set_presentation_policy(PresentationPolicy::EveryFrame)
-        );
-        bench.player.seek(Cue::Index(1000), Accuracy::Keyframe);
-        bench.player.seek(Cue::Index(3000), Accuracy::Keyframe);
-        bench.player.seek(Cue::Index(3000), Accuracy::Exact);
-        let now = Instant::now();
-        bench.decoded(1, 990);
-        bench.decoded(2, 2990);
-        assert_eq!(
-            bench.redraw(now),
-            None,
-            "old drag landings cannot initialize the new stitch root"
-        );
-        assert!(bench.player.is_seeking());
-        bench.decoded(3, 3000);
-        assert_eq!(bench.redraw(now), Some(3000));
-        assert!(!bench.player.is_seeking());
+        for policy in [
+            PresentationPolicy::EveryFrame,
+            PresentationPolicy::SequentialRealtime,
+        ] {
+            let mut bench = Bench::new();
+            assert!(bench.player.set_presentation_policy(policy));
+            bench.player.seek(Cue::Index(1000), Accuracy::Keyframe);
+            bench.player.seek(Cue::Index(3000), Accuracy::Keyframe);
+            bench.player.seek(Cue::Index(3000), Accuracy::Exact);
+            let now = Instant::now();
+            bench.decoded(1, 990);
+            bench.decoded(2, 2990);
+            assert_eq!(
+                bench.redraw(now),
+                None,
+                "old drag landings cannot initialize the new stitch root"
+            );
+            assert!(bench.player.is_seeking());
+            bench.decoded(3, 3000);
+            assert_eq!(bench.redraw(now), Some(3000));
+            assert!(!bench.player.is_seeking());
+        }
     }
 
     /// A seek is a request to leave the position on screen, and the read that

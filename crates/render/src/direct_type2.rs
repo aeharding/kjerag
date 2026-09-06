@@ -154,6 +154,7 @@ impl ImportedOneXsPicture {
         ImportedOneXsDrawBinding {
             picture,
             _uniforms: uniforms,
+            rectilinear: reframe.is_rectilinear(),
         }
     }
 
@@ -164,7 +165,11 @@ impl ImportedOneXsPicture {
         map: &wgpu::BindGroup,
         pass: &mut wgpu::RenderPass<'_>,
     ) {
-        pipeline.draw(pass, &binding.picture, map);
+        if binding.rectilinear {
+            pipeline.draw_mesh(pass, &binding.picture, map);
+        } else {
+            pipeline.draw(pass, &binding.picture, map);
+        }
     }
 
     pub(crate) fn ensure_resident_frame(&self, frame: &FrameStamp) -> Fallible<()> {
@@ -265,6 +270,7 @@ impl ImportedOneXsPicture {
 pub(crate) struct ImportedOneXsDrawBinding {
     picture: wgpu::BindGroup,
     _uniforms: wgpu::Buffer,
+    rectilinear: bool,
 }
 
 #[cfg(test)]
@@ -333,6 +339,7 @@ fn exact_one_xs_lenses<T>(lenses: &[T]) -> Fallible<[&T; 2]> {
 pub(crate) struct DirectType2Pipeline {
     device: wgpu::Device,
     pipeline: wgpu::RenderPipeline,
+    mesh_pipeline: wgpu::RenderPipeline,
     picture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     map_layout: wgpu::BindGroupLayout,
@@ -344,7 +351,10 @@ impl DirectType2Pipeline {
         picture_layout: &wgpu::BindGroupLayout,
         format: wgpu::TextureFormat,
     ) -> Self {
-        let map_layout = layout(device, wgpu::ShaderStages::FRAGMENT);
+        let map_layout = layout(
+            device,
+            wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+        );
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ONE X2 direct type-2 map"),
             source: wgpu::ShaderSource::Wgsl(draw_wgsl().into()),
@@ -379,9 +389,35 @@ impl DirectType2Pipeline {
             multiview_mask: None,
             cache: None,
         });
+        let mesh_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ONE X2 native sphere rasterization"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("mesh_vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("mesh_fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
             device: device.clone(),
             pipeline,
+            mesh_pipeline,
             picture_layout: picture_layout.clone(),
             sampler: device.create_sampler(&wgpu::SamplerDescriptor {
                 mag_filter: wgpu::FilterMode::Linear,
@@ -422,6 +458,18 @@ impl DirectType2Pipeline {
         pass.set_bind_group(0, picture, &[]);
         pass.set_bind_group(1, map, &[]);
         pass.draw(0..3, 0..1);
+    }
+
+    fn draw_mesh(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        picture: &wgpu::BindGroup,
+        map: &wgpu::BindGroup,
+    ) {
+        pass.set_pipeline(&self.mesh_pipeline);
+        pass.set_bind_group(0, picture, &[]);
+        pass.set_bind_group(1, map, &[]);
+        pass.draw(0..(100 * 50 * 6), 0..1);
     }
 }
 
@@ -823,12 +871,7 @@ fn type2_ycbcr(uv: vec2<f32>) -> vec3<f32> {
   );
 }
 
-@fragment
-fn fs(in: Type2VsOut) -> @location(0) vec4<f32> {
-  let view = view_ray(in.uv);
-  if view.w <= 0.0 { return vec4<f32>(0.0); }
-  let map = type2_mesh(reframe.view_to_body * view.xyz);
-  if map.covered <= 0.5 { return vec4<f32>(0.0); }
+fn type2_color(map: Type2Sample) -> vec4<f32> {
   var rgb: vec3<f32>;
   if map.alpha == 0.0 {
     rgb = type2_ycbcr(map.packed.zw);
@@ -845,6 +888,49 @@ fn fs(in: Type2VsOut) -> @location(0) vec4<f32> {
     rgb > vec3<f32>(0.04045),
   );
   return vec4<f32>(select(rgb, linear, reframe.linearize > 0.5), 1.0);
+}
+
+@fragment
+fn fs(in: Type2VsOut) -> @location(0) vec4<f32> {
+  let view = view_ray(in.uv);
+  if view.w <= 0.0 { return vec4<f32>(0.0); }
+  let map = type2_mesh(reframe.view_to_body * view.xyz);
+  if map.covered <= 0.5 { return vec4<f32>(0.0); }
+  return type2_color(map);
+}
+
+struct Type2MeshOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) packed: vec4<f32>,
+  @location(1) map_uv: vec2<f32>,
+};
+
+// The same native triangles and vertex UV law as type2_cell. On a flat
+// perspective view, hardware rasterization performs the ray intersection
+// and perspective-correct interpolation for us. Curved/ball views retain fs.
+@vertex
+fn mesh_vs(@builtin(vertex_index) index: u32) -> Type2MeshOut {
+  let cell = index / 6u;
+  let offsets = array<vec2<i32>, 6>(
+    vec2<i32>(0, 0), vec2<i32>(0, 1), vec2<i32>(1, 0),
+    vec2<i32>(0, 1), vec2<i32>(1, 1), vec2<i32>(1, 0),
+  );
+  let at = vec2<i32>(i32(cell / 100u), i32(cell % 100u)) + offsets[index % 6u];
+  let sphere = type2_position(at.x, at.y);
+  let body = vec3<f32>(-sphere.x, sphere.y, -sphere.z);
+  let view = transpose(reframe.view_to_body) * body;
+  var out: Type2MeshOut;
+  out.position = vec4<f32>(view.x / reframe.screen.half_extent,
+    -view.y * reframe.screen.aspect / reframe.screen.half_extent,
+    view.z - 0.0001, view.z);
+  out.map_uv = type2_varying(at.x, at.y);
+  out.packed = type2_sample4(out.map_uv);
+  return out;
+}
+
+@fragment
+fn mesh_fs(in: Type2MeshOut) -> @location(0) vec4<f32> {
+  return type2_color(Type2Sample(in.packed, type2_sample1(in.map_uv), 1.0));
 }
 "#;
 
@@ -1087,6 +1173,14 @@ mod tests {
                     fov: 1.0,
                 },
             ),
+            (
+                "widest flat view and periodic seam",
+                Camera {
+                    yaw: std::f32::consts::PI,
+                    pitch: 0.0,
+                    fov: crate::projection::FOV_FLAT,
+                },
+            ),
         ] {
             let reframe = Reframe::new(
                 &crate::projection::tests::one_xs_lenses(),
@@ -1098,39 +1192,88 @@ mod tests {
                 crate::Sampling::Bilinear,
             );
             let cpu = map.rasterize(&reframe, size);
-            let gpu = on_gpu(&device, &queue, &reframe, &map, size);
-            assert_eq!(gpu.len(), cpu.pixels.len());
-            let mut worst = 0.0f32;
-            let mut coverage_mismatch = 0usize;
-            for (expected, actual) in cpu.pixels.iter().zip(&gpu) {
-                if expected.covered != actual.covered {
-                    coverage_mismatch += 1;
-                    continue;
+            let mesh = crate::map_oracle::Mesh::new(&map);
+            for rasterized in [false, true] {
+                let gpu = on_gpu(&device, &queue, &reframe, &map, size, rasterized);
+                assert_eq!(gpu.len(), cpu.pixels.len());
+                let mut worst = 0.0f32;
+                let mut coverage_mismatch = 0usize;
+                for (index, (expected, actual)) in cpu.pixels.iter().zip(&gpu).enumerate() {
+                    if expected.covered != actual.covered {
+                        coverage_mismatch += 1;
+                        continue;
+                    }
+                    if expected.covered == 0.0 {
+                        continue;
+                    }
+                    // Fixed-function interpolation snaps projected vertices
+                    // to a subpixel grid. Bound its difference in output
+                    // pixels, including the fixture's discontinuous UV ramp.
+                    // The ray path keeps its original numeric bound below.
+                    let neighbors: Vec<_> = if rasterized {
+                        [-1.0f32, 1.0]
+                            .into_iter()
+                            .flat_map(|dy| [-1.0f32, 1.0].into_iter().map(move |dx| (dx, dy)))
+                            .map(|(dx, dy)| {
+                                mesh.sample_view(
+                                    &reframe,
+                                    &map.alpha,
+                                    [
+                                        ((index % size.width as usize) as f32 + 0.5 + dx / 64.0)
+                                            / size.width as f32,
+                                        ((index / size.width as usize) as f32 + 0.5 + dy / 64.0)
+                                            / size.height as f32,
+                                    ],
+                                )
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    for (channel, (a, b)) in expected
+                        .packed_uv
+                        .iter()
+                        .flatten()
+                        .chain(std::iter::once(&expected.alpha))
+                        .zip(
+                            actual
+                                .packed_uv
+                                .iter()
+                                .flatten()
+                                .chain(std::iter::once(&actual.alpha)),
+                        )
+                        .enumerate()
+                    {
+                        let difference = (a - b).abs();
+                        if rasterized {
+                            let values = neighbors.iter().map(|pixel| {
+                                if channel == 4 {
+                                    pixel.alpha
+                                } else {
+                                    pixel.packed_uv[channel / 2][channel % 2]
+                                }
+                            });
+                            let (low, high) = values.fold((*a, *a), |(low, high), value| {
+                                (low.min(value), high.max(value))
+                            });
+                            assert!(
+                                *b >= low - 2.0e-4 && *b <= high + 2.0e-4,
+                                "{label}, pixel {index}, channel {channel}: rasterized {b} outside 1/64-pixel reference [{low}, {high}]"
+                            );
+                        }
+                        worst = worst.max(difference);
+                    }
                 }
-                if expected.covered == 0.0 {
-                    continue;
-                }
-                for (a, b) in expected
-                    .packed_uv
-                    .iter()
-                    .flatten()
-                    .chain(std::iter::once(&expected.alpha))
-                    .zip(
-                        actual
-                            .packed_uv
-                            .iter()
-                            .flatten()
-                            .chain(std::iter::once(&actual.alpha)),
-                    )
-                {
-                    worst = worst.max((a - b).abs());
-                }
+                assert_eq!(
+                    coverage_mismatch, 0,
+                    "{label}, rasterized={rasterized}: triangle admission differs"
+                );
+                assert!(
+                    rasterized || worst <= 2.0e-4,
+                    "{label}, rasterized={rasterized}: worst native-grid residue is {worst}"
+                );
+                eprintln!("{label}, rasterized={rasterized}: worst native-grid residue {worst}");
             }
-            assert_eq!(coverage_mismatch, 0, "{label}: triangle admission differs");
-            assert!(
-                worst <= 2.0e-4,
-                "{label}: worst native-grid residue is {worst}"
-            );
         }
     }
 
@@ -1175,6 +1318,7 @@ mod tests {
         reframe: &Reframe,
         map: &CapturedMap,
         size: Size,
+        rasterized: bool,
     ) -> Vec<DensePixel> {
         let probe = format!(
             r#"
@@ -1195,11 +1339,19 @@ fn direct_type2_twin(@builtin(global_invocation_id) id: vec3<u32>) {{
   type2_answers[id.x * 2u] = answer.packed;
   type2_answers[id.x * 2u + 1u] = vec4<f32>(answer.alpha, answer.covered, 0.0, 0.0);
 }}
+
+@fragment
+fn mesh_probe(in: Type2MeshOut) -> @location(0) vec4<f32> {{
+  let index = u32(in.position.y) * PROBE_WIDTH + u32(in.position.x);
+  type2_answers[index * 2u] = in.packed;
+  type2_answers[index * 2u + 1u] = vec4<f32>(type2_sample1(in.map_uv), 1.0, 0.0, 0.0);
+  return vec4<f32>(1.0);
+}}
 "#,
             width = size.width,
             height = size.height,
         );
-        let source = format!("{}\n{}\n{probe}", projection::wgsl(), map_wgsl());
+        let source = format!("{}\n{probe}", draw_wgsl());
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("direct type-2 twin"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -1208,7 +1360,7 @@ fn direct_type2_twin(@builtin(global_invocation_id) id: vec3<u32>) {{
             label: Some("direct type-2 twin uniform"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
+                visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::VERTEX,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -1219,7 +1371,13 @@ fn direct_type2_twin(@builtin(global_invocation_id) id: vec3<u32>) {{
         });
         let storage = |binding, read_only, bytes| wgpu::BindGroupLayoutEntry {
             binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
+            visibility: wgpu::ShaderStages::COMPUTE
+                | wgpu::ShaderStages::FRAGMENT
+                | if read_only {
+                    wgpu::ShaderStages::VERTEX
+                } else {
+                    wgpu::ShaderStages::empty()
+                },
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Storage { read_only },
                 has_dynamic_offset: false,
@@ -1313,7 +1471,71 @@ fn direct_type2_twin(@builtin(global_invocation_id) id: vec3<u32>) {{
             ],
         });
         let mut encoder = device.create_command_encoder(&Default::default());
-        {
+        if rasterized {
+            let raster = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("native mesh rasterization regression"),
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: None,
+                        bind_group_layouts: &[&uniform_layout, &map_layout],
+                        immediate_size: 0,
+                    }),
+                ),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("mesh_vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("mesh_probe"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+            let target = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("native mesh regression target"),
+                size: wgpu::Extent3d {
+                    width: size.width,
+                    height: size.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = target.create_view(&Default::default());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("native mesh regression"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&raster);
+            pass.set_bind_group(0, &group0, &[]);
+            pass.set_bind_group(1, &group1, &[]);
+            pass.draw(0..30_000, 0..1);
+        } else {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &group0, &[]);

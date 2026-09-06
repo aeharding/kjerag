@@ -1154,7 +1154,36 @@ pub(super) fn solve_with_descent_admission<D: PisDirection>(
     hint: Option<&HintGrid<D>>,
     admission: DescentAdmission,
 ) -> Result<PatchGrid<D>, LevelError> {
-    solve_with_descents(input, initial, hint, DESCENTS_PER_PASS, admission)
+    solve_with_descents(
+        input,
+        initial,
+        hint,
+        DESCENTS_PER_PASS,
+        admission,
+        input.level.patch_rows(),
+    )
+}
+
+/// Readable reference for the parallel GPU variant. Independent spatial
+/// stripes omit vertical propagation across their borders; all image
+/// arithmetic, initial/hint candidates and descent rules remain unchanged.
+/// The Studio/global-stripe reference above is deliberately not replaced.
+pub(super) fn solve_striped_with_descent_admission<D: PisDirection>(
+    input: &Input<D>,
+    initial: InitialGrid<D>,
+    hint: Option<&HintGrid<D>>,
+    admission: DescentAdmission,
+    stripe_rows: usize,
+) -> Result<PatchGrid<D>, LevelError> {
+    assert!(stripe_rows > 0);
+    solve_with_descents(
+        input,
+        initial,
+        hint,
+        DESCENTS_PER_PASS,
+        admission,
+        stripe_rows,
+    )
 }
 
 #[cfg(test)]
@@ -1170,6 +1199,7 @@ pub(crate) fn solve_with_test_descents<D: PisDirection>(
         hint,
         descents_per_pass,
         DescentAdmission::EveryPatch,
+        input.level.patch_rows(),
     )
 }
 
@@ -1528,6 +1558,7 @@ fn solve_with_descents<D: PisDirection>(
     hint: Option<&HintGrid<D>>,
     descents_per_pass: usize,
     descent_admission: DescentAdmission,
+    stripe_rows: usize,
 ) -> Result<PatchGrid<D>, LevelError> {
     assert!(
         u8::try_from(descents_per_pass).is_ok(),
@@ -1552,9 +1583,10 @@ fn solve_with_descents<D: PisDirection>(
 
     let mut kernel = ImageKernel::with_descent_admission(input, descent_admission);
     let disparity = input.disparity;
-    let patches = schedule(
+    let patches = schedule_striped(
         input.level.patch_rows(),
         input.level.patch_cols(),
+        stripe_rows,
         &initial.flows,
         hint.map(|hint| hint.flows.as_ref()),
         disparity,
@@ -1911,6 +1943,7 @@ impl<D: PisDirection> Kernel for ImageKernel<'_, D> {
 
 /// The exact in-place scheduling core, parameterized only so focused tests can
 /// distinguish dependency order from image arithmetic.
+#[cfg(test)]
 fn schedule<K: Kernel>(
     patch_rows: usize,
     patch_cols: usize,
@@ -1920,6 +1953,30 @@ fn schedule<K: Kernel>(
     descents_per_pass: usize,
     kernel: &mut K,
 ) -> Vec<Patch> {
+    schedule_striped(
+        patch_rows,
+        patch_cols,
+        patch_rows,
+        initial,
+        hint,
+        disparity,
+        descents_per_pass,
+        kernel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn schedule_striped<K: Kernel>(
+    patch_rows: usize,
+    patch_cols: usize,
+    stripe_rows: usize,
+    initial: &[Flow],
+    hint: Option<&[Flow]>,
+    disparity: Option<DisparityInterval>,
+    descents_per_pass: usize,
+    kernel: &mut K,
+) -> Vec<Patch> {
+    assert!(stripe_rows > 0);
     let patch_count = patch_rows * patch_cols;
     assert_eq!(initial.len(), patch_count);
     if let Some(hint) = hint {
@@ -1942,9 +1999,10 @@ fn schedule<K: Kernel>(
                 (col + 1 < patch_cols).then_some(patch + 1)
             };
             let vertical = if pass == 0 {
-                row.checked_sub(1).map(|_| patch - patch_cols)
+                (!row.is_multiple_of(stripe_rows)).then(|| patch - patch_cols)
             } else {
-                (row + 1 < patch_rows).then_some(patch + patch_cols)
+                (row + 1 < patch_rows && !(row + 1).is_multiple_of(stripe_rows))
+                    .then_some(patch + patch_cols)
             };
             let flows = [
                 Some(patches[patch].flow),
@@ -3508,6 +3566,23 @@ mod tests {
                 .flow,
             flow(2.0, 0.0),
         );
+    }
+
+    #[test]
+    fn striped_propagation_keeps_both_borders_and_a_partial_last_stripe() {
+        let mut initial = vec![Flow::ZERO; 10];
+        initial[0] = flow(-3.0, 0.0);
+        initial[9] = flow(-7.0, 0.0);
+        let striped = schedule_striped(5, 2, 2, &initial, None, None, 0, &mut FlowScoreKernel);
+        let columns: Vec<_> = striped.iter().map(|patch| patch.flow().dcol()).collect();
+        assert_eq!(
+            columns,
+            [-3.0, -3.0, -3.0, -3.0, 0.0, 0.0, 0.0, 0.0, -7.0, -7.0]
+        );
+        let global = schedule(5, 2, &initial, None, None, 0, &mut FlowScoreKernel);
+        assert!(global.iter().all(|patch| patch.flow().dcol() == -7.0));
+        let full_stripe = schedule_striped(5, 2, 5, &initial, None, None, 0, &mut FlowScoreKernel);
+        assert_eq!(global, full_stripe);
     }
 
     struct SentinelKernel;
