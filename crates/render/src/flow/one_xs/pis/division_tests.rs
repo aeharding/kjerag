@@ -54,9 +54,7 @@ fn corrected_division_matches_binary32_edges_random_inputs_and_fallback() {
         pairs.push([random(), random()]);
     }
     let expected: Vec<_> = pairs.iter().map(|&[a, b]| reference(a, b)).collect();
-    let start = super::SHADER.find("fn div_f32_bits").unwrap();
-    let end = super::SHADER.find("\nfn div_rn").unwrap();
-    let division = &super::SHADER[start..end];
+    let division = include_str!("../f32_div.wgsl");
     // A deliberately bad estimate must exercise the restoring fallback, not
     // silently turn the exact divider into approximate arithmetic.
     let fallback = division.replacen(

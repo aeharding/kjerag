@@ -359,11 +359,14 @@ Selected PIS uses independent 16-patch-row stripes. Vertical candidates do not
 cross stripe boundaries; this is an explicit propagation approximation, not
 Studio's global schedule. The global scalar/GPU reference remains available,
 and selected GPU construction qualifies exactly against its striped CPU twin.
-Binary32 division now estimates a normalized quotient on hardware and corrects
+Parent mapping and PIS compile one shared `one_xs/f32_div.wgsl` helper.
+Binary32 division estimates a normalized quotient on hardware and corrects
 the exact integer remainder before the unchanged RN-even/exponent handling.
 The bounded estimate follows [WGSL's division accuracy contract](https://www.w3.org/TR/WGSL/#accuracy-of-concrete-expressions);
 integer residual correction replaces the ordinary 24-step restoring loop.
 Edge/random and forced-fallback tests compare complete output bits to CPU.
+Sharing this helper removes the parent's separate divider implementation;
+alternating whole-Scene measurements did not establish a capacity improvement.
 
 Flat perspective views rasterize the native 100-by-50 sphere triangles directly,
 sampling packed maps at vertices and alpha after perspective interpolation.

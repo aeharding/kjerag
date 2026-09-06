@@ -14,6 +14,30 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Shared exact arithmetic and native cleanup gate, 2026-09-06:** parent mapping
+and PIS now compile the same binary32 division helper. PIS arithmetic is
+unchanged; parent mapping replaces its duplicate restoring divider with PIS's
+existing hardware estimate plus exact integer correction and restoring
+fallback. This is consolidation, not a demonstrated whole-player speedup.
+The direct GPU test passes all 67,300 input pairs both normally and with the
+fallback forced, and all seven parent GPU tests pass. All 93 X4 and 183 X2
+actual Scene artifacts remain byte-identical. Workspace tests pass 1140/0
+with 30 ignored; full-target clippy, formatting, name-check and Cargo-source
+consistency pass. The refreshed branch player, including the camera-profile
+cleanup below, passes 48 native UI checks with zero failures at the exact X4
+view. Root inspected its native-window capture, which is byte-identical to
+the previous corrected capture. No owner acceptance or main merge is implied.
+Evidence: `scratch/shared-exact-division-20260906-01/`.
+
+Alternating 2560x1440 X4 capacity runs do not establish a repeatable improvement:
+baseline/candidate/baseline/candidate averaged 297/275/265/278 redraws/s, with
+p99 redraw times of 14.695/15.463/15.942/15.966 ms. Each retained all 360 source
+changes with zero drops, starvation or audio underruns. The 4.17 ms tail
+target remains unmet. A separate final-map input-buffer reuse experiment also
+showed no repeatable preparation-time improvement and was removed; its patch,
+separate binaries and logs remain in `scratch/final-map-input-reuse-20260906-01/`.
+No native-arithmetic or scratch-buffer-pooling prototype remains selected.
+
 **Camera setup consolidated, 2026-09-06:** one immutable resident profile now
 resolves live admission, parent inputs, static maps and image support while
 opening the capture. GPU attachment consumes that profile instead of rebuilding
@@ -28,9 +52,9 @@ All 93 X4 and 183 X2 actual Scene artifacts (92 frames plus their packed/alpha
 maps) are byte-identical to the corrected pre-refactor baseline. Workspace
 tests pass 1140/0 with 30 ignored; full-target clippy, formatting, name-check and
 Cargo-source consistency pass. Evidence is in
-`scratch/camera-profile-20260906-01/`. The owner-review native executable stays
-at the previously tested camera-correction build; this refactor has not yet
-received a fresh native-window harness run and is not merged.
+`scratch/camera-profile-20260906-01/`. The subsequent shared-arithmetic
+checkpoint above includes the fresh native-window harness run for this
+refactor. The branch is not merged.
 
 The capacity diagnostic now separates host pump/prepare time from draw plus
 queue-completion time without adding GPU synchronization. These are independent

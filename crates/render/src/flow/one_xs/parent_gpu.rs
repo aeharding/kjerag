@@ -296,7 +296,11 @@ fn words_to_bytes(words: &[u32]) -> Vec<u8> {
     words.iter().flat_map(|word| word.to_ne_bytes()).collect()
 }
 
-const SHADER: &str = include_str!("parent_map.wgsl");
+const SHADER: &str = concat!(
+    include_str!("f32_div.wgsl"),
+    "\n",
+    include_str!("parent_map.wgsl")
+);
 
 fn shader_source() -> String {
     let mut dst_x = Vec::with_capacity(SELECTED_FLOWSTATE_COLS);

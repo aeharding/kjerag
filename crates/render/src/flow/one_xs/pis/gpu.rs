@@ -1945,7 +1945,11 @@ fn initial_grid<D: PisDirection>(level: Level, flows: &[Flow]) -> InitialGrid<D>
     }
 }
 
-const SHADER: &str = include_str!("pis.wgsl");
+const SHADER: &str = concat!(
+    include_str!("../f32_div.wgsl"),
+    "\n",
+    include_str!("pis.wgsl")
+);
 
 #[cfg(test)]
 pub(crate) const DIRECT_TEST_SHADER: &str = SHADER;
