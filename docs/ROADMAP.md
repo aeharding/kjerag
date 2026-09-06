@@ -14,6 +14,44 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Separable bilateral mask verified, 2026-09-06:** the
+geometry shader factors its 9-by-9 validity conjunction into a nine-column
+horizontal scan and nine-row packed-word AND. Camera support, retained maps,
+public A/B mask words and sentinel remain unchanged. One extra compute pass
+uses a private 64,800-byte tail on the existing allocation, with no extra
+buffer or binding. The downstream guard validates its real enlarged size;
+it does not disguise that size or loosen validation. Five required Radeon
+geometry tests pass, including exact CPU-oracle output and deliberate mutations
+of both radii, bilateral validity, packing, vertical AND and byte lanes.
+
+Two alternating 2560x1440 pairs per camera improve throughput and redraw
+p95/p99 in each pair. X4 capacity changes from 310–315 to 316–319 redraws/s,
+with p99 from 11.14–13.84 to 10.21–10.84 ms. X2 changes from about 381 to
+387 redraws/s, with p99 from 7.73–8.01 to 6.93–7.49 ms. All eight runs retain
+360 source changes. Not every measure improves: X4's second over-budget count
+rises from 588 to 624, and its arrival statistics worsen in that pair; X2
+arrival medians, p95 and maxima worsen in both pairs despite better arrival
+p99. This is a modest capacity/tail improvement, not a universal latency win,
+ordinary-desktop acceptance or a 4.17 ms pass. Required-GPU workspace tests
+with both real camera fixtures pass: 1,164 passed, zero failed, 30 ignored.
+Full-target clippy, formatting, name and Cargo-source checks pass. All 276
+real Scene X2/X4 image/map/alpha artifacts are byte-identical to the import
+cleanup checkpoint. Root inspected both final sequence frames and the native
+exact-view X4 capture. The saved native candidate passes 48 UI checks with
+zero failures; four paired-file checks are inapplicable to this X4 capture.
+Installed Flatpak remains frozen for the owner's retest; no merge, release
+or performance compromise is accepted. Evidence: `scratch/separable-mask-20260906/`.
+
+**PIS reciprocal broadcast declined, 2026-09-06:** one shared exact division
+per patch-owned workgroup replaced duplicate lane/descent divisions, at the
+cost of one new barrier. Required Radeon PIS checks pass, but two alternating
+2560x1440 pairs per camera do not justify retaining it. X2 p99 improves from
+7.26/7.93 to 6.22/7.06 ms; X4 changes from 9.81/11.01 to 11.24/10.74 ms, with
+capacity lower in its first pair and nearly unchanged in its second. All
+runs retain 360 source changes. The shader and trial-only tests are removed;
+native and installed players are unchanged. No capacity or pixel-identity
+claim follows. Evidence: `scratch/pis-reciprocal-broadcast-20260906/`.
+
 **Import-time draw binding removed and verified, 2026-09-06:** the
 selected source owner no longer allocates an unused view-uniform buffer,
 queues its upload, creates four texture views, or retains a picture bind group

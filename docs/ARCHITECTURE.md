@@ -296,11 +296,16 @@ An additional dispatch establishes the cache dependency. The CPU oracle and
 GPU mutation checks cover the complete public result. This removes repeated
 work without changing the solver's input arithmetic, admission or temporal law.
 
-The geometry mask is bilateral: every word already combines both source
-lenses' validity and image support. One invocation evaluates that word once
-and writes it to both lens sections; a disjoint invocation writes the trailing
-validity sentinel. This avoids two identical neighborhood scans while retaining
-the existing buffer layout and full CPU-oracle qualification.
+The geometry mask is bilateral. A horizontal nine-column validity scan combines
+both source lenses and packs four boolean results per word. A second pass ANDs
+the nine neighboring row words, reproducing the original clipped 9-by-9
+conjunction before applying the unchanged camera support. It writes the final
+word to both lens sections; a disjoint invocation writes the validity sentinel.
+The mask allocation has a private 64,800-byte scratch tail, without an added
+buffer or binding. Its public two-lens prefix and sentinel offsets are unchanged;
+the prepared-source front end checks the actual enlarged allocation size and
+indexes only that prefix. Retained maps are never overwritten for scratch.
+Full public-mask and retained-map qualification still uses the direct CPU oracle.
 
 ## Playback (issue #4)
 

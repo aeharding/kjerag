@@ -10,7 +10,7 @@
 use std::marker::PhantomData;
 use std::sync::mpsc;
 
-use super::geometry_gpu::{GpuGeometryBelts, GpuGeometryFrameOwner};
+use super::geometry_gpu::{GpuGeometryBelts, GpuGeometryFrameOwner, MASK_ALLOCATION_BYTES};
 use super::resident_frame_gpu::GpuResidentIdentity;
 use crate::Fallible;
 use crate::flow::one_xs::gpu_context::OneXsGpuContext;
@@ -701,11 +701,11 @@ impl GpuPisFrontEnd {
         mut geometry: GpuGeometryBelts<K>,
     ) -> Fallible<GpuPreparedFrame<GpuGeometryFrameOwner<K>>> {
         geometry.belts.lease.validate_provenance(&self.context)?;
-        if geometry.masks.size() != words_bytes(2 * MASK_WORDS_PER_LENS + 1) {
+        if geometry.masks.size() != MASK_ALLOCATION_BYTES {
             return Err(format!(
                 "ONE X2 GPU geometry mask buffer is {} bytes, expected {}",
                 geometry.masks.size(),
-                words_bytes(2 * MASK_WORDS_PER_LENS + 1)
+                MASK_ALLOCATION_BYTES
             )
             .into());
         }

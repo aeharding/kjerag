@@ -35,8 +35,14 @@ const RETAINED_BYTES: u64 = (2 * RETAINED_NODES_PER_LENS * size_of::<[f32; 2]>()
 pub(in crate::flow) const MASK_WORDS_PER_LENS: usize = RETAINED_NODES_PER_LENS.div_ceil(4);
 const MASK_WORDS: usize = 2 * MASK_WORDS_PER_LENS + 1;
 const MASK_BYTES: u64 = (MASK_WORDS * size_of::<u32>()) as u64;
+// The public two-lens mask and sentinel remain the leading MASK_WORDS. The
+// tail is private storage for one packed horizontal result per four nodes.
+const MASK_SCRATCH_WORDS: usize = MASK_WORDS_PER_LENS;
+const MASK_ALLOCATION_WORDS: usize = MASK_WORDS + MASK_SCRATCH_WORDS;
+pub(super) const MASK_ALLOCATION_BYTES: u64 = (MASK_ALLOCATION_WORDS * size_of::<u32>()) as u64;
 const WORKGROUP: u32 = 64;
 const _: () = assert!(COLS == SELECTED_LINE_COLS && ROWS == SELECTED_LINE_ROWS);
+const _: () = assert!(COLS.is_multiple_of(4));
 
 /// A complete frame-bound geometry allocation admitted by the one source
 /// submission lease. It remains owned through belt sampling, PIS and final
@@ -138,9 +144,10 @@ impl GpuGeometryFrameOwner<crate::direct_type2::ImportedOneXsPicture> {
     }
 }
 
-/// Exact geometry-to-belt product. The mask handle is private and can only
-/// enter the matching prepared-source front end; the geometry allocation and
-/// imported source owner remain inside the belt submission lease.
+/// Exact geometry-to-belt product. The mask allocation is private and only its
+/// unchanged public prefix is indexed by the matching prepared-source front
+/// end; the geometry allocation and imported source owner remain inside the
+/// belt submission lease.
 #[must_use = "the geometry-backed ONE X2 solver belts have not been consumed"]
 pub(crate) struct GpuGeometryBelts<K> {
     pub(super) belts: GpuBlurredBelts<GpuGeometryFrameOwner<K>>,
@@ -240,6 +247,7 @@ pub(crate) struct GpuGeometryPipeline {
     context: OneXsGpuContext,
     merge: wgpu::ComputePipeline,
     filter: wgpu::ComputePipeline,
+    horizontal_mask: wgpu::ComputePipeline,
     mask: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     static_coordinates: wgpu::Buffer,
@@ -334,6 +342,7 @@ impl GpuGeometryPipeline {
             context: context.clone(),
             merge: pipeline("merge_maps"),
             filter: pipeline("filter_rows"),
+            horizontal_mask: pipeline("build_horizontal_masks"),
             mask: pipeline("build_masks"),
             layout,
             static_coordinates,
@@ -427,8 +436,8 @@ impl GpuGeometryPipeline {
             mapped_at_creation: false,
         });
         let masks = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ONE X2 resident physical masks"),
-            size: MASK_BYTES,
+            label: Some("ONE X2 resident physical masks and horizontal scratch"),
+            size: MASK_ALLOCATION_BYTES,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
@@ -458,21 +467,19 @@ impl GpuGeometryPipeline {
                 },
             ],
         });
-        for pipeline in [&self.merge, &self.filter, &self.mask] {
+        for (pipeline, work) in [
+            (&self.merge, 2 * ROWS * COLS),
+            (&self.filter, 2 * ROWS),
+            (&self.horizontal_mask, MASK_WORDS_PER_LENS),
+            (&self.mask, MASK_WORDS_PER_LENS + 1),
+        ] {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ONE X2 resident geometry"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &resources, &[]);
-            let work = if std::ptr::eq(pipeline, &self.filter) {
-                (2 * ROWS) as u32
-            } else if std::ptr::eq(pipeline, &self.mask) {
-                (MASK_WORDS_PER_LENS + 1) as u32
-            } else {
-                (2 * ROWS * COLS) as u32
-            };
-            pass.dispatch_workgroups(work.div_ceil(WORKGROUP), 1, 1);
+            pass.dispatch_workgroups((work as u32).div_ceil(WORKGROUP), 1, 1);
         }
         Ok(EncodedGpuGeometry {
             context: self.context.clone(),
@@ -758,8 +765,11 @@ const SHADER: &str = r#"
 const PARENT_NODES: u32 = 20000u;
 const RETAINED_NODES: u32 = 64800u;
 const MASK_WORDS_PER_LENS: u32 = 16200u;
+const MASK_WORDS: u32 = 2u * MASK_WORDS_PER_LENS + 1u;
+const MASK_SCRATCH_BASE: u32 = MASK_WORDS;
 const ROWS: u32 = 1080u;
 const COLS: u32 = 60u;
+const MASK_WORDS_PER_ROW: u32 = COLS / 4u;
 const PARENT_COLS: u32 = 200u;
 const PARENT_ROWS: u32 = 100u;
 const THRESHOLD: f32 = 0.005;
@@ -855,6 +865,27 @@ fn camera_clears(lens: u32, uv: vec2<f32>) -> bool {
 }
 
 @compute @workgroup_size(64)
+fn build_horizontal_masks(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= MASK_WORDS_PER_LENS) { return; }
+  let word = gid.x;
+  let row = word / MASK_WORDS_PER_ROW;
+  let word_column = word % MASK_WORDS_PER_ROW;
+  var packed = 0u;
+  for (var byte = 0u; byte < 4u; byte++) {
+    let col = word_column * 4u + byte;
+    let c0 = select(col - 4u, 0u, col < 4u);
+    let c1 = min(col + 4u, COLS - 1u);
+    var both = true;
+    for (var c = c0; c <= c1; c++) {
+      let at = row * COLS + c;
+      both = both && valid(retained[at]) && valid(retained[RETAINED_NODES + at]);
+    }
+    packed = packed | (select(0u, 1u, both) << (8u * byte));
+  }
+  masks[MASK_SCRATCH_BASE + word] = packed;
+}
+
+@compute @workgroup_size(64)
 fn build_masks(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (gid.x == MASK_WORDS_PER_LENS) {
     masks[2u * MASK_WORDS_PER_LENS] = 0u;
@@ -862,22 +893,18 @@ fn build_masks(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   if (gid.x > MASK_WORDS_PER_LENS) { return; }
   let word = gid.x;
+  let row = word / MASK_WORDS_PER_ROW;
+  let word_column = word % MASK_WORDS_PER_ROW;
+  let r0 = select(row - 4u, 0u, row < 4u);
+  let r1 = min(row + 4u, ROWS - 1u);
+  var eroded = 0x01010101u;
+  for (var r = r0; r <= r1; r++) {
+    eroded = eroded & masks[MASK_SCRATCH_BASE + r * MASK_WORDS_PER_ROW + word_column];
+  }
   var packed = 0u;
   for (var byte = 0u; byte < 4u; byte++) {
     let local = word * 4u + byte;
-    let row = local / COLS;
-    let col = local % COLS;
-    let r0 = select(row - 4u, 0u, row < 4u);
-    let r1 = min(row + 4u, ROWS - 1u);
-    let c0 = select(col - 4u, 0u, col < 4u);
-    let c1 = min(col + 4u, COLS - 1u);
-    var both = true;
-    for (var r = r0; r <= r1; r++) {
-      for (var c = c0; c <= c1; c++) {
-        let at = r * COLS + c;
-        both = both && valid(retained[at]) && valid(retained[RETAINED_NODES + at]);
-      }
-    }
+    var both = ((eroded >> (8u * byte)) & 1u) != 0u;
     if (both && (camera_support[320001u] != 0u || row < 216u || row >= 864u)) {
       both = !camera_clears(0u, retained[local]) && !camera_clears(1u, retained[RETAINED_NODES + local]);
     }
@@ -907,6 +934,52 @@ mod tests {
     use crate::flow::one_xs::scalar::propagate_work_modes;
     use kjerag_media::FrameStamp;
     use temporal_gpu::{GpuColdPriorPublicLevelTwo, GpuMotionStage};
+
+    #[test]
+    fn separable_erosion_matches_direct_at_edges_corners_and_interior_holes() {
+        const TEST_ROWS: usize = 11;
+        const TEST_COLS: usize = 12;
+        let erode_direct = |input: &[bool]| {
+            (0..TEST_ROWS * TEST_COLS)
+                .map(|node| {
+                    let row = node / TEST_COLS;
+                    let col = node % TEST_COLS;
+                    (row.saturating_sub(4)..=(row + 4).min(TEST_ROWS - 1)).all(|r| {
+                        (col.saturating_sub(4)..=(col + 4).min(TEST_COLS - 1))
+                            .all(|c| input[r * TEST_COLS + c])
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let erode_separable = |input: &[bool]| {
+            let horizontal = (0..TEST_ROWS * TEST_COLS)
+                .map(|node| {
+                    let row = node / TEST_COLS;
+                    let col = node % TEST_COLS;
+                    (col.saturating_sub(4)..=(col + 4).min(TEST_COLS - 1))
+                        .all(|c| input[row * TEST_COLS + c])
+                })
+                .collect::<Vec<_>>();
+            (0..TEST_ROWS * TEST_COLS)
+                .map(|node| {
+                    let row = node / TEST_COLS;
+                    let col = node % TEST_COLS;
+                    (row.saturating_sub(4)..=(row + 4).min(TEST_ROWS - 1))
+                        .all(|r| horizontal[r * TEST_COLS + col])
+                })
+                .collect::<Vec<_>>()
+        };
+
+        for hole in [(0, 0), (0, 6), (5, 0), (5, 6), (10, 11)] {
+            let mut input = vec![true; TEST_ROWS * TEST_COLS];
+            input[hole.0 * TEST_COLS + hole.1] = false;
+            assert_eq!(
+                erode_separable(&input),
+                erode_direct(&input),
+                "separable erosion differs around hole {hole:?}"
+            );
+        }
+    }
 
     #[test]
     fn camera_support_threshold_and_bilateral_mask_match_cpu() {
@@ -1022,11 +1095,27 @@ mod tests {
                 "const THRESHOLD: f32 = 0.005;",
                 "const THRESHOLD: f32 = 0.0;",
             ),
-            ("erosion radius", "row + 4u", "row + 3u"),
+            ("horizontal erosion radius", "col + 4u", "col + 3u"),
+            ("vertical erosion radius", "row + 4u", "row + 3u"),
             (
-                "lens unification",
+                "horizontal lens unification",
                 "both = both && valid(retained[at]) && valid(retained[RETAINED_NODES + at]);",
                 "both = both && valid(retained[at]);",
+            ),
+            (
+                "horizontal packed result",
+                "select(0u, 1u, both) << (8u * byte)",
+                "select(1u, 0u, both) << (8u * byte)",
+            ),
+            (
+                "vertical packed AND",
+                "eroded = eroded & masks[",
+                "eroded = eroded | masks[",
+            ),
+            (
+                "vertical scratch byte",
+                "eroded >> (8u * byte)",
+                "eroded >> (8u * ((byte + 1u) % 4u))",
             ),
             (
                 "second bilateral lens write",
