@@ -213,10 +213,6 @@ struct Holding {
     readout: Option<Readout>,
 }
 
-fn supports_player_flow(lenses: Option<&[Lens]>) -> bool {
-    lenses.is_none_or(|lenses| !projection::is_one_xs_lens_pair(lenses))
-}
-
 /// The generated static resources and direct renderer have passed their
 /// authenticated substitution and rendered-pixel gates. Keep the activation
 /// explicit and reviewable; it is not a user-facing quality switch.
@@ -1183,7 +1179,7 @@ impl Scene {
         // either way round and one that opens only if it was picked in the
         // camera's own order (issue #123).
         let calibrated = calibrated(&files[0], player.size(), player.lenses())?;
-        let selected_one_xs = projection::is_one_xs_lens_pair(&calibrated.lenses);
+        let selected_stitch = calibrated.one_xs.is_some();
         println!(
             "media:  {}{}, {}x{}, {:.3} fps, {} frames, {:.1} s",
             match player.lenses() {
@@ -1208,13 +1204,14 @@ impl Scene {
         // Opening a file plays it, which is what every player does. Space
         // and the control row's button pause it (issue #16).
         let frame = player.size();
-        if one_xs_playback_selected(ONE_XS_PLAYBACK_ENABLED, selected_one_xs) {
+        if one_xs_playback_selected(ONE_XS_PLAYBACK_ENABLED, selected_stitch) {
             // The selected estimator is causal: every aligned decoded pair is
             // part of the next pair's state. Presentation therefore cannot
             // discard a late frame before the stitch owner consumes it.
             if !player.set_presentation_policy(PresentationPolicy::SequentialRealtime) {
                 return Err(
-                    "ONE X2 playback could not preserve every source frame before starting".into(),
+                    "stitched playback could not preserve every source frame before starting"
+                        .into(),
                 );
             }
         }
@@ -1814,10 +1811,11 @@ impl Scene {
 
     /// Whether the player's optical-flow toggle may use the available legacy
     /// route for this file. With nothing open it remains a persisted
-    /// preference; an open ONE X2 refuses the legacy solver because its
-    /// selected route runs automatically.
+    /// preference; a resident capture refuses the legacy solver because its
+    /// selected route runs automatically. Use the actual admitted capture,
+    /// since a file without orientation cannot use the resident parent mapper.
     pub fn supports_optical_flow(&self) -> bool {
-        supports_player_flow(self.show.as_ref().map(|show| show.lenses.as_ref()))
+        self.show.as_ref().is_none_or(|show| show.one_xs.is_none())
     }
 
     /// Which clock a frame's orientation is looked up on. The instrument that
@@ -2344,16 +2342,22 @@ fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<Calibrated> {
         readout: calibration.readout(),
     };
     let camera = calibration.camera_key();
-    let (one_xs, one_xs_calibration) =
-        if ONE_XS_PLAYBACK_ENABLED && projection::is_one_xs_lens_pair(&lenses) {
-            let calibration = Arc::new(calibration);
-            (
-                Some(ResidentCaptureFacade::new(calibration.clone(), orientation)),
-                Some(calibration),
-            )
-        } else {
-            (None, None)
-        };
+    let (one_xs, one_xs_calibration) = if ONE_XS_PLAYBACK_ENABLED
+        && !orientation.is_empty()
+        && lenses.len() == calibration.lenses.len()
+        && crate::stitch_camera::StitchCamera::from_lenses(&lenses).is_some()
+    {
+        // Validate camera inputs while opening, before changing the player's
+        // presentation policy or constructing any GPU resources.
+        crate::flow::one_xs::ParentMapBuilder::new(&calibration)?;
+        let calibration = Arc::new(calibration);
+        (
+            Some(ResidentCaptureFacade::new(calibration.clone(), orientation)),
+            Some(calibration),
+        )
+    } else {
+        (None, None)
+    };
     Ok(Calibrated {
         lenses: lenses.into(),
         camera,
@@ -7570,37 +7574,76 @@ mod tests {
     /// screenshot path. No prefix replay, hidden warmup or substituted map.
     #[test]
     fn selected_one_x2_post_seek_review_sequence() {
-        use std::io::Write;
         let Some(output) = std::env::var_os("KJERAG_SEEK_REVIEW_DIR").map(PathBuf::from) else {
             return;
         };
         let path = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").expect("review needs real footage");
-        std::fs::create_dir(&output).expect("review output must be a new directory");
+        post_seek_review_sequence(
+            Path::new(&path),
+            &output,
+            Duration::from_secs_f64(6339.0 * 1001.0 / 30000.0),
+            61,
+            Camera {
+                yaw: 71.13f32.to_radians(),
+                pitch: -13.99f32.to_radians(),
+                fov: 57.95f32.to_radians(),
+            },
+        );
+    }
+
+    /// The owner's second-camera report must use Scene's actual seek,
+    /// resident stitch, draw and screenshot path, not an offline substitute.
+    #[test]
+    fn calibrated_x4_air_post_seek_review_sequence() {
+        let Some(output) = std::env::var_os("KJERAG_X4_REVIEW_DIR").map(PathBuf::from) else {
+            return;
+        };
+        let path = std::env::var_os("KJERAG_X4_TEST_MEDIA").expect("review needs real footage");
+        post_seek_review_sequence(
+            Path::new(&path),
+            &output,
+            Duration::from_secs_f64(1153.452),
+            31,
+            Camera {
+                yaw: 132.05f32.to_radians(),
+                pitch: 3.55f32.to_radians(),
+                fov: 63.63f32.to_radians(),
+            },
+        );
+    }
+
+    fn post_seek_review_sequence(
+        path: &Path,
+        output: &Path,
+        target: Duration,
+        count: u64,
+        camera: Camera,
+    ) {
+        use std::io::Write;
+        std::fs::create_dir(output).expect("review output must be a new directory");
         let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
-        let mut scene = Scene::open(Path::new(&path)).unwrap();
+        let mut scene = Scene::open(path).unwrap();
+        assert!(scene.show.as_ref().unwrap().one_xs_calibration.is_some());
+        assert!(!scene.supports_optical_flow());
         scene.set_muted(true);
         scene.pause(Instant::now());
         scene.set_horizon(Horizon::Locked);
-        let target = {
+        let start = {
             let playing = scene.show.as_ref().unwrap().playing.borrow();
             let Source::Live(player) = &playing.source else {
                 unreachable!()
             };
+            let start = player.timing().index_at(target);
             assert!(
-                player.timing().frames > 6399,
+                player.timing().frames >= start + count,
                 "review fixture is shorter than the owner interval"
             );
-            player.timing().time_of(6339)
+            start
         };
         scene.seek(target, Accuracy::Exact);
-        let camera = Camera {
-            yaw: 71.13f32.to_radians(),
-            pitch: -13.99f32.to_radians(),
-            fov: 57.95f32.to_radians(),
-        };
         let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
         let mut previous = None;
-        for index in 6339..=6399 {
+        for index in start..start + count {
             let frame = wait_for_new_scene_frame(&scene, previous.as_ref());
             assert_eq!(frame.index(), index);
             prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &frame);
@@ -7648,7 +7691,7 @@ mod tests {
                 shot.time.as_secs_f64()
             );
             previous = Some(frame);
-            if index < 6399 {
+            if index + 1 < start + count {
                 scene.step(Instant::now(), 1);
             }
         }
@@ -8038,24 +8081,6 @@ mod tests {
         assert!(legacy_flow_draw(true, false, false));
         assert!(legacy_flow_draw(false, true, false));
         assert!(legacy_flow_draw(true, true, false));
-    }
-
-    #[test]
-    fn scene_capability_uses_the_projection_owned_one_xs_identity() {
-        assert!(supports_player_flow(None));
-
-        let mut lenses = projection::tests::one_xs_lenses();
-        let selected_type = lenses[0].lens_type;
-        assert!(!supports_player_flow(Some(&lenses)));
-
-        lenses[1].lens_type = 0;
-        assert!(!supports_player_flow(Some(&lenses)));
-
-        lenses[0].lens_type = 0;
-        assert!(supports_player_flow(Some(&lenses)));
-
-        lenses[1].lens_type = selected_type;
-        assert!(supports_player_flow(Some(&lenses)));
     }
 
     /// A camera rolling at a constant rate, as an orientation track: enough

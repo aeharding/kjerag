@@ -18,8 +18,10 @@ use super::LensPair;
 use super::base_map::FlowstateRoi;
 use super::metal_calc_map::{MetalCalcMapParams, diagnostic_metal_calc_map};
 use super::parent_inputs::{
-    POSE_COUNT, ScanAxis, SelectedModel3Static, diagnostic_pose_times, diagnostic_selected_static,
+    POSE_COUNT, ScanAxis, SelectedModel3Static, calibrated_mei_static, diagnostic_pose_times,
+    diagnostic_selected_static,
 };
+use crate::stitch_camera::StitchCamera;
 
 /// Why the selected ONE X2 parent map could not be built for one delivery.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,8 +65,16 @@ impl ParentMapBuilder {
                 "selected ONE X2 parent readout is not finite and positive",
             ));
         }
-        let selected = diagnostic_selected_static(calibration)
-            .map_err(|error| fail(format!("selected ONE X2 parent input: {error}")))?;
+        let selected = match StitchCamera::from_lenses(&calibration.lenses) {
+            Some(StitchCamera::OneX2) => diagnostic_selected_static(calibration),
+            Some(StitchCamera::CalibratedMei) => calibrated_mei_static(calibration),
+            None => {
+                return Err(fail(
+                    "resident stitching requires two compatible calibrated Mei lenses",
+                ));
+            }
+        }
+        .map_err(|error| fail(format!("selected ONE X2 parent input: {error}")))?;
         Ok(Self { selected, readout })
     }
 

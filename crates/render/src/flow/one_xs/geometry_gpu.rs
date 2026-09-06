@@ -320,9 +320,10 @@ impl GpuGeometryPipeline {
         // A runtime zero prevents contraction across the scalar sampler's
         // separately rounded operations, as in the qualified PIS frontend.
         support_bytes.extend(0u32.to_ne_bytes());
+        support_bytes.extend(u32::from(support.applies_all_rows()).to_ne_bytes());
         assert_eq!(
             support_bytes.len(),
-            (2 * CAMERA_MASK_SIZE * CAMERA_MASK_SIZE + 1) * 4
+            (2 * CAMERA_MASK_SIZE * CAMERA_MASK_SIZE + 2) * 4
         );
         let camera_support = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ONE X2 capture-static conditioned camera support"),
@@ -878,7 +879,7 @@ fn build_masks(@builtin(global_invocation_id) gid: vec3<u32>) {
         both = both && valid(retained[at]) && valid(retained[RETAINED_NODES + at]);
       }
     }
-    if (both && (row < 216u || row >= 864u)) {
+    if (both && (camera_support[320001u] != 0u || row < 216u || row >= 864u)) {
       both = !camera_clears(0u, retained[local]) && !camera_clears(1u, retained[RETAINED_NODES + local]);
     }
     packed = packed | (select(0u, 255u, both) << (8u * byte));
@@ -951,6 +952,43 @@ mod tests {
     }
 
     #[test]
+    fn calibrated_camera_gpu_masks_clip_middle_rows_too() {
+        let (context, _, _) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(reason) => {
+                assert!(std::env::var("KJERAG_REQUIRE_GPU").is_err(), "{reason}");
+                eprintln!("skipping calibrated camera GPU mask test: {reason}");
+                return;
+            }
+        };
+        let reframe = crate::Reframe::new(
+            &crate::projection::tests::fixture_lenses(),
+            crate::projection::tests::FRAME,
+            crate::Camera::default(),
+            crate::Held::default(),
+            1.0,
+            false,
+            crate::Sampling::default(),
+        );
+        let support = CameraMaskSupport::for_camera(
+            crate::stitch_camera::StitchCamera::CalibratedMei,
+            &reframe,
+        )
+        .unwrap();
+        let coordinates = one_xs_static_coordinates();
+        GpuGeometryPipeline::new(context.clone(), &coordinates, &support).unwrap();
+        let (_, masks) =
+            cpu_oracle(&coordinates, &qualification_corner_parents(), &support).unwrap();
+        assert_eq!(masks[540 * COLS / 4], 0);
+        let changed = SHADER.replace("camera_support[320001u] != 0u", "false");
+        assert_ne!(changed, SHADER);
+        let error = GpuGeometryPipeline::from_shader(context, &coordinates, &support, &changed)
+            .err()
+            .expect("a calibrated camera admitted the native pole-only mask mutation");
+        assert!(error.to_string().contains("physical mask"));
+    }
+
+    #[test]
     fn retained_geometry_matches_cpu_and_rejects_semantic_mutations() {
         let (context, _, adapter) = match gpu() {
             Ok(gpu) => gpu,
@@ -990,7 +1028,7 @@ mod tests {
             ),
             (
                 "camera support omission",
-                "if (both && (row < 216u || row >= 864u))",
+                "if (both && (camera_support[320001u] != 0u || row < 216u || row >= 864u))",
                 "if (false)",
             ),
             ("camera top range", "row < 216u", "row < 215u"),

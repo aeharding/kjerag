@@ -861,8 +861,9 @@ fn type2_box(a: texture_2d<f32>, b: texture_2d<f32>, uv: vec2<f32>, logical: vec
 }
 
 fn type2_ycbcr(uv: vec2<f32>) -> vec3<f32> {
-  let luma = type2_box(type2_luma0, type2_luma1, uv, vec2<f32>(2880.0));
-  let chroma = type2_box(type2_chroma0, type2_chroma1, uv, vec2<f32>(1440.0));
+  let source_size = vec2<f32>(reframe.frame_width, reframe.frame_height);
+  let luma = type2_box(type2_luma0, type2_luma1, uv, source_size);
+  let chroma = type2_box(type2_chroma0, type2_chroma1, uv, source_size * 0.5);
   let c = chroma.rg - vec2<f32>(0.50196081399917603);
   return vec3<f32>(
     luma.r + 1.4019999504089355 * c.g,
@@ -1114,6 +1115,10 @@ mod tests {
                 || source.contains("view_ray(in.uv)")
         );
         assert!(source.contains("select(rgb, linear, reframe.linearize > 0.5)"));
+        assert!(source.contains("vec2<f32>(reframe.frame_width, reframe.frame_height)"));
+        assert!(source.contains("source_size * 0.5"));
+        assert!(!source.contains("2880.0"));
+        assert!(!source.contains("1440.0"));
     }
 
     #[test]

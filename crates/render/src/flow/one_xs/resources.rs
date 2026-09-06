@@ -11,6 +11,7 @@ use std::fmt;
 use kjerag_meta::Lens;
 
 use crate::projection;
+use crate::stitch_camera::StitchCamera;
 use crate::studio_type2::{AlphaMap, MAP_HEIGHT, MAP_NODES, MAP_WIDTH};
 
 use super::base_map::{StaticLineCoordinates, one_xs_static_coordinates};
@@ -31,6 +32,37 @@ pub struct OneXsResources {
 impl OneXsResources {
     /// Generate every frame-invariant selected ONE X2 map from its calibration.
     pub fn new(lenses: &[Lens]) -> Result<Self, ResourceError> {
+        Self::build(lenses, None)
+    }
+
+    /// Shared solver resources with camera-owned final blend weights.
+    /// The native ONE X2 resource construction remains bit-for-bit unchanged.
+    pub(crate) fn for_camera(
+        camera: StitchCamera,
+        lenses: &[Lens],
+        size: crate::Size,
+    ) -> Result<Self, ResourceError> {
+        if StitchCamera::from_lenses(lenses) != Some(camera) {
+            return Err(ResourceError::NotOneXsPair);
+        }
+        match camera {
+            StitchCamera::OneX2 => Self::new(lenses),
+            StitchCamera::CalibratedMei => {
+                let reframe = crate::Reframe::new(
+                    lenses,
+                    size,
+                    crate::Camera::default(),
+                    crate::Held::default(),
+                    1.0,
+                    false,
+                    crate::Sampling::default(),
+                );
+                Self::build(lenses, Some(&reframe))
+            }
+        }
+    }
+
+    fn build(lenses: &[Lens], calibrated: Option<&crate::Reframe>) -> Result<Self, ResourceError> {
         let mut left_gate = Vec::with_capacity(MAP_NODES);
         let mut right_gate = Vec::with_capacity(MAP_NODES);
         let mut line_coordinates = Vec::with_capacity(MAP_NODES);
@@ -48,10 +80,11 @@ impl OneXsResources {
                     .expect("sphere nodes have a defined ONE X2 line coordinate");
                 line_coordinates.push([sample.col(), sample.row()]);
 
-                alpha.push(
-                    projection::one_xs_alpha_at_body(lenses, body)
+                alpha.push(match calibrated {
+                    Some(reframe) => reframe.blend(body).weights[0],
+                    None => projection::one_xs_alpha_at_body(lenses, body)
                         .ok_or(ResourceError::NotOneXsPair)?,
-                );
+                });
             }
         }
 
@@ -129,7 +162,8 @@ impl Error for ResourceError {}
 
 #[cfg(test)]
 mod tests {
-    use crate::projection::tests::one_xs_lenses;
+    use crate::projection::tests::{FRAME, fixture_lenses, one_xs_lenses};
+    use crate::stitch_camera::StitchCamera;
     use crate::{Camera, Held, Sampling, Size};
 
     use super::*;
@@ -216,6 +250,62 @@ mod tests {
             &alpha[MAP_WIDTH..2 * MAP_WIDTH],
             &alpha[2 * MAP_WIDTH..3 * MAP_WIDTH]
         );
+    }
+
+    #[test]
+    fn calibrated_x4_resources_reuse_geometry_with_calibrated_alpha() {
+        let lenses = fixture_lenses();
+        let calibrated =
+            OneXsResources::for_camera(StitchCamera::CalibratedMei, &lenses, FRAME).unwrap();
+        let native = resources();
+
+        assert_eq!(calibrated.static_coordinates(), native.static_coordinates());
+        assert_eq!(calibrated.gates(), native.gates());
+        assert_eq!(calibrated.coordinates(), native.coordinates());
+        assert_ne!(calibrated.alpha().bytes(), native.alpha().bytes());
+        assert!(
+            calibrated
+                .alpha()
+                .nodes()
+                .iter()
+                .all(|weight| weight.is_finite() && (0.0..=1.0).contains(weight))
+        );
+
+        let reframe = crate::Reframe::new(
+            &lenses,
+            FRAME,
+            Camera::default(),
+            Held::default(),
+            1.0,
+            false,
+            Sampling::default(),
+        );
+        for (row, column) in [(1, 0), (MAP_HEIGHT / 2, 17), (MAP_HEIGHT - 2, 59)] {
+            let index = row * MAP_WIDTH + column;
+            assert_eq!(
+                calibrated.alpha().nodes()[index].to_bits(),
+                reframe.blend(sphere_node(row, column)).weights[0].to_bits(),
+                "calibrated alpha at ({row},{column})",
+            );
+        }
+    }
+
+    #[test]
+    fn native_camera_selection_preserves_exact_one_x2_resources() {
+        let lenses = one_xs_lenses();
+        let selected = OneXsResources::for_camera(
+            StitchCamera::OneX2,
+            &lenses,
+            Size {
+                width: 2880,
+                height: 2880,
+            },
+        )
+        .unwrap();
+        let native = OneXsResources::new(&lenses).unwrap();
+
+        assert_eq!(selected, native);
+        assert_eq!(selected.alpha().bytes(), native.alpha().bytes());
     }
 
     #[test]

@@ -83,6 +83,39 @@ Selected Scene playback reaches it only through the capture-owned resident
 session and renderer attachment; the legacy `VecDeque<Live>` path remains an
 explicit diagnostic/oracle boundary and is not a selected fallback.
 
+### Shared camera boundary (issue #184)
+
+The resident solver now serves ONE X2 and X4 Air. `stitch_camera` selects
+the two tested lens families without changing their metadata identity. The
+ONE X2 law retains its recovered Template mounting, crop centers, alpha and
+housing masks. The calibrated Mei law uses the existing X4 projection's
+intrinsic centers and lens mounting, delivered source dimensions, blend
+weights and image circles. It applies valid-image support across the whole
+solver belt instead of inheriting ONE X2's pole-only housing exclusion.
+
+Everything after that camera boundary is shared: source import, parent GPU
+mapping, belt sampling, sparse PIS, temporal history, final map construction,
+frame ownership and direct draw. The final luma/chroma sampler uses the actual
+per-lens dimensions. Both live routes use sequential source presentation and
+automatic stitching; the legacy optical-flow toggle cannot select a second
+solver on an admitted capture. Camera inputs are validated before changing
+presentation policy. A capture without usable orientation stays on the older
+projection path rather than entering a parent mapper that requires it.
+
+The fixed solver chart, displacement gates and native parent UV convention
+remain shared implementation choices, not evidence of Studio's X4 setup.
+Admission is deliberately limited to type-41/type-131 residual Mei pairs;
+other camera families need calibration/coverage validation, not a new PIS
+implementation. In particular, arbitrary mounting residuals could move a
+different camera's seam outside this chart. Existing native oracle APIs and
+module names remain available for comparison.
+
+Studio's Chromatic Calibration means photometric lens color/brightness
+matching. It is required follow-on work at the geometrically aligned
+source-sampling/fusion boundary. The shared resident path does not yet apply
+it; the old projection path's unaligned color estimator is not silently reused
+as a parity implementation.
+
 ## Failures the pilot is told about (issue #124)
 
 There is one way a failure reaches the pilot and it is the alert, and that is

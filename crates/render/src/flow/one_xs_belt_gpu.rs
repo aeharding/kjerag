@@ -155,14 +155,16 @@ impl ResidentSourceFrontPipeline {
         orientation: OrientationTrack,
     ) -> Fallible<Self> {
         let parent_inputs = ParentMapBuilder::new(calibration)?;
-        let resources = OneXsResources::new(&calibration.lenses)?;
-        let support = crate::flow::one_xs_belt::CameraMaskSupport::from_reframe(
+        let camera = crate::stitch_camera::StitchCamera::from_lenses(&calibration.lenses)
+            .ok_or("resident stitching requires two compatible calibrated Mei lenses")?;
+        let size =
+            kjerag_media::Size::new(calibration.dimension.width, calibration.dimension.height);
+        let resources = OneXsResources::for_camera(camera, &calibration.lenses, size)?;
+        let support = crate::flow::one_xs_belt::CameraMaskSupport::for_camera(
+            camera,
             &crate::projection::Reframe::new(
                 &calibration.lenses,
-                kjerag_media::Size {
-                    width: calibration.dimension.width,
-                    height: calibration.dimension.height,
-                },
+                size,
                 crate::Camera::default(),
                 crate::Held::default(),
                 1.0,
@@ -3850,7 +3852,8 @@ mod tests {
 
         assert!(pipeline.contains("ParentMapBuilder::new(calibration)"));
         assert!(pipeline.contains("self.parent_inputs.readout()"));
-        assert!(pipeline.contains("OneXsResources::new(&calibration.lenses)"));
+        assert!(pipeline.contains("OneXsResources::for_camera(camera, &calibration.lenses, size)"));
+        assert!(pipeline.contains("CameraMaskSupport::for_camera("));
         assert!(pipeline.contains("GpuResidentFramePipeline::new(context.clone())"));
         assert!(pipeline.contains("GpuResidentCapture::new_bound("));
         assert!(capture.contains("ResidentSourceFrontPipeline::new("));

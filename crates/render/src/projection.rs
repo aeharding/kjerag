@@ -1760,6 +1760,18 @@ impl Reframe {
         ]
     }
 
+    /// The ordinary calibrated projection circle for one populated lens.
+    ///
+    /// Unlike [`Self::lens_image_circle_centre`], this is the principal point
+    /// and valid-image radius used by [`LensBlock`] and therefore by the
+    /// generic projection's own coverage test. A calibrated resident camera
+    /// can build its support from this same geometry without borrowing the
+    /// ONE X2-specific Offset circle and lobe law.
+    pub(crate) fn calibrated_image_circle(&self, lens: usize) -> ([f32; 2], f32) {
+        let lens = &self.lenses[lens];
+        ([lens.cx, lens.cy], lens.image_radius)
+    }
+
     /// Studio's scalar image-circle radius for an `offset_v3` ONE X2 lens.
     ///
     /// Mac 6.0.2 `Offset::setOffset` reads the lens type's 200-degree FOV,
@@ -3364,6 +3376,24 @@ pub(crate) fn one_xs_parent_lens_quaternion(lens: &Lens, index: usize) -> Quat {
     quaternion
 }
 
+/// The calibrated Mei parent's lens rotation in the fixed type-2 sphere frame.
+///
+/// The shared parent raster expresses a camera-body ray as
+/// `sphere = [body.z, body.x, body.y]`.  Unlike the selected ONE X2 adapter,
+/// this path uses the ordinary calibrated lens mounting already owned by the
+/// renderer.  Postmultiplying by the inverse body-to-sphere rotation makes
+/// the invariant explicit:
+///
+/// `lens_from_sphere * sphere_from_body == lens_from_body`.
+///
+/// Keep [`one_xs_parent_lens_quaternion`] separate. Its Template mounting and
+/// deterministic sign are captured native semantics, not the generic
+/// calibrated mounting used here.
+pub(crate) fn calibrated_parent_lens_quaternion(lens: &Lens, index: usize) -> Quat {
+    let sphere_from_body_inverse = Mat3([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]);
+    eigen_quaternion(lens_from_body(lens, index).mul(sphere_from_body_inverse))
+}
+
 /// Eigen's deterministic `Matrix3d -> Quaterniond` assignment.
 fn eigen_quaternion(matrix: Mat3) -> Quat {
     let m = matrix.0;
@@ -4430,6 +4460,39 @@ pub(crate) mod tests {
             false,
             Sampling::default(),
         )
+    }
+
+    #[test]
+    fn calibrated_parent_quaternion_maps_the_fixed_sphere_through_generic_mounting() {
+        let sphere_from_body = Mat3([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        for (index, lens) in fixture_lenses().iter().enumerate() {
+            let parent = calibrated_parent_lens_quaternion(lens, index);
+            let lens_from_sphere = Mat3::from(parent.matrix().rows());
+            let reconstructed = lens_from_sphere.mul(sphere_from_body);
+            let expected = lens_from_body(lens, index);
+            for row in 0..3 {
+                for column in 0..3 {
+                    assert!(
+                        (reconstructed.0[row][column] - expected.0[row][column]).abs() < 1e-12,
+                        "lens {index} matrix [{row}][{column}] is {} rather than {}",
+                        reconstructed.0[row][column],
+                        expected.0[row][column]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn calibrated_image_circle_is_the_generic_x4_projection_coverage() {
+        let reframe = fixture(Camera::default());
+        let (centre_a, radius_a) = reframe.calibrated_image_circle(0);
+        let (centre_b, radius_b) = reframe.calibrated_image_circle(1);
+
+        assert_eq!(centre_a, [1918.94_f32, 1927.21_f32]);
+        assert_eq!(centre_b, [1935.35_f32, 1935.09_f32]);
+        assert_eq!(radius_a, 1912.79_f32);
+        assert_eq!(radius_b, 1904.65_f32);
     }
 
     #[test]

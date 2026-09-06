@@ -33,6 +33,7 @@ mod scene;
 /// attribution and the controls printed round it.
 pub mod seam;
 mod stall;
+mod stitch_camera;
 pub mod studio_type2;
 /// The shader and its Rust mirror, asked the same question on a real GPU
 /// (`src/twin.rs`). Tests only: it exists because a change to one half and not

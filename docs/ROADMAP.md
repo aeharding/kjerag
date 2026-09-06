@@ -3,6 +3,72 @@
 Update this file in any PR that changes project status. Work queue is
 GitHub issues; this doc is the map, issues are the tasks.
 
+**Product direction, owner approved 2026-09-05:** deliver a usable zero-config
+player with Studio-like stitching, stable horizons, responsive seeking and
+240 fps active rendering capacity on the owner's machine. Generalize the GPU
+engine through explicit camera calibration/geometry, preserving ONE X2 while
+bringing the owner's X4 Air footage onto the shared engine. Existing code may
+be replaced; broad optimization RE stays frozen. The coordinator manages
+delivery, but visible tradeoffs and the tested branch still need owner
+acceptance before main changes.
+[Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
+shared-camera engine work.
+
+**Shared-camera branch checkpoint, issue #184:** ONE X2 and X4 Air now use
+one resident GPU solver with separate camera calibration inputs. The native
+X4 Air player has rendered the owner's exact view, and its Scene regression
+captured frames 34569..34599 through ordinary seek, stitch, draw and screenshot
+ownership. Inspected first/last output shows substantially reduced central
+terrain duplication. This is a candidate for owner review, not an X4 Studio
+parity verdict. Local evidence: `scratch/shared-x4-review-01/`,
+`scratch/shared-x4-native-held.png`, `scratch/shared-x4-native-repro.log`.
+The 61-frame ONE X2 regression keeps every packed/alpha map byte-identical to
+`scratch/240-final-f6339-6399`; pixels have small differences after making
+source sampling dimensions dynamic (sampled frame 6369: 75.98 dB PSNR, both
+actual images inspected). This is not a claim of bit-identical pictures.
+The shared chart/UV convention is still native-derived, camera admission is
+limited to the tested type-41/type-131 families, and no X4-specific throughput
+or matching Studio export comparison has been completed. Main is unchanged.
+
+**Original coverage gap:** the preceding resident path was ONE X2-only. The owner
+called the native ONE X2 view at 212.512 s good, then supplied an X4 Air view
+at 1153.452 s with yaw 132.05, pitch 3.55, FOV 63.63, locked horizon. That
+file used the legacy path; the exact native screenshot
+`scratch/april-riser-native-held.png` shows a central double image/horizon
+offset. The original log path was reused during the new native verification;
+the durable earlier context is `scratch/NEXT-SESSION-20260905-x4air-report.md`.
+The reproduction does not prove Studio parity or identify the detailed cause
+within the legacy path. No shared-camera change has shipped on main. Both
+reported views must be checked as the engine evolves.
+
+**Photometric lens fusion, Studio calls it Chromatic Calibration, [issue #185](https://github.com/aeharding/kjerag/issues/185):** the owner
+requests parity with this setting when appropriate. It is lens color and
+brightness matching, represented in Studio projects as `image_fusion`, not
+optical chromatic-aberration correction or per-channel lens displacement;
+`docs/research/linux-landscape.md` section 6 records the maker SDK's matching
+`EnableStitchFusion` description. The exact Studio 6.0.2 Flow On and Flow Off
+project blobs authenticated by the hashes in
+`docs/research/studio-video-oracle-602.json` both encode Image Fusion enabled.
+Read-only inspection of those manifest-named projects therefore does not
+provide an isolated Image-Fusion-on/off comparison, coefficients or parity
+proof. After issue #184's shared camera stitching works, add a default-neutral
+per-lens photometric stage at its source-sampling/fusion boundary, then verify
+the relevant Studio setting and real output. This is required work, not an
+implemented or verified feature. No speculative scaffolding, new Studio
+reverse engineering or export belongs in the current X4 Air deliverable.
+
+The shared-camera workspace gate passes **1126 tests, zero failures, 30 ignored**
+with required RADV and real ONE X2 input (`scratch/shared-camera-workspace.log`).
+The separately enabled X4 Scene sequence passed with real X4 input; its final
+repeat preserved all 31 pictures and their packed/alpha maps byte-for-byte.
+Native UI verification passed **48 checks, zero failures** on the exact X4
+view (`scratch/shared-camera-uitest.log`); two-file checks skip on this
+single-file capture. The final native exact-view image is
+`scratch/shared-x4-native-final.png`, inspected from the harness capture.
+Native SHA-256 is
+`aecd39b338fd7c8ce2d0c90109275d807e3ba4a29a2d1b9ce8951610040b220c`.
+Owner branch review and installed Flatpak verification remain pending.
+
 **Active-playback capacity checkpoint, 2026-09-05, issue #182:** the final
 uncapped 2560x1440 Scene/ScenePipeline test completes **329.96 redraws/s**
 with stitching active, versus 510.54 paused. It advances every displayed

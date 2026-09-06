@@ -440,9 +440,58 @@ impl Error for CameraMaskError {}
 pub(crate) struct CameraMaskSupport {
     pixels: [Box<[f32]>; LENSES],
     geometry: [CameraMaskGeometry; LENSES],
+    all_rows: bool,
 }
 
 impl CameraMaskSupport {
+    pub(crate) fn applies_all_rows(&self) -> bool {
+        self.all_rows
+    }
+
+    /// Calibrated cameras supply their own valid-image circle. They do not
+    /// inherit ONE X2's measured housing lobes or pole-only mask application.
+    pub(crate) fn for_camera(
+        camera: crate::stitch_camera::StitchCamera,
+        reframe: &Reframe,
+    ) -> Result<Self, CameraMaskError> {
+        if camera == crate::stitch_camera::StitchCamera::OneX2 {
+            return Self::from_reframe(reframe);
+        }
+        let [width, _] = reframe.frame_size();
+        let scale = CAMERA_MASK_SIZE as f32 / width;
+        let geometry = std::array::from_fn(|index| {
+            let (centre, radius) = reframe.calibrated_image_circle(index);
+            CameraMaskGeometry {
+                centre: centre.map(|value| value * scale),
+                image_circle_radius: radius,
+                mask_radius: radius * scale,
+                scale,
+                support_pixels: 0,
+            }
+        });
+        let mut built = Self {
+            pixels: std::array::from_fn(|_| Box::default()),
+            geometry,
+            all_rows: true,
+        };
+        for index in 0..LENSES {
+            let geometry = &mut built.geometry[index];
+            let binary: Vec<f32> = (0..CAMERA_MASK_SIZE * CAMERA_MASK_SIZE)
+                .map(|pixel| {
+                    let x = (pixel % CAMERA_MASK_SIZE) as f32 - geometry.centre[0];
+                    let y = (pixel / CAMERA_MASK_SIZE) as f32 - geometry.centre[1];
+                    f32::from(u8::from(
+                        x * x + y * y <= geometry.mask_radius * geometry.mask_radius,
+                    ))
+                })
+                .collect();
+            geometry.support_pixels = binary.iter().filter(|value| **value > 0.0).count();
+            built.pixels[index] =
+                condition_camera_support(&binary, CAMERA_MASK_SIZE, CAMERA_MASK_SIZE);
+        }
+        Ok(built)
+    }
+
     /// Capture-static conditioned field, uploaded once by resident geometry.
     pub(crate) fn conditioned_pixels(&self, lens: Lens) -> &[f32] {
         &self.pixels[lens.index()]
@@ -501,6 +550,7 @@ impl CameraMaskSupport {
         Ok(Self {
             pixels: [supports[0].clone(), supports[1].clone()],
             geometry: [geometry[0], geometry[1]],
+            all_rows: false,
         })
     }
 
@@ -567,7 +617,11 @@ fn apply_camera_support(
     support: &CameraMaskSupport,
 ) -> (LensPair<Vec<u8>>, CameraMaskReport) {
     let mut masks = base_support_masks(base);
-    let ranges = camera_mask_ranges();
+    let ranges = if support.all_rows {
+        [(0, one_xs::ROWS), (0, 0)]
+    } else {
+        camera_mask_ranges()
+    };
     let mut cleared = [0; LENSES];
     for lens in Lens::ALL {
         let map = base.lens(lens);
@@ -1313,6 +1367,7 @@ fn one_xs_ray_probe(@builtin(global_invocation_id) id: vec3<u32>) {
                 vec![b; CAMERA_MASK_SIZE * CAMERA_MASK_SIZE].into_boxed_slice(),
             ],
             geometry: [geometry; LENSES],
+            all_rows: false,
         }
     }
 
@@ -1435,6 +1490,85 @@ fn one_xs_ray_probe(@builtin(global_invocation_id) id: vec3<u32>) {
                 .map(|geometry| geometry.centre.map(f32::to_bits)),
             [[0x4349_60b7, 0x4349_660c], [0x4347_e4fd, 0x4346_cef0],]
         );
+        assert!(!support.applies_all_rows());
+    }
+
+    #[test]
+    fn calibrated_x4_mask_uses_intrinsic_image_circles_on_all_rows() {
+        use crate::projection::tests::{FRAME, fixture_lenses};
+        use crate::stitch_camera::StitchCamera;
+
+        let reframe = Reframe::new(
+            &fixture_lenses(),
+            FRAME,
+            crate::Camera::default(),
+            crate::Held::default(),
+            1.0,
+            false,
+            crate::Sampling::default(),
+        );
+        let support = CameraMaskSupport::for_camera(StitchCamera::CalibratedMei, &reframe).unwrap();
+        let scale = CAMERA_MASK_SIZE as f32 / FRAME.width as f32;
+
+        assert!(support.applies_all_rows());
+        for (lens, expected_centre, expected_radius) in [
+            (Lens::A, [1918.94_f32, 1927.21_f32], 1912.79_f32),
+            (Lens::B, [1935.35_f32, 1935.09_f32], 1904.65_f32),
+        ] {
+            let geometry = support.geometry[lens.index()];
+            assert_eq!(geometry.centre, expected_centre.map(|value| value * scale));
+            assert_eq!(geometry.image_circle_radius, expected_radius);
+            assert_eq!(geometry.mask_radius, expected_radius * scale);
+            assert_eq!(geometry.scale, scale);
+            assert!(geometry.support_pixels > 0);
+            assert!(
+                support.sample(
+                    lens,
+                    expected_centre.map(|value| value / FRAME.width as f32)
+                ) > 0.0
+            );
+            assert_eq!(support.sample(lens, [0.001, 0.001]), 0.0);
+        }
+    }
+
+    #[test]
+    fn calibrated_camera_support_clips_invalid_image_circle_uv_in_middle_rows() {
+        use crate::projection::tests::{FRAME, fixture_lenses};
+        use crate::stitch_camera::StitchCamera;
+
+        let mut a = vec![[0.5, 0.5]; RetainedBaseMaps::NODES_PER_LENS];
+        let mut b = a.clone();
+        let row = one_xs::ROWS / 2;
+        let col = one_xs::COLS / 2;
+        let index = row * one_xs::COLS + col;
+        a[index] = [0.001, 0.001];
+        b[index] = [0.001, 0.001];
+        let maps = RetainedBaseMaps::from_lenses(LensPair { a, b }).unwrap();
+        let reframe = Reframe::new(
+            &fixture_lenses(),
+            FRAME,
+            crate::Camera::default(),
+            crate::Held::default(),
+            1.0,
+            false,
+            crate::Sampling::default(),
+        );
+        let calibrated =
+            CameraMaskSupport::for_camera(StitchCamera::CalibratedMei, &reframe).unwrap();
+        let (calibrated_masks, calibrated_report) = calibrated.apply(&maps);
+
+        assert_eq!(calibrated_report.ranges, [(0, one_xs::ROWS), (0, 0)]);
+        assert_eq!(calibrated_report.rows_walked, one_xs::ROWS);
+        assert_eq!(calibrated_masks.a[index], 0);
+        assert_eq!(calibrated_masks.b[index], 0);
+        assert_eq!(calibrated_masks.a[index + 1], 255);
+
+        let native = CameraMaskSupport::for_test();
+        let (native_masks, native_report) = native.apply(&maps);
+        assert_eq!(native_report.ranges, camera_mask_ranges());
+        assert_eq!(native_report.rows_walked, 432);
+        assert_eq!(native_masks.a[index], 255);
+        assert_eq!(native_masks.b[index], 255);
     }
 
     #[test]

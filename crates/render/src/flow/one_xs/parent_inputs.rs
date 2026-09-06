@@ -11,7 +11,7 @@ use std::fmt;
 use kjerag_meta::{CalibrationSet, Model, Size, Sweep};
 
 use super::{LENS_TYPE, LensPair};
-use crate::projection::one_xs_parent_lens_quaternion;
+use crate::projection::{calibrated_parent_lens_quaternion, one_xs_parent_lens_quaternion};
 
 /// The selected mapper requests this many poses across one sensor readout.
 pub const POSE_COUNT: usize = 51;
@@ -139,6 +139,116 @@ pub fn diagnostic_selected_static(
     })
 }
 
+/// Pack the calibration-derived parent inputs for a generic calibrated Mei pair.
+///
+/// This is deliberately not another camera selector and does not relax the
+/// native ONE X2 diagnostic above. The caller owns camera admission. This
+/// adapter validates only the geometry it consumes, uses the ordinary
+/// renderer mounting, and takes its projection centre from the calibrated Mei
+/// principal point rather than ONE X2's captured native crop centre.
+pub(crate) fn calibrated_mei_static(
+    calibration: &CalibrationSet,
+) -> Result<LensPair<SelectedModel3Static>, StaticInputError> {
+    let dimension = calibration.dimension;
+    if dimension.width == 0 || dimension.height == 0 || dimension.width != dimension.height {
+        return Err(fail(format!(
+            "calibrated Mei parent input must be a nonzero square, not {} by {}",
+            dimension.width, dimension.height
+        )));
+    }
+    let [left, right]: [&kjerag_meta::Lens; 2] = calibration
+        .lenses
+        .iter()
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|lenses: Vec<_>| {
+            fail(format!(
+                "calibrated Mei parent input has {} lenses, expected 2",
+                lenses.len()
+            ))
+        })?;
+    let scan_axis = match calibration.readout().sweep {
+        Sweep::Down => ScanAxis::Vertical,
+        sweep => {
+            return Err(fail(format!(
+                "calibrated Mei parent input has unsupported readout {sweep:?}"
+            )));
+        }
+    };
+
+    let pack = |lens: &kjerag_meta::Lens, index| {
+        if lens.model != Model::Mei {
+            return Err(fail(format!(
+                "calibrated Mei parent lens {index} does not use a Mei model"
+            )));
+        }
+        let numbers = [
+            lens.intrinsics.xi,
+            lens.intrinsics.fx,
+            lens.intrinsics.fy,
+            lens.intrinsics.cx,
+            lens.intrinsics.cy,
+            lens.distortion.k1,
+            lens.distortion.k2,
+            lens.distortion.k3,
+            lens.distortion.p1,
+            lens.distortion.p2,
+            lens.pose.yaw_deg,
+            lens.pose.pitch_deg,
+            lens.pose.roll_deg,
+            lens.pose.translation_m[0],
+            lens.pose.translation_m[1],
+            lens.pose.translation_m[2],
+        ];
+        if numbers.iter().any(|value| !value.is_finite())
+            || lens.intrinsics.fx <= 0.0
+            || lens.intrinsics.fy <= 0.0
+        {
+            return Err(fail(format!(
+                "calibrated Mei parent lens {index} has invalid calibration values"
+            )));
+        }
+        if let Some(mounting) = lens.mounting
+            && mounting
+                .rows()
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+        {
+            return Err(fail(format!(
+                "calibrated Mei parent lens {index} has an invalid mounting"
+            )));
+        }
+
+        let quaternion = calibrated_parent_lens_quaternion(lens, index);
+        Ok(SelectedModel3Static {
+            center: [lens.intrinsics.cx as f32, lens.intrinsics.cy as f32],
+            focal: [lens.intrinsics.fx as f32, lens.intrinsics.fy as f32],
+            source_size: [dimension.width as f32, dimension.height as f32],
+            lens_quaternion_xyzw: [
+                quaternion.v[0] as f32,
+                quaternion.v[1] as f32,
+                quaternion.v[2] as f32,
+                quaternion.w as f32,
+            ],
+            xi: lens.intrinsics.xi as f32,
+            distortion: [
+                lens.distortion.k1 as f32,
+                lens.distortion.k2 as f32,
+                lens.distortion.k3 as f32,
+                lens.distortion.p1 as f32,
+                lens.distortion.p2 as f32,
+            ],
+            scan_axis,
+        })
+    };
+
+    Ok(LensPair {
+        a: pack(left, 0)?,
+        b: pack(right, 1)?,
+    })
+}
+
 /// Reproduce the selected host's 51 binary64 pose-request instants.
 ///
 /// `parent_timestamp_seconds` is the already converted result of Studio's
@@ -252,6 +362,35 @@ mod tests {
         }
     }
 
+    fn x4_air_calibration() -> CalibrationSet {
+        CalibrationSet {
+            camera_model: "Insta360 X4 Air".to_owned(),
+            firmware: "v1.2.7_build1".to_owned(),
+            dimension: Size {
+                width: 3_840,
+                height: 3_840,
+            },
+            lenses: crate::projection::tests::fixture_lenses(),
+            rolling_shutter_ms: 15.882_978_439_331_055,
+            gyro: GyroConfig {
+                encoding: GyroEncoding::Raw {
+                    accel_range_g: 32.0,
+                    gyro_range_dps: 2_000.0,
+                },
+                imu_orientation: "xZY",
+                first_frame_timestamp: 3_848_400,
+                gyro_timestamp: Some(1.6),
+            },
+            exposure: [ExposureTrack::default(), ExposureTrack::default()],
+            imu: GyroTrack::default(),
+            fused: OrientationTrack::default(),
+            calibration_canvas: Size {
+                width: 15_360,
+                height: 7_680,
+            },
+        }
+    }
+
     #[test]
     fn selected_static_inputs_match_the_captured_binary32_uploads() {
         let calibration = calibration();
@@ -307,5 +446,48 @@ mod tests {
                 0xc6, 0x77, 0x72, 0xb7,
             ]
         );
+    }
+
+    #[test]
+    fn calibrated_x4_air_inputs_use_delivered_intrinsics_and_dynamic_size() {
+        let calibration = x4_air_calibration();
+        let packed = calibrated_mei_static(&calibration).unwrap();
+
+        assert_eq!(packed.a.center, [1918.94_f32, 1927.21_f32]);
+        assert_eq!(packed.b.center, [1935.35_f32, 1935.09_f32]);
+        assert_ne!(
+            packed.a.center,
+            calibration.lenses[0].crop_centre.map(|value| value as f32)
+        );
+        assert_ne!(
+            packed.b.center,
+            calibration.lenses[1].crop_centre.map(|value| value as f32)
+        );
+        assert_eq!(packed.a.focal, [3665.9397_f32, 3667.4194_f32]);
+        assert_eq!(packed.b.focal, [3671.9126_f32, 3671.0823_f32]);
+        assert_eq!(packed.a.source_size, [3840.0, 3840.0]);
+        assert_eq!(packed.b.source_size, [3840.0, 3840.0]);
+        assert_eq!(packed.a.xi, 2.31494_f32);
+        assert_eq!(packed.a.scan_axis, ScanAxis::Vertical);
+        assert_eq!(packed.b.scan_axis, ScanAxis::Vertical);
+    }
+
+    #[test]
+    fn calibrated_mei_inputs_validate_the_geometry_they_consume() {
+        let mut calibration = x4_air_calibration();
+        calibration.dimension.width = 0;
+        assert!(calibrated_mei_static(&calibration).is_err());
+
+        let mut calibration = x4_air_calibration();
+        calibration.dimension.height -= 1;
+        assert!(calibrated_mei_static(&calibration).is_err());
+
+        let mut calibration = x4_air_calibration();
+        calibration.lenses[1].model = Model::Theta { k: [0.0; 5] };
+        assert!(calibrated_mei_static(&calibration).is_err());
+
+        let mut calibration = x4_air_calibration();
+        calibration.lenses[1].intrinsics.fx = f64::NAN;
+        assert!(calibrated_mei_static(&calibration).is_err());
     }
 }

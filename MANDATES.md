@@ -18,6 +18,35 @@ sequences, the reported riser defect and the owner's eye remain the quality gate
 Keep the readable reference implementation and existing evidence for comparison.
 Broader optimization reverse engineering remains frozen.
 
+### Shared product direction, owner approval 2026-09-05
+
+The owner approved taking product ownership and generalizing the stitcher:
+one shared GPU engine with camera-specific calibration/geometry inputs, not
+a separate implementation project for every camera. Prioritize usable,
+zero-config playback, a stable horizon, responsive seeking and the capacity
+target below. Existing architecture may be replaced where it obstructs that
+result. ONE X2 and the owner's X4 Air footage must both be regression inputs;
+success on one camera must not be reported as success on all supported files.
+The coordinator owns prioritization and verification. Owner-visible tradeoffs
+and branch acceptance remain the owner's decisions before merge.
+
+The owner additionally requires "chromatic calibration w parity to Studio's"
+when appropriate. Studio's term means photometric matching of the two lenses'
+color and brightness, represented in its project as `image_fusion`; it does
+not mean optical chromatic-aberration correction or per-channel lens
+displacement. `docs/research/linux-landscape.md` section 6 records the maker
+SDK's matching `EnableStitchFusion` description. The exact Studio 6.0.2 Flow
+On and Flow Off project blobs sealed by
+`docs/research/studio-video-oracle-602.json` both have Image Fusion enabled, as
+authenticated by a read-only inspection of those manifest-named projects. They
+therefore do not isolate Image Fusion's effect, coefficients or parity.
+After the shared camera stitcher is working, add this photometric lens-fusion
+work at the shared source-sampling/fusion boundary and verify it against the
+relevant Studio setting and real output. It is required follow-on work, not a
+completed feature. Do not invent Studio coefficients, build speculative
+scaffolding, reopen unrelated reverse engineering, or delay the current X4 Air
+stitching deliverable for it. A new Studio export is not part of this deliverable.
+
 ### Player performance target, owner clarification 2026-09-05
 
 "we need to do at least 240fps on this computer", clarified as "when I play
