@@ -14,6 +14,77 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Implemented X4 camera correction, 2026-09-06:** the real Scene seek/stitch/
+draw/screenshot path now renders frames 34569 through 34599 at the owner's
+exact view with a broadly straight horizon instead of the prior visible bend.
+Root inspected full-size first/middle/last frames and the complete sequence
+contact sheet. This is a branch candidate awaiting owner review, not whole-video
+or exact Studio parity. The review video is
+`scratch/x4-model6-scene-review-20260906-01/review.mp4`.
+
+The fix is camera geometry, not another solver: parse optional `offset_v6`
+without replacing the v3 IMU/camera identity; use its crop-scaled intrinsics,
+Template mounting and all thirteen distortion coefficients in the shared
+scalar/GPU parent projector. Resolve native calibration record 1 to container
+stream 0 and record 0 to stream 1 once in static packing. A fixed BODY Rx(pi),
+equivalently producer-SPHERE Ry(pi), preserves the existing view convention.
+No per-clip fit, source decoder reordering or new playback configuration is
+introduced. The attempted import-order-only patch was rejected after it
+rendered the wrong view and has been removed, not carried into playback.
+
+The Radeon 760M model-6 GPU parent pair matches the scalar reference bit for
+bit, and all seven existing model-3 qualification cases remain exact. The
+61-frame ONE X2 actual Scene regression is byte-identical to the current
+pre-change `shared-onex2-review-01` baseline in all 183 PPM/map/alpha files.
+The first comparison against the older `240-final-f6339-6399` baseline differed
+in RGB rounding only; it was the wrong baseline for this change. Final workspace
+tests passed 1139/0 with 30 ignored, and the exact-view native-window harness
+passed 48 checks with zero failures. The four two-file drop checks correctly
+skip for this single-file X4 capture. Root inspected the native window capture
+as well as the Scene sequence. Formatting, workspace all-target clippy,
+name-check and Cargo-source consistency checks pass. The branch player is
+rebuilt and ready for owner testing; main remains unchanged.
+
+The X4 blend/support still use the existing Kjerag v3-derived image-circle and
+blend law, and rolling motion still uses Kjerag's shared pose provider. Those
+are not newly authenticated Studio internals. Peripheral support coverage and
+the active 240 fps capacity target remain open; this visual improvement does
+not establish either. No visible tradeoff or merge is owner-approved yet.
+
+**Source-order finding, 2026-09-06:** the isolated Studio-map replay had its
+source lenses reversed. A read-only CoreVideo snapshot of the actual renderer
+inputs is byte-identical, across all 22,118,400 logical luma/chroma bytes per
+record, to container stream **1 for FTD/shader source 0** and container stream
+**0 for FTD/shader source 1**. Both are full-range NV12 at PTS 34572538.
+The source-read texture-assignment path preserves this FTD order. The earlier
+replay's filename-based stream-0-first assumption was wrong; its camera and
+interpolation ablations below must not be treated as correctly paired native
+replay evidence.
+
+With the verified source order, the same captured maps and uniforms now render
+a broadly straight horizon, without the prior obvious doubled terrain, at the
+fixed owner-view comparison. Only one common panorama rotation is fitted and
+applied unchanged to the final image, both lens-only images and alpha. The
+replay still differs locally and is softer than Studio. This is a corrected
+diagnostic, **not a native-player fix or owner acceptance**. The next work is
+implementation of the verified camera geometry with explicit source assignment,
+preserving ONE X2 and the player's horizon/view convention, not more blind
+camera-constant substitutions or a global decoder swap.
+
+Evidence: `scratch/x4-type11-source-pixels-20260906-02/` contains the exact
+decoded planes, same-window maps/blocks, balanced successful read-only lock and
+unlock receipts, and the byte-comparison script/result. The report hash matches
+on both hosts; all ten breakpoints were deleted and Studio detached. The fixed
+view and Studio comparison are in
+`scratch/x4-type11-direct-replay-20260906-01/registered-source-authenticated-to-studio-on/`.
+`docs/research/studio-x4-video-reference-602.json` records their hashes. The
+preceding source-pixel attempt never reached a render entry and copied no
+pixels; it is terminal and detached. Production source and native binary were
+unchanged at that capture checkpoint; the implementation above supersedes it.
+
+The following paragraphs retain the preceding diagnostic sequence. The verified
+source assignment above supersedes their unresolved-source conclusions.
+
 **X4 owner rejection and diagnosis, 2026-09-06:** the shared-camera candidate
 below is NOT accepted: the owner reports distorted terrain/horizon through the
 join. A same-source ablation of frame 34569 at the exact reported locked view
@@ -128,6 +199,50 @@ moves downstream of the verified projector; do not reacquire these camera
 inputs or treat more calibration variants as a fix. Production source and
 the native player are unchanged, and owner acceptance remains outstanding.
 
+The ordinary X4 360 exporter takes the plane-stitch/type-11 renderer, not the
+archived ONE X2 type-2 render entry. Its 200x100 packed source-UV and left-alpha
+uploads have now been captured repeatedly with identical bytes. Replaying
+them through the existing type-2 consumer still shows an offset join; that is
+not yet a faithful reproduction of the plane-stitch draw. Embedded shader
+source identifies direct per-fragment map interpolation, a source transform
+and coverage-weight normalization as consumer inputs.
+
+A direct-callsite observation now captures the submitted 96-byte fragment
+block and 152-byte texture block. The first texture transform is identity,
+with 3840x3840 source size and a 1x1 box; the fragment block names a 200x100
+lookup and 1x1 fisheye-coverage texture. The coverage texel itself was not
+captured. Thus a missing source transform is not supported as the correction.
+Both independently decoded lens PNGs have PTS 34572538, matching the captured
+native timing numerically, but the actual draw's source-pixel identity remains
+unverified. Evidence is in `scratch/x4-type11-inputs-20260906-02/` and the
+reference manifest. All ten breakpoints were deleted and Studio detached.
+No production fix is claimed; the next comparison bypasses the type-2
+consumer instead of changing camera constants to fit its output.
+
+That direct plane-stitch replay is now rendered from the captured inputs and
+independently decoded lens images. After one common panorama registration
+against Studio's AI-on frame zero, the actual owner-view crops still show a
+double horizon. The shared registration is applied unchanged to both lens-only
+images and alpha; no per-lens correction is fitted. Triangle-centroid checks
+in the captured blend region bound the type-2 interpolation discrepancy to
+2.241 source pixels in this sample, too small to explain the broad gap alone.
+The replay therefore does not establish native draw parity. The remaining
+boundary to authenticate is the actual source imagery and its path to this
+draw, not another blind projector or triangulation substitution. The replay,
+registration, lens-only images and audit are durable in
+`scratch/x4-type11-direct-replay-20260906-01/`.
+
+A following same-window observation now reads the two actual decoder records:
+both are 3840x3840 VideoToolbox frames with signed PTS 34572538, zero texture
+rotation and the same upside-down flag. The first TextureParam apply points
+exactly to record zero's MediaTexture. Maps and submitted blocks are identical
+to the preceding capture. This does not support a different-moment lens pair,
+but does not yet establish the container-stream ordering, source pixel bytes
+or final shader bindings. The report and bounded headers are preserved in
+`scratch/x4-type11-inputs-20260906-03/`, with matching report hashes on both
+hosts, all ten breakpoints deleted and the exporter detached. No player change
+or visual fix follows from this observation alone.
+
 The zero-flow roundtrip through the real CPU map merge, filtering and final
 materialization contributes at most 0.182 source pixel in the neutral X4
 fixture. This rules out broad deformation from that roundtrip without flow;
@@ -144,6 +259,13 @@ audio underruns. Paused capacity was 473.30. Playing p95 was 12.253 ms, p99
 18.480 ms and max 39.237 ms; 370/3324 draws exceeded 4.17 ms. This is an
 offscreen capacity measurement, not sustained budget compliance or native
 presentation proof (`scratch/x4-capacity-20260906-01.log`).
+
+A persistent-workgroup GPU experiment reduced isolated patch-search time but
+did not consistently improve actual X4 playback capacity in alternating A/B
+runs. It has been removed from production source. The baseline and candidate
+binaries, measurements and rejected patch remain in ignored scratch; native
+player code and binary are unchanged. Both versions still exceed the 4.17 ms
+frame-time budget at the tail, so average throughput is not target completion.
 
 **Shared-camera branch checkpoint, issue #184:** ONE X2 and X4 Air now use
 one resident GPU solver with separate camera calibration inputs. The native

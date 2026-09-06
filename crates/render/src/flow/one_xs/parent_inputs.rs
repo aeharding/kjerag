@@ -8,10 +8,13 @@
 use std::error::Error;
 use std::fmt;
 
-use kjerag_meta::{CalibrationSet, Model, Size, Sweep};
+use kjerag_meta::{CalibrationSet, Model, Quat, Size, Sweep};
 
 use super::{LENS_TYPE, LensPair};
-use crate::projection::{calibrated_parent_lens_quaternion, one_xs_parent_lens_quaternion};
+use crate::projection::{
+    calibrated_parent_lens_quaternion, one_xs_parent_lens_quaternion,
+    template_parent_lens_quaternion,
+};
 
 /// The selected mapper requests this many poses across one sensor readout.
 pub const POSE_COUNT: usize = 51;
@@ -23,19 +26,20 @@ pub enum ScanAxis {
     Vertical,
 }
 
-/// Calibration-derived binary32 fields for one selected model-3 Metal call.
+/// Calibration-derived binary32 inputs for one source lane's parent map.
 ///
 /// Runtime scale, offset, mapping-base, initial-composed and pose values are
 /// intentionally absent.  Those are not calibration and must remain visible
 /// at the later completion boundary.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SelectedModel3Static {
+pub struct StaticLensInputs {
     pub center: [f32; 2],
     pub focal: [f32; 2],
     pub source_size: [f32; 2],
     pub lens_quaternion_xyzw: [f32; 4],
     pub xi: f32,
     pub distortion: [f32; 5],
+    pub model6_distortion: Option<[f32; 13]>,
     pub scan_axis: ScanAxis,
 }
 
@@ -62,7 +66,7 @@ fn fail(message: impl Into<String>) -> StaticInputError {
 /// its own native setup evidence before this adapter may generalize it.
 pub fn diagnostic_selected_static(
     calibration: &CalibrationSet,
-) -> Result<LensPair<SelectedModel3Static>, StaticInputError> {
+) -> Result<LensPair<StaticLensInputs>, StaticInputError> {
     if !calibration.camera_model.starts_with("Insta360 ONE X2") {
         return Err(fail(format!(
             "camera model {} is not the selected Insta360 ONE X2 route",
@@ -109,7 +113,7 @@ pub fn diagnostic_selected_static(
 
     let pack = |lens: &kjerag_meta::Lens, index| {
         let quaternion = one_xs_parent_lens_quaternion(lens, index);
-        SelectedModel3Static {
+        StaticLensInputs {
             center: lens.crop_centre.map(|value| value as f32),
             focal: [lens.intrinsics.fx as f32, lens.intrinsics.fy as f32],
             source_size: [
@@ -130,6 +134,7 @@ pub fn diagnostic_selected_static(
                 lens.distortion.p1 as f32,
                 lens.distortion.p2 as f32,
             ],
+            model6_distortion: None,
             scan_axis,
         }
     };
@@ -148,7 +153,7 @@ pub fn diagnostic_selected_static(
 /// principal point rather than ONE X2's captured native crop centre.
 pub(crate) fn calibrated_mei_static(
     calibration: &CalibrationSet,
-) -> Result<LensPair<SelectedModel3Static>, StaticInputError> {
+) -> Result<LensPair<StaticLensInputs>, StaticInputError> {
     let dimension = calibration.dimension;
     if dimension.width == 0 || dimension.height == 0 || dimension.width != dimension.height {
         return Err(fail(format!(
@@ -221,7 +226,7 @@ pub(crate) fn calibrated_mei_static(
         }
 
         let quaternion = calibrated_parent_lens_quaternion(lens, index);
-        Ok(SelectedModel3Static {
+        Ok(StaticLensInputs {
             center: [lens.intrinsics.cx as f32, lens.intrinsics.cy as f32],
             focal: [lens.intrinsics.fx as f32, lens.intrinsics.fy as f32],
             source_size: [dimension.width as f32, dimension.height as f32],
@@ -239,6 +244,7 @@ pub(crate) fn calibrated_mei_static(
                 lens.distortion.p1 as f32,
                 lens.distortion.p2 as f32,
             ],
+            model6_distortion: None,
             scan_axis,
         })
     };
@@ -246,6 +252,84 @@ pub(crate) fn calibrated_mei_static(
     Ok(LensPair {
         a: pack(left, 0)?,
         b: pack(right, 1)?,
+    })
+}
+
+/// Associate X4's native model-6 calibration with delivered decoder lanes.
+///
+/// Studio's actual source pixels establish native slot 0 = container stream 1
+/// and native slot 1 = container stream 0. Resolve that association once here,
+/// keeping every downstream map, image circle, gate and imported frame in the
+/// shared engine's delivered-stream order. The decoder and IMU do not change.
+///
+/// The nominal raw Template matrices in BODY coordinates are Rz(pi), Rx(pi).
+/// After the source association their common bridge to Kjerag's established
+/// body/view convention is BODY Rx(pi), or SPHERE Ry(pi), since the parent
+/// sphere is [body.z, body.x, body.y]. This is a fixed coordinate conversion,
+/// not a fitted camera residual. Apply it to the static mounting so the
+/// existing rolling-pose provider remains in its established body basis.
+pub(crate) fn x4_model6_static(
+    calibration: &CalibrationSet,
+) -> Result<LensPair<StaticLensInputs>, StaticInputError> {
+    let models = calibration
+        .model6
+        .as_deref()
+        .ok_or_else(|| fail("X4 model-6 parent input has no offset_v6 calibration"))?;
+    if models.len() != 2
+        || models.iter().any(|model| model.lens_type != 131)
+        || calibration.dimension.width == 0
+        || calibration.dimension.width != calibration.dimension.height
+        || calibration.readout().sweep != Sweep::Down
+    {
+        return Err(fail(
+            "X4 model-6 parent requires two type-131 lenses with square frames and downward readout",
+        ));
+    }
+    let sphere_datum = Quat {
+        w: 0.0,
+        v: [0.0, 1.0, 0.0],
+    };
+    let pack = |native_slot: usize| {
+        let model = &models[native_slot];
+        let quaternion =
+            template_parent_lens_quaternion(model.pose, native_slot).times(sphere_datum);
+        let result = StaticLensInputs {
+            center: [model.intrinsics.cx as f32, model.intrinsics.cy as f32],
+            focal: [model.intrinsics.fx as f32, model.intrinsics.fy as f32],
+            source_size: [
+                calibration.dimension.width as f32,
+                calibration.dimension.height as f32,
+            ],
+            lens_quaternion_xyzw: [
+                quaternion.v[0] as f32,
+                quaternion.v[1] as f32,
+                quaternion.v[2] as f32,
+                quaternion.w as f32,
+            ],
+            xi: model.intrinsics.xi as f32,
+            distortion: [0.0; 5],
+            model6_distortion: Some(model.distortion.map(|value| value as f32)),
+            scan_axis: ScanAxis::Vertical,
+        };
+        if result.focal.iter().any(|&value| value <= 0.0)
+            || result
+                .center
+                .iter()
+                .chain(&result.focal)
+                .chain(&result.lens_quaternion_xyzw)
+                .chain(std::iter::once(&result.xi))
+                .chain(result.model6_distortion.as_ref().unwrap())
+                .any(|value| !value.is_finite())
+        {
+            return Err(fail(format!(
+                "X4 model-6 lens {native_slot} has invalid GPU calibration values"
+            )));
+        }
+        Ok(result)
+    };
+    Ok(LensPair {
+        a: pack(1)?,
+        b: pack(0)?,
     })
 }
 
@@ -345,6 +429,7 @@ mod tests {
                 height: ONE_XS_FRAME.height,
             },
             lenses: one_xs_lenses(),
+            model6: None,
             rolling_shutter_ms: 23.516_071_319_580_078,
             gyro: GyroConfig {
                 encoding: GyroEncoding::Scaled,
@@ -371,6 +456,7 @@ mod tests {
                 height: 3_840,
             },
             lenses: crate::projection::tests::fixture_lenses(),
+            model6: None,
             rolling_shutter_ms: 15.882_978_439_331_055,
             gyro: GyroConfig {
                 encoding: GyroEncoding::Raw {
@@ -446,6 +532,57 @@ mod tests {
                 0xc6, 0x77, 0x72, 0xb7,
             ]
         );
+    }
+
+    #[test]
+    fn x4_model6_associates_calibration_once_and_preserves_the_body_chart() {
+        let mut calibration = x4_air_calibration();
+        // Distinct principal points and coefficient payloads fingerprint the
+        // physical calibration records; neutral poses isolate the body datum.
+        calibration.model6 = Some(
+            (0..2)
+                .map(|index| kjerag_meta::Model6Lens {
+                    intrinsics: kjerag_meta::Intrinsics {
+                        xi: 2.31494,
+                        fx: 3668.0,
+                        fy: 3668.0,
+                        cx: 1920.0 + index as f64,
+                        cy: 1920.0,
+                    },
+                    distortion: [index as f64; 13],
+                    pose: kjerag_meta::Pose {
+                        yaw_deg: 0.0,
+                        pitch_deg: 0.0,
+                        roll_deg: 90.0,
+                        translation_m: [0.0; 3],
+                    },
+                    lens_type: 131,
+                })
+                .collect(),
+        );
+        let packed = x4_model6_static(&calibration).unwrap();
+        assert_eq!(packed.a.center[0], 1921.0);
+        assert_eq!(packed.b.center[0], 1920.0);
+        assert_eq!(packed.a.model6_distortion, Some([1.0; 13]));
+        assert_eq!(packed.b.model6_distortion, Some([0.0; 13]));
+        let body = [0.25, -0.5, 0.75];
+        let sphere = [body[2], body[0], body[1]];
+        for (lens, expected) in [
+            (&packed.a, body),
+            (&packed.b, [-body[0], body[1], -body[2]]),
+        ] {
+            let [x, y, z, w] = lens.lens_quaternion_xyzw;
+            let actual = Quat {
+                w: w as f64,
+                v: [x as f64, y as f64, z as f64],
+            }
+            .rotate(sphere);
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                assert!((actual - expected).abs() < 1.0e-6);
+            }
+        }
+        calibration.model6.as_mut().unwrap()[0].distortion[12] = f64::MAX;
+        assert!(x4_model6_static(&calibration).is_err());
     }
 
     #[test]

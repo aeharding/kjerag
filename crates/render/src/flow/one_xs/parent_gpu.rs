@@ -16,8 +16,9 @@ use super::resident_frame_gpu::GpuResidentReservation;
 use crate::Fallible;
 
 const PARAM_WORDS: usize = 33;
+const MODEL6_WORDS: usize = 14;
 const POSE_WORDS: usize = 51 * 4;
-const INPUT_WORDS: usize = 2 * PARAM_WORDS + POSE_WORDS;
+const INPUT_WORDS: usize = 2 * (PARAM_WORDS + MODEL6_WORDS) + POSE_WORDS;
 pub(super) const LENS_OUTPUT_WORDS: usize = SELECTED_FLOWSTATE_ROWS * SELECTED_FLOWSTATE_COLS * 2;
 const OUTPUT_WORDS: usize = 2 * LENS_OUTPUT_WORDS;
 
@@ -257,10 +258,21 @@ fn pack(prepared: &PreparedParentMap) -> Vec<u32> {
     let mut words = Vec::with_capacity(INPUT_WORDS);
     pack_parameters(&mut words, &prepared.parameters.a);
     pack_parameters(&mut words, &prepared.parameters.b);
+    pack_model6_parameters(&mut words, &prepared.parameters.a);
+    pack_model6_parameters(&mut words, &prepared.parameters.b);
     for pose in prepared.poses {
         words.extend(pose.map(f32::to_bits));
     }
     words
+}
+
+fn pack_model6_parameters(words: &mut Vec<u32>, value: &MetalCalcMapParams) {
+    if let Some(coefficients) = value.model6_distortion {
+        words.push(1);
+        words.extend(coefficients.map(f32::to_bits));
+    } else {
+        words.extend([0; MODEL6_WORDS]);
+    }
 }
 
 fn pack_parameters(words: &mut Vec<u32>, value: &MetalCalcMapParams) {

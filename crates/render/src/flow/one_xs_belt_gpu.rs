@@ -155,7 +155,7 @@ impl ResidentSourceFrontPipeline {
         orientation: OrientationTrack,
     ) -> Fallible<Self> {
         let parent_inputs = ParentMapBuilder::new(calibration)?;
-        let camera = crate::stitch_camera::StitchCamera::from_lenses(&calibration.lenses)
+        let camera = crate::stitch_camera::StitchCamera::from_calibration(calibration)
             .ok_or("resident stitching requires two compatible calibrated Mei lenses")?;
         let size =
             kjerag_media::Size::new(calibration.dimension.width, calibration.dimension.height);
@@ -3719,6 +3719,7 @@ mod tests {
                 height: ONE_XS_FRAME.height,
             },
             lenses,
+            model6: None,
             rolling_shutter_ms: readout_ms,
             gyro: GyroConfig {
                 encoding: GyroEncoding::Scaled,

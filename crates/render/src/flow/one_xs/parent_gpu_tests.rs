@@ -28,6 +28,7 @@ fn calibration() -> CalibrationSet {
             height: ONE_XS_FRAME.height,
         },
         lenses: one_xs_lenses(),
+        model6: None,
         rolling_shutter_ms: 20.0,
         gyro: GyroConfig {
             encoding: GyroEncoding::Scaled,
@@ -356,8 +357,8 @@ fn qualification_rejects_planted_parent_semantic_mutations() {
         ("A/B output base", "gid.z * LENS_OUTPUT_WORDS", "gid.z * 0u"),
         (
             "pose layout",
-            "const POSE_BASE: u32 = 66u",
-            "const POSE_BASE: u32 = 67u",
+            "const POSE_BASE: u32 = 94u",
+            "const POSE_BASE: u32 = 95u",
         ),
         (
             "low endpoint clamp",
@@ -493,6 +494,132 @@ fn parent_geometry_and_belts_share_one_pre_submission_owner_chain() {
     assert_eq!(Arc::strong_count(&source_owner), 2);
     assert!(!capture.snapshot().pending);
     eprintln!("ONE X2 GPU parent, geometry and belts retained one root reservation on {adapter}");
+}
+
+const MODEL6_COEFFICIENTS: [[f32; 13]; 2] = [
+    [
+        0.96564066,
+        -1.893_707_5,
+        3.895_677,
+        -0.13278545,
+        0.0,
+        0.00176593,
+        -0.00078501,
+        0.00636060,
+        0.00263606,
+        -0.00638099,
+        -0.00193177,
+        -0.02387245,
+        -0.00347206,
+    ],
+    [
+        0.927_919_8,
+        -1.358_195_3,
+        -0.19015622,
+        9.317_827,
+        0.0,
+        -0.00192407,
+        -0.00334321,
+        0.00950197,
+        -0.00726822,
+        0.00276126,
+        0.00455220,
+        0.01397504,
+        0.01839879,
+    ],
+];
+
+fn model6_parameters(coefficients: [f32; 13]) -> MetalCalcMapParams {
+    MetalCalcMapParams {
+        center: [1920.0, 1920.0],
+        focal: [3668.0, 3668.0],
+        src_size: [3840.0, 3840.0],
+        inv_src_size: [1.0, 1.0],
+        qci: [0.0, 0.0, 0.0, 1.0],
+        qwm: [0.0, 0.0, 0.0, 1.0],
+        q_c0_f0: [0.0, 0.0, 0.0, 1.0],
+        shift: [0.0, 0.0],
+        xi: 2.31494,
+        is_horizon_sweep: false,
+        flip: 1.0,
+        max_fov: f32::from_bits(0x4006_0a92),
+        distort_coeffs: coefficients[..5].try_into().unwrap(),
+        model6_distortion: Some(coefficients),
+        pos_scale: [3840.0, 3840.0],
+    }
+}
+
+fn model6_prepared() -> PreparedParentMap {
+    PreparedParentMap {
+        parameters: LensPair {
+            a: model6_parameters(MODEL6_COEFFICIENTS[0]),
+            b: model6_parameters(MODEL6_COEFFICIENTS[1]),
+        },
+        poses: [[0.0, 0.0, 0.0, 1.0]; 51],
+    }
+}
+
+#[test]
+fn pack_preserves_model3_prefix_and_appends_model6_payloads() {
+    let prepared = model6_prepared();
+    let words = pack(&prepared);
+    assert_eq!(&words[..PARAM_WORDS], &{
+        let mut expected = Vec::new();
+        pack_parameters(&mut expected, &prepared.parameters.a);
+        expected
+    });
+    assert_eq!(&words[PARAM_WORDS..2 * PARAM_WORDS], &{
+        let mut expected = Vec::new();
+        pack_parameters(&mut expected, &prepared.parameters.b);
+        expected
+    });
+    assert_eq!(words[2 * PARAM_WORDS], 1);
+    assert_eq!(words[2 * PARAM_WORDS + MODEL6_WORDS], 1);
+    assert_eq!(words.len(), INPUT_WORDS);
+}
+
+#[test]
+fn gpu_model6_maps_match_the_scalar_projector_bit_for_bit() {
+    let (device, queue, adapter, _) = match gpu() {
+        Ok(gpu) => gpu,
+        Err(why) if std::env::var_os("KJERAG_REQUIRE_GPU").is_none() => {
+            eprintln!("skipping model-6 GPU parent qualification: {why}");
+            return;
+        }
+        Err(why) => panic!("GPU required for model-6 parent qualification: {why}"),
+    };
+    let context = OneXsGpuContext::new(&device, &queue);
+    let pipeline = GpuParentMapPipeline::new(context.clone()).unwrap();
+    let prepared = model6_prepared();
+    let LensPair { a, b } = prepared.scalar_maps();
+    let expected: Vec<u32> = a
+        .row_major_values()
+        .iter()
+        .chain(b.row_major_values())
+        .flat_map(|position| position.map(f32::to_bits))
+        .collect();
+    let capture = GpuResidentCapture::new();
+    let frame = FrameStamp::for_test(6, Duration::from_secs(1), None);
+    let reservation = capture.reserve(frame.clone()).unwrap();
+    let encoded = pipeline.encode_prepared(
+        &prepared,
+        GpuPisFlight {
+            generation: 1,
+            frame,
+        },
+        reservation,
+    );
+    let actual = encoded.read_qualification(&context).unwrap();
+    if let Some((word, (&actual, &expected))) = actual
+        .iter()
+        .zip(&expected)
+        .enumerate()
+        .find(|(_, (actual, expected))| actual != expected)
+    {
+        panic!("model-6 GPU parent word {word} is {actual:#010x}, expected {expected:#010x}");
+    }
+    assert_eq!(actual.len(), expected.len());
+    eprintln!("qualified model-6 GPU parent maps on {adapter}");
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {

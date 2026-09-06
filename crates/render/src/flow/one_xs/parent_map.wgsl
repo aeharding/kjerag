@@ -2,7 +2,9 @@ const PI: f32 = 3.14159265358979323846;
 const COLS: u32 = 200u;
 const ROWS: u32 = 100u;
 const PARAM_WORDS: u32 = 33u;
-const POSE_BASE: u32 = 66u;
+const MODEL6_BASE: u32 = 66u;
+const MODEL6_WORDS: u32 = 14u;
+const POSE_BASE: u32 = 94u;
 const LENS_OUTPUT_WORDS: u32 = 40000u;
 // GENERATED_TABLES
 
@@ -79,6 +81,10 @@ fn sqrt_rn(value: f32) -> f32 {
 
 fn lane(lens: u32, offset: u32) -> f32 {
     return bitcast<f32>(inputs[lens * PARAM_WORDS + offset]);
+}
+
+fn model6_lane(lens: u32, offset: u32) -> f32 {
+    return bitcast<f32>(inputs[MODEL6_BASE + lens * MODEL6_WORDS + 1u + offset]);
 }
 
 fn quat_param(lens: u32, offset: u32) -> vec4f {
@@ -169,6 +175,17 @@ fn radtan_distort(position: vec2f, lens: u32) -> vec2f {
                  add_rn(add_rn(add_rn(position.y,mul_rn(position.y,radial)),mul_rn(mul_rn(2.0,lane(lens,30u)),mxy)),mul_rn(lane(lens,29u),add_rn(rho2,mul_rn(2.0,my2)))));
 }
 
+fn radtan_distort_model6(position: vec2f, lens: u32) -> vec2f {
+    let x = position.x; let y = position.y;
+    let r = add_rn(mul_rn(x,x),mul_rn(y,y)); let r2 = mul_rn(r,r);
+    let radial = add_rn(add_rn(add_rn(add_rn(add_rn(1.0,mul_rn(model6_lane(lens,0u),r)),mul_rn(model6_lane(lens,1u),r2)),mul_rn(mul_rn(model6_lane(lens,2u),r2),r)),mul_rn(mul_rn(model6_lane(lens,3u),r2),r2)),mul_rn(mul_rn(mul_rn(model6_lane(lens,4u),r2),r2),r));
+    let p = add_rn(model6_lane(lens,5u),mul_rn(model6_lane(lens,7u),r));
+    let q = add_rn(model6_lane(lens,6u),mul_rn(model6_lane(lens,8u),r));
+    let xd = add_rn(add_rn(add_rn(add_rn(mul_rn(x,radial),mul_rn(p,add_rn(r,mul_rn(mul_rn(2.0,x),x)))),mul_rn(mul_rn(mul_rn(2.0,q),x),y)),mul_rn(model6_lane(lens,9u),r)),mul_rn(model6_lane(lens,11u),r2));
+    let yd = add_rn(add_rn(add_rn(add_rn(mul_rn(y,radial),mul_rn(q,add_rn(r,mul_rn(mul_rn(2.0,y),y)))),mul_rn(mul_rn(mul_rn(2.0,p),x),y)),mul_rn(model6_lane(lens,10u),r)),mul_rn(model6_lane(lens,12u),r2));
+    return vec2f(xd, yd);
+}
+
 fn remap(dst_pos: vec2f, column: u32, row: u32, quaternion: vec4f, lens: u32) -> RemapResult {
     let ray = quaternion_rotate(quaternion, back_project(column, row));
     let rho2 = add_rn(mul_rn(ray.x,ray.x),mul_rn(ray.y,ray.y));
@@ -181,7 +198,13 @@ fn remap(dst_pos: vec2f, column: u32, row: u32, quaternion: vec4f, lens: u32) ->
             pixel = vec2f(-1.0, -1.0);
         } else {
             let reciprocal = div_rn(1.0,add_rn(ray.z,mul_rn(lane(lens,22u),radius)));
-            let distorted = radtan_distort(vec2f(mul_rn(reciprocal,ray.x),mul_rn(reciprocal,ray.y)),lens);
+            let undistorted = vec2f(mul_rn(reciprocal,ray.x),mul_rn(reciprocal,ray.y));
+            var distorted: vec2f;
+            if inputs[MODEL6_BASE + lens * MODEL6_WORDS] != 0u {
+                distorted = radtan_distort_model6(undistorted,lens);
+            } else {
+                distorted = radtan_distort(undistorted,lens);
+            }
             pixel = vec2f(add_rn(mul_rn(mul_rn(distorted.x,lane(lens,2u)),lane(lens,24u)),lane(lens,0u)),
                           add_rn(mul_rn(distorted.y,lane(lens,3u)),lane(lens,1u)));
         }

@@ -18,8 +18,8 @@ use super::LensPair;
 use super::base_map::FlowstateRoi;
 use super::metal_calc_map::{MetalCalcMapParams, diagnostic_metal_calc_map};
 use super::parent_inputs::{
-    POSE_COUNT, ScanAxis, SelectedModel3Static, calibrated_mei_static, diagnostic_pose_times,
-    diagnostic_selected_static,
+    POSE_COUNT, ScanAxis, StaticLensInputs, calibrated_mei_static, diagnostic_pose_times,
+    diagnostic_selected_static, x4_model6_static,
 };
 use crate::stitch_camera::StitchCamera;
 
@@ -46,7 +46,7 @@ fn fail(message: impl Into<String>) -> ParentMapError {
 /// exact authenticated container center without repeating static work.
 #[derive(Clone, Debug)]
 pub struct ParentMapBuilder {
-    selected: LensPair<SelectedModel3Static>,
+    selected: LensPair<StaticLensInputs>,
     readout: Readout,
 }
 
@@ -67,6 +67,9 @@ impl ParentMapBuilder {
         }
         let selected = match StitchCamera::from_lenses(&calibration.lenses) {
             Some(StitchCamera::OneX2) => diagnostic_selected_static(calibration),
+            Some(StitchCamera::CalibratedMei) if calibration.model6.is_some() => {
+                x4_model6_static(calibration)
+            }
             Some(StitchCamera::CalibratedMei) => calibrated_mei_static(calibration),
             None => {
                 return Err(fail(
@@ -155,7 +158,7 @@ impl PreparedParentMap {
 }
 
 fn prepare_at_center(
-    selected: &LensPair<SelectedModel3Static>,
+    selected: &LensPair<StaticLensInputs>,
     orientation: &OrientationTrack,
     center: Duration,
     readout: Readout,
@@ -202,7 +205,7 @@ fn prepare_at_center(
     })
 }
 
-fn parameters(selected: &SelectedModel3Static, mapping_base: [f32; 4]) -> MetalCalcMapParams {
+fn parameters(selected: &StaticLensInputs, mapping_base: [f32; 4]) -> MetalCalcMapParams {
     MetalCalcMapParams {
         center: selected.center,
         focal: selected.focal,
@@ -220,6 +223,7 @@ fn parameters(selected: &SelectedModel3Static, mapping_base: [f32; 4]) -> MetalC
         flip: 1.0,
         max_fov: f32::from_bits(0x4006_0a92),
         distort_coeffs: selected.distortion,
+        model6_distortion: selected.model6_distortion,
         pos_scale: selected.source_size,
     }
 }
@@ -323,6 +327,7 @@ mod tests {
                 height: ONE_XS_FRAME.height,
             },
             lenses: one_xs_lenses(),
+            model6: None,
             rolling_shutter_ms: 20.0,
             gyro: GyroConfig {
                 encoding: GyroEncoding::Scaled,
@@ -365,6 +370,7 @@ mod tests {
                 height: FRAME.height,
             },
             lenses: fixture_lenses(),
+            model6: None,
             rolling_shutter_ms: 15.882_978_439_331_055,
             gyro: GyroConfig {
                 encoding: GyroEncoding::Scaled,

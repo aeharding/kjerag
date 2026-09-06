@@ -330,8 +330,9 @@ struct Show {
     files: Arc<[PathBuf]>,
     /// The size of one lens's decoded frame.
     frame: Size,
-    /// One per decoded stream, in stream order, as the camera calibrated
-    /// them.
+    /// One per decoded stream in the generic v3 projection's established
+    /// delivered-lane convention. A resident camera adapter owns any native
+    /// calibration-record association without reordering these lenses.
     lenses: Arc<[Lens]>,
     /// What names the camera these came off, serial-free
     /// ([`CalibrationSet::camera_key`]). The seam calibration is stored under
@@ -2230,10 +2231,10 @@ fn handover_deg(lenses: &[Lens], frame: Size) -> Option<f32> {
 /// for the lenses the shader samples, checked against the streams they will
 /// be sampled from, and where the camera body went while it recorded.
 ///
-/// One lens entry per decoded stream, and in the same order: the trailer
-/// writes its lens blocks in the order the container carries the streams,
-/// and a paired per-lens capture opens lens 0's file first, so the two
-/// orders are the same one (`kjerag_meta::lens_index`).
+/// The generic v3 projection keeps its established delivered-lane convention.
+/// Native calibration records do not universally follow container stream order:
+/// the X4 model-6 parent adapter explicitly associates its records with those
+/// lanes, without changing this lens list or the IMU's calibration reference.
 ///
 /// **The calibration belongs to the capture, not to the file** (issue #79).
 /// A camera that writes one lens per file writes one trailer for the pair
@@ -2345,7 +2346,7 @@ fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<Calibrated> {
     let (one_xs, one_xs_calibration) = if ONE_XS_PLAYBACK_ENABLED
         && !orientation.is_empty()
         && lenses.len() == calibration.lenses.len()
-        && crate::stitch_camera::StitchCamera::from_lenses(&lenses).is_some()
+        && crate::stitch_camera::StitchCamera::from_calibration(&calibration).is_some()
     {
         // Validate camera inputs while opening, before changing the player's
         // presentation policy or constructing any GPU resources.
@@ -6120,6 +6121,7 @@ mod tests {
                 height: ONE_XS_FRAME.height,
             },
             lenses: one_xs_lenses(),
+            model6: None,
             rolling_shutter_ms: 23.516_071_319_580_078,
             gyro: GyroConfig {
                 encoding: GyroEncoding::Scaled,

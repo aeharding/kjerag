@@ -102,6 +102,9 @@ pub(crate) struct ExtraMetadata {
     #[prost(string, tag = "54")]
     #[cfg_attr(test, serde(deserialize_with = "offset_v3_from_fixture"))]
     pub offset_v3: String,
+    /// The extended 13-coefficient lens calibration when this camera writes it.
+    #[prost(string, tag = "111")]
+    pub offset_v6: String,
     #[prost(bool, tag = "62")]
     pub is_raw_gyro: bool,
     #[prost(message, optional, tag = "65")]

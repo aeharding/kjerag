@@ -24,12 +24,13 @@ const COLS: usize = SELECTED_FLOWSTATE_COLS;
 const PI: f32 = std::f32::consts::PI;
 const SENTINEL: [f32; 2] = [-1.0, -1.0];
 
-/// The model-3 subset of Studio's uploaded `FlowstateParam`.
+/// The shared model-3/model-6 subset of Studio's uploaded `FlowstateParam`.
 ///
 /// Every floating value is already binary32, exactly as the host wrapper
-/// supplied it to Metal.  The boolean specializes the uploaded integer and
-/// model 3 is specialized by this type.  Keeping packing out of the arithmetic
-/// makes conversions and quaternion roles visible at the caller.
+/// supplied it to Metal. The boolean specializes the uploaded sweep integer;
+/// the optional 13 coefficients discriminate model 6 from the original
+/// five-coefficient model-3 path. Keeping packing out of the arithmetic makes
+/// conversions and quaternion roles visible at the caller.
 #[derive(Clone, Debug, PartialEq)]
 #[doc(hidden)]
 pub struct MetalCalcMapParams {
@@ -46,10 +47,11 @@ pub struct MetalCalcMapParams {
     pub flip: f32,
     pub max_fov: f32,
     pub distort_coeffs: [f32; 5],
+    pub model6_distortion: Option<[f32; 13]>,
     pub pos_scale: [f32; 2],
 }
 
-/// Evaluate Studio's selected model-3 `CalcMap` source for one lens.
+/// Evaluate Studio's selected `CalcMap` source for one model-3 or model-6 lens.
 ///
 /// The returned layout is the same tightly packed row-major `CV_32FC2` half
 /// consumed by the selected native `mapMerge` call.
@@ -241,7 +243,10 @@ fn omni_projection(ray: [f32; 3], param: &MetalCalcMapParams) -> (bool, [f32; 2]
         }
         let reciprocal = 1.0 / (z + param.xi * radius);
         let undistorted = [reciprocal * x, reciprocal * y];
-        let distorted = radtan_distort(undistorted, &param.distort_coeffs);
+        let distorted = match &param.model6_distortion {
+            Some(coefficients) => radtan_distort_model6(undistorted, coefficients),
+            None => radtan_distort(undistorted, &param.distort_coeffs),
+        };
         (
             true,
             [
@@ -271,6 +276,20 @@ fn radtan_distort(position: [f32; 2], coefficients: &[f32; 5]) -> [f32; 2] {
             + position[1] * radial
             + 2.0 * coefficients[4] * mxy
             + coefficients[3] * (rho2 + 2.0 * my2),
+    ]
+}
+
+fn radtan_distort_model6(position: [f32; 2], c: &[f32; 13]) -> [f32; 2] {
+    let x = position[0];
+    let y = position[1];
+    let r = x * x + y * y;
+    let r2 = r * r;
+    let radial = 1.0 + c[0] * r + c[1] * r2 + c[2] * r2 * r + c[3] * r2 * r2 + c[4] * r2 * r2 * r;
+    let p = c[5] + c[7] * r;
+    let q = c[6] + c[8] * r;
+    [
+        x * radial + p * (r + 2.0 * x * x) + 2.0 * q * x * y + c[9] * r + c[11] * r2,
+        y * radial + q * (r + 2.0 * y * y) + 2.0 * p * x * y + c[10] * r + c[12] * r2,
     ]
 }
 
@@ -316,5 +335,41 @@ mod tests {
         quaternions[50] = [5.0, 6.0, 7.0, 8.0];
         assert_eq!(get_quat(&quaternions, -0.1), quaternions[0]);
         assert_eq!(get_quat(&quaternions, 1.1), quaternions[50]);
+    }
+
+    #[test]
+    fn model6_distortion_matches_archived_x4_coefficients() {
+        let coefficients = [
+            0.96564066,
+            -1.893_707_5,
+            3.895_677,
+            -0.13278545,
+            0.0,
+            0.00176593,
+            -0.00078501,
+            0.00636060,
+            0.00263606,
+            -0.00638099,
+            -0.00193177,
+            -0.02387245,
+            -0.00347206,
+        ];
+        let result = radtan_distort_model6([0.31, -0.27], &coefficients);
+        assert_eq!(result.map(f32::to_bits), [0x3eb2_a875, 0xbe9c_6c6c]);
+    }
+
+    #[test]
+    fn every_model6_coefficient_position_affects_the_projection() {
+        let position = [0.31, -0.27];
+        let identity = radtan_distort_model6(position, &[0.0; 13]);
+        for index in 0..13 {
+            let mut coefficients = [0.0; 13];
+            coefficients[index] = 0.25;
+            assert_ne!(
+                radtan_distort_model6(position, &coefficients),
+                identity,
+                "model-6 coefficient c{index} was inert"
+            );
+        }
     }
 }

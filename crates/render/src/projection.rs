@@ -61,7 +61,7 @@
 use std::f32::consts::PI;
 use std::sync::OnceLock;
 
-use kjerag_meta::{Intrinsics, Lens, Model, Quat};
+use kjerag_meta::{Intrinsics, Lens, Model, Pose, Quat};
 
 use super::sampling::Sampling;
 use super::{Camera, Size};
@@ -3333,8 +3333,9 @@ fn lens_from_body(lens: &Lens, index: usize) -> Mat3 {
 /// Keep this renderer-local. [`kjerag_meta::Pose`] also owns the IMU mounting,
 /// while Kjerag's caller scopes this formula to lens type `0x29` because
 /// upstream dispatch and the runtime packed-UV capture close that path. The
-/// native Template map worker itself has no `0x29` comparison; other camera
-/// types remain unverified.
+/// native Template map worker itself has no `0x29` comparison. The X4 model-6
+/// parent adapter now shares the raw Template helper with its independently
+/// verified source association; other native camera families remain unverified.
 fn one_xs_lens_from_body(lens: &Lens, index: usize) -> Mat3 {
     let mounting = one_xs_template_mounting(lens, index);
 
@@ -3344,15 +3345,14 @@ fn one_xs_lens_from_body(lens: &Lens, index: usize) -> Mat3 {
 
 /// The native ONE X2 Template mounting before its body-to-sphere basis.
 fn one_xs_template_mounting(lens: &Lens, index: usize) -> Mat3 {
-    let mut mounting = one_xs_template_base(lens);
+    let mut mounting = template_mounting_base(lens.pose);
     if index == 0 {
         mounting = mounting.mul(Mat3::rot_z(std::f64::consts::PI));
     }
     mounting
 }
 
-fn one_xs_template_base(lens: &Lens) -> Mat3 {
-    let pose = lens.pose;
+fn template_mounting_base(pose: Pose) -> Mat3 {
     Mat3::rot_y((pose.pitch_deg + 90.0).to_radians())
         .mul(Mat3::rot_z(pose.yaw_deg.to_radians()))
         .mul(Mat3::rot_x(pose.roll_deg.to_radians()))
@@ -3365,7 +3365,13 @@ fn one_xs_template_base(lens: &Lens) -> Mat3 {
 /// `(0,0,1,0)`.  That branch, rather than a generic positive-`w` convention,
 /// fixes the observed quaternion sign.
 pub(crate) fn one_xs_parent_lens_quaternion(lens: &Lens, index: usize) -> Quat {
-    let mut quaternion = eigen_quaternion(one_xs_template_base(lens));
+    template_parent_lens_quaternion(lens.pose, index)
+}
+
+/// The native Template law shared by the captured ONE X2 and X4 models.
+/// This image mounting does not alter the metadata-owned IMU mounting.
+pub(crate) fn template_parent_lens_quaternion(pose: Pose, index: usize) -> Quat {
+    let mut quaternion = eigen_quaternion(template_mounting_base(pose));
     if index == 0 {
         let [x, y, z] = quaternion.v;
         quaternion = Quat {

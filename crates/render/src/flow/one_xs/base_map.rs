@@ -702,6 +702,7 @@ mod tests {
                 height: FRAME.height,
             },
             lenses: fixture_lenses(),
+            model6: None,
             rolling_shutter_ms: 15.882_978_439_331_055,
             gyro: GyroConfig {
                 encoding: GyroEncoding::Scaled,

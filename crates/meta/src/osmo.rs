@@ -1054,6 +1054,7 @@ fn from_record(record: &[u8]) -> Result<CalibrationSet, Error> {
         firmware: text(camera, field::FIRMWARE).unwrap_or_default(),
         dimension,
         lenses,
+        model6: None,
         // Not in the record, and a readout nobody has measured is one this
         // does not correct for (`kjerag_meta::Sweep`).
         rolling_shutter_ms: 0.0,

@@ -2,10 +2,11 @@
 //!
 //! Solver grids, temporal processing, frame ownership and GPU drawing are
 //! shared. The captured ONE X2 geometry stays a distinct compatibility law;
-//! X4 Air residual-pose Mei lenses use Kjerag's calibrated projection law.
-//! Selecting that law does not claim Studio parity on an unreviewed camera.
+//! X4 Air uses the captured model-6 Template geometry, associated once with
+//! delivered source lanes. Its v3-only classifier remains a reference boundary;
+//! live X4 admission requires the extended calibration.
 
-use kjerag_meta::{Lens, Model};
+use kjerag_meta::{CalibrationSet, Lens, Model};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StitchCamera {
@@ -14,6 +15,18 @@ pub(crate) enum StitchCamera {
 }
 
 impl StitchCamera {
+    /// Camera admission for live resident playback.
+    ///
+    /// The generic lens-only classifier remains useful to resource and
+    /// reference-map code, but the selected X4 path additionally requires the
+    /// extended calibration its parent projector consumes.
+    pub(crate) fn from_calibration(calibration: &CalibrationSet) -> Option<Self> {
+        match Self::from_lenses(&calibration.lenses) {
+            Some(Self::CalibratedMei) if calibration.model6.is_none() => None,
+            camera => camera,
+        }
+    }
+
     pub(crate) fn from_lenses(lenses: &[Lens]) -> Option<Self> {
         let [a, b] = lenses else { return None };
         if [a, b]
@@ -37,6 +50,34 @@ impl StitchCamera {
 mod tests {
     use super::*;
     use crate::projection::tests::{fixture_lenses, one_xs_lenses};
+    use kjerag_meta::{ExposureTrack, GyroConfig, GyroEncoding, GyroTrack, OrientationTrack, Size};
+
+    fn calibration(lenses: Vec<Lens>) -> CalibrationSet {
+        CalibrationSet {
+            camera_model: "admission fixture".to_owned(),
+            firmware: String::new(),
+            dimension: Size {
+                width: 3_840,
+                height: 3_840,
+            },
+            lenses,
+            model6: None,
+            rolling_shutter_ms: 1.0,
+            gyro: GyroConfig {
+                encoding: GyroEncoding::Scaled,
+                imu_orientation: "Zxy",
+                first_frame_timestamp: 0,
+                gyro_timestamp: None,
+            },
+            exposure: [ExposureTrack::default(), ExposureTrack::default()],
+            imu: GyroTrack::default(),
+            fused: OrientationTrack::default(),
+            calibration_canvas: Size {
+                width: 7_680,
+                height: 3_840,
+            },
+        }
+    }
 
     #[test]
     fn camera_laws_share_admission_without_changing_lens_identity() {
@@ -51,6 +92,23 @@ mod tests {
         );
         assert_eq!(x4[0].lens_type, 131);
         assert_eq!(x4[1].lens_type, 131);
+    }
+
+    #[test]
+    fn live_x4_admission_requires_model6_without_changing_one_x2() {
+        let one_x2 = calibration(one_xs_lenses());
+        assert_eq!(
+            StitchCamera::from_calibration(&one_x2),
+            Some(StitchCamera::OneX2)
+        );
+
+        let mut x4 = calibration(fixture_lenses());
+        assert_eq!(StitchCamera::from_calibration(&x4), None);
+        x4.model6 = Some(Vec::new());
+        assert_eq!(
+            StitchCamera::from_calibration(&x4),
+            Some(StitchCamera::CalibratedMei)
+        );
     }
 
     #[test]

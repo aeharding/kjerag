@@ -709,6 +709,7 @@ mod tests {
                 height: ONE_XS_FRAME.height,
             },
             lenses: one_xs_lenses(),
+            model6: None,
             rolling_shutter_ms: 23.516_071_319_580_078,
             gyro: GyroConfig {
                 encoding: GyroEncoding::Scaled,

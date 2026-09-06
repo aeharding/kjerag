@@ -88,10 +88,18 @@ explicit diagnostic/oracle boundary and is not a selected fallback.
 The resident solver now serves ONE X2 and X4 Air. `stitch_camera` selects
 the two tested lens families without changing their metadata identity. The
 ONE X2 law retains its recovered Template mounting, crop centers, alpha and
-housing masks. The calibrated Mei law uses the existing X4 projection's
-intrinsic centers and lens mounting, delivered source dimensions, blend
-weights and image circles. It applies valid-image support across the whole
-solver belt instead of inheriting ONE X2's pole-only housing exclusion.
+housing masks. X4 Air parents use the native model-6 Template mounting and
+13-coefficient distortion from `offset_v6`. The adapter assigns native record
+1 to delivered stream 0 and native record 0 to stream 1, then applies a fixed
+body-to-sphere datum once in camera packing. Decoder order, IMU calibration,
+view controls and downstream A/B ownership stay unchanged. A v3-only X4 stays
+on ordinary projection instead of entering the resident solver.
+
+X4 currently retains Kjerag's existing blend weights and image-circle support,
+not a claim of Studio's complete fusion law. The support applies across the
+whole solver belt instead of inheriting ONE X2's pole-only housing exclusion.
+Checking peripheral support against the associated model-6 centers remains
+follow-up coverage work; the centers differ from the v3 support circles.
 
 Everything after that camera boundary is shared: source import, parent GPU
 mapping, belt sampling, sparse PIS, temporal history, final map construction,
@@ -104,7 +112,7 @@ projection path rather than entering a parent mapper that requires it.
 
 The fixed solver chart, displacement gates and native parent UV convention
 remain shared implementation choices, not evidence of Studio's X4 setup.
-Admission is deliberately limited to type-41/type-131 residual Mei pairs;
+Admission is deliberately limited to type-41 and model-6 type-131 pairs;
 other camera families need calibration/coverage validation, not a new PIS
 implementation. In particular, arbitrary mounting residuals could move a
 different camera's seam outside this chart. Existing native oracle APIs and

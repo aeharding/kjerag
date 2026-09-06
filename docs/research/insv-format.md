@@ -408,7 +408,7 @@ can identify a string by token count (MED, inferred from the fixture):
   terms**, i.e. a different and weaker camera model.
 
 The progression v1 to v2 to v3 is a progression in model richness, not
-just precision. Kjerag currently reads `offset_v3`; this is not a statement
+just precision. Kjerag originally read only `offset_v3`; this is not a statement
 that Studio selects it on every camera. The later X4 analysis at commit
 `672f9f4f17e1633c29945e49c73279ff19e8990d`,
 `docs/research/studio-seam-re.md` sections 3.3 and 5.3, reads the selected
@@ -417,9 +417,21 @@ before v3 and constructing the 13-coefficient `RadtanDistortPro` model.
 The owner's April X4 Air source contains that exact 523-byte, 56-token v6
 record, SHA-256
 `0950b9d7bb63fc131e698cf80cf81d7720a6cdae4d3f1c1f8514cba3e7fba3ef`,
-reverified directly from its indexed metadata on 2026-09-06. This establishes
-a current calibration-support gap, not the cause or fix of the reported
-horizon defect, nor a runtime trace of the newer Mac Studio 6.0.2 export.
+reverified directly from its indexed metadata on 2026-09-06. The later Mac
+6.0.2 captures independently establish model 6, the centered endpoint-scaled
+intrinsics and raw Template quaternions. Actual renderer source pixels also
+establish native record 0 as container stream 1 and record 1 as stream 0.
+The evidence is indexed in `studio-x4-video-reference-602.json`.
+
+Kjerag now parses optional `offset_v6` alongside v3. A v6 block has 27 fields:
+`xi, fx, fy, cx, cy, yaw, pitch, roll, tx, ty, tz`, thirteen coefficients,
+then `calib_w, calib_h, lensType`. V3 still owns the established IMU mounting,
+generic projection and camera key. The selected X4 parent uses v6, resolves
+its native calibration records to delivered stream order once, and applies a
+fixed body datum without fitting a clip. ONE X2 retains its established model-3
+path. The checked-in `x4air-offset-v6.txt` contains only this serial-free
+calibration string. Bounded actual-player sequence review shows the broad
+horizon defect improved; this does not establish whole-video Studio parity.
 
 ### 4.5 `offset` vs `original_offset`
 
