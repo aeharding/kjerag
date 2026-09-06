@@ -447,13 +447,14 @@ The first lazy resident-session construction runs the existing target-device
 arithmetic qualifications synchronously. Those constructor-only probes perform
 bulk readbacks and waits. Once the session exists, the UI-side submit, redraw,
 draw and retirement paths perform no bulk readback or wait; only the four-byte
-validity callback crosses to CPU. The worker splits the unchanged fine L1
-solver's 47 dispatches into six command buffers of at most eight dispatches and
-waits between those L1 chunks so view work can enter the shared queue. The
-prefix, post-L1 and final-map commands remain normally queued, and final validity
-mapping is registered without a worker wait. These are command and scheduling
-boundaries only: shader arithmetic, dispatch order, buffers, estimator state and
-map construction are unchanged. The bulk legacy CPU stitch implementation is
+validity callback crosses to CPU. The worker submits each GPU stage normally,
+without waits between stages or chunks. An actual resident L1 pacing trial
+increased picture delay and worsened redraw tails on both cameras and was
+removed, together with the earlier diagnostic-only pacing machinery. Selected
+L1 runs through `GpuL2BridgeOutput::submit_l1_pis`, not the CPU-grid diagnostic
+`submit_pis_stage`. A test-only counter at the selected successful-submission
+site lets real Scene cold, warm and cached-redraw tests prove worker routing.
+The bulk legacy CPU stitch implementation is
 retained solely as the frozen oracle and explicit diagnostic surface; small
 control, pose, identity and lifecycle state remains on CPU.
 
@@ -477,6 +478,11 @@ parity.
 
 ## Trap list (each verified in the 2026-07 study)
 
+- A passing solver primitive test does not prove playback uses that entry.
+  The 2026-09-06 L1 pacing change was initially attached to a CPU-grid
+  diagnostic while resident playback used the GPU L2-to-L1 bridge. Its
+  apparent paced/unpaced and batch-size timing differences were uncontrolled
+  variation, not effects of those edits. Verify the actual Scene call path.
 - Use descriptor `pitch[]`/`offset[]` verbatim. Chroma pitch is
   `align(width, 512)`: at 3840-wide that is 4096 != 3840, and computed
   strides shear chroma on real footage while passing on 1920/2560 tests.

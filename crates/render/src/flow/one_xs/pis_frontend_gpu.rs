@@ -468,27 +468,16 @@ impl<K> GpuPreparedFrame<K> {
                     binding(8, pair.models),
                 ],
             });
-        if level == Level::One && self.context.is_worker_thread() {
-            for command in dispatch
-                .pipeline
-                .encode_chunks(self.context.device(), &resources, level)
-            {
-                self.belts
-                    .lease
-                    .submit_paced_after(&self.context, |_| command)?;
-            }
-        } else {
-            let mut encoder =
-                self.context
-                    .device()
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("ONE X2 resident paired GPU PIS"),
-                    });
-            dispatch.pipeline.encode(&mut encoder, &resources, level);
-            self.belts
-                .lease
-                .submit_after(&self.context, |_| encoder.finish())?;
-        }
+        let mut encoder =
+            self.context
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("ONE X2 resident paired GPU PIS"),
+                });
+        dispatch.pipeline.encode(&mut encoder, &resources, level);
+        self.belts
+            .lease
+            .submit_after(&self.context, |_| encoder.finish())?;
         Ok(GpuPreparedTerminal {
             receipt: GpuPisStageReceipt {
                 flight,

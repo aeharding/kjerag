@@ -1145,6 +1145,8 @@ impl<K, P: GpuResidentLevelTwoPost> GpuL2BridgeOutput<K, P> {
             .lease
             .submit_after(&bridge.context, |_| encoder.finish())?;
         #[cfg(test)]
+        bridge.context.note_worker_l1_submission();
+        #[cfg(test)]
         let l2_terminal = self._terminal.clone();
         #[cfg(test)]
         let l1_initial = self.seeds.buffer.clone();

@@ -69,7 +69,6 @@ const DISTANCE_PROBES: &[(u32, u32, u32)] = &[
 
 const DISPARITY_PROBES: usize = 5;
 const PROBE_WORDS: usize = 1 + DIVISION_PROBES.len() + DISTANCE_PROBES.len() + DISPARITY_PROBES;
-const DISPATCHES_PER_COMMAND: usize = 8;
 
 /// One capture-owned GPU sparse-solver transaction.
 ///
@@ -814,26 +813,6 @@ impl GpuPisPipeline {
         self.encode_schedule(encoder, resources, level, &self.wavefront_schedule(level));
     }
 
-    /// Cut one unchanged level dispatch sequence into bounded command buffers.
-    /// This does not claim that any individual dispatch meets a time budget.
-    pub(crate) fn encode_chunks(
-        &self,
-        device: &wgpu::Device,
-        resources: &wgpu::BindGroup,
-        level: Level,
-    ) -> Vec<wgpu::CommandBuffer> {
-        self.wavefront_schedule(level)
-            .chunks(DISPATCHES_PER_COMMAND)
-            .map(|schedule| {
-                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("ONE X2 paired GPU PIS chunk"),
-                });
-                self.encode_schedule(&mut encoder, resources, level, schedule);
-                encoder.finish()
-            })
-            .collect()
-    }
-
     /// Execute both native directions at one level. Inputs have already passed
     /// the CPU constructor's shape, finite, mask and rolling-denominator gates.
     #[allow(clippy::too_many_arguments)]
@@ -899,16 +878,6 @@ impl GpuPisPipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         packed: PackedPair,
-    ) -> Fallible<PairedTerminalBits> {
-        self.dispatch_pair_with_encoding(device, queue, packed, false)
-    }
-
-    fn dispatch_pair_with_encoding(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        packed: PackedPair,
-        chunked: bool,
     ) -> Fallible<PairedTerminalBits> {
         let u32_buffer = upload(
             device,
@@ -977,23 +946,12 @@ impl GpuPisPipeline {
                 },
             ],
         });
-        let commands = if chunked {
-            let mut commands = self.encode_chunks(device, &resources, packed.level);
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("ONE X2 paired GPU PIS terminal readback"),
-            });
-            encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, output_size);
-            commands.push(encoder.finish());
-            commands
-        } else {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("ONE X2 paired GPU PIS"),
-            });
-            self.encode(&mut encoder, &resources, packed.level);
-            encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, output_size);
-            vec![encoder.finish()]
-        };
-        let submission = queue.submit(commands);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ONE X2 paired GPU PIS"),
+        });
+        self.encode(&mut encoder, &resources, packed.level);
+        encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, output_size);
+        let submission = queue.submit([encoder.finish()]);
         let slice = readback.slice(..);
         let (mapped, answer) = mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -2133,114 +2091,6 @@ mod tests {
             .is_err(),
             "cross-stripe propagation escaped qualification"
         );
-    }
-
-    #[test]
-    fn l1_chunk_partition_preserves_complete_wavefront_schedule() {
-        let max_diagonals = (Level::One.patch_rows().min(16) + Level::One.patch_cols() - 1) as u32;
-        assert_eq!(max_diagonals, 23);
-        let schedule = wavefront_schedule(Level::One, 16, max_diagonals);
-        assert_eq!(schedule.len(), 47);
-        assert_eq!(schedule[0], 0, "initialization must remain first");
-        assert_eq!(&schedule[1..24], &(1..=23).collect::<Vec<_>>());
-        assert_eq!(&schedule[24..], &(24..=46).collect::<Vec<_>>());
-
-        let chunks = schedule
-            .chunks(DISPATCHES_PER_COMMAND)
-            .map(<[u32]>::to_vec)
-            .collect::<Vec<_>>();
-        assert_eq!(chunks.len(), 6);
-        assert!(
-            chunks
-                .iter()
-                .all(|chunk| !chunk.is_empty() && chunk.len() <= 8)
-        );
-        assert_eq!(chunks.concat(), schedule);
-    }
-
-    #[test]
-    fn l2_chunk_partition_preserves_padded_wavefront_schedule() {
-        let max_diagonals = (Level::One.patch_rows().min(16) + Level::One.patch_cols() - 1) as u32;
-        let schedule = wavefront_schedule(Level::Two, 16, max_diagonals);
-        assert_eq!(schedule.len(), 37);
-        assert_eq!(schedule[0], 0, "initialization must remain first");
-        assert_eq!(&schedule[1..19], &(1..=18).collect::<Vec<_>>());
-        assert_eq!(&schedule[19..], &(24..=41).collect::<Vec<_>>());
-
-        let chunks = schedule
-            .chunks(DISPATCHES_PER_COMMAND)
-            .map(<[u32]>::to_vec)
-            .collect::<Vec<_>>();
-        assert_eq!(chunks.len(), 5);
-        assert!(
-            chunks
-                .iter()
-                .all(|chunk| !chunk.is_empty() && chunk.len() <= 8)
-        );
-        assert_eq!(chunks.concat(), schedule);
-    }
-
-    #[test]
-    fn chunked_gpu_matches_unchunked_and_cpu_schedule_at_both_levels() {
-        let (device, queue, adapter) = match gpu() {
-            Ok(gpu) => gpu,
-            Err(error) => {
-                assert!(std::env::var_os("KJERAG_REQUIRE_GPU").is_none(), "{error}");
-                eprintln!("skipping chunked PIS reference: {error}");
-                return;
-            }
-        };
-        let pipeline = GpuPisPipeline::from_shader_striped(
-            OneXsGpuContext::new(&device, &queue),
-            SHADER,
-            false,
-            16,
-        )
-        .unwrap_or_else(|error| panic!("chunked PIS failed on {adapter}: {error}"));
-        for level in [Level::One, Level::Two] {
-            let packed = || -> Fallible<PackedPair> {
-                let (a, b, a_initial, b_initial, a_hint, b_hint) = qualification_fixture(level);
-                PackedPair::new(
-                    PackedInput::new(
-                        &a,
-                        a_initial,
-                        Some(&a_hint),
-                        DescentAdmission::EveryPatch,
-                        false,
-                    )?,
-                    PackedInput::new(
-                        &b,
-                        b_initial,
-                        Some(&b_hint),
-                        DescentAdmission::EveryPatch,
-                        false,
-                    )?,
-                )
-            };
-            let unchunked = pipeline
-                .dispatch_pair(&device, &queue, packed().unwrap())
-                .unwrap_or_else(|error| {
-                    panic!("unchunked {level} PIS failed on {adapter}: {error}")
-                });
-            let chunked = pipeline
-                .dispatch_pair_with_encoding(&device, &queue, packed().unwrap(), true)
-                .unwrap_or_else(|error| panic!("chunked {level} PIS failed on {adapter}: {error}"));
-            assert_eq!(
-                chunked, unchunked,
-                "chunk boundaries changed {level} bits on {adapter}"
-            );
-
-            let (a, b, a_initial, b_initial, a_hint, b_hint) = qualification_fixture(level);
-            let expected_a = pipeline
-                .reference(&a, a_initial, Some(&a_hint), DescentAdmission::EveryPatch)
-                .unwrap();
-            let expected_b = pipeline
-                .reference(&b, b_initial, Some(&b_hint), DescentAdmission::EveryPatch)
-                .unwrap();
-            compare_qualified(chunked, &expected_a, &expected_b, false).unwrap_or_else(|error| {
-                panic!("chunked {level} PIS differs from CPU on {adapter}: {error}")
-            });
-        }
     }
 
     #[test]

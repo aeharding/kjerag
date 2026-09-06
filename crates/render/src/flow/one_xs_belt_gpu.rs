@@ -602,7 +602,7 @@ impl ResidentCaptureSession {
         orientation: OrientationTrack,
     ) -> Fallible<Self> {
         require_resident_device_limits(&context.device().limits())?;
-        let context = context.with_worker_pacing();
+        let context = context.with_worker();
         let picture_layout = crate::scene::bind_group_layout(context.device());
         let sampler = context.device().create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Linear,
@@ -938,6 +938,15 @@ impl ResidentCaptureFacade {
             ResidentTransaction::Ready(ready) => Some(ready.frame().clone()),
             _ => None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn worker_l1_submissions_for_test(&self) -> Fallible<usize> {
+        Ok(self
+            .state()?
+            .session
+            .as_ref()
+            .map_or(0, |session| session.context.worker_l1_submissions()))
     }
 
     /// Explicit instrument-only bulk readback of the exact installed resident
@@ -3071,7 +3080,7 @@ enum InjectedWait {
 }
 
 impl ExactSubmission {
-    fn wait(&self) -> Fallible<()> {
+    fn wait(self) -> Fallible<()> {
         match self {
             Self::Device {
                 context,
@@ -3088,7 +3097,7 @@ impl ExactSubmission {
                 let result = context
                     .device()
                     .poll(wgpu::PollType::Wait {
-                        submission_index: Some(index.clone()),
+                        submission_index: Some(index),
                         timeout: None,
                     })
                     .map(|_| ())
@@ -3248,56 +3257,6 @@ impl<K> SubmissionLease<K> {
             .as_mut()
             .ok_or("ONE X2 GPU submission lease was already completed")?;
         completion.submit_after(producer, encode)
-    }
-
-    fn submit_paced_after<F>(&mut self, producer: &OneXsGpuContext, encode: F) -> Fallible<()>
-    where
-        F: FnOnce(&wgpu::Device) -> wgpu::CommandBuffer,
-    {
-        // Reject a foreign device/queue before a worker can wait on work that
-        // the proposed producer does not own.
-        self.validate_provenance(producer)?;
-        // Pace the predecessor, then advance the proof to the successor.
-        self.wait_retaining_for_worker()?;
-        let completion = self
-            .completion
-            .as_mut()
-            .ok_or("ONE X2 GPU submission lease was already completed")?;
-        completion.submit_after(producer, encode)
-    }
-
-    /// Pace only the resident worker while retaining both the completion proof
-    /// and source ownership for the next same-queue submission.
-    fn wait_retaining_for_worker(&mut self) -> Fallible<()> {
-        let should_wait = match self.completion.as_ref() {
-            Some(ExactSubmission::Device { context, .. }) => context.is_worker_thread(),
-            #[cfg(test)]
-            Some(ExactSubmission::Injected { .. }) => false,
-            None => false,
-        };
-        if !should_wait {
-            return Ok(());
-        }
-        self.wait_retaining()
-    }
-
-    fn wait_retaining(&mut self) -> Fallible<()> {
-        let Some(completion) = self.completion.as_ref() else {
-            return Err("ONE X2 GPU submission lease was already completed".into());
-        };
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| completion.wait())) {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => {
-                self.completion.take();
-                self.quarantine_owner();
-                Err(error)
-            }
-            Err(payload) => {
-                self.completion.take();
-                self.quarantine_owner();
-                std::panic::resume_unwind(payload)
-            }
-        }
     }
 
     #[cfg(test)]
@@ -3860,7 +3819,7 @@ mod tests {
     const SESSION_CENTER: Duration = Duration::from_micros(2_000_000);
 
     #[test]
-    fn worker_pacing_marker_is_shared_only_by_the_paced_context_clones() {
+    fn worker_marker_is_shared_only_by_the_worker_context_clones() {
         let (device, queue, adapter) = match gpu() {
             Ok(gpu) => gpu,
             Err(why) => {
@@ -3868,28 +3827,28 @@ mod tests {
                     std::env::var("KJERAG_REQUIRE_GPU").is_err(),
                     "KJERAG_REQUIRE_GPU is set and there is no GPU to answer with: {why}"
                 );
-                eprintln!("skipping ONE X2 worker pacing identity test: {why}");
+                eprintln!("skipping ONE X2 worker identity test: {why}");
                 return;
             }
         };
         let ordinary = OneXsGpuContext::new(&device, &queue);
-        let paced = ordinary.with_worker_pacing();
-        let worker_context = paced.clone();
+        let worker_context = ordinary.with_worker();
+        let worker_clone = worker_context.clone();
         let (start, ready) = mpsc::channel();
         let worker = std::thread::spawn(move || {
             ready.recv().unwrap();
-            worker_context.is_worker_thread()
+            worker_clone.is_worker_thread()
         });
-        paced
+        worker_context
             .register_worker_thread(worker.thread().id())
             .unwrap_or_else(|error| panic!("worker registration failed on {adapter}: {error}"));
         assert!(!ordinary.is_worker_thread());
         assert!(
-            !paced.is_worker_thread(),
-            "the registering thread must not pace"
+            !worker_context.is_worker_thread(),
+            "the registering thread must not be the worker"
         );
         assert_eq!(
-            paced
+            worker_context
                 .register_worker_thread(std::thread::current().id())
                 .unwrap_err()
                 .to_string(),
@@ -3898,138 +3857,8 @@ mod tests {
         start.send(()).unwrap();
         assert!(
             worker.join().unwrap(),
-            "the registered worker clone did not pace"
+            "the registered worker clone lost its identity"
         );
-    }
-
-    #[test]
-    fn worker_paces_only_explicit_successor_and_leaves_ordinary_final_pending() {
-        let (device, queue, adapter) = match gpu() {
-            Ok(gpu) => gpu,
-            Err(why) => {
-                assert!(
-                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
-                    "KJERAG_REQUIRE_GPU is set and there is no GPU to answer with: {why}"
-                );
-                eprintln!("skipping ONE X2 worker pre-submit pacing test: {why}");
-                return;
-            }
-        };
-        let context = OneXsGpuContext::new(&device, &queue).with_worker_pacing();
-        let worker_context = context.clone();
-        let (start, ready) = mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            ready.recv().unwrap();
-            let first = worker_context.queue().submit([worker_context
-                .device()
-                .create_command_encoder(&Default::default())
-                .finish()]);
-            let first_completed = Arc::new(AtomicU8::new(0));
-            worker_context.queue().on_submitted_work_done({
-                let first_completed = Arc::clone(&first_completed);
-                move || first_completed.store(1, Ordering::SeqCst)
-            });
-            let owner = Arc::new(());
-            let retained = Arc::downgrade(&owner);
-            let mut lease = SubmissionLease::new(worker_context.clone(), first, owner);
-            let waited = Arc::new(AtomicU8::new(0));
-            let submitted = Arc::new(AtomicU8::new(0));
-            lease.observe(Arc::clone(&waited));
-            lease.observe_submit(Arc::clone(&submitted));
-
-            assert_eq!(waited.load(Ordering::SeqCst), 0, "first submit waited");
-            assert_eq!(
-                first_completed.load(Ordering::SeqCst),
-                0,
-                "lease construction drove the first completion callback"
-            );
-            let source = worker_context
-                .device()
-                .create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("ONE X2 pacing final-copy source"),
-                    size: 4,
-                    usage: wgpu::BufferUsages::COPY_SRC,
-                    mapped_at_creation: true,
-                });
-            source
-                .slice(..)
-                .get_mapped_range_mut()
-                .copy_from_slice(&0x1234_5678_u32.to_ne_bytes());
-            source.unmap();
-            let mapped = worker_context
-                .device()
-                .create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("ONE X2 pacing final-copy mapping"),
-                    size: 4,
-                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                    mapped_at_creation: false,
-                });
-            lease
-                .submit_paced_after(&worker_context, |device| {
-                    assert_eq!(
-                        waited.load(Ordering::SeqCst),
-                        2,
-                        "successor encoded before its predecessor completed"
-                    );
-                    assert_eq!(first_completed.load(Ordering::SeqCst), 1);
-                    device.create_command_encoder(&Default::default()).finish()
-                })
-                .unwrap();
-            assert_eq!(submitted.load(Ordering::SeqCst), 1);
-            assert_eq!(
-                waited.load(Ordering::SeqCst),
-                2,
-                "paced successor was waited after submission"
-            );
-            lease
-                .submit_after(&worker_context, |device| {
-                    let mut encoder = device.create_command_encoder(&Default::default());
-                    encoder.copy_buffer_to_buffer(&source, 0, &mapped, 0, 4);
-                    encoder.finish()
-                })
-                .unwrap();
-            assert_eq!(submitted.load(Ordering::SeqCst), 2);
-            assert_eq!(
-                waited.load(Ordering::SeqCst),
-                2,
-                "ordinary final submission paced its predecessor"
-            );
-            assert!(retained.upgrade().is_some(), "pacing released the owner");
-
-            let slice = mapped.slice(..);
-            let (sent, received) = mpsc::channel();
-            slice.map_async(wgpu::MapMode::Read, move |result| {
-                let _ = sent.send(result);
-            });
-            worker_context
-                .device()
-                .poll(wgpu::PollType::Wait {
-                    submission_index: None,
-                    timeout: None,
-                })
-                .unwrap();
-            received.recv().unwrap().unwrap();
-            assert_eq!(&*slice.get_mapped_range(), &0x1234_5678_u32.to_ne_bytes());
-            mapped.unmap();
-            assert_eq!(
-                waited.load(Ordering::SeqCst),
-                2,
-                "mapped completion performed another lease wait"
-            );
-            lease.acknowledge_mapped_completion().unwrap();
-            let owner = lease.complete_into_owner_after_mapped_validity().unwrap();
-            assert!(
-                retained.upgrade().is_some(),
-                "mapped completion did not return the exact owner"
-            );
-            drop(owner);
-            assert!(retained.upgrade().is_none(), "mapped owner was retained");
-        });
-        context
-            .register_worker_thread(worker.thread().id())
-            .unwrap_or_else(|error| panic!("worker registration failed on {adapter}: {error}"));
-        start.send(()).unwrap();
-        worker.join().unwrap();
     }
 
     #[test]
@@ -5068,89 +4897,6 @@ mod tests {
             state.load(Ordering::SeqCst),
             7,
             "disarmed lease waited again during drop"
-        );
-    }
-
-    #[test]
-    fn submission_lease_wait_retaining_preserves_owner_and_completion_proof() {
-        let state = Arc::new(AtomicU8::new(0));
-        let owner = Arc::new(());
-        let retained = Arc::downgrade(&owner);
-        let mut lease = SubmissionLease::injected(
-            Arc::clone(&owner),
-            InjectedWait::Success,
-            Arc::clone(&state),
-        );
-
-        lease.wait_retaining().unwrap();
-        assert_eq!(state.load(Ordering::SeqCst), 2);
-        drop(owner);
-        assert!(retained.upgrade().is_some(), "pacing released the owner");
-
-        lease.acknowledge_mapped_completion().unwrap();
-        let returned = lease.complete_into_owner_after_mapped_validity().unwrap();
-        drop(returned);
-        assert!(retained.upgrade().is_none());
-        assert_eq!(
-            state.load(Ordering::SeqCst),
-            2,
-            "acknowledgement waited twice"
-        );
-    }
-
-    #[test]
-    fn submission_lease_wait_retaining_error_quarantines_once() {
-        let state = Arc::new(AtomicU8::new(0));
-        let owner = Arc::new(());
-        let retained = Arc::downgrade(&owner);
-        let mut lease =
-            SubmissionLease::injected(owner.clone(), InjectedWait::Error, Arc::clone(&state));
-
-        let error = lease.wait_retaining().unwrap_err();
-        assert_eq!(error.to_string(), "injected ONE X2 submission poll failure");
-        assert_eq!(state.load(Ordering::SeqCst), 2);
-        assert!(lease.completion.is_none());
-        drop(lease);
-        drop(owner);
-        assert!(
-            retained.upgrade().is_some(),
-            "pacing error released the owner"
-        );
-        assert_eq!(
-            state.load(Ordering::SeqCst),
-            2,
-            "drop waited after quarantine"
-        );
-    }
-
-    #[test]
-    fn submission_lease_wait_retaining_panic_quarantines_once() {
-        let state = Arc::new(AtomicU8::new(0));
-        let owner = Arc::new(());
-        let retained = Arc::downgrade(&owner);
-        let mut lease =
-            SubmissionLease::injected(owner.clone(), InjectedWait::Panic, Arc::clone(&state));
-
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = lease.wait_retaining();
-        }))
-        .expect_err("injected pacing panic was not preserved");
-        assert_eq!(
-            panic.downcast_ref::<&str>(),
-            Some(&"injected ONE X2 submission poll panic")
-        );
-        assert_eq!(state.load(Ordering::SeqCst), 1);
-        assert!(lease.completion.is_none());
-        drop(lease);
-        drop(owner);
-        assert!(
-            retained.upgrade().is_some(),
-            "pacing panic released the owner"
-        );
-        assert_eq!(
-            state.load(Ordering::SeqCst),
-            1,
-            "drop waited after quarantine"
         );
     }
 

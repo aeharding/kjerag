@@ -20,6 +20,8 @@ pub(crate) struct OneXsGpuContext {
     device: wgpu::Device,
     queue: wgpu::Queue,
     worker_thread: Option<Arc<OnceLock<ThreadId>>>,
+    #[cfg(test)]
+    worker_l1_submissions: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl OneXsGpuContext {
@@ -28,22 +30,26 @@ impl OneXsGpuContext {
             device: device.clone(),
             queue: queue.clone(),
             worker_thread: None,
+            #[cfg(test)]
+            worker_l1_submissions: None,
         }
     }
 
-    /// Clone the exact device/queue pair with a fresh worker-pacing identity.
-    pub(crate) fn with_worker_pacing(&self) -> Self {
+    /// Clone the exact device/queue pair with a fresh worker identity.
+    pub(crate) fn with_worker(&self) -> Self {
         Self {
             device: self.device.clone(),
             queue: self.queue.clone(),
             worker_thread: Some(Arc::new(OnceLock::new())),
+            #[cfg(test)]
+            worker_l1_submissions: Some(Arc::new(std::sync::atomic::AtomicUsize::new(0))),
         }
     }
 
     pub(crate) fn register_worker_thread(&self, thread: ThreadId) -> Fallible<()> {
         self.worker_thread
             .as_ref()
-            .ok_or("ONE X2 GPU context has no worker pacing marker")?
+            .ok_or("ONE X2 GPU context has no worker marker")?
             .set(thread)
             .map_err(|_| "ONE X2 GPU worker thread was already registered".into())
     }
@@ -53,6 +59,24 @@ impl OneXsGpuContext {
             .as_ref()
             .and_then(|worker| worker.get())
             .is_some_and(|worker| *worker == std::thread::current().id())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn note_worker_l1_submission(&self) {
+        if self.is_worker_thread()
+            && let Some(submissions) = &self.worker_l1_submissions
+        {
+            submissions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn worker_l1_submissions(&self) -> usize {
+        self.worker_l1_submissions
+            .as_ref()
+            .map_or(0, |submissions| {
+                submissions.load(std::sync::atomic::Ordering::SeqCst)
+            })
     }
 
     pub(crate) fn device(&self) -> &wgpu::Device {

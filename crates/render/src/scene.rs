@@ -7405,6 +7405,49 @@ mod tests {
     }
 
     #[test]
+    fn selected_scene_submits_actual_cold_and_warm_l1_work_on_its_worker() {
+        let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").map(PathBuf::from) else {
+            return;
+        };
+        let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
+        let mut scene = Scene::open(&path).unwrap();
+        scene.set_muted(true);
+        scene.pause(Instant::now());
+        assert!(scene.primitive(Camera::default()).resident_next.is_none());
+
+        let first = wait_for_new_scene_frame(&scene, None);
+        let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let capture =
+            prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &first);
+        assert_eq!(
+            capture.worker_l1_submissions_for_test().unwrap(),
+            3,
+            "cold Scene frame did not submit three L1 passes on its worker"
+        );
+
+        pipeline.prepare(&scene.primitive(Camera::default()), &device, &queue, 1.0);
+        draw_resident_test_pass(&pipeline, &device, &queue);
+        assert_eq!(
+            capture.worker_l1_submissions_for_test().unwrap(),
+            3,
+            "cached paused redraw submitted more stitch work"
+        );
+
+        scene.step(Instant::now(), 1);
+        let second = wait_for_new_scene_frame(&scene, Some(&first));
+        assert_eq!(second.index(), first.index() + 1);
+        assert!(scene.primitive(Camera::default()).resident_next.is_none());
+        let continued =
+            prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &second);
+        assert!(continued.same_capture(&capture));
+        assert_eq!(
+            capture.worker_l1_submissions_for_test().unwrap(),
+            4,
+            "adjacent warm Scene frame did not submit one L1 pass on its worker"
+        );
+    }
+
+    #[test]
     fn final_resident_offer_keeps_redrawing_until_its_map_is_acknowledged() {
         let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").map(PathBuf::from) else {
             return;

@@ -14,9 +14,55 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
-**Further performance trials rejected, 2026-09-06:** halving L1 batches from
-eight to four dispatches gave contradictory X4 paired results and only modest
-X2 differences. A separate exact separable-mask prototype passed all five
+**Scheduling verification correction, 2026-09-06:** the earlier L1 pacing
+change was on the diagnostic CPU-grid entry, not resident playback's
+`GpuL2BridgeOutput::submit_l1_pis`. The worker and due-frame lookahead are
+active, but playback did not use the claimed six paced L1 commands. The
+L1-only paced/unpaced and batch-size comparisons therefore did not exercise
+their intended controls; their causal conclusions are withdrawn. Raw timings
+and the worker/lookahead pixel and lifecycle checks remain recorded, without
+crediting L1 pacing.
+
+The audit also mistakenly used `objcopy --dump-section` without an output ELF
+path, rewriting two archived capacity executables and the build target. The
+original worker/lookahead baseline survives intact in the L1-paced-named trial
+directory; no intact duplicate of the original batch-four executable was
+found. Raw logs, source patches, pixel artifacts and the native player were
+unaffected. Original versus rewritten hashes are recorded in
+`scratch/gpu-resident-l1-pacing-20260906-01/artifact-audit.md`; archived binary
+references below must be read with that correction.
+
+The subsequent actual resident-path trial is also rejected, now with a real
+Scene test proving 18 cold and six additional warm paced submissions. Two
+2560x1440 baseline/candidate pairs per camera lost throughput and worsened
+p95/p99 redraw time: X4 averaged 331–347 / 304–305 redraws/s with p99
+6.72–7.03 / 15.77–16.95 ms; X2 averaged 393–406 / 307–308 with p99
+5.29–5.44 / 13.97–14.15 ms. Median first-draw arrival lateness rose from
+4.0–4.7 ms to 23.3–25.7 ms. X4 had fewer over-budget draws despite worse
+tails; X2 had more. All eight arms retained 360 source changes and zero
+drop/starvation/audio-underrun counts. No pixel, native-window or full-workspace
+gate is claimed for this rejected scheduling candidate. Its patch, binaries,
+test and raw measurements remain in
+`scratch/gpu-resident-l1-pacing-20260906-01/`.
+
+Pacing-only code is removed. The worker and lookahead remain, with an
+actual Scene regression for ordinary cold/warm worker submissions and no
+extra work on cached redraws. Final cleanup gates pass 1,157 workspace tests
+with 30 ignored, full-target clippy, formatting, name and Cargo-source checks.
+Seven pacing-only tests were removed with their retired implementation, and
+one actual Scene worker-routing regression was added. All 276 X2/X4
+PPM/map/alpha artifacts remain byte-identical to the worker/lookahead checkpoint;
+root inspected both final frames. The rebuilt native player passes 48 window
+checks with zero failures and four inapplicable paired-file checks. Root
+inspected its exact-view X4 capture, also byte-identical to the preceding
+capture. The prior native binary and harness are preserved. Evidence is in
+`scratch/gpu-resident-l1-cleanup-20260906-01/`. This is verified cleanup and
+corrected attribution, not a performance improvement or owner acceptance;
+4.17 ms frame-time compliance remains unmet.
+
+**Further performance trials, 2026-09-06:** the eight-to-four L1 batch trial
+was ineffective on playback, as corrected above. A separate exact
+separable-mask prototype passed all five
 geometry tests, including new radius/packed-lane mutations, but showed no
 repeatable capacity benefit for its extra pass and 64,800-byte buffer; X2
 throughput and redraw p95/p99 regressed in both pairs. Both prototypes are
@@ -35,9 +81,9 @@ diagnosed COSMIC bug, an attribution of benchmark stalls, or grounds to accept
 the rejected candidates. The owner does not want known COSMIC issues fixed.
 
 **Bounded worker and due-frame lookahead candidate, 2026-09-06:** the shared
-resident stitch chain now runs on one capture-shared worker. Only the fine L1
-solver is split into six paced command buffers; the UI never waits for that
-worker. One already-decoded successor can stitch before its presentation time,
+resident stitch chain now runs on one capture-shared worker. The UI never
+waits for that worker. This checkpoint's L1 pacing claim was incorrect, as
+corrected above. One already-decoded successor can stitch before its presentation time,
 but its completed map remains private until Player promotes the exact same
 opaque delivery. Pause, renderer recreation and seek replacement retain the
 correct source owners; EOF keeps drawing until its final map installs. Shader
@@ -53,8 +99,9 @@ native-window checks at the exact X4 view; four paired-file drop checks are
 inapplicable. Root viewed its capture, byte-identical to the prior checkpoint.
 Evidence is in `scratch/gpu-lookahead-final-20260906-01/`.
 
-The same 2560x1440 diagnostic binary as the L1-paced trial is reproduced byte
-for byte. Its two baseline/candidate pairs per camera reduced median first-draw
+The same 2560x1440 diagnostic binary as the trial formerly labeled L1-paced
+was reproduced byte for byte at verification time. Its worker/lookahead
+baseline/candidate pairs per camera reduced median first-draw
 arrival lateness from 13.6–16.2 ms to 4.4–5.4 ms and redraw p99 from
 12.7–14.4 ms to 7.7–11.2 ms. **This is not a general capacity pass:** average
 redraw throughput fell on both cameras, X4 measured 239.8–247.8 redraws/s, more
@@ -65,11 +112,10 @@ native presentation or physical audio latency. The 240 fps frame-time target
 and owner branch acceptance remain open; these defects are not accepted
 tradeoffs.
 
-Both broader worker pacing and completely unpaced L1 submission were tested
-and rejected. Broader pacing added picture delay; removing L1 pacing reduced
-throughput and worsened redraw p95/p99 in all four paired comparisons, with
-X4 arrival p99 rising from 8.7–9.3 to 23.9–27.5 ms in that separate run set.
-Their binaries, full records and limits remain in ignored scratch. No new
+Broader worker pacing added picture delay in its separate trial. The supposed
+removal of L1 pacing did not change the selected playback path, so the measured
+differences in that comparison cannot support rejecting unpaced L1 submission.
+The raw records and limits remain in ignored scratch. No new
 Studio export, profiling probe or optimization RE was needed. Main is unchanged.
 
 **Bilateral mask work consolidated, 2026-09-06:** geometry now evaluates each

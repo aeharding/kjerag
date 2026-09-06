@@ -54,8 +54,8 @@ impl ResidentStitchWorker {
                 }
             })?;
         // No caller can enqueue until construction returns. Registering here
-        // makes pacing apply only to this thread, never constructor qualifiers
-        // or the UI even though they use clones of the same device and queue.
+        // makes the worker identity apply only to this thread, never constructor
+        // qualifiers or the UI even though they clone the same device and queue.
         context.register_worker_thread(thread.thread().id())?;
         // No join in Drop: the last sender closes the channel, and the worker
         // finishes its owned job before exiting without blocking the UI.
