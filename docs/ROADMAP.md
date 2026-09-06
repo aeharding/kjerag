@@ -46,6 +46,18 @@ is an index-derived candidate, while the fixed-view 30/31/32 comparison favors
 The earlier fractional accessibility-slider readback was NOT proof of a seek
 to 1153.452 s. Acquisition was recovered using guarded physical clicks and
 the saved project range. No production fix or owner acceptance is claimed.
+
+A second export of the **same short range with Stitching Optimization Off**
+now separates AI from the base-mapping issue. Its preserved project differs
+from the default reference only in AI true-to-false and modification time;
+Image Fusion, stabilization and trim are unchanged. It has the same 102-frame
+packet grid. At the identical registered view, actual Studio pixels still
+show a broadly straight horizon, while the current parent lens-A discrepancy
+persists. The reference manifest records both exports and their hashes.
+This redirects the next work to camera/base mapping before optional alignment,
+not to reproducing Studio's AI. It does not identify the correct replacement
+camera law. Studio's original AI-on setting has been restored and verified.
+
 The zero-flow roundtrip through the real CPU map merge, filtering and final
 materialization contributes at most 0.182 source pixel in the neutral X4
 fixture. This rules out broad deformation from that roundtrip without flow;

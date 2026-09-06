@@ -87,6 +87,51 @@
     },
     "visual_observation": "Studio horizon is broadly straight where current Kjerag final bends through the central join; neighboring Studio frames show the same distinction"
   },
+  "stitching_off_comparison": {
+    "purpose": "separate optional stitching AI from the camera/base-mapping discrepancy, not isolate photometric fusion",
+    "video": {
+      "name": "studio-stitching-off.mp4",
+      "producer_name": "VID_20260410_185407_00_004(1).mp4",
+      "bytes": 79571230,
+      "sha256": "af1076c6a865afc6ced01fbf447a05293769ff28ba4111600c0e3fddd6c1e4cc"
+    },
+    "project": {
+      "name": "x4-stitching-off-project.insprj",
+      "bytes": 12920,
+      "sha256": "c0fda10d0dde68d6ef7cee7af0b4cb4028cedf460681b575fe21496ba2fdb917"
+    },
+    "project_difference": {
+      "$.projects[0].clip.stitching_optimization.enableAIStitching": {
+        "before": true,
+        "after": false
+      },
+      "$.projects[0].modifiedTime": "changed",
+      "verification": "full sorted JSON equality after deleting exactly those two fields"
+    },
+    "unchanged_settings": {
+      "enableOpticalFlowStitching": false,
+      "enableDynamicStitching": false,
+      "enableImageFusionStitching": true,
+      "trim_and_stabilization": "identical to default reference"
+    },
+    "video_grid": {
+      "width": 7680,
+      "height": 3840,
+      "frame_rate": "30000/1001",
+      "frames": 102,
+      "duration_seconds": "3.403400",
+      "packet_grid_matches_default": true
+    },
+    "registered_image": {
+      "export_frame": 31,
+      "same_v360_rotation_and_fov_as_default": true,
+      "name": "registered-off-frame-0031.png",
+      "sha256": "61744f92fd355f6cbce81986a6f5ea2aa233c1213bc0da25b01badc2d790c67a"
+    },
+    "visual_observation": "Studio also retains the broadly straight horizon with stitching optimization Off; the large disagreement with Kjerag parent lens A persists",
+    "interpretation": "the next investigation is camera/base mapping before optional alignment; no replacement mounting or projection law is established",
+    "default_ai_setting_restored_and_project_verified": true
+  },
   "limitations": [
     "A recorded project setting does not identify the exclusive runtime stitching algorithm.",
     "This is the default X4 setting, not the earlier ONE X2 Optical Flow On setting.",
