@@ -176,6 +176,65 @@
     "temporary_test_hook_removed": true,
     "native_player_sha256_unchanged": "aecd39b338fd7c8ce2d0c90109275d807e3ba4a29a2d1b9ce8951610040b220c"
   },
+  "native_camera_input_capture": {
+    "producer": "Mac Studio 6.0.2, ordinary short AI-on 360 export",
+    "worker_arm64_sha256": "0a34f593198a0a7a29239ccded91231af3d7bc94e04213c67a2d44a04076a452",
+    "boundary": "MultiFlowstateSystem getEquirectangleFlowMap call at worker offset 0x17f2d80 to FlowstateRender2 getFlowMap at 0x17e78f8",
+    "private_report_sha256": "7da8e44832f31ac36d635be9db66e51825b44524f4e5ea789f683248a2d6d155",
+    "observer_sha256": "3235a00ec714378dfa5c089d01fc681589a790a1f540c27c02a1b4fd684b12fd",
+    "copies_hash_match_between_hosts": true,
+    "status": "captured",
+    "breakpoint_deleted": true,
+    "detached": true,
+    "ordered_pair_from_same_system": true,
+    "lenses": [
+      {
+        "ordinal": 0,
+        "model": 6,
+        "dimensions": [3840, 3840],
+        "center": [1920.746394988549, 1929.5332210696483],
+        "focal": [3665.637317796039, 3667.137129193048],
+        "xi": 2.31494,
+        "quaternion_xyzw": [0.49668182777623043, -0.5032273368722446, 0.49869786245508285, 0.5013679799947969]
+      },
+      {
+        "ordinal": 1,
+        "model": 6,
+        "dimensions": [3840, 3840],
+        "center": [1930.0503974134444, 1933.220688400916],
+        "focal": [3673.3432453186037, 3672.381297319143],
+        "xi": 2.31494,
+        "quaternion_xyzw": [0.4952514266264301, 0.5037332504058263, -0.496686893797798, 0.5042627949686171]
+      }
+    ],
+    "comparison": {
+      "all_13_coefficients_per_lens_match_exact_source_v6": true,
+      "delivered_center_and_focal_match_full_crop_schedule_binary64": true,
+      "raw_template_max_sign_aligned_quaternion_component_error": [1.11e-16, 2.22e-16],
+      "no_image_fitting": true
+    },
+    "not_captured": ["configured angular cap", "configured horizontal mirror", "common mapping quaternion", "pose batch", "returned parent map", "independent source/output frame identity"],
+    "scope": "direct static camera inputs for this activation; not complete parent-map or output parity"
+  },
+  "native_camera_motion_diagnostic": {
+    "source_frame": 34569,
+    "provider": "unchanged Kjerag orientation track, not Studio's captured provider",
+    "datum": "fixed nominal Rx(pi) at output grid via (row,column) -> (99-row,(200-column)%200); no fitted angle",
+    "max_current_provider_rotation_from_center_degrees": 0.131883363,
+    "versus_previous_post_quaternion_datum": {
+      "jointly_valid_nodes": 28185,
+      "validity_differences": 0,
+      "max_source_pixel_difference": 0.656410038
+    },
+    "versus_constant_center_pose": {
+      "jointly_valid_nodes": 28185,
+      "validity_differences": 0,
+      "max_source_pixel_difference": 4.712916851
+    },
+    "visual_observation": "native-input and constant-pose blends still show the horizon offset; lens-only inputs and computed trace inspected",
+    "runtime_cap_and_mirror_still_unverified": true,
+    "production_source_and_native_binary_unchanged": true
+  },
   "limitations": [
     "A recorded project setting does not identify the exclusive runtime stitching algorithm.",
     "This is the default X4 setting, not the earlier ONE X2 Optical Flow On setting.",

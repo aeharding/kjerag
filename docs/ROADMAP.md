@@ -83,6 +83,29 @@ in durable ignored `scratch/x4-model6-*`; the temporary test include is
 removed and the native player hash is unchanged. Do not repeat these
 calibration substitutions as new fixes or tune the solver to hide the offset.
 
+The current Mac 6.0.2 export now supplies direct camera-input evidence, not
+only the older Windows selection trace. Both captured lenses use model 6;
+all eight delivered center/focal binary64 values match the v6 crop schedule,
+and both lens quaternions match the recovered raw Template law to host
+arithmetic precision. The report and observer are hash-matched in durable
+storage on both hosts. This closes static model selection and those inputs
+for this activation, not the complete parent map or the visible defect.
+The observer did not capture the configured angular cap, mirror, common
+mapping quaternion or pose batch. Those remain explicitly unverified.
+
+A further exact-frame diagnostic separates the nominal coordinate-frame
+turn from rolling motion: it applies the captured lens quaternions and moves
+the fixed 180-degree datum to the output grid, then compares against the
+previous post-quaternion turn and a zero-motion control. The first comparison
+changes at most 0.657 source pixel across 28185 jointly valid nodes with no
+validity changes. The current provider turns at most 0.132 degrees from the
+frame center across the readout; removing that motion still leaves the visible
+horizon offset. Both actual renders and the computed seam trace were inspected.
+These are diagnostic controls, not an accepted camera correction. No production
+source or native binary changed. The next distinction is Studio's actual
+parent output versus a later stitching correction, not another blind mounting
+or flow-parameter substitution.
+
 The zero-flow roundtrip through the real CPU map merge, filtering and final
 materialization contributes at most 0.182 source pixel in the neutral X4
 fixture. This rules out broad deformation from that roundtrip without flow;
