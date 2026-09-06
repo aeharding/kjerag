@@ -150,10 +150,14 @@ for the A/B, not a claim.
   measured) - and it moves individual sites elsewhere by up to **+11.5 src px
   the wrong way** (BAD arc +65.02: +7.859 to +19.358; GOOD arc -152.98:
   -7.402 to -13.314). That is the redistribution, measured per site.
-- **v6 is eliminated as the fix.** `offset_v6` is byte identical on all six
+- **v6 alone does not explain the varying per-flight residual.** `offset_v6` is byte identical on all six
   X4 Air captures, one md5 (measured), so it can only carry an error that is
-  the same on every flight, and the across-seam DC is not. It stays the
-  ground-truth oracle for any learn-from-footage estimator. *The claim that
+  the same on every flight, and the across-seam DC is not. This historical
+  observation does not reject v6 as Studio's base camera model. Later
+  selected-path evidence in the full ledger at commit `672f9f4f`, sections
+  3.3 and 5.3, proves Windows Studio 5.9.10 selects v6/RadtanDistortPro for
+  this X4 family. The exact April source still contains that record. Neither
+  fact establishes the remaining mounting or fixes a rendered seam. *The claim that
   the ONE X2 has no v6 at all is not written down anywhere in the repo; treat
   it as unsourced until someone checks.*
 

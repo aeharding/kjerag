@@ -58,6 +58,31 @@ This redirects the next work to camera/base mapping before optional alignment,
 not to reproducing Studio's AI. It does not identify the correct replacement
 camera law. Studio's original AI-on setting has been restored and verified.
 
+The next bounded calibration check has a concrete source basis: the April
+source's tag-111 v6 record is byte-identical to the archived X4 fixture,
+while current Kjerag reads only v3. The recovered Windows Studio 5.9.10
+selection uses v6 and its 13-term distortion model; that is not a runtime
+selection trace of the current Mac 6.0.2 export. Earlier all-v6 rejection
+mixed distortion, crop, validity and unverified mounting changes, so it
+does not isolate the model. Compare those camera inputs in lens-only parent
+renders before changing the shared solver. No production selection changed.
+That five-arm comparison is now complete: current v3, v6 pose only, v6
+pose/intrinsics with v3 distortion, full v6 generic mounting, and full v6
+with the previously disclosed fixed-datum Template rotation all retain a
+visible horizon join in the actual lens-only and blended renders. The current
+null reproduces the earlier parent pictures byte-for-byte. Feature-derived
+relative lens disagreement improves from about 2.03 to 1.48 degrees with
+v6 pose/intrinsics, but the extra distortion terms do not materially improve
+that particular statistic. This is not an accepted correction or a proof of
+the remaining mounting law. The scalar equivalent-null differs by at most
+0.001233 source pixel with identical sentinel validity; changing the full-v6
+cap leaves all 28185 jointly valid nodes identical, while changing support
+at 4675 others. The isolated f32 diagnostic does not claim Studio's double
+arithmetic or X4 rolling-pose parity. Outputs and exact test sources remain
+in durable ignored `scratch/x4-model6-*`; the temporary test include is
+removed and the native player hash is unchanged. Do not repeat these
+calibration substitutions as new fixes or tune the solver to hide the offset.
+
 The zero-flow roundtrip through the real CPU map merge, filtering and final
 materialization contributes at most 0.182 source pixel in the neutral X4
 fixture. This rules out broad deformation from that roundtrip without flow;

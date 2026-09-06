@@ -132,6 +132,50 @@
     "interpretation": "the next investigation is camera/base mapping before optional alignment; no replacement mounting or projection law is established",
     "default_ai_setting_restored_and_project_verified": true
   },
+  "base_calibration_diagnostic": {
+    "source_offset_v6": {
+      "protobuf_tag": 111,
+      "serialized_bytes": 523,
+      "tokens": 56,
+      "lens_count": 2,
+      "lens_types": [131, 131],
+      "trailing_word": 394240,
+      "sha256": "0950b9d7bb63fc131e698cf80cf81d7720a6cdae4d3f1c1f8514cba3e7fba3ef",
+      "authentication": "direct indexed metadata read from the exact source, matching the archived sanitized fixture"
+    },
+    "selection_evidence": {
+      "archive_commit": "672f9f4f17e1633c29945e49c73279ff19e8990d",
+      "path": "docs/research/studio-seam-re.md",
+      "sections": ["3.3", "5.3"],
+      "producer_scope": "Windows Studio 5.9.10.0, not a runtime trace of the current Mac 6.0.2 export",
+      "selected_model": "v6, OmniProjection<RadtanDistortPro>, 13 coefficients",
+      "current_kjerag_model": "v3, five-coefficient Mei"
+    },
+    "rendered_arms": [
+      "current-v3-null",
+      "v6-pose-only",
+      "v6-pose-intrinsics-v3-distortion",
+      "v6-full-generic",
+      "v6-full-template-rx-pi"
+    ],
+    "controls": {
+      "current_null_picture_matches_previous_parent_bytes": true,
+      "equivalent_five_term_scalar_null": {
+        "sentinel_validity_matches": true,
+        "jointly_valid_nodes": 32861,
+        "max_source_pixel_error": 0.001232245
+      },
+      "full_v6_cap_120_vs_105_degrees": {
+        "jointly_valid_nodes": 28185,
+        "max_source_pixel_difference": 0,
+        "validity_disagreements": 4675
+      }
+    },
+    "visual_observation": "all five calibration-only arms retain a visible horizon join; no production correction selected",
+    "scope": "shared current orientation/readout schedule and saved alpha, scalar f32 model diagnostic consumed by the unchanged real frame renderer; not a recovered X4 rolling-pose or Mac arithmetic contract",
+    "temporary_test_hook_removed": true,
+    "native_player_sha256_unchanged": "aecd39b338fd7c8ce2d0c90109275d807e3ba4a29a2d1b9ce8951610040b220c"
+  },
   "limitations": [
     "A recorded project setting does not identify the exclusive runtime stitching algorithm.",
     "This is the default X4 setting, not the earlier ONE X2 Optical Flow On setting.",

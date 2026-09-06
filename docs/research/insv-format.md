@@ -408,7 +408,18 @@ can identify a string by token count (MED, inferred from the fixture):
   terms**, i.e. a different and weaker camera model.
 
 The progression v1 to v2 to v3 is a progression in model richness, not
-just precision. Use `offset_v3`.
+just precision. Kjerag currently reads `offset_v3`; this is not a statement
+that Studio selects it on every camera. The later X4 analysis at commit
+`672f9f4f17e1633c29945e49c73279ff19e8990d`,
+`docs/research/studio-seam-re.md` sections 3.3 and 5.3, reads the selected
+Windows Studio 5.9.10 route choosing valid `offset_v6` (protobuf tag 111)
+before v3 and constructing the 13-coefficient `RadtanDistortPro` model.
+The owner's April X4 Air source contains that exact 523-byte, 56-token v6
+record, SHA-256
+`0950b9d7bb63fc131e698cf80cf81d7720a6cdae4d3f1c1f8514cba3e7fba3ef`,
+reverified directly from its indexed metadata on 2026-09-06. This establishes
+a current calibration-support gap, not the cause or fix of the reported
+horizon defect, nor a runtime trace of the newer Mac Studio 6.0.2 export.
 
 ### 4.5 `offset` vs `original_offset`
 
