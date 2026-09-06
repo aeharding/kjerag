@@ -29,6 +29,14 @@ actual-sequence, native-window or full-workspace gate ran for this rejected
 candidate. Installed Flatpak remains unchanged. Evidence:
 `scratch/bounded-draw-box-20260906/`.
 
+A separate literal native-window high-refresh feasibility check did not reach
+the player. A locally unpacked `wlr-randr` requested a 2560x1440, 240 Hz mode
+from an isolated headless Cage session; Cage aborted in
+`wlr_scene_output_layout_add_output` while applying the mode. No 240 Hz output,
+player capacity, desktop-mode change or system-package installation is claimed.
+The compositor is not being patched as part of this checkpoint. Evidence:
+`scratch/native-high-refresh-20260906/`.
+
 **Ordered PIS accumulator lanes declined, 2026-09-06:** four lanes executed
 the four independent descent accumulations with their original row-major
 operation order, followed by an extra barrier and unchanged final correction.
