@@ -813,6 +813,34 @@ impl GpuPisPipeline {
         self.encode_schedule(encoder, resources, level, &self.wavefront_schedule(level));
     }
 
+    /// Preserve the complete schedule, with at most eight dispatches per
+    /// submission so the worker can leave queue space for interactive draws.
+    /// The first encoder already contains this stage's input preparation.
+    pub(crate) fn encode_worker_chunks(
+        &self,
+        mut encoder: wgpu::CommandEncoder,
+        resources: &wgpu::BindGroup,
+        level: Level,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let schedule = self.wavefront_schedule(level);
+        let mut chunks = schedule.chunks(8).peekable();
+        let mut commands = Vec::with_capacity(schedule.len().div_ceil(8));
+        while let Some(chunk) = chunks.next() {
+            self.encode_schedule(&mut encoder, resources, level, chunk);
+            commands.push(encoder.finish());
+            if chunks.peek().is_none() {
+                break;
+            }
+            encoder =
+                self.context
+                    .device()
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("ONE X2 worker PIS continuation"),
+                    });
+        }
+        commands
+    }
+
     /// Execute both native directions at one level. Inputs have already passed
     /// the CPU constructor's shape, finite, mask and rolling-denominator gates.
     #[allow(clippy::too_many_arguments)]
@@ -2075,22 +2103,24 @@ mod tests {
                 return;
             }
         };
-        for rows in [1, 16, 23] {
+        for rows in [1, 8, 16, 23] {
             GpuPisPipeline::new_striped(OneXsGpuContext::new(&device, &queue), rows)
                 .unwrap_or_else(|error| panic!("{rows}-row striped PIS on {adapter}: {error}"));
         }
         let broken = SHADER.replacen("present = local_row > 0u;", "present = row > 0u;", 1);
         assert_ne!(broken, SHADER);
-        assert!(
-            GpuPisPipeline::from_shader_striped(
-                OneXsGpuContext::new(&device, &queue),
-                &broken,
-                true,
-                16,
-            )
-            .is_err(),
-            "cross-stripe propagation escaped qualification"
-        );
+        for rows in [8, 16] {
+            assert!(
+                GpuPisPipeline::from_shader_striped(
+                    OneXsGpuContext::new(&device, &queue),
+                    &broken,
+                    true,
+                    rows,
+                )
+                .is_err(),
+                "cross-stripe propagation escaped {rows}-row qualification"
+            );
+        }
     }
 
     #[test]

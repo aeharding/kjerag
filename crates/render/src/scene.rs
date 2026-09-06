@@ -7421,15 +7421,15 @@ mod tests {
             prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &first);
         assert_eq!(
             capture.worker_l1_submissions_for_test().unwrap(),
-            3,
-            "cold Scene frame did not submit three L1 passes on its worker"
+            18,
+            "cold Scene frame did not submit six chunks for each of three L1 passes on its worker"
         );
 
         pipeline.prepare(&scene.primitive(Camera::default()), &device, &queue, 1.0);
         draw_resident_test_pass(&pipeline, &device, &queue);
         assert_eq!(
             capture.worker_l1_submissions_for_test().unwrap(),
-            3,
+            18,
             "cached paused redraw submitted more stitch work"
         );
 
@@ -7442,8 +7442,8 @@ mod tests {
         assert!(continued.same_capture(&capture));
         assert_eq!(
             capture.worker_l1_submissions_for_test().unwrap(),
-            4,
-            "adjacent warm Scene frame did not submit one L1 pass on its worker"
+            24,
+            "adjacent warm Scene frame did not submit six L1 chunks on its worker"
         );
     }
 

@@ -258,8 +258,8 @@ Every selected ONE X2 GPU stage is rooted in one render-private
 `OneXsGpuContext`, constructed from the exact device and queue iced gives the
 `ScenePipeline`. The context compares those wgpu handles structurally, so a
 renderer-pipeline recreation on clones of the same pair remains compatible;
-a replacement device or queue is a different context. The resident producer
-and its `SubmissionLease` retain that context. The lease submits
+a replacement device or queue within that wgpu Instance is a different context.
+The resident producer and its `SubmissionLease` retain that context. The lease submits
 later resident consumers on its own queue and replaces its own completion
 index; no consumer may hand it a detached `SubmissionIndex`.
 
@@ -274,6 +274,16 @@ all selected work uses the retained context handles. A mismatch selects no
 draw, preserves the last complete display untouched and surfaces the raw
 identity error. Diagnostic picture preparation and full-luma readback are
 context-owned too; their per-frame APIs accept no replacement device or queue.
+
+The pinned wgpu's structural device/queue equality compares per-Instance IDs,
+not Instance identity. First allocations in two separate Instances can compare
+equal, so foreign-pair tests request two devices from the same Instance. This
+is a boundary limitation, not proof that separate Instances share resources.
+Normal iced renderer and surface recreation clone the existing compositor's
+Engine/device/queue. Constructing a new compositor creates fresh primitive
+storage, so current playback does not carry a resident attachment across that
+boundary. Any future cross-compositor attachment reuse must add Instance
+identity rather than rely on these structural comparisons.
 
 The shared PIS front end caches its rolling patch sums instead of replaying
 each row/column prefix for every patch. One horizontal recurrence per source
@@ -443,17 +453,33 @@ redraw capacity separately from changing-view playback and its tail latencies.
 It waits for each GPU draw and has no compositor; its results do not prove
 native-window presentation at 240 Hz.
 
+That diagnostic now observes a queue-completion callback using nonblocking
+polls and 100-microsecond receive timeouts, with one redraw in flight. Polling
+and wakeup costs remain in the measurement. Concurrent stitch work may join
+the callback's queue prefix and delay observation; it can never make the draw
+appear complete early. The previous offscreen blocking poll held wgpu's fence
+read lock throughout GPU execution, preventing the stitch worker from acquiring
+the write lock needed for submission. It therefore disproportionately delayed
+chunked scheduling. Comparisons of worker schedules must rebuild both arms
+with the same nonblocking measurement; old blocking-poll figures remain raw
+instrument observations, not causal evidence of native scheduling behavior.
+
 The first lazy resident-session construction runs the existing target-device
 arithmetic qualifications synchronously. Those constructor-only probes perform
 bulk readbacks and waits. Once the session exists, the UI-side submit, redraw,
 draw and retirement paths perform no bulk readback or wait; only the four-byte
 validity callback crosses to CPU. The worker submits each GPU stage normally,
-without waits between stages or chunks. An actual resident L1 pacing trial
-increased picture delay and worsened redraw tails on both cameras and was
-removed, together with the earlier diagnostic-only pacing machinery. Selected
+except resident L1, whose unchanged wavefront schedule is encoded into chunks
+of at most eight dispatches. Its six submissions have five callback-completion
+waits on the registered worker only. These waits hold no wgpu fence lock; a
+one-millisecond receive timeout drives nonblocking polling if no UI is active.
+The callback is only a scheduling signal, not a source-release proof. The
+exact lease stays armed through every chunk and final validity acknowledgement.
+UI draws may interleave, but are not guaranteed a submission between chunks.
+Earlier blocking-wait pacing and diagnostic-only pacing were removed. Selected
 L1 runs through `GpuL2BridgeOutput::submit_l1_pis`, not the CPU-grid diagnostic
-`submit_pis_stage`. A test-only counter at the selected successful-submission
-site lets real Scene cold, warm and cached-redraw tests prove worker routing.
+`submit_pis_stage`. A test-only counter at the successful-submission site lets
+real Scene cold, warm and cached-redraw tests prove the selected worker route.
 The bulk legacy CPU stitch implementation is
 retained solely as the frozen oracle and explicit diagnostic surface; small
 control, pose, identity and lifecycle state remains on CPU.
@@ -483,6 +509,11 @@ parity.
   diagnostic while resident playback used the GPU L2-to-L1 bridge. Its
   apparent paced/unpaced and batch-size timing differences were uncontrolled
   variation, not effects of those edits. Verify the actual Scene call path.
+- A blocking GPU wait on another thread can block drawing: pinned wgpu holds
+  a fence read lock across that wait and submission needs its write lock.
+  This applies in both directions, including a benchmark's draw-completion
+  wait preventing worker submission. Nonblocking callback polling avoids
+  holding the lock throughout GPU execution; it still has polling overhead.
 - Use descriptor `pitch[]`/`offset[]` verbatim. Chroma pitch is
   `align(width, 512)`: at 3840-wide that is 4096 != 3840, and computed
   strides shear chroma on real footage while passing on 1920/2560 tests.

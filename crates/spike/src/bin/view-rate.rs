@@ -7,6 +7,9 @@
 //! with ordinary decoding and stitching running. These are NOT
 //! native-window fps: compositor/input/presentation are absent, and each draw
 //! waits for GPU completion rather than pipelining several display frames.
+//! Completion uses a queue callback and nonblocking polls, with up to 100 us
+//! sleeps between polls. Unlike PollType::Wait this leaves submission free for
+//! the concurrent stitch worker; polling/wakeup overhead stays in the result.
 //! No pixel/map readback occurs inside either timed phase.
 
 use std::path::Path;
@@ -86,6 +89,7 @@ fn main() -> Fallible<()> {
         json!({"gpu": gpu.name, "output": [width, height], "target_hz": HZ,
             "view_degrees": [camera.yaw.to_degrees(), camera.pitch.to_degrees(), camera.fov.to_degrees()],
             "measurement": "offscreen CPU+GPU completed redraw, not native presentation",
+            "completion": "queue-prefix callback, nonblocking poll, 100 us timeout",
             "start": scene.displayed_frame(), "sampling": "selected type-2 box filter"})
     );
     measure(&scene, &mut pipeline, &gpu, &target, camera, false)?;
@@ -113,7 +117,7 @@ fn redraw(
         aspect(target.size()),
     );
     let prepared = Instant::now();
-    target.render(&gpu.device, &gpu.queue, pipeline)?;
+    target.render_callback_completed(&gpu.device, &gpu.queue, pipeline)?;
     let completed = Instant::now();
     Ok((prepared - began, completed - prepared, completed))
 }

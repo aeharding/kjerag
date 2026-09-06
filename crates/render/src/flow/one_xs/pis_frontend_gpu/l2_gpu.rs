@@ -1137,15 +1137,35 @@ impl<K, P: GpuResidentLevelTwoPost> GpuL2BridgeOutput<K, P> {
             pass.set_bind_group(0, hint_resources, &[]);
             pass.dispatch_workgroups(L1_PATCHES.div_ceil(64) as u32, 2, 1);
         }
-        dispatch
-            .pipeline
-            .encode(&mut encoder, &resources, dispatch.stage.level());
-        self._prepared
-            .belts
-            .lease
-            .submit_after(&bridge.context, |_| encoder.finish())?;
-        #[cfg(test)]
-        bridge.context.note_worker_l1_submission();
+        if bridge.context.is_worker_thread() {
+            for (chunk, command) in dispatch
+                .pipeline
+                .encode_worker_chunks(encoder, &resources, dispatch.stage.level())
+                .into_iter()
+                .enumerate()
+            {
+                if chunk != 0 {
+                    self._prepared
+                        .belts
+                        .lease
+                        .await_worker_queue_prefix(&bridge.context)?;
+                }
+                self._prepared
+                    .belts
+                    .lease
+                    .submit_after(&bridge.context, |_| command)?;
+                #[cfg(test)]
+                bridge.context.note_worker_l1_submission();
+            }
+        } else {
+            dispatch
+                .pipeline
+                .encode(&mut encoder, &resources, dispatch.stage.level());
+            self._prepared
+                .belts
+                .lease
+                .submit_after(&bridge.context, |_| encoder.finish())?;
+        }
         #[cfg(test)]
         let l2_terminal = self._terminal.clone();
         #[cfg(test)]

@@ -14,6 +14,73 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Callback-paced worker candidate, 2026-09-06:** pinned wgpu holds a fence read
+lock throughout `Device::poll(Wait)`, while every `Queue::submit` needs the
+same fence's write lock. This explains how an off-thread wait can block UI
+submission. The first callback-paced trial still regressed under `view-rate`;
+the instrument itself used that blocking wait after each draw, preventing
+later worker chunks from submitting. Those old measurements remain raw
+instrument observations and cannot isolate native scheduling behavior.
+
+The diagnostic now observes queue-prefix completion with nonblocking polling
+and 100-microsecond receive timeouts, keeping one redraw in flight and including
+polling/wakeup costs. Both comparison arms were rebuilt with this measurement.
+The selected resident L1 candidate uses the same sixteen-row solver, shader
+arithmetic and dispatch order in six chunks, with five worker-only callback
+waits. Each wait retains the exact submission lease and decoded source;
+nonblocking fallback polling ensures progress without the UI. There is no
+dependency change or new Studio export.
+
+Two alternating 2560x1440 pairs per camera favor candidate throughput and
+redraw p95/p99/maximum in all four pairs. X4 baseline/candidate capacity is
+335–342 / 349–364 redraws/s and p99 is 9.57–9.78 / 7.85–8.28 ms. ONE X2 is
+392–393 / 393–408 redraws/s and p99 is 6.64–7.10 / 6.05–6.27 ms. X2 arrival
+p99 worsens in both pairs (7.60 to 8.77 and 6.55 to 7.10 ms), and its second
+arrival median worsens (4.23 to 4.44 ms); do not call it a universal latency
+improvement. Every arm retains 360 source changes with zero drops, starvation
+and audio underruns. These are completed offscreen redraws, not compositor
+presentation; the 4.17 ms target remains unmet.
+
+Focused callback ownership/no-UI-progress and real Scene worker tests pass;
+the latter observes 18 cold, unchanged cached and six additional warm chunk
+submissions. Final gates pass 1,158 workspace tests with 30 ignored, full-target
+clippy, formatting, name and Cargo-source checks. All 276 real Scene X2/X4
+PPM/map/alpha artifacts are byte-identical to the preceding cleanup checkpoint;
+root inspected both final frames. The rebuilt native player passes 48 window
+checks with zero failures and four inapplicable paired-file drop checks. Root
+inspected its exact-view X4 capture, also byte-identical to that checkpoint.
+The prior native and harness remain preserved. This callback candidate is
+retained on the working branch, not accepted by the owner or merged.
+Evidence is in `scratch/gpu-callback-l1-20260906-01/` (old
+blocking instrument) and `scratch/gpu-callback-capacity-20260906-02/` (rebuilt
+controls). Owner branch acceptance and main are unchanged.
+
+**Exact map-corner cache trial declined, 2026-09-06:** moving four identical
+retained-map loads outside each 3x3 sampling loop passed exhaustive coordinate
+invariants, GPU/CPU qualification and cached-corner/FMA mutation checks. It did
+not establish a capacity benefit: both X4 pairs lost throughput and worsened
+p99/over-budget counts, while X2's two pairs disagreed. The shader change and
+its candidate-only tests are removed; logical read counts were not measured
+hardware traffic. The exact patch, four passing focused tests and eight
+capacity runs remain in `scratch/gpu-belt-corner-cache-20260906-01/`. No actual
+Scene pixel sequence, native UI or full-workspace gate is claimed for this
+rejected candidate. The native player remains unchanged.
+
+**Eight-row propagation trial declined, 2026-09-06:** the existing parameterized
+solver was tested at eight instead of sixteen rows, with GPU/CPU qualification
+and cross-boundary mutation checks for both sizes. Two alternating capacity
+pairs per camera reduced redraw p95/p99 and over-budget counts, but average
+throughput was mixed and worst redraw and arrival p99 worsened in three of
+four pairs. All 360 source changes and zero counters were retained in every
+run. Both actual Scene cohorts were rendered: all 31 X4 and 61 X2 pictures
+and maps changed, while alpha remained exact. Root inspected baseline/candidate
+X4 frame 34572 and X2 frame 6374, finding a more pronounced double edge around
+the latter's upper left riser connector. The modest, mixed timing gains do not
+justify taking that extra visible change. Production remains sixteen rows;
+eight-row reference/mutation coverage is retained. No native build or full
+workspace gate is claimed for the rejected candidate. Evidence remains in
+`scratch/gpu-stripe8-20260906-01/`; the verified native player is unchanged.
+
 **Scheduling verification correction, 2026-09-06:** the earlier L1 pacing
 change was on the diagnostic CPU-grid entry, not resident playback's
 `GpuL2BridgeOutput::submit_l1_pis`. The worker and due-frame lookahead are

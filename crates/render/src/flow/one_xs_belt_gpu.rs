@@ -3259,6 +3259,36 @@ impl<K> SubmissionLease<K> {
         completion.submit_after(producer, encode)
     }
 
+    /// Pace the stitch worker without holding wgpu's fence lock across a GPU
+    /// wait. In our pinned wgpu, PollType::Wait holds a fence read lock that
+    /// also blocks Queue::submit's write lock, including UI draw submission.
+    /// The callback covers the queue prefix, possibly including concurrent
+    /// draws. It is only a scheduling signal: retain the exact lease and owner
+    /// until the ordinary final validity acknowledgement proves completion.
+    fn await_worker_queue_prefix(&self, producer: &OneXsGpuContext) -> Fallible<()> {
+        self.validate_provenance(producer)?;
+        if !producer.is_worker_thread() {
+            return Err("ONE X2 GPU pacing was called outside its stitch worker".into());
+        }
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        producer.queue().on_submitted_work_done(move || {
+            let _ = sender.try_send(());
+        });
+        loop {
+            match receiver.recv_timeout(std::time::Duration::from_millis(1)) {
+                Ok(()) => return Ok(()),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("ONE X2 GPU completion callback disconnected".into());
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // Callbacks need a poll or submit to run. Do not depend on
+                    // the UI still drawing after pause, seek or window close.
+                    producer.device().poll(wgpu::PollType::Poll)?;
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     fn injected(
         source_owner: K,
@@ -4858,6 +4888,65 @@ mod tests {
             matches!(answer.try_recv(), Err(mpsc::TryRecvError::Empty)),
             "cancelled resident submission returned its uncertain source owner"
         );
+    }
+
+    #[test]
+    fn worker_callback_pacing_checks_identity_and_progresses_without_ui_polling() {
+        let (device, queue, foreign_device, foreign_queue, _) = match gpu_pair() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(std::env::var("KJERAG_REQUIRE_GPU").is_err(), "{why}");
+                eprintln!("skipping worker callback pacing test: {why}");
+                return;
+            }
+        };
+        let foreign = OneXsGpuContext::new(&foreign_device, &foreign_queue);
+        let context = OneXsGpuContext::new(&device, &queue).with_worker();
+        let (finished, result) = mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            context
+                .register_worker_thread(std::thread::current().id())
+                .unwrap();
+            let owner = Arc::new(());
+            let retained = Arc::downgrade(&owner);
+            let first = context.device().create_command_encoder(&Default::default());
+            let mut lease = SubmissionLease::new(
+                context.clone(),
+                context.queue().submit([first.finish()]),
+                owner,
+            );
+            assert_eq!(
+                lease
+                    .await_worker_queue_prefix(&foreign)
+                    .unwrap_err()
+                    .to_string(),
+                "ONE X2 GPU submission crossed a different device or queue"
+            );
+            let unmarked = OneXsGpuContext::new(context.device(), context.queue());
+            assert_eq!(
+                lease
+                    .await_worker_queue_prefix(&unmarked)
+                    .unwrap_err()
+                    .to_string(),
+                "ONE X2 GPU pacing was called outside its stitch worker"
+            );
+            lease.await_worker_queue_prefix(&context).unwrap();
+            assert!(lease.completion.is_some());
+            assert!(retained.upgrade().is_some());
+            lease
+                .submit_after(&context, |device| {
+                    device.create_command_encoder(&Default::default()).finish()
+                })
+                .unwrap();
+            lease.await_worker_queue_prefix(&context).unwrap();
+            assert!(lease.completion.is_some());
+            assert!(retained.upgrade().is_some());
+            lease.complete().unwrap();
+            assert!(retained.upgrade().is_none());
+            finished.send(()).unwrap();
+        });
+        // Only the registered worker may poll during this wait.
+        result.recv_timeout(Duration::from_secs(10)).unwrap();
     }
 
     #[test]
