@@ -14,6 +14,23 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Image Fusion comparison available, 2026-09-06:** the required photometric
+follow-on now has one isolated X4 Studio 6.0.2 OFF export paired with the
+existing ON reference. Full project JSON differs only by Image Fusion and
+save time; all 102 video packet timestamps, durations and keyframe flags match,
+as do the resolution, rate and export color metadata. Original ON settings were
+restored and verified. Root inspected both arms at output frames 0, 31 and 101,
+plus the whole sphere at 31: the reported view differs subtly in color without
+an obvious shape change. Magnified signed differences show smooth regions of
+opposite color adjustment, consistent with spatial lens matching. Separate
+lossy encodes mean those differences are not the actual per-lens coefficients.
+The reference's exact camera-source frame association remains pending.
+`docs/research/studio-image-fusion-oracle-602.json` seals the artifacts and limits.
+This is evidence for issue #185, not an implemented feature or a new stitching
+acceptance. The verified player is unchanged; old unaligned color estimation
+will not be silently reused. No additional export or broad optimization RE is
+needed to inspect this pair.
+
 **Lazy draw-filter fallback declined, 2026-09-06:** replacing the final eager
 selection with conditional fallback sampling passed a frozen-old-shader
 bit-exact check across the atlas interiors, join and clamp edges. Manual

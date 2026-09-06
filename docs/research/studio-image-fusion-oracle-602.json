@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "status": "isolated project switch and matching export grid verified; output samples inspected; renderer feature not implemented",
+  "issue": 185,
+  "producer": {
+    "application": "Insta360 Studio",
+    "version": "6.0.2",
+    "route": "ordinary UI 360 Video export, source resolution/rate, H.265, Original 180 Mbps",
+    "reference_manifest": "docs/research/studio-x4-video-reference-602.json"
+  },
+  "artifacts": {
+    "on_video": {
+      "path": "scratch/x4-studio-default-20260906/VID_20260410_185407_00_004.mp4",
+      "bytes": 79674872,
+      "sha256": "9926504109a37b64836fb8af2d7b80ad5d4b6adf0de232d1cde9b8c7954b9d35"
+    },
+    "on_project": {
+      "path": "scratch/x4-studio-default-20260906/x4-default-short360-project.insprj",
+      "bytes": 12919,
+      "sha256": "c853887c7720db6256063c81add75cc5a473322fbc8fd1b583ea9b3c6c5b0e20"
+    },
+    "off_video": {
+      "path": "scratch/x4-image-fusion-20260906-01/studio-fusion-off.mp4",
+      "bytes": 79564374,
+      "sha256": "5adb88ef6e1d85f2986da9c8f9e24b819e1c87991fa44d644339a2cac4786c85"
+    },
+    "off_project": {
+      "path": "scratch/x4-image-fusion-20260906-01/off.insprj",
+      "bytes": 12920,
+      "sha256": "c01ab0495a9f221450b9ec9897872a02c5150d678154f0089ea0d4c3626e0707"
+    },
+    "private_verification": "scratch/x4-image-fusion-verification-20260906-01/report.json",
+    "private_pixel_evidence": "scratch/x4-image-fusion-20260906-01/",
+    "off_export_and_project_hashes_match_between_hosts": true
+  },
+  "project_comparison": {
+    "full_json_equal_except": [
+      "projects[0].clip.stitching_optimization.enableImageFusionStitching",
+      "projects[0].modifiedTime"
+    ],
+    "image_fusion_on": true,
+    "image_fusion_off": false,
+    "common_roughcut": {"leftTrim": 34538, "rightTrim": 19301, "totalFrames": 53940},
+    "common_stitching": {"AI": true, "optical_flow": false, "dynamic": false},
+    "stabilization_direction_lock_and_all_other_project_values_equal": true,
+    "restored_project": {
+      "path": "scratch/x4-image-fusion-20260906-01/restored.insprj",
+      "sha256": "a6ca0c5b47c9a073487c9e156370793239942363b9bb0d355c989b5a581b4c21",
+      "image_fusion": true,
+      "full_json_equals_on_except_modified_time": true
+    }
+  },
+  "common_video": {
+    "codec": "HEVC Main",
+    "dimensions": [7680, 3840],
+    "pixel_format": "yuvj420p",
+    "range": "full",
+    "matrix_transfer_primaries": "bt709",
+    "frame_rate": "30000/1001",
+    "time_base": "1/30000",
+    "frames": 102,
+    "duration_ts": 102102,
+    "duration_seconds": "3.403400",
+    "packet_grid": {
+      "pts_dts_duration_and_keyframe_flags_equal": true,
+      "first_pts": 0,
+      "last_pts": 101101,
+      "step_and_duration": 1001,
+      "dts_equals_pts": true
+    }
+  },
+  "pixel_inspection": {
+    "output_frame_indices": [0, 31, 101],
+    "common_view": "v360=input=equirect:output=flat:yaw=90.90:pitch=-2.30:roll=-0.37:rorder=ypr:h_fov=63.63:v_fov=38.474775649129:w=1280:h=720:interp=line",
+    "whole_sphere_sample": "output frame 31, area-downsampled to 1920x960",
+    "observed": "Reported-view pairs look closely similar, without an obvious shape change. Signed, magnified whole-sphere differences show broad smooth color regions of opposite sign, consistent with photometric matching rather than one global gain.",
+    "difference_visualization": "ON minus OFF RGB, area-averaged to approximately 32-pixel cells, displayed as 128 + 16 * difference; not a production field or quality threshold",
+    "scope": "sampled visual observations, not a full sequence acceptance verdict"
+  },
+  "limits": [
+    "The original X4 reference's exact camera-source/output-frame association remains pending. Equal export grids alone do not establish it.",
+    "Both videos are separately lossy encoded. Their pixel difference includes encoding and any export variation; it is not a recovered per-lens correction field.",
+    "No coefficients, chart association, evidence admission or temporal update rule are authenticated by this comparison.",
+    "No new Kjerag photometric implementation, both-camera parity, performance pass or owner acceptance is claimed."
+  ]
+}
