@@ -468,7 +468,7 @@ impl GpuGeometryPipeline {
             let work = if std::ptr::eq(pipeline, &self.filter) {
                 (2 * ROWS) as u32
             } else if std::ptr::eq(pipeline, &self.mask) {
-                MASK_WORDS as u32
+                (MASK_WORDS_PER_LENS + 1) as u32
             } else {
                 (2 * ROWS * COLS) as u32
             };
@@ -856,13 +856,12 @@ fn camera_clears(lens: u32, uv: vec2<f32>) -> bool {
 
 @compute @workgroup_size(64)
 fn build_masks(@builtin(global_invocation_id) gid: vec3<u32>) {
-  if (gid.x == 2u * MASK_WORDS_PER_LENS) {
-    masks[gid.x] = 0u;
+  if (gid.x == MASK_WORDS_PER_LENS) {
+    masks[2u * MASK_WORDS_PER_LENS] = 0u;
     return;
   }
-  if (gid.x > 2u * MASK_WORDS_PER_LENS) { return; }
-  let lens = gid.x / MASK_WORDS_PER_LENS;
-  let word = gid.x % MASK_WORDS_PER_LENS;
+  if (gid.x > MASK_WORDS_PER_LENS) { return; }
+  let word = gid.x;
   var packed = 0u;
   for (var byte = 0u; byte < 4u; byte++) {
     let local = word * 4u + byte;
@@ -884,7 +883,10 @@ fn build_masks(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     packed = packed | (select(0u, 255u, both) << (8u * byte));
   }
-  masks[lens * MASK_WORDS_PER_LENS + word] = packed;
+  // The mask is bilateral. This invocation uniquely owns the same word in
+  // both lens sections; the sentinel above has its own disjoint owner.
+  masks[word] = packed;
+  masks[MASK_WORDS_PER_LENS + word] = packed;
 }
 "#;
 
@@ -1025,6 +1027,16 @@ mod tests {
                 "lens unification",
                 "both = both && valid(retained[at]) && valid(retained[RETAINED_NODES + at]);",
                 "both = both && valid(retained[at]);",
+            ),
+            (
+                "second bilateral lens write",
+                "masks[MASK_WORDS_PER_LENS + word] = packed;",
+                "masks[MASK_WORDS_PER_LENS + word] = packed ^ 255u;",
+            ),
+            (
+                "trailing validity sentinel",
+                "masks[2u * MASK_WORDS_PER_LENS] = 0u;",
+                "masks[2u * MASK_WORDS_PER_LENS] = 1u;",
             ),
             (
                 "camera support omission",

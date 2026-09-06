@@ -14,6 +14,28 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Bilateral mask work consolidated, 2026-09-06:** geometry now evaluates each
+joint two-lens mask word once and writes both output sections, instead of
+repeating the identical 9-by-9 validity and support calculation. Workgroups
+fall from 507 to 254; the 32,401-word buffer, arithmetic and sentinel remain
+unchanged. Actual Radeon qualification, including deliberately corrupted
+second-lens and sentinel writes, passes. All 93 X4 and 183 X2 real Scene
+artifacts are byte-identical to the preceding recurrence checkpoint; root
+viewed both new final frames. Workspace 1140 passed, 30 ignored, with full
+clippy/fmt/name/Cargo-source gates passing. The rebuilt native player passes
+all 48 window checks at the exact X4 view; four paired-file drop checks are
+inapplicable. Root viewed its capture, byte-identical to the prior checkpoint.
+
+Two alternating capacity pairs per camera at 2560x1440 show mixed results:
+X4 baseline/candidate 302–323 / 305–309 redraws/s and p99 12.77–13.47 /
+13.12–13.17 ms; X2 361–366 / 367–370 and p99 11.62–11.66 / 11.34–11.44 ms.
+All eight runs retained 360 source changes with zero drops, starvation and
+audio underruns. This is redundant-work removal, not a demonstrated general
+capacity or tail-latency win. The 4.17 ms target remains unmet. No additional
+timing probe or Studio export was used. Evidence is in ignored
+`scratch/bilateral-mask-once-20260906-01/`; main and owner acceptance are
+unchanged.
+
 **Exact PIS input preparation optimized, 2026-09-06:** the GPU front end no
 longer reconstructs each patch's entire row/column prefix independently.
 Cached horizontal and vertical recurrences preserve every rounded operation,

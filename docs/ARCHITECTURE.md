@@ -285,6 +285,12 @@ An additional dispatch establishes the cache dependency. The CPU oracle and
 GPU mutation checks cover the complete public result. This removes repeated
 work without changing the solver's input arithmetic, admission or temporal law.
 
+The geometry mask is bilateral: every word already combines both source
+lenses' validity and image support. One invocation evaluates that word once
+and writes it to both lens sections; a disjoint invocation writes the trailing
+validity sentinel. This avoids two identical neighborhood scans while retaining
+the existing buffer layout and full CPU-oracle qualification.
+
 ## Playback (issue #4)
 
 One demuxer per file feeds every decoder and hands out `Frames`: every lens
