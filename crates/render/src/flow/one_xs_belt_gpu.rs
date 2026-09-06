@@ -25,8 +25,61 @@ use crate::direct_type2::DirectType2Pipeline;
 use crate::direct_type2::ImportedOneXsPicture;
 use crate::draw_retirement::{DrawPermit, DrawRetirementError, IcedDrawRetirements};
 use crate::flow::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sample_source_belts};
+use crate::stitch_camera::StitchCamera;
 use kjerag_media::{FrameStamp, Frames};
 use kjerag_meta::{CalibrationSet, OrientationTrack, Readout};
+
+/// One admitted capture's immutable camera interpretation and CPU resources.
+///
+/// Constructing this is the live admission boundary. Parent geometry, static
+/// maps and support therefore cannot classify the same capture independently.
+/// X4 support and alpha deliberately remain derived from the established v3
+/// projection here; reviewing their model-6 edge coverage is separate work.
+pub(crate) struct ResidentCameraProfile {
+    source_size: kjerag_meta::Size,
+    parent_inputs: ParentMapBuilder,
+    resources: OneXsResources,
+    support: crate::flow::one_xs_belt::CameraMaskSupport,
+    #[cfg(test)]
+    calibration: CalibrationSet,
+}
+
+impl ResidentCameraProfile {
+    pub(crate) fn from_calibration(calibration: &CalibrationSet) -> Fallible<Option<Self>> {
+        let Some(camera) = StitchCamera::from_calibration(calibration) else {
+            return Ok(None);
+        };
+        let parent_inputs = ParentMapBuilder::new(calibration)?;
+        let size =
+            kjerag_media::Size::new(calibration.dimension.width, calibration.dimension.height);
+        let resources = OneXsResources::for_camera(camera, &calibration.lenses, size)?;
+        let support = crate::flow::one_xs_belt::CameraMaskSupport::for_camera(
+            camera,
+            &crate::projection::Reframe::new(
+                &calibration.lenses,
+                size,
+                crate::Camera::default(),
+                crate::Held::default(),
+                1.0,
+                false,
+                crate::Sampling::default(),
+            ),
+        )?;
+        Ok(Some(Self {
+            source_size: calibration.dimension,
+            parent_inputs,
+            resources,
+            support,
+            #[cfg(test)]
+            calibration: calibration.clone(),
+        }))
+    }
+
+    #[cfg(test)]
+    fn calibration(&self) -> &CalibrationSet {
+        &self.calibration
+    }
+}
 
 /// Resident PIS preparation is nested under the belt owner so its only
 /// boundary can consume the whole private producer token atomically.
@@ -131,9 +184,9 @@ impl ResidentSourceIdentity {
 /// Capture-private parent, geometry, belt and final-map producers.
 ///
 /// This value can only be constructed inside [`ResidentSourceCapture`] from
-/// one calibration and its one orientation track. Keeping it private prevents
-/// a same-device capture root from being paired with another capture's static
-/// resources or parent inputs.
+/// one camera profile and its one orientation track. Keeping it private
+/// prevents a same-device capture root from being paired with another
+/// capture's static resources or parent inputs.
 #[allow(dead_code)]
 struct ResidentSourceFrontPipeline {
     context: OneXsGpuContext,
@@ -151,42 +204,27 @@ struct ResidentSourceFrontPipeline {
 impl ResidentSourceFrontPipeline {
     fn new(
         context: OneXsGpuContext,
-        calibration: &CalibrationSet,
+        profile: &ResidentCameraProfile,
         orientation: OrientationTrack,
     ) -> Fallible<Self> {
-        let parent_inputs = ParentMapBuilder::new(calibration)?;
-        let camera = crate::stitch_camera::StitchCamera::from_calibration(calibration)
-            .ok_or("resident stitching requires two compatible calibrated Mei lenses")?;
-        let size =
-            kjerag_media::Size::new(calibration.dimension.width, calibration.dimension.height);
-        let resources = OneXsResources::for_camera(camera, &calibration.lenses, size)?;
-        let support = crate::flow::one_xs_belt::CameraMaskSupport::for_camera(
-            camera,
-            &crate::projection::Reframe::new(
-                &calibration.lenses,
-                size,
-                crate::Camera::default(),
-                crate::Held::default(),
-                1.0,
-                false,
-                crate::Sampling::default(),
-            ),
-        )?;
         let identity = ResidentSourceIdentity::new();
         Ok(Self {
             context: context.clone(),
             identity: identity.clone(),
             root: resident_frame_gpu::GpuResidentCapture::new_bound(context.clone(), identity),
-            parent_inputs,
+            parent_inputs: profile.parent_inputs.clone(),
             orientation,
             parent: Arc::new(GpuResidentFramePipeline::new(context.clone())?),
             geometry: Arc::new(geometry_gpu::GpuGeometryPipeline::new(
                 context.clone(),
-                resources.static_coordinates(),
-                &support,
+                profile.resources.static_coordinates(),
+                &profile.support,
             )?),
             belts: Arc::new(GpuSolverBeltPipeline::new(context.clone())?),
-            final_map: Arc::new(map_patch_gpu::GpuMapMaterializer::new(context, &resources)?),
+            final_map: Arc::new(map_patch_gpu::GpuMapMaterializer::new(
+                context,
+                &profile.resources,
+            )?),
         })
     }
 
@@ -260,11 +298,11 @@ pub(crate) struct ResidentSourceCapture {
 impl ResidentSourceCapture {
     pub(crate) fn new(
         context: OneXsGpuContext,
-        calibration: &CalibrationSet,
+        profile: &ResidentCameraProfile,
         orientation: OrientationTrack,
     ) -> Fallible<Self> {
         Ok(Self {
-            pipeline: ResidentSourceFrontPipeline::new(context, calibration, orientation)?,
+            pipeline: ResidentSourceFrontPipeline::new(context, profile, orientation)?,
         })
     }
 
@@ -529,7 +567,7 @@ impl ResidentCaptureSession {
     fn new(
         context: OneXsGpuContext,
         format: wgpu::TextureFormat,
-        calibration: &CalibrationSet,
+        profile: &ResidentCameraProfile,
         orientation: OrientationTrack,
     ) -> Fallible<Self> {
         require_resident_device_limits(&context.device().limits())?;
@@ -545,7 +583,7 @@ impl ResidentCaptureSession {
             format,
         ));
         Ok(Self {
-            capture: ResidentSourceCapture::new(context.clone(), calibration, orientation)?,
+            capture: ResidentSourceCapture::new(context.clone(), profile, orientation)?,
             motion: Arc::new(geometry_gpu::temporal_gpu::GpuMotionStage::new(
                 context.clone(),
             )?),
@@ -571,7 +609,7 @@ impl ResidentCaptureSession {
             cold_blurred_probe: Mutex::new(None),
             context,
             format,
-            source_size: calibration.dimension,
+            source_size: profile.source_size,
         })
     }
 
@@ -736,7 +774,7 @@ impl ResidentCaptureSession {
 
 #[allow(dead_code)]
 struct ResidentCaptureFacadeInner {
-    calibration: Arc<CalibrationSet>,
+    profile: Arc<ResidentCameraProfile>,
     orientation: OrientationTrack,
     state: Mutex<ResidentCaptureState>,
 }
@@ -752,10 +790,10 @@ pub(crate) struct ResidentCaptureFacade {
 
 #[allow(dead_code)]
 impl ResidentCaptureFacade {
-    pub(crate) fn new(calibration: Arc<CalibrationSet>, orientation: OrientationTrack) -> Self {
+    pub(crate) fn new(profile: Arc<ResidentCameraProfile>, orientation: OrientationTrack) -> Self {
         Self {
             inner: Arc::new(ResidentCaptureFacadeInner {
-                calibration,
+                profile,
                 orientation,
                 state: Mutex::new(ResidentCaptureState {
                     session: None,
@@ -779,7 +817,7 @@ impl ResidentCaptureFacade {
             .map(|session| Arc::new(session.restarted()));
         Ok(Self {
             inner: Arc::new(ResidentCaptureFacadeInner {
-                calibration: self.inner.calibration.clone(),
+                profile: self.inner.profile.clone(),
                 orientation: self.inner.orientation.clone(),
                 state: Mutex::new(ResidentCaptureState {
                     session,
@@ -821,7 +859,7 @@ impl ResidentCaptureFacade {
         let session = Arc::new(ResidentCaptureSession::new(
             context,
             format,
-            &self.inner.calibration,
+            &self.inner.profile,
             self.inner.orientation.clone(),
         )?);
         state.session = Some(Arc::clone(&session));
@@ -848,6 +886,11 @@ impl ResidentCaptureFacade {
 
     pub(crate) fn same_capture(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn diagnostic_calibration(&self) -> &CalibrationSet {
+        self.inner.profile.calibration()
     }
 
     pub(crate) fn installed_stamp(&self) -> Fallible<Option<FrameStamp>> {
@@ -3669,7 +3712,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::projection::tests::{ONE_XS_FRAME, one_xs_lenses};
+    use crate::projection::tests::{ONE_XS_FRAME, fixture_lenses, one_xs_lenses};
 
     const SESSION_CENTER: Duration = Duration::from_micros(2_000_000);
 
@@ -3735,6 +3778,58 @@ mod tests {
                 height: 3_040,
             },
         }
+    }
+
+    fn resident_profile(calibration: CalibrationSet) -> Arc<ResidentCameraProfile> {
+        Arc::new(
+            ResidentCameraProfile::from_calibration(&calibration)
+                .unwrap()
+                .expect("test calibration must be admitted for resident playback"),
+        )
+    }
+
+    #[test]
+    fn resident_profile_is_the_single_live_camera_admission_boundary() {
+        let x2_calibration = session_calibration(20.0, 0.0);
+        let expected = OneXsResources::new(&x2_calibration.lenses).unwrap();
+        let x2 = ResidentCameraProfile::from_calibration(&x2_calibration)
+            .unwrap()
+            .expect("ONE X2 remains admitted");
+        assert_eq!(x2.resources, expected);
+
+        let mut missing_model6 = session_calibration(20.0, 0.0);
+        missing_model6.camera_model = "Insta360 X4 Air".to_owned();
+        missing_model6.lenses = fixture_lenses();
+        assert!(
+            ResidentCameraProfile::from_calibration(&missing_model6)
+                .unwrap()
+                .is_none()
+        );
+        missing_model6.model6 = Some(
+            missing_model6
+                .lenses
+                .iter()
+                .map(|lens| kjerag_meta::Model6Lens {
+                    intrinsics: lens.intrinsics,
+                    distortion: [0.0; 13],
+                    pose: lens.pose,
+                    lens_type: lens.lens_type,
+                })
+                .collect(),
+        );
+        assert!(
+            ResidentCameraProfile::from_calibration(&missing_model6)
+                .unwrap()
+                .is_some()
+        );
+
+        let mut inconsistent = session_calibration(20.0, 0.0);
+        inconsistent.lenses[1] = fixture_lenses()[1].clone();
+        assert!(
+            ResidentCameraProfile::from_calibration(&inconsistent)
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn session_orientation(scale: f64) -> OrientationTrack {
@@ -3833,7 +3928,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_constructor_is_the_only_calibration_composition_boundary() {
+    fn camera_profile_is_the_only_calibration_composition_boundary() {
         let source = include_str!("one_xs_belt_gpu.rs");
         let production = source.split_once("#[cfg(test)]\nmod tests").unwrap().0;
         let pipeline = production
@@ -3841,6 +3936,13 @@ mod tests {
             .unwrap()
             .1
             .split_once("/// One open capture's inseparable")
+            .unwrap()
+            .0;
+        let profile = production
+            .split_once("impl ResidentCameraProfile {")
+            .unwrap()
+            .1
+            .split_once("/// Resident PIS preparation")
             .unwrap()
             .0;
         let capture = production
@@ -3851,10 +3953,12 @@ mod tests {
             .unwrap()
             .0;
 
-        assert!(pipeline.contains("ParentMapBuilder::new(calibration)"));
+        assert!(profile.contains("ParentMapBuilder::new(calibration)"));
+        assert!(profile.contains("OneXsResources::for_camera(camera, &calibration.lenses, size)"));
+        assert!(profile.contains("CameraMaskSupport::for_camera("));
         assert!(pipeline.contains("self.parent_inputs.readout()"));
-        assert!(pipeline.contains("OneXsResources::for_camera(camera, &calibration.lenses, size)"));
-        assert!(pipeline.contains("CameraMaskSupport::for_camera("));
+        assert!(!pipeline.contains("StitchCamera::from_"));
+        assert!(!pipeline.contains("ParentMapBuilder::new"));
         assert!(pipeline.contains("GpuResidentFramePipeline::new(context.clone())"));
         assert!(pipeline.contains("GpuResidentCapture::new_bound("));
         assert!(capture.contains("ResidentSourceFrontPipeline::new("));
@@ -3878,12 +3982,13 @@ mod tests {
         let context = OneXsGpuContext::new(&device, &queue);
         let calibration_a = session_calibration(20.0, 0.0);
         let calibration_b = session_calibration(23.516, 0.25);
+        let profile_a = resident_profile(calibration_a);
+        let profile_b = resident_profile(calibration_b);
         let capture_a =
-            ResidentSourceCapture::new(context.clone(), &calibration_a, session_orientation(1.0))
+            ResidentSourceCapture::new(context.clone(), &profile_a, session_orientation(1.0))
                 .unwrap_or_else(|error| panic!("capture A failed on {adapter}: {error}"));
-        let capture_b =
-            ResidentSourceCapture::new(context, &calibration_b, session_orientation(2.0))
-                .unwrap_or_else(|error| panic!("capture B failed on {adapter}: {error}"));
+        let capture_b = ResidentSourceCapture::new(context, &profile_b, session_orientation(2.0))
+            .unwrap_or_else(|error| panic!("capture B failed on {adapter}: {error}"));
         let frame = FrameStamp::for_test(77, SESSION_CENTER, None);
 
         let error = capture_a
@@ -4009,7 +4114,7 @@ mod tests {
         };
         let context = OneXsGpuContext::new(&device, &queue);
         let facade = ResidentCaptureFacade::new(
-            Arc::new(session_calibration(20.0, 0.0)),
+            resident_profile(session_calibration(20.0, 0.0)),
             session_orientation(1.0),
         );
         let first = facade
@@ -4173,11 +4278,12 @@ mod tests {
     #[test]
     fn unbound_seek_restart_stays_lazy_and_admits_only_a_new_lineage() {
         let facade = ResidentCaptureFacade::new(
-            Arc::new(session_calibration(20.0, 0.0)),
+            resident_profile(session_calibration(20.0, 0.0)),
             session_orientation(1.0),
         );
         assert!(!facade.state().unwrap().seek_restart);
         let restart = facade.restarted().unwrap();
+        assert!(Arc::ptr_eq(&facade.inner.profile, &restart.inner.profile));
         let state = restart.state().unwrap();
         assert!(state.seek_restart);
         assert!(state.session.is_none());
@@ -4189,7 +4295,7 @@ mod tests {
     #[test]
     fn resident_start_guard_quarantines_submit_and_install_unwind() {
         let facade = ResidentCaptureFacade::new(
-            Arc::new(session_calibration(20.0, 0.0)),
+            resident_profile(session_calibration(20.0, 0.0)),
             session_orientation(1.0),
         );
         facade.state().unwrap().transaction = ResidentTransaction::Starting;
@@ -4225,7 +4331,7 @@ mod tests {
     #[test]
     fn retryable_import_preserves_installed_acknowledgement_and_allows_the_same_source() {
         let facade = ResidentCaptureFacade::new(
-            Arc::new(session_calibration(20.0, 0.0)),
+            resident_profile(session_calibration(20.0, 0.0)),
             session_orientation(1.0),
         );
         let installed = FrameStamp::for_test(0, Duration::ZERO, None);
@@ -4310,7 +4416,7 @@ mod tests {
     #[test]
     fn capture_acknowledgement_requires_the_exact_full_frame_stamp() {
         let facade = ResidentCaptureFacade::new(
-            Arc::new(session_calibration(20.0, 0.0)),
+            resident_profile(session_calibration(20.0, 0.0)),
             session_orientation(1.0),
         );
         let installed = FrameStamp::for_test(7, Duration::from_millis(7), None);

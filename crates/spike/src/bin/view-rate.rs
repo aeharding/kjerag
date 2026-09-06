@@ -99,7 +99,8 @@ fn redraw(
     gpu: &Gpu,
     target: &Offscreen,
     camera: Camera,
-) -> Fallible<()> {
+) -> Fallible<(Duration, Duration)> {
+    let began = Instant::now();
     if let Next::Stopped(stall) = scene.pump(Instant::now()) {
         return Err(stall.to_string().into());
     }
@@ -111,7 +112,9 @@ fn redraw(
         &gpu.queue,
         aspect(target.size()),
     );
-    target.render(&gpu.device, &gpu.queue, pipeline)
+    let prepared = Instant::now();
+    target.render(&gpu.device, &gpu.queue, pipeline)?;
+    Ok((prepared - began, prepared.elapsed()))
 }
 
 fn measure(
@@ -124,6 +127,8 @@ fn measure(
 ) -> Fallible<()> {
     let duration = Duration::from_secs(if playing { 12 } else { 2 });
     let mut timings = Vec::new();
+    let mut prepare_timings = Vec::new();
+    let mut completion_timings = Vec::new();
     let first = scene.displayed_frame().ok_or("view-rate has no picture")?;
     let mut last = first;
     let mut changes = 0;
@@ -134,8 +139,10 @@ fn measure(
         // Bounded movement across the reported riser, not repeated identical
         // uniforms or a render aimed forever away from the seam.
         let yaw = camera.yaw + (began.elapsed().as_secs_f32() * 2.0).sin() * 0.2;
-        redraw(scene, pipeline, gpu, target, Camera { yaw, ..camera })?;
+        let (prepare, completion) = redraw(scene, pipeline, gpu, target, Camera { yaw, ..camera })?;
         timings.push(start.elapsed().as_secs_f64() * 1000.0);
+        prepare_timings.push(prepare.as_secs_f64() * 1000.0);
+        completion_timings.push(completion.as_secs_f64() * 1000.0);
         let displayed = scene
             .displayed_frame()
             .ok_or("view-rate lost its picture")?;
@@ -155,14 +162,23 @@ fn measure(
         return Err("view-rate paused phase advanced the source".into());
     }
     timings.sort_by(f64::total_cmp);
-    let quantile = |p: f64| timings[((timings.len() - 1) as f64 * p).round() as usize];
+    prepare_timings.sort_by(f64::total_cmp);
+    completion_timings.sort_by(f64::total_cmp);
+    let summary = |values: &[f64]| {
+        let q = |p: f64| values[((values.len() - 1) as f64 * p).round() as usize];
+        json!({"median": q(0.5), "p95": q(0.95), "p99": q(0.99), "max": q(1.0)})
+    };
     println!(
         "{}",
         json!({"phase": if playing { "playing-unpaced" } else { "paused-unpaced" },
             "seconds": elapsed, "redraws": timings.len(),
             "completed_redraws_per_second": timings.len() as f64 / elapsed,
-            "redraw_ms": {"median": quantile(0.5), "p95": quantile(0.95),
-                "p99": quantile(0.99), "max": quantile(1.0)},
+            "redraw_ms": summary(&timings),
+            // Host wall time, not GPU timestamps. Completion can include
+            // queued stitching as well as the view itself. Do not add these
+            // independent percentiles to reconstruct the redraw percentile.
+            "pump_prepare_ms": summary(&prepare_timings),
+            "draw_and_queue_completion_ms": summary(&completion_timings),
             "redraws_over_budget": timings.iter().filter(|ms| **ms > 1000.0 / HZ).count(),
             "source_changes": changes, "source_frames_per_second": changes as f64 / elapsed,
             "source_seconds_advanced": (last.1 - first.1).as_secs_f64(),

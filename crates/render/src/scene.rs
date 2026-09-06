@@ -57,8 +57,8 @@ use super::flow::one_xs::scalar::{
 };
 use super::flow::one_xs::temporal::BlurredBelts;
 use super::flow::one_xs_belt_gpu::{
-    PendingBlurredBelts, ResidentCaptureFacade, ResidentDrain, ResidentPrepare, ResidentRetry,
-    ResidentSceneFacade, ResidentScreenshotPrepare, ResidentSubmit,
+    PendingBlurredBelts, ResidentCameraProfile, ResidentCaptureFacade, ResidentDrain,
+    ResidentPrepare, ResidentRetry, ResidentSceneFacade, ResidentScreenshotPrepare, ResidentSubmit,
 };
 use super::flow::{Cadence, Estimate};
 use super::one_xs_luma::{self, LumaReadbackPipeline, PendingOneXsLuma};
@@ -353,10 +353,9 @@ struct Show {
     /// (issue #8); both are empty for a file with no IMU record, and then
     /// horizon lock is a no-op rather than an error.
     held: Arc<Motion>,
-    /// Sequential selected ONE X2 state for ordinary live playback only.
+    /// Sequential selected ONE X2 state for ordinary live playback only. Its
+    /// camera profile is also the factory input for a fresh restart lineage.
     one_xs: Option<ResidentCaptureFacade>,
-    /// Factory input for a genuinely fresh causal lineage after a restart.
-    one_xs_calibration: Option<Arc<CalibrationSet>>,
     /// A requested target remains a seek until its exact map, not merely its
     /// decoded surfaces, has completed the capture transaction.
     replay: RefCell<Option<OneXsReplay>>,
@@ -2010,9 +2009,6 @@ impl Show {
         let one_xs = matches!(&source, Source::Live(_))
             .then(|| calibrated.one_xs.clone())
             .flatten();
-        let one_xs_calibration = matches!(&source, Source::Live(_))
-            .then(|| calibrated.one_xs_calibration.clone())
-            .flatten();
         Self {
             files,
             frame,
@@ -2022,7 +2018,6 @@ impl Show {
             camera: calibrated.camera,
             held: calibrated.held,
             one_xs,
-            one_xs_calibration,
             replay: RefCell::new(None),
             playing: RefCell::new(Playing { frames, source }),
         }
@@ -2149,9 +2144,6 @@ impl Show {
             target,
         );
         if start == ReplayStart::FrameZero {
-            self.one_xs_calibration
-                .as_ref()
-                .ok_or("ONE X2 playback lost its capture calibration")?;
             // Replace the Arc. The retained old View continues to name the
             // old completed capture and can never submit its nonzero frame to
             // this fresh frame-zero owner.
@@ -2343,28 +2335,20 @@ fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<Calibrated> {
         readout: calibration.readout(),
     };
     let camera = calibration.camera_key();
-    let (one_xs, one_xs_calibration) = if ONE_XS_PLAYBACK_ENABLED
+    let one_xs = if ONE_XS_PLAYBACK_ENABLED
         && !orientation.is_empty()
         && lenses.len() == calibration.lenses.len()
-        && crate::stitch_camera::StitchCamera::from_calibration(&calibration).is_some()
     {
-        // Validate camera inputs while opening, before changing the player's
-        // presentation policy or constructing any GPU resources.
-        crate::flow::one_xs::ParentMapBuilder::new(&calibration)?;
-        let calibration = Arc::new(calibration);
-        (
-            Some(ResidentCaptureFacade::new(calibration.clone(), orientation)),
-            Some(calibration),
-        )
+        ResidentCameraProfile::from_calibration(&calibration)?
+            .map(|profile| ResidentCaptureFacade::new(Arc::new(profile), orientation))
     } else {
-        (None, None)
+        None
     };
     Ok(Calibrated {
         lenses: lenses.into(),
         camera,
         held: Arc::new(held),
         one_xs,
-        one_xs_calibration,
     })
 }
 
@@ -2375,7 +2359,6 @@ struct Calibrated {
     camera: u64,
     held: Arc<Motion>,
     one_xs: Option<ResidentCaptureFacade>,
-    one_xs_calibration: Option<Arc<CalibrationSet>>,
 }
 
 /// What the shell hands the renderer for one frame.
@@ -7625,7 +7608,7 @@ mod tests {
         std::fs::create_dir(output).expect("review output must be a new directory");
         let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
         let mut scene = Scene::open(path).unwrap();
-        assert!(scene.show.as_ref().unwrap().one_xs_calibration.is_some());
+        assert!(scene.show.as_ref().unwrap().one_xs.is_some());
         assert!(!scene.supports_optical_flow());
         scene.set_muted(true);
         scene.pause(Instant::now());
@@ -7745,12 +7728,7 @@ mod tests {
         );
         let luma = pending_luma.read().expect("exact source readback failed");
         assert_eq!(luma.frame(), &exact);
-        let calibration = scene
-            .show
-            .as_ref()
-            .and_then(|show| show.one_xs_calibration.clone())
-            .expect("selected capture lost its factory calibration");
-        let owner = crate::flow::one_xs::player::FrameOwner::new(&calibration)
+        let owner = crate::flow::one_xs::player::FrameOwner::new(capture.diagnostic_calibration())
             .expect("CPU frame owner construction failed");
         let expected = owner
             .blurred_for_test(&luma)

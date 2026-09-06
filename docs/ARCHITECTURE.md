@@ -85,6 +85,16 @@ explicit diagnostic/oracle boundary and is not a selected fallback.
 
 ### Shared camera boundary (issue #184)
 
+Live admission produces one immutable `ResidentCameraProfile` while opening
+the capture, before selecting sequential playback or constructing GPU state.
+It owns the resolved parent inputs, source dimensions, static maps and image
+support, without retaining the full raw calibration in production. Renderer
+attachment consumes those prepared resources;
+seeks share the same profile while creating fresh temporal/frame ownership.
+Scene no longer carries a second optional calibration alongside the capture.
+The lens-only constructors remain available to reference instruments, but
+live GPU attachment does not independently rebuild or choose camera geometry.
+
 The resident solver now serves ONE X2 and X4 Air. `stitch_camera` selects
 the two tested lens families without changing their metadata identity. The
 ONE X2 law retains its recovered Template mounting, crop centers, alpha and

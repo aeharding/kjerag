@@ -14,6 +14,52 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Camera setup consolidated, 2026-09-06:** one immutable resident profile now
+resolves live admission, parent inputs, static maps and image support while
+opening the capture. GPU attachment consumes that profile instead of rebuilding
+camera inputs, and restarts share it while creating a fresh temporal lineage.
+Scene's duplicate optional calibration and redundant parent validation are
+removed. Production retains only the prepared inputs, not the full raw
+calibration; the frozen CPU diagnostic retains a test-only copy. This is a
+structural correction, not another stitching law or a claim that the remaining
+v3-derived X4 support has been corrected.
+
+All 93 X4 and 183 X2 actual Scene artifacts (92 frames plus their packed/alpha
+maps) are byte-identical to the corrected pre-refactor baseline. Workspace
+tests pass 1140/0 with 30 ignored; full-target clippy, formatting, name-check and
+Cargo-source consistency pass. Evidence is in
+`scratch/camera-profile-20260906-01/`. The owner-review native executable stays
+at the previously tested camera-correction build; this refactor has not yet
+received a fresh native-window harness run and is not merged.
+
+The capacity diagnostic now separates host pump/prepare time from draw plus
+queue-completion time without adding GPU synchronization. These are independent
+wall-time distributions, not GPU timestamps or additive percentiles. One
+post-refactor 2560x1440 run per camera retained all 360 source changes and zero
+drop/starvation/audio-underrun counts. X4 reached 287 completed redraws/s with
+p95 prepare 3.315 ms and completion 8.435 ms; X2 reached 330 with 2.825 ms and
+6.956 ms respectively. Both host preparation and queued work need attention;
+this refactor is not a measured performance improvement.
+
+**Native PIS arithmetic experiment rejected, 2026-09-06:** replacing only the
+five arithmetic wrappers with ordinary GPU operations did not establish a
+repeatable whole-Scene capacity improvement. Corrected-X4 baseline runs at
+2560x1440 averaged 284 to 308 completed redraws/s; native-arithmetic trials
+averaged 277 and 311, with more over-budget redraws than their adjacent exact
+runs. All preserved 360 consecutive source changes per twelve-second sample
+with no reported drops, starvation or audio underruns. Neither arm meets the
+4.17 ms tail target. The production constructor and exact shader are restored;
+the owner-review player was not rebuilt. The prototype, separate binaries and
+logs remain in ignored `scratch/native-pis-arithmetic-20260906-01/`.
+
+Actual Scene comparison also completed for all 61 X2 and 31 corrected X4
+review frames. Alpha stayed bit-identical, while terminal decisions and final
+UVs changed. Root inspected the worst-RMS frame from each camera but makes no
+owner-quality acceptance claim. No additional X2 performance trial or native
+window gate was needed after the X4 performance criterion failed. This narrows
+the performance work away from assuming exact rounding is the primary problem;
+it does not prove native arithmetic could never be useful.
+
 **Implemented X4 camera correction, 2026-09-06:** the real Scene seek/stitch/
 draw/screenshot path now renders frames 34569 through 34599 at the owner's
 exact view with a broadly straight horizon instead of the prior visible bend.
