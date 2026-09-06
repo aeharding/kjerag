@@ -14,6 +14,43 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Exact PIS input preparation optimized, 2026-09-06:** the GPU front end no
+longer reconstructs each patch's entire row/column prefix independently.
+Cached horizontal and vertical recurrences preserve every rounded operation,
+including intermediate positions between emitted patches. Patch-sum input
+reads fall from 46,505,536 to 85,100 per source frame. A 41,040-byte private
+scratch tail uses an existing allocation and binding; public outputs, model
+calculations and temporal admission are unchanged.
+
+A bounded timestamp experiment over 360 actual source changes per camera
+measured the front-end GPU interval falling from 2.066 to 0.188 ms on X4 and
+1.972 to 0.195 ms on X2. Paired per-frame totals fell from 7.767 to 5.692 ms
+and 6.846 to 5.245 ms respectively. These are instrumented submission intervals,
+not isolated busy times or native presentation. The temporary timestamp code
+is removed; its patch, binaries, raw records and interpretation limits remain
+in ignored `scratch/warm-stage-timing-20260906-01/`.
+
+Two uninstrumented baseline/candidate pairs per camera at 2560x1440 show lower
+p95 and p99 redraw times in each pair. X4 baseline/candidate capacity ranges
+are 287–307 / 301–307 redraws/s, with p99 14.20–15.69 / 13.26–13.56 ms. X2
+ranges are 330–338 / 363–365, with p99 13.11–13.89 / 11.44–11.80 ms. All eight
+runs retained 360 consecutive source changes with zero reported drops,
+starvation or audio underruns. Not every distribution improved: X4's count
+over 4.17 ms increased in both pairs, substantially in one, despite its lower
+p95/p99. The active
+240 fps frame-time target remains unmet; no universal throughput claim is made.
+
+All 93 X4 and 183 X2 real Scene PPM/map/alpha artifacts remain byte-identical;
+root inspected the final frame from each new sequence. GPU qualification and
+late-row/late-column/scratch-boundary mutation checks pass, as do all 1140
+workspace tests (30 ignored), full-target clippy, formatting, name-check and
+Cargo-source consistency. The refreshed branch native executable passes all
+48 window checks at the exact X4 view. Root inspected its capture, also
+byte-identical to the prior corrected native capture; four paired-file drop
+checks are inapplicable to the single-file X4 capture. The previous binary and
+harness directory are preserved. Main is unchanged and owner acceptance
+remains required.
+
 **Shared exact arithmetic and native cleanup gate, 2026-09-06:** parent mapping
 and PIS now compile the same binary32 division helper. PIS arithmetic is
 unchanged; parent mapping replaces its duplicate restoring divider with PIS's

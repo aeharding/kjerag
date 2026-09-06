@@ -275,6 +275,16 @@ draw, preserves the last complete display untouched and surfaces the raw
 identity error. Diagnostic picture preparation and full-luma readback are
 context-owned too; their per-frame APIs accept no replacement device or queue.
 
+The shared PIS front end caches its rolling patch sums instead of replaying
+each row/column prefix for every patch. One horizontal recurrence per source
+row feeds one vertical recurrence per patch column. Both retain every
+intermediate rounded update, including positions between the stride-three
+outputs. The 3,376-word public patch-sum prefix and downstream bindings stay
+unchanged; a 10,260-word private scratch tail uses the existing allocation.
+An additional dispatch establishes the cache dependency. The CPU oracle and
+GPU mutation checks cover the complete public result. This removes repeated
+work without changing the solver's input arithmetic, admission or temporal law.
+
 ## Playback (issue #4)
 
 One demuxer per file feeds every decoder and hands out `Frames`: every lens

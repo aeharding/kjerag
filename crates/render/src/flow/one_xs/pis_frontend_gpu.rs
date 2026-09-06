@@ -4,7 +4,8 @@
 //! plus the direction-owned L1/L2 gradients, exact weights, rolling patch
 //! denominators and five-word source models. L1 additionally owns the native
 //! lack-of-texture rows and physical block mask. The readable CPU `Input`
-//! remains the oracle. Scene does not select this path.
+//! remains the oracle. Scene selects this front end through the shared resident
+//! capture facade.
 
 use std::marker::PhantomData;
 use std::sync::mpsc;
@@ -50,6 +51,10 @@ const L2_PIXELS: usize = Level::Two.pixels();
 const SHARED_PIXELS: usize = 2 * (L1_PIXELS + L2_PIXELS);
 const STAGE_PIXELS: usize = 2 * (L1_PIXELS + L2_PIXELS);
 const STAGE_PATCHES: usize = 2 * (Level::One.patches() + Level::Two.patches());
+// Private horizontal-prefix cache after the unchanged public patch-sum prefix.
+// Keeping both in one allocation adds no binding or per-frame buffer owner.
+const PATCH_ROW_SUM_WORDS: usize =
+    2 * (Level::One.rows() * Level::One.patch_cols() + Level::Two.rows() * Level::Two.patch_cols());
 const L1_LACK_ROWS: usize = 2 * Level::One.patch_rows();
 const L1_BLOCKS: usize = Level::One.patches();
 const MASK_WORDS_PER_LENS: usize = (ROWS * COLS).div_ceil(4);
@@ -577,6 +582,7 @@ pub(crate) struct GpuPisFrontEnd {
     gradient: wgpu::ComputePipeline,
     weight_horizontal: wgpu::ComputePipeline,
     weight_vertical: wgpu::ComputePipeline,
+    patch_horizontal: wgpu::ComputePipeline,
     patches: wgpu::ComputePipeline,
     l1_aux: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
@@ -640,6 +646,7 @@ impl GpuPisFrontEnd {
             gradient: pipeline("prepare_gradients"),
             weight_horizontal: pipeline("prepare_weight_horizontal"),
             weight_vertical: pipeline("prepare_weight_vertical"),
+            patch_horizontal: pipeline("prepare_patch_horizontal"),
             patches: pipeline("prepare_patches"),
             l1_aux: pipeline("prepare_l1_aux"),
             layout,
@@ -857,6 +864,10 @@ fn encode(
         (&pipelines.gradient, STAGE_PIXELS),
         (&pipelines.weight_horizontal, STAGE_PIXELS),
         (&pipelines.weight_vertical, STAGE_PIXELS),
+        (
+            &pipelines.patch_horizontal,
+            2 * (Level::One.rows() + Level::Two.rows()),
+        ),
         (&pipelines.patches, STAGE_PATCHES),
         (&pipelines.l1_aux, L1_BLOCKS.max(L1_LACK_ROWS)),
     ] {
@@ -1054,7 +1065,7 @@ impl OutputBuffers {
             patch_weight_sums: storage_buffer(
                 device,
                 "ONE X2 GPU PIS rolling patch sums",
-                STAGE_PATCHES,
+                STAGE_PATCHES + PATCH_ROW_SUM_WORDS,
             ),
             models: storage_buffer(
                 device,
@@ -1209,6 +1220,8 @@ const L2_PATCH_ROWS = 88u;
 const L2_PATCH_COLS = 3u;
 const L2_PATCHES = L2_PATCH_ROWS * L2_PATCH_COLS;
 const STAGE_PATCHES = 2u * (L1_PATCHES + L2_PATCHES);
+const STAGE_ROWS = 2u * (L1_ROWS + L2_ROWS);
+const STAGE_PATCH_COLS = 2u * (L1_PATCH_COLS + L2_PATCH_COLS);
 const PATCH_SIZE = 8u;
 const PATCH_STRIDE = 3u;
 const MODEL_WORDS = 5u;
@@ -1412,6 +1425,61 @@ fn stage_patch(index: u32) -> Stage {
         L2_ROWS, L2_COLS, L2_PATCH_ROWS, L2_PATCH_COLS);
 }
 
+fn stage_row(index: u32) -> Stage {
+    if index < L1_ROWS {
+        return Stage(0u, 0u, 0u, index, L1_ROWS, L1_COLS, L1_PATCH_ROWS, L1_PATCH_COLS);
+    }
+    if index < 2u * L1_ROWS {
+        return Stage(L1_PIXELS, L1_PIXELS, 0u, index - L1_ROWS, L1_ROWS, L1_COLS, L1_PATCH_ROWS, L1_PATCH_COLS);
+    }
+    if index < 2u * L1_ROWS + L2_ROWS {
+        return Stage(2u * L1_PIXELS, 2u * L1_PIXELS, 2u * L1_PIXELS,
+            index - 2u * L1_ROWS, L2_ROWS, L2_COLS, L2_PATCH_ROWS, L2_PATCH_COLS);
+    }
+    return Stage(2u * L1_PIXELS + L2_PIXELS, 2u * L1_PIXELS + L2_PIXELS,
+        2u * L1_PIXELS, index - 2u * L1_ROWS - L2_ROWS,
+        L2_ROWS, L2_COLS, L2_PATCH_ROWS, L2_PATCH_COLS);
+}
+
+fn stage_patch_column(index: u32) -> Stage {
+    if index < L1_PATCH_COLS {
+        return Stage(0u, 0u, 0u, index, L1_ROWS, L1_COLS, L1_PATCH_ROWS, L1_PATCH_COLS);
+    }
+    if index < 2u * L1_PATCH_COLS {
+        return Stage(L1_PIXELS, L1_PIXELS, 0u, index - L1_PATCH_COLS, L1_ROWS, L1_COLS, L1_PATCH_ROWS, L1_PATCH_COLS);
+    }
+    if index < 2u * L1_PATCH_COLS + L2_PATCH_COLS {
+        return Stage(2u * L1_PIXELS, 2u * L1_PIXELS, 2u * L1_PIXELS,
+            index - 2u * L1_PATCH_COLS, L2_ROWS, L2_COLS, L2_PATCH_ROWS, L2_PATCH_COLS);
+    }
+    return Stage(2u * L1_PIXELS + L2_PIXELS, 2u * L1_PIXELS + L2_PIXELS,
+        2u * L1_PIXELS, index - 2u * L1_PATCH_COLS - L2_PATCH_COLS,
+        L2_ROWS, L2_COLS, L2_PATCH_ROWS, L2_PATCH_COLS);
+}
+
+fn patch_stage_index(stage: Stage) -> u32 {
+    if stage.base == 0u { return 0u; }
+    if stage.base == L1_PIXELS { return 1u; }
+    if stage.base == 2u * L1_PIXELS { return 2u; }
+    return 3u;
+}
+
+fn patch_row_scratch_base(stage: Stage) -> u32 {
+    let section = patch_stage_index(stage);
+    if section == 0u { return 0u; }
+    if section == 1u { return L1_ROWS * L1_PATCH_COLS; }
+    if section == 2u { return 2u * L1_ROWS * L1_PATCH_COLS; }
+    return 2u * L1_ROWS * L1_PATCH_COLS + L2_ROWS * L2_PATCH_COLS;
+}
+
+fn patch_output_base(stage: Stage) -> u32 {
+    let section = patch_stage_index(stage);
+    if section == 0u { return 0u; }
+    if section == 1u { return L1_PATCHES; }
+    if section == 2u { return 2u * L1_PATCHES; }
+    return 2u * L1_PATCHES + L2_PATCHES;
+}
+
 fn gradient(stage: Stage, row: u32, col: u32) -> vec2<f32> {
     if shared_masks[stage.mask_a_base + row * stage.cols + col] == 0u {
         return vec2<f32>(0.0);
@@ -1443,32 +1511,31 @@ fn weight_at(stage: Stage, row: u32, col: u32) -> f32 {
     return bitcast<f32>(raw_weight_bits[stage.base + row * stage.cols + col]);
 }
 
-fn horizontal_patch_sum(stage: Stage, row: u32, patch_col: u32) -> f32 {
-    var sum = 0.0;
-    for (var col = 0u; col < PATCH_SIZE; col += 1u) {
-        sum = add_rn(sum, weight_at(stage, row, col));
-    }
-    let origin = patch_col * PATCH_STRIDE;
-    for (var source_col = 1u; source_col <= origin; source_col += 1u) {
-        let entering = weight_at(stage, row, source_col + PATCH_SIZE - 1u);
-        let leaving = weight_at(stage, row, source_col - 1u);
-        sum = add_rn(sum, add_rn(entering, -leaving));
-    }
-    return sum;
+fn patch_row_sum_at(stage: Stage, row: u32, patch_col: u32) -> f32 {
+    let local = patch_row_scratch_base(stage) + row * stage.patch_cols + patch_col;
+    return bitcast<f32>(patch_weight_sum_bits[STAGE_PATCHES + local]);
 }
 
-fn rolling_patch_sum(stage: Stage, patch_row: u32, patch_col: u32) -> f32 {
+fn write_patch_column(stage: Stage, patch_col: u32) {
+    // Continue the same rounded recurrence once per column. Store every third
+    // position, but keep the two intermediate updates too: skipping them or
+    // reassociating a prefix sum would change the native binary32 result.
     var sum = 0.0;
     for (var row = 0u; row < PATCH_SIZE; row += 1u) {
-        sum = add_rn(sum, horizontal_patch_sum(stage, row, patch_col));
+        sum = add_rn(sum, patch_row_sum_at(stage, row, patch_col));
     }
-    let origin = patch_row * PATCH_STRIDE;
-    for (var source_row = 1u; source_row <= origin; source_row += 1u) {
-        let entering = horizontal_patch_sum(stage, source_row + PATCH_SIZE - 1u, patch_col);
-        let leaving = horizontal_patch_sum(stage, source_row - 1u, patch_col);
-        sum = add_rn(sum, add_rn(entering, -leaving));
+    let output_base = patch_output_base(stage);
+    patch_weight_sum_bits[output_base + patch_col] = bitcast<u32>(sum);
+    var source_row = 1u;
+    for (var patch_row = 1u; patch_row < stage.patch_rows; patch_row += 1u) {
+        for (var step = 0u; step < PATCH_STRIDE; step += 1u) {
+            let entering = patch_row_sum_at(stage, source_row + PATCH_SIZE - 1u, patch_col);
+            let leaving = patch_row_sum_at(stage, source_row - 1u, patch_col);
+            sum = add_rn(sum, add_rn(entering, -leaving));
+            source_row += 1u;
+        }
+        patch_weight_sum_bits[output_base + patch_row * stage.patch_cols + patch_col] = bitcast<u32>(sum);
     }
-    return sum;
 }
 
 @compute @workgroup_size(64)
@@ -1542,15 +1609,43 @@ fn prepare_weight_vertical(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 @compute @workgroup_size(64)
+fn prepare_patch_horizontal(@builtin(global_invocation_id) id: vec3<u32>) {
+    // Cache each row's rounded recurrence once, instead of replaying the
+    // entire row/column prefix independently for every downstream patch.
+    if id.x >= STAGE_ROWS { return; }
+    let stage = stage_row(id.x);
+    let row = stage.local;
+    var sum = 0.0;
+    for (var col = 0u; col < PATCH_SIZE; col += 1u) {
+        sum = add_rn(sum, weight_at(stage, row, col));
+    }
+    let scratch_base = STAGE_PATCHES + patch_row_scratch_base(stage) + row * stage.patch_cols;
+    patch_weight_sum_bits[scratch_base] = bitcast<u32>(sum);
+    var source_col = 1u;
+    for (var patch_col = 1u; patch_col < stage.patch_cols; patch_col += 1u) {
+        for (var step = 0u; step < PATCH_STRIDE; step += 1u) {
+            let entering = weight_at(stage, row, source_col + PATCH_SIZE - 1u);
+            let leaving = weight_at(stage, row, source_col - 1u);
+            sum = add_rn(sum, add_rn(entering, -leaving));
+            source_col += 1u;
+        }
+        patch_weight_sum_bits[scratch_base + patch_col] = bitcast<u32>(sum);
+    }
+}
+
+@compute @workgroup_size(64)
 fn prepare_patches(@builtin(global_invocation_id) id: vec3<u32>) {
     let patch_index = id.x;
     if patch_index >= STAGE_PATCHES { return; }
+    if patch_index < STAGE_PATCH_COLS {
+        let column_stage = stage_patch_column(patch_index);
+        write_patch_column(column_stage, column_stage.local);
+    }
     let stage = stage_patch(patch_index);
     let patch_row = stage.local / stage.patch_cols;
     let patch_col = stage.local % stage.patch_cols;
     let origin_row = patch_row * PATCH_STRIDE;
     let origin_col = patch_col * PATCH_STRIDE;
-    patch_weight_sum_bits[patch_index] = bitcast<u32>(rolling_patch_sum(stage, patch_row, patch_col));
     var sums = array<f32, 5>(0.0, 0.0, 0.0, 0.0, 0.0);
     for (var row = 0u; row < PATCH_SIZE; row += 1u) {
         for (var col = 0u; col < PATCH_SIZE; col += 1u) {
@@ -1676,7 +1771,9 @@ mod tests {
     }
 
     #[test]
-    fn prepared_binding_bases_cover_each_whole_buffer_without_overlap() {
+    fn prepared_binding_bases_cover_each_public_section_without_overlap() {
+        assert_eq!(STAGE_PATCHES, 3_376);
+        assert_eq!(PATCH_ROW_SUM_WORDS, 10_260);
         let stages = [
             prepared_bases::<AtoB, GpuLevelOne>(),
             prepared_bases::<BtoA, GpuLevelOne>(),
@@ -2014,7 +2111,7 @@ mod tests {
         assert_eq!(binding.raw_weights().size(), words_bytes(STAGE_PIXELS));
         assert_eq!(
             binding.patch_weight_sums().size(),
-            words_bytes(STAGE_PATCHES)
+            words_bytes(STAGE_PATCHES + PATCH_ROW_SUM_WORDS)
         );
         assert_eq!(
             binding.models().size(),
@@ -2569,6 +2666,21 @@ mod tests {
                 "rolling patch sums",
                 "sum = add_rn(sum, add_rn(entering, -leaving));",
                 "sum = add_rn(sum, entering);",
+            ),
+            (
+                "cached horizontal late patch columns",
+                "source_col += 1u;",
+                "source_col += 2u;",
+            ),
+            (
+                "cached vertical late patch rows",
+                "source_row += 1u;",
+                "source_row += 2u;",
+            ),
+            (
+                "private patch-sum scratch boundary",
+                "let scratch_base = STAGE_PATCHES + patch_row_scratch_base(stage) + row * stage.patch_cols;",
+                "let scratch_base = STAGE_PATCHES + 1u + patch_row_scratch_base(stage) + row * stage.patch_cols;",
             ),
             (
                 "positive determinant clamp",
