@@ -45,7 +45,9 @@ work at the shared source-sampling/fusion boundary and verify it against the
 relevant Studio setting and real output. It is required follow-on work, not a
 completed feature. Do not invent Studio coefficients, build speculative
 scaffolding, reopen unrelated reverse engineering, or delay the current X4 Air
-stitching deliverable for it. A new Studio export is not part of this deliverable.
+stitching deliverable for it. A new photometric-isolation export is not part
+of this stitching deliverable. This does not exclude ordinary Studio output
+verification of the owner's reported X4 stitching defect.
 
 ### Player performance target, owner clarification 2026-09-05
 

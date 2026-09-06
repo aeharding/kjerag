@@ -643,6 +643,22 @@ fn wrap_coordinate(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use kjerag_meta::{
+        CalibrationSet, ExposureTrack, GyroConfig, GyroEncoding, GyroTrack, OrientationSample,
+        OrientationTrack, Quat, Size,
+    };
+
+    use crate::flow::one_xs::map_patch::{
+        self, Action, BaseMap, BilateralInputs, FlowMap, PreimageMap, SideInputs,
+    };
+    use crate::flow::one_xs::parent::ParentMapBuilder;
+    use crate::flow::one_xs::resources::OneXsResources;
+    use crate::flow::one_xs_belt::RetainedBaseMaps;
+    use crate::projection::tests::{FRAME, fixture_lenses};
+    use crate::stitch_camera::StitchCamera;
+
     use super::*;
 
     fn coordinates(rows: usize, cols: usize, fill: [f32; 2]) -> StaticLineCoordinates {
@@ -674,6 +690,141 @@ mod tests {
             .iter()
             .map(|value| [value[0].to_bits(), value[1].to_bits()])
             .collect()
+    }
+
+    #[test]
+    fn calibrated_x4_zero_flow_materialization_round_trips_its_parent() {
+        let calibration = CalibrationSet {
+            camera_model: "Insta360 X4 Air".to_owned(),
+            firmware: "fixture".to_owned(),
+            dimension: Size {
+                width: FRAME.width,
+                height: FRAME.height,
+            },
+            lenses: fixture_lenses(),
+            rolling_shutter_ms: 15.882_978_439_331_055,
+            gyro: GyroConfig {
+                encoding: GyroEncoding::Scaled,
+                imu_orientation: "xZY",
+                first_frame_timestamp: 0,
+                gyro_timestamp: None,
+            },
+            exposure: [ExposureTrack::default(), ExposureTrack::default()],
+            imu: GyroTrack::default(),
+            fused: OrientationTrack::default(),
+            calibration_canvas: Size {
+                width: 15_360,
+                height: 7_680,
+            },
+        };
+        let orientation = OrientationTrack::from_samples(
+            [1_980_000, 2_020_000]
+                .into_iter()
+                .map(|offset_us| OrientationSample {
+                    offset_us,
+                    world_from_body: Quat::IDENTITY,
+                })
+                .collect(),
+        );
+        let parents = ParentMapBuilder::new(&calibration)
+            .unwrap()
+            .build(
+                &orientation,
+                Duration::from_micros(2_000_000),
+                calibration.readout(),
+            )
+            .unwrap();
+        let resources =
+            OneXsResources::for_camera(StitchCamera::CalibratedMei, &calibration.lenses, FRAME)
+                .unwrap();
+        let merged = LensPair {
+            a: map_merge(&resources.static_coordinates().a, &parents.a).unwrap(),
+            b: map_merge(&resources.static_coordinates().b, &parents.b).unwrap(),
+        };
+        let filtered = filter_fisheye_line_pair(merged).unwrap();
+        let retained = RetainedBaseMaps::from_lenses(LensPair {
+            a: filtered.a.row_major_values().to_vec(),
+            b: filtered.b.row_major_values().to_vec(),
+        })
+        .unwrap();
+        let bases = LensPair {
+            a: BaseMap::new(retained.lens(crate::flow::one_xs::Lens::A).to_vec()).unwrap(),
+            b: BaseMap::new(retained.lens(crate::flow::one_xs::Lens::B).to_vec()).unwrap(),
+        };
+        let zero = LensPair {
+            a: FlowMap::new(vec![[0.0; 2]; RetainedBaseMaps::NODES_PER_LENS]).unwrap(),
+            b: FlowMap::new(vec![[0.0; 2]; RetainedBaseMaps::NODES_PER_LENS]).unwrap(),
+        };
+        let preimage = LensPair {
+            a: PreimageMap::new(parents.a.row_major_values().to_vec()).unwrap(),
+            b: PreimageMap::new(parents.b.row_major_values().to_vec()).unwrap(),
+        };
+        let maps = map_patch::materialize(BilateralInputs {
+            b_to_a: SideInputs {
+                preimage: &preimage.a,
+                base: &bases.a,
+                flow: &zero.a,
+                gate: &resources.gates().a,
+                coordinate: &resources.coordinates().a,
+            },
+            a_to_b: SideInputs {
+                preimage: &preimage.b,
+                base: &bases.b,
+                flow: &zero.b,
+                gate: &resources.gates().b,
+                coordinate: &resources.coordinates().b,
+            },
+        });
+
+        let mut stores = [0_usize; 2];
+        let mut max_pixels = [0.0_f32; 2];
+        let mut sum_squared = [0.0_f64; 2];
+        for (lens, (base, flow, gate, coordinate, parent, output)) in [
+            (
+                &bases.a,
+                &zero.a,
+                &resources.gates().a,
+                &resources.coordinates().a,
+                &preimage.a,
+                &maps.lens_a,
+            ),
+            (
+                &bases.b,
+                &zero.b,
+                &resources.gates().b,
+                &resources.coordinates().b,
+                &preimage.b,
+                &maps.lens_b,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for (node, action) in map_patch::classify(base, flow, gate, coordinate)
+                .into_iter()
+                .enumerate()
+            {
+                if !matches!(action, Action::Store(_)) {
+                    continue;
+                }
+                stores[lens] += 1;
+                let before = parent.values()[node];
+                let after = output.values()[node];
+                let pixels =
+                    (after[0] - before[0]).hypot(after[1] - before[1]) * FRAME.width as f32;
+                max_pixels[lens] = max_pixels[lens].max(pixels);
+                sum_squared[lens] += f64::from(pixels * pixels);
+            }
+        }
+        let rms_pixels: [f32; 2] =
+            std::array::from_fn(|lens| (sum_squared[lens] / stores[lens] as f64).sqrt() as f32);
+        eprintln!(
+            "X4 zero-flow parent round trip: stores {stores:?}, max source px {max_pixels:?}, RMS source px {rms_pixels:?}"
+        );
+
+        assert!(stores.into_iter().all(|count| count > 1_000));
+        assert!(max_pixels.into_iter().all(|error| error < 0.2));
+        assert!(rms_pixels.into_iter().all(|error| error < 0.1));
     }
 
     #[test]

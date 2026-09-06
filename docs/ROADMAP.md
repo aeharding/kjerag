@@ -14,6 +14,40 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**X4 owner rejection and diagnosis, 2026-09-06:** the shared-camera candidate
+below is NOT accepted: the owner reports distorted terrain/horizon through the
+join. A same-source ablation of frame 34569 at the exact reported locked view
+now separates ordinary projection, parent maps, final maps and each lens alone
+(`scratch/x4-layers-20260906-01/`). Before alignment, the parent lenses show
+offset, broadly straight horizons; final displacement bends them toward each
+other. The detached final-map consumer visually reproduces the saved Scene
+picture, with small sampling differences (RGB PSNR about 70.34 dB). This
+localizes the shape change, not its correctness versus Studio. The neutral X4
+parent test agrees with the existing generic projection within 0.0014 source
+pixel before the inherited normalization difference; agreement with our own
+projection is not a Studio calibration verdict. No production fix is claimed.
+The exact April file is now on the Mac with matching source hashes, active in
+Studio for a bounded ordinary output comparison. The fresh X4 project has
+Optical Flow off, AI Stitching and Image Fusion on; preserve those defaults
+for the first reference rather than assume the earlier ONE X2 Flow On setup.
+Broader RE stays frozen; no matching X4 reference image exists yet.
+The zero-flow roundtrip through the real CPU map merge, filtering and final
+materialization contributes at most 0.182 source pixel in the neutral X4
+fixture. This rules out broad deformation from that roundtrip without flow;
+it does not establish that the estimated correction or camera model is right.
+The diagnostic-only additions pass full workspace regression: 1128 passed,
+zero failed, 30 ignored, with required GPU and real ONE X2 input
+(`scratch/x4-layers-workspace-final-20260906.log`). Workspace clippy, formatting,
+name-check and cargo-sources checks pass. These gates do not accept the X4
+image defect; the native player remains the preceding, unaccepted candidate.
+
+The first exact-view X4 active-capacity run at 2560x1440 completed 277.00
+redraws/s, advancing all 360 source frames over 12 seconds with no reported
+audio underruns. Paused capacity was 473.30. Playing p95 was 12.253 ms, p99
+18.480 ms and max 39.237 ms; 370/3324 draws exceeded 4.17 ms. This is an
+offscreen capacity measurement, not sustained budget compliance or native
+presentation proof (`scratch/x4-capacity-20260906-01.log`).
+
 **Shared-camera branch checkpoint, issue #184:** ONE X2 and X4 Air now use
 one resident GPU solver with separate camera calibration inputs. The native
 X4 Air player has rendered the owner's exact view, and its Scene regression
@@ -54,8 +88,10 @@ provide an isolated Image-Fusion-on/off comparison, coefficients or parity
 proof. After issue #184's shared camera stitching works, add a default-neutral
 per-lens photometric stage at its source-sampling/fusion boundary, then verify
 the relevant Studio setting and real output. This is required work, not an
-implemented or verified feature. No speculative scaffolding, new Studio
-reverse engineering or export belongs in the current X4 Air deliverable.
+implemented or verified feature. No speculative scaffolding, new photometric
+reverse engineering or photometric-isolation export belongs in the current
+X4 Air stitching deliverable. Ordinary Studio verification of that camera's
+reported stitching defect remains in scope.
 
 The shared-camera workspace gate passes **1126 tests, zero failures, 30 ignored**
 with required RADV and real ONE X2 input (`scratch/shared-camera-workspace.log`).

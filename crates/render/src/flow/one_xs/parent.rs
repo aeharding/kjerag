@@ -310,7 +310,7 @@ mod tests {
     use sha2::{Digest as _, Sha256};
 
     use super::*;
-    use crate::projection::tests::{ONE_XS_FRAME, one_xs_lenses};
+    use crate::projection::tests::{FRAME, ONE_XS_FRAME, fixture_lenses, one_xs_lenses};
 
     const CENTER: Duration = Duration::from_micros(2_000_000);
 
@@ -356,6 +356,58 @@ mod tests {
         )
     }
 
+    fn x4_air_calibration() -> CalibrationSet {
+        CalibrationSet {
+            camera_model: "Insta360 X4 Air".to_owned(),
+            firmware: "fixture".to_owned(),
+            dimension: Size {
+                width: FRAME.width,
+                height: FRAME.height,
+            },
+            lenses: fixture_lenses(),
+            rolling_shutter_ms: 15.882_978_439_331_055,
+            gyro: GyroConfig {
+                encoding: GyroEncoding::Scaled,
+                imu_orientation: "xZY",
+                first_frame_timestamp: 0,
+                gyro_timestamp: None,
+            },
+            exposure: [ExposureTrack::default(), ExposureTrack::default()],
+            imu: GyroTrack::default(),
+            fused: OrientationTrack::default(),
+            calibration_canvas: Size {
+                width: 15_360,
+                height: 7_680,
+            },
+        }
+    }
+
+    fn neutral_orientation() -> OrientationTrack {
+        OrientationTrack::from_samples(
+            [1_980_000, 2_020_000]
+                .into_iter()
+                .map(|offset_us| OrientationSample {
+                    offset_us,
+                    world_from_body: Quat::IDENTITY,
+                })
+                .collect(),
+        )
+    }
+
+    fn parent_node_body_ray(row: usize, column: usize) -> [f32; 3] {
+        let dst = [
+            ((column as f32 * 2.0) * std::f32::consts::PI) / 200.0,
+            (row as f32 * std::f32::consts::PI) / 99.0,
+        ];
+        let theta = 0.5 * std::f32::consts::PI - dst[1];
+        let phi = 2.0 * std::f32::consts::PI - dst[0];
+        let z = theta.sin();
+        let radius = theta.cos();
+        let sphere = [radius * phi.cos(), radius * phi.sin(), z];
+        // Parent's fixed basis is `sphere = [body.z, body.x, body.y]`.
+        [sphere[1], sphere[2], sphere[0]]
+    }
+
     fn map_digest(maps: &LensPair<FlowstateRoi>) -> String {
         let bytes = maps
             .a
@@ -390,6 +442,108 @@ mod tests {
         assert_eq!(
             map_digest(&first),
             "b03ed396eef59e54aaac55db16817bd8f55030d781cc08ccb109b3224de05481"
+        );
+    }
+
+    #[test]
+    fn calibrated_x4_neutral_parent_matches_generic_projection_before_uv_normalization() {
+        let calibration = x4_air_calibration();
+        let maps = ParentMapBuilder::new(&calibration)
+            .unwrap()
+            .build(&neutral_orientation(), CENTER, calibration.readout())
+            .unwrap();
+        let reframe = crate::Reframe::new(
+            &calibration.lenses,
+            FRAME,
+            crate::Camera::default(),
+            crate::Held::default(),
+            1.0,
+            false,
+            crate::Sampling::default(),
+        );
+        let extent = FRAME.width as f32;
+        let mut compared = [0_usize; 2];
+        let mut generic_inside = [0_usize; 2];
+        let mut parent_valid_generic_outside = [0_usize; 2];
+        let mut squared_model_error = [0.0_f64; 2];
+        let mut max_model_error = [0.0_f32; 2];
+        let mut max_sample_displacement = [0.0_f32; 2];
+        let mut max_normalization_residual = [0.0_f32; 2];
+
+        for (lens, map) in [&maps.a, &maps.b].into_iter().enumerate() {
+            for row in 0..map.rows() {
+                for column in 0..map.cols() {
+                    let index = row * map.cols() + column;
+                    let uv = map.row_major_values()[index];
+                    let parent_valid = uv != [-1.0, -1.0];
+                    let generic = reframe.project(lens, parent_node_body_ray(row, column));
+                    if generic.inside {
+                        generic_inside[lens] += 1;
+                        assert!(
+                            parent_valid,
+                            "generic-valid lens {lens} node ({row},{column})"
+                        );
+                    } else {
+                        parent_valid_generic_outside[lens] += usize::from(parent_valid);
+                    }
+                    if !parent_valid {
+                        continue;
+                    }
+                    compared[lens] += 1;
+                    let parent_pixel = uv.map(|value| value * (extent - 1.0));
+                    let model_error = [
+                        parent_pixel[0] - generic.pixel[0],
+                        parent_pixel[1] - generic.pixel[1],
+                    ];
+                    let model_distance = model_error[0].hypot(model_error[1]);
+                    max_model_error[lens] = max_model_error[lens].max(model_distance);
+                    squared_model_error[lens] += f64::from(model_distance * model_distance);
+
+                    // The resident source sampler multiplies parent UV by the
+                    // full extent. Separate that known convention from model
+                    // disagreement with the ordinary projection itself.
+                    let sampled_pixel = uv.map(|value| value * extent);
+                    let sample_displacement = [
+                        sampled_pixel[0] - generic.pixel[0],
+                        sampled_pixel[1] - generic.pixel[1],
+                    ];
+                    max_sample_displacement[lens] = max_sample_displacement[lens]
+                        .max(sample_displacement[0].hypot(sample_displacement[1]));
+                    let expected_normalization = generic.pixel.map(|value| value / (extent - 1.0));
+                    let normalization_residual = [
+                        sample_displacement[0] - expected_normalization[0],
+                        sample_displacement[1] - expected_normalization[1],
+                    ];
+                    max_normalization_residual[lens] = max_normalization_residual[lens]
+                        .max(normalization_residual[0].hypot(normalization_residual[1]));
+                }
+            }
+        }
+
+        let rms_model_error: [f32; 2] = std::array::from_fn(|lens| {
+            (squared_model_error[lens] / compared[lens] as f64).sqrt() as f32
+        });
+        eprintln!(
+            "X4 neutral parent: compared {compared:?}, generic-inside {generic_inside:?}, \
+             parent-valid/generic-outside {parent_valid_generic_outside:?}, model max px \
+             {max_model_error:?}, model RMS px {rms_model_error:?}, downstream normalization max \
+             px {max_sample_displacement:?}, residual after exact normalization \
+             {max_normalization_residual:?}"
+        );
+
+        assert!(compared.into_iter().all(|count| count > 10_000));
+        assert!(generic_inside.into_iter().all(|count| count > 10_000));
+        assert!(max_model_error.into_iter().all(|error| error < 0.01));
+        assert!(rms_model_error.into_iter().all(|error| error < 0.001));
+        assert!(
+            max_normalization_residual
+                .into_iter()
+                .all(|error| error < 0.011)
+        );
+        assert!(
+            max_sample_displacement
+                .into_iter()
+                .all(|error| error > 1.0 && error < 1.5)
         );
     }
 

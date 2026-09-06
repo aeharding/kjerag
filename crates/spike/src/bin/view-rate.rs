@@ -1,6 +1,8 @@
 //! High-refresh view diagnostic through the player's resident Scene path.
 //!
-//! Run through scripts/quiet.sh: view-rate <file.insv> [width] [height] [time].
+//! Run through scripts/quiet.sh:
+//! view-rate <file.insv> [width] [height] [time] [yaw] [pitch] [fov].
+//! View angles are degrees; omitted angles retain the ONE X2 review view.
 //! Both phases measure uncapped changing-view capacity, first paused then
 //! with ordinary decoding and stitching running. These are NOT
 //! native-window fps: compositor/input/presentation are absent, and each draw
@@ -21,10 +23,31 @@ fn main() -> Fallible<()> {
     let args: Vec<_> = std::env::args().collect();
     let input = args
         .get(1)
-        .ok_or("usage: view-rate <file.insv> [width] [height] [time]")?;
+        .ok_or("usage: view-rate <file.insv> [width] [height] [time] [yaw] [pitch] [fov]")?;
     let width = args.get(2).map_or(Ok(2560), |s| s.parse::<u32>())?;
     let height = args.get(3).map_or(Ok(1440), |s| s.parse::<u32>())?;
     let time = args.get(4).map_or(Ok(0.0), |s| s.parse::<f64>())?;
+    let camera = Camera {
+        yaw: args
+            .get(5)
+            .map_or(Ok(71.13), |s| s.parse::<f32>())?
+            .to_radians(),
+        pitch: args
+            .get(6)
+            .map_or(Ok(-13.99), |s| s.parse::<f32>())?
+            .to_radians(),
+        fov: args
+            .get(7)
+            .map_or(Ok(57.95), |s| s.parse::<f32>())?
+            .to_radians(),
+    };
+    if !camera.yaw.is_finite()
+        || !camera.pitch.is_finite()
+        || !camera.fov.is_finite()
+        || camera.fov <= 0.0
+    {
+        return Err("view-rate needs finite view angles and a positive field of view".into());
+    }
     if width == 0 || height == 0 || !time.is_finite() || time < 0.0 {
         return Err("view-rate needs nonzero dimensions and a finite nonnegative time".into());
     }
@@ -38,11 +61,6 @@ fn main() -> Fallible<()> {
     scene.seek(Duration::from_secs_f64(time), Accuracy::Exact);
     let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let target = Offscreen::new(&gpu.device, Size::new(width, height), FORMAT);
-    let camera = Camera {
-        yaw: 71.13f32.to_radians(),
-        pitch: -13.99f32.to_radians(),
-        fov: 57.95f32.to_radians(),
-    };
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         redraw(&scene, &mut pipeline, &gpu, &target, camera)?;
@@ -58,7 +76,7 @@ fn main() -> Fallible<()> {
     // generic fallback and call it fast selected stitching.
     let map = scene
         .diagnostic_one_xs_displayed_map()?
-        .ok_or("view-rate requires the selected resident ONE X2 path")?;
+        .ok_or("view-rate requires resident stitching")?;
     if Some(map.frame().clone()) != scene.displayed_frame_stamp() {
         return Err("view-rate source and displayed map identities differ".into());
     }
@@ -66,6 +84,7 @@ fn main() -> Fallible<()> {
     println!(
         "{}",
         json!({"gpu": gpu.name, "output": [width, height], "target_hz": HZ,
+            "view_degrees": [camera.yaw.to_degrees(), camera.pitch.to_degrees(), camera.fov.to_degrees()],
             "measurement": "offscreen CPU+GPU completed redraw, not native presentation",
             "start": scene.displayed_frame(), "sampling": "selected type-2 box filter"})
     );

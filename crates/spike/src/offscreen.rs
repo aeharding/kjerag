@@ -77,6 +77,22 @@ impl Offscreen {
         self.size
     }
 
+    /// Draw an explicitly supplied diagnostic map over the prepared picture.
+    pub fn render_map(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipeline: &mut ScenePipeline,
+        map: &kjerag_render::OneXsMapFrame,
+    ) -> Fallible<()> {
+        let index = pipeline.submit_one_xs_map_direct(device, queue, &self.texture, map)?;
+        device.poll(wgpu::PollType::Wait {
+            submission_index: Some(index),
+            timeout: None,
+        })?;
+        Ok(())
+    }
+
     /// The pass, drawn and waited for.
     pub fn render(
         &self,
