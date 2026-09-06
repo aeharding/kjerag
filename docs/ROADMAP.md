@@ -14,7 +14,63 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
-**Current branch installed-bundle check, 2026-09-06:** the shared-camera source
+**Owner-reported playback failure, 2026-09-06:** the owner likes the sampled
+clip appearance but reports actual installed X4 playback at only 17–19 fps
+with seconds of increasing video lateness. This takes priority over photometric
+follow-on and further draw-kernel trials. From-zero, real-audio runs of both
+the unchanged native and installed players reproduce initial video debt and
+continuing lag in an isolated 1280x720 compositor. A normal-desktop run also
+slowed severely, but its visibility state was not authenticated; the exact
+sustained desktop condition remains under investigation.
+
+Source inspection identifies one definite startup defect: the running clock
+anchors on decoded frame zero before the first resident map is installed.
+The sequential policy neither reanchors nor skips late source frames, so it
+needs surplus processing capacity to repay that initial debt. Stitch-wait time
+also bypasses the current drop/starvation counters; the reported sound offset
+is against the media clock, not the late displayed picture. Earlier UI and
+offscreen capacity passes therefore do not establish usable actual playback.
+The startup regression fails before the change on both reported clips and
+passes afterward, including pause-before-install and exact acknowledgement.
+Reusing the existing landing hold removes the X4 native test's initial underrun
+burst (98 to zero) and most initial video debt, but alone still leaves roughly
+29.4 fps and increasing lag. A second scheduling-only change shortens the
+worker's callback-poll fallback from one millisecond to 100 microseconds;
+uncapped diagnostics had driven callbacks more frequently from their own loop.
+The bounded continuous native X4 comparison with both changes records
+29.80–30.20 fps after startup and worst reported source lateness of 33.2 ms
+through 53.55 seconds, with zero audio underruns. ONE X2 improves from
+2,960.3 ms worst lateness with the one-millisecond control to 739.4 ms with
+100 microseconds, but still has timing spikes. Both X4 native trial sessions
+produced their full timing records but hit cage exit 134 during forced teardown;
+they are not clean-exit passes. The X2 control and candidate exit normally.
+
+The final installed Flatpak (`80bbad8a...`, executable SHA256 `1d3c1139...`)
+also completes the exact reported X4 portal-path run with a normal exit.
+At 1280x720 in isolated cage, its post-start samples are 29.80–30.01 fps,
+worst reported source lateness stays at 21.9 ms through 48.50 seconds,
+and there are zero audio underruns. The previous installed portal run reached
+6,365.3 ms worst lateness. This is bounded installed-player evidence, not
+ordinary COSMIC-desktop acceptance, displayed A/V acceptance, or the 4.17 ms
+capacity gate. More frequent CPU wakeups have not yet been costed.
+
+An immediate step after an already-installed startup landing retires the hold
+before selecting the existing warm continuation; its strict capture-identity
+regression is retained. Empty clean EOF also retires an unlanded startup hold.
+Required-GPU workspace tests with both reported camera fixtures pass: 1,163
+passed, zero failed, 30 ignored. Formatting, workspace clippy, name check and
+Cargo-source consistency pass. The installed binary matches the build output,
+all tracked source hashes match its recorded inputs, and permissions metadata
+is unchanged. Full installed UI checks pass: X4 39 and X2 45, zero failures,
+including exact views, X2 backward seek and real scrubber drag, paired-file
+arrivals, and real quiet audio controls. Both captures were inspected.
+The stuck-import injection group skips inside Flatpak; X4 additionally skips
+four inapplicable paired-file checks. The final Rust/shader twin helper runs
+natively, not inside the installed resident solver. Evidence:
+`scratch/flatpak-playback-defect-20260906/`, issue #184. Owner retest remains
+required before merge.
+
+**Prior installed-bundle check, before playback repair, 2026-09-06:** the shared-camera source
 now has a fresh local Flatpak build and two real-camera UI runs. Every tracked
 file copied into the build matched the recorded branch inputs. The manifest
 now also excludes `.target`, avoiding an unrelated 1.7 GB cache in that copy;

@@ -362,7 +362,14 @@ Flow setting controls only the legacy solver and does not select or modify
 this route.
 
 The player changes to `PresentationPolicy::SequentialRealtime` and one
-capture-owned resident facade starts at frame zero. Scene branches to this route
+capture-owned resident facade starts at frame zero. Selected startup uses the
+same exact-landing hold as seeking: Scene retains autoplay intent, but the
+source/audio clock stays paused until frame zero's resident map is installed
+and acknowledged. A pause during startup cancels that autoplay intent. Generic
+projection opens still start immediately. This prevents cold GPU setup from
+charging time against a picture that has not been prepared yet; it does not
+solve sustained processing slower than the source cadence.
+Scene branches to this route
 before legacy prepare, import or draw. Admission and publication stay on the UI
 thread; a capture-shared stitch worker owns the exact imported pair while it runs
 the existing typed GPU chain. Its bounded channel permits one executing job and
@@ -472,7 +479,11 @@ validity callback crosses to CPU. The worker submits each GPU stage normally,
 except resident L1, whose unchanged wavefront schedule is encoded into chunks
 of at most eight dispatches. Its six submissions have five callback-completion
 waits on the registered worker only. These waits hold no wgpu fence lock; a
-one-millisecond receive timeout drives nonblocking polling if no UI is active.
+100-microsecond receive timeout drives nonblocking polling if no UI is active.
+The earlier one-millisecond fallback delayed completion observation between
+chunks in normal compositor-paced playback; the uncapped diagnostic's frequent
+polling had hidden this cost. The timeout is a host scheduling interval, not
+stitch arithmetic or a source-release proof.
 The callback is only a scheduling signal, not a source-release proof. The
 exact lease stays armed through every chunk and final validity acknowledgement.
 UI draws may interleave, but are not guaranteed a submission between chunks.

@@ -288,6 +288,12 @@ fn retire_replay<T>(replay: &RefCell<Option<T>>) {
     replay.borrow_mut().take();
 }
 
+fn retire_empty_eof<T>(has_frame: bool, replay: &RefCell<Option<T>>) {
+    if !has_frame {
+        retire_replay(replay);
+    }
+}
+
 fn next_after_pump(
     transaction_pending: bool,
     playing: bool,
@@ -395,6 +401,24 @@ struct OneXsReplay {
     target: u64,
     position: Duration,
     playing: bool,
+}
+
+impl OneXsReplay {
+    fn landed(self, index: u64) -> bool {
+        self.accuracy == Accuracy::Keyframe || self.target == index
+    }
+}
+
+/// Keep autoplay intent while the first source acquires its stitched map.
+/// The ordinary exact-landing acknowledgement then starts the clock and sound,
+/// so cold GPU setup cannot create video debt before the first picture exists.
+fn startup_replay(selected: bool) -> Option<OneXsReplay> {
+    selected.then_some(OneXsReplay {
+        accuracy: Accuracy::Exact,
+        target: 0,
+        position: Duration::ZERO,
+        playing: true,
+    })
 }
 
 #[allow(dead_code, reason = "frozen CPU transaction oracle")]
@@ -1180,6 +1204,7 @@ impl Scene {
         // camera's own order (issue #123).
         let calibrated = calibrated(&files[0], player.size(), player.lenses())?;
         let selected_stitch = calibrated.one_xs.is_some();
+        let selected_playback = one_xs_playback_selected(ONE_XS_PLAYBACK_ENABLED, selected_stitch);
         println!(
             "media:  {}{}, {}x{}, {:.3} fps, {} frames, {:.1} s",
             match player.lenses() {
@@ -1204,7 +1229,7 @@ impl Scene {
         // Opening a file plays it, which is what every player does. Space
         // and the control row's button pause it (issue #16).
         let frame = player.size();
-        if one_xs_playback_selected(ONE_XS_PLAYBACK_ENABLED, selected_stitch) {
+        if selected_playback {
             // The selected estimator is causal: every aligned decoded pair is
             // part of the next pair's state. Presentation therefore cannot
             // discard a late frame before the stitch owner consumes it.
@@ -1215,15 +1240,20 @@ impl Scene {
                 );
             }
         }
-        player.play();
+        let replay = startup_replay(selected_playback);
+        if replay.is_none() {
+            player.play();
+        }
+        let show = Show::new(
+            files,
+            frame,
+            calibrated,
+            None,
+            Source::Live(Box::new(player)),
+        );
+        show.replay.replace(replay);
         Ok(Self {
-            show: Some(Show::new(
-                files,
-                frame,
-                calibrated,
-                None,
-                Source::Live(Box::new(player)),
-            )),
+            show: Some(show),
             ..Self::blank()
         })
     }
@@ -1523,9 +1553,9 @@ impl Scene {
         };
         if current_ready == Some(true)
             && frames.as_ref().is_some_and(|frame| {
-                show.replay.borrow().is_some_and(|replay| {
-                    replay.accuracy == Accuracy::Keyframe || replay.target == frame.index
-                })
+                show.replay
+                    .borrow()
+                    .is_some_and(|replay| replay.landed(frame.index))
             })
         {
             // Decoder landing is not completion. Retire the exposed seek only
@@ -1570,6 +1600,9 @@ impl Scene {
         // The end of the file stops the clock rather than leaving it running
         // against frames that will never arrive.
         if player.is_ended() {
+            // With no frame there can be no later map acknowledgement to end
+            // the startup hold. Keep a real pending final frame's hold intact.
+            retire_empty_eof(frames.is_some(), &show.replay);
             player.pause(now);
             return if current_ready == Some(false)
                 || resident_refresh
@@ -2177,14 +2210,26 @@ impl Show {
     }
 
     fn replay_step(&mut self, now: Instant, by: i64) -> Fallible<bool> {
-        if self.one_xs.is_none() {
+        let Some(capture) = self.one_xs.clone() else {
             return Ok(false);
-        }
-        let Playing { source, .. } = self.playing.get_mut();
+        };
+        let Playing { frames, source } = self.playing.get_mut();
         let Source::Live(player) = source else {
             return Ok(false);
         };
         player.pause(now);
+        let completed_landing = if let Some(frame) = frames.as_ref() {
+            capture.acknowledged(&frame.stamp())?
+                && self
+                    .replay
+                    .borrow()
+                    .is_some_and(|replay| replay.landed(frame.index))
+        } else {
+            false
+        };
+        if completed_landing {
+            retire_replay(&self.replay);
+        }
         let was_replaying = self.replay.borrow().is_some();
         if let Some(replay) = self.replay.borrow_mut().as_mut() {
             replay.playing = false;
@@ -6598,6 +6643,46 @@ mod tests {
     }
 
     #[test]
+    fn only_selected_playback_gets_a_frame_zero_startup_hold() {
+        assert!(startup_replay(false).is_none());
+        assert!(startup_replay(true).is_some_and(|replay| {
+            replay.accuracy == Accuracy::Exact
+                && replay.target == 0
+                && replay.position == Duration::ZERO
+                && replay.playing
+        }));
+    }
+
+    #[test]
+    fn clean_eof_without_a_frame_retires_startup_playing_and_seeking_intent() {
+        let replay = RefCell::new(startup_replay(true));
+        assert!(replay.borrow().is_some_and(|replay| replay.playing));
+        retire_empty_eof(true, &replay);
+        assert!(replay.borrow().is_some_and(|replay| replay.playing));
+        retire_empty_eof(false, &replay);
+        assert!(replay.borrow().is_none());
+    }
+
+    #[test]
+    fn replay_landing_matches_exact_targets_and_any_keyframe_landing() {
+        let exact = OneXsReplay {
+            accuracy: Accuracy::Exact,
+            target: 7,
+            position: Duration::ZERO,
+            playing: false,
+        };
+        assert!(exact.landed(7));
+        assert!(!exact.landed(6));
+        assert!(
+            OneXsReplay {
+                accuracy: Accuracy::Keyframe,
+                ..exact
+            }
+            .landed(6)
+        );
+    }
+
+    #[test]
     fn selected_player_waits_only_for_an_unacknowledged_current_frame() {
         // No offered frame is the initial admission for frame zero.
         assert!(!one_xs_frame_waiting(true, true, None));
@@ -7405,6 +7490,83 @@ mod tests {
     }
 
     #[test]
+    fn selected_open_holds_autoplay_clock_until_frame_zero_map_is_installed() {
+        let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").map(PathBuf::from) else {
+            return;
+        };
+        let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
+        let scene = Scene::open(&path).unwrap();
+        scene.set_muted(true);
+        assert!(scene.is_playing(), "selected open lost autoplay intent");
+
+        let frame = wait_for_new_scene_frame(&scene, None);
+        assert_eq!(frame.index(), 0);
+        let capture = scene.show.as_ref().unwrap().one_xs.clone().unwrap();
+        assert!(!capture.acknowledged(&frame).unwrap());
+        let now = Instant::now();
+        assert_eq!(scene.position(now), Duration::ZERO);
+        assert_eq!(scene.position(now + Duration::from_secs(2)), Duration::ZERO);
+        assert!(
+            scene
+                .show
+                .as_ref()
+                .unwrap()
+                .replay
+                .borrow()
+                .is_some_and(|replay| replay.accuracy == Accuracy::Exact
+                    && replay.target == 0
+                    && replay.position == Duration::ZERO
+                    && replay.playing)
+        );
+        assert!(!scene.player(Player::is_playing).unwrap());
+
+        let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let installed =
+            prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &frame);
+        assert!(installed.same_capture(&capture));
+        assert!(capture.acknowledged(&frame).unwrap());
+        assert!(scene.show.as_ref().unwrap().replay.borrow().is_some());
+        assert!(!scene.player(Player::is_playing).unwrap());
+
+        assert!(!matches!(scene.pump(Instant::now()), Next::Stopped(_)));
+        assert!(scene.show.as_ref().unwrap().replay.borrow().is_none());
+        assert!(scene.player(Player::is_playing).unwrap());
+        assert!(scene.is_playing());
+    }
+
+    #[test]
+    fn pausing_selected_open_before_frame_zero_install_prevents_autostart() {
+        let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").map(PathBuf::from) else {
+            return;
+        };
+        let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
+        let mut scene = Scene::open(&path).unwrap();
+        scene.set_muted(true);
+        let frame = wait_for_new_scene_frame(&scene, None);
+        assert_eq!(frame.index(), 0);
+
+        scene.pause(Instant::now());
+        assert!(!scene.is_playing());
+        assert!(!scene.player(Player::is_playing).unwrap());
+        assert!(
+            scene
+                .show
+                .as_ref()
+                .unwrap()
+                .replay
+                .borrow()
+                .is_some_and(|replay| !replay.playing)
+        );
+
+        let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &frame);
+        assert!(!matches!(scene.pump(Instant::now()), Next::Stopped(_)));
+        assert!(scene.show.as_ref().unwrap().replay.borrow().is_none());
+        assert!(!scene.player(Player::is_playing).unwrap());
+        assert!(!scene.is_playing());
+    }
+
+    #[test]
     fn selected_scene_submits_actual_cold_and_warm_l1_work_on_its_worker() {
         let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").map(PathBuf::from) else {
             return;
@@ -7433,7 +7595,27 @@ mod tests {
             "cached paused redraw submitted more stitch work"
         );
 
+        assert!(
+            scene
+                .show
+                .as_ref()
+                .unwrap()
+                .replay
+                .borrow()
+                .is_some_and(|replay| replay.target == 0)
+        );
         scene.step(Instant::now(), 1);
+        assert!(
+            scene
+                .show
+                .as_ref()
+                .unwrap()
+                .replay
+                .borrow()
+                .is_some_and(|replay| replay.accuracy == Accuracy::Exact
+                    && replay.target == 1
+                    && !replay.playing)
+        );
         let second = wait_for_new_scene_frame(&scene, Some(&first));
         assert_eq!(second.index(), first.index() + 1);
         assert!(scene.primitive(Camera::default()).resident_next.is_none());
@@ -7639,15 +7821,28 @@ mod tests {
         // Replacing the capture drains the speculative Ready without exposing
         // it. Until the new seek landing installs, the exact old display remains
         // drawable through the retired attachment.
+        let retired_draw_deadline = Instant::now() + Duration::from_secs(10);
         for _ in 0..3 {
-            pipeline.prepare(&scene.primitive(Camera::default()), &device, &queue, 1.0);
-            assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&second));
-            assert_ne!(scene.displayed_frame_stamp().as_ref(), Some(&future));
-            assert!(!replacement.accepted(&future).unwrap());
-            assert!(matches!(
-                pipeline.resident_draw,
-                ResidentDrawSelection::Retired(_)
-            ));
+            loop {
+                pipeline.prepare(&scene.primitive(Camera::default()), &device, &queue, 1.0);
+                assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&second));
+                assert_ne!(scene.displayed_frame_stamp().as_ref(), Some(&future));
+                assert!(!replacement.accepted(&future).unwrap());
+                assert!(!scene.stalled.stopped());
+                match pipeline.resident_draw {
+                    ResidentDrawSelection::Retired(_) => break,
+                    ResidentDrawSelection::None => {
+                        // Two decoder-backed draws may still occupy the bounded
+                        // retirement slots under concurrent GPU test load. Keep
+                        // every identity check active while normal polling makes
+                        // room; still require three actual retired draws below.
+                        assert!(scene.resident_refresh.load(AtomicOrdering::Acquire));
+                        assert!(Instant::now() < retired_draw_deadline);
+                        std::thread::yield_now();
+                    }
+                    ResidentDrawSelection::Active => panic!("seek exposed an active replacement"),
+                }
+            }
             draw_resident_test_pass(&pipeline, &device, &queue);
         }
 

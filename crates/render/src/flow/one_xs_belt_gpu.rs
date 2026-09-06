@@ -3275,7 +3275,7 @@ impl<K> SubmissionLease<K> {
             let _ = sender.try_send(());
         });
         loop {
-            match receiver.recv_timeout(std::time::Duration::from_millis(1)) {
+            match receiver.recv_timeout(std::time::Duration::from_micros(100)) {
                 Ok(()) => return Ok(()),
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     return Err("ONE X2 GPU completion callback disconnected".into());
