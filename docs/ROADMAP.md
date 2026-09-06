@@ -14,6 +14,41 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Bounded draw-box loops declined, 2026-09-06:** the unchanged 1.788-source-unit
+box filter was tested with a maximum of two loop iterations per axis, retaining
+the original early breaks, sampling and accumulation order. An independent
+frozen old-loop shader agrees bit-for-bit across the atlas grid, and named
+one/two-tap threshold phases discriminate a one-tap mutation on Radeon.
+Two alternating 2560x1440 pairs per camera show no dependable gain: X4 redraw
+p99 worsens from 9.38/10.09 to 10.50/10.17 ms; X2 throughput falls slightly in
+both pairs with mixed p99 and over-budget counts. All eight runs advance
+360 source frames with no reported drops, starvation or audio underruns.
+Production changes and trial-only tests are removed; normal capacity and
+native executables again match the verified separable-mask checkpoint. No new
+actual-sequence, native-window or full-workspace gate ran for this rejected
+candidate. Installed Flatpak remains unchanged. Evidence:
+`scratch/bounded-draw-box-20260906/`.
+
+**Ordered PIS accumulator lanes declined, 2026-09-06:** four lanes executed
+the four independent descent accumulations with their original row-major
+operation order, followed by an extra barrier and unchanged final correction.
+All eight required-Radeon PIS tests pass, including deliberate component,
+survivor-count and recurrence-order mutations. Two alternating 2560x1440
+pairs per camera do not justify retaining it: X4 redraw p99 improves from
+10.75/10.84 to 9.35/8.66 ms with mixed throughput, but X2 loses throughput and
+has more over-budget redraws in both pairs (371/365 to 433/434). Its p99 is
+mixed. All eight runs advance 360 consecutive source frames with zero reported
+drops, starvation or audio underruns. Both source files and trial-only tests
+are restored; native and installed players are unchanged. No actual-sequence,
+native-window or full-workspace gate is claimed for the rejected candidate.
+Evidence: `scratch/pis-ordered-accumulators-20260906/`.
+
+After both removals, the restored runtime passes the full required-GPU workspace
+suite again: 1,164 passed, zero failed, 30 ignored, with both real camera inputs
+and quiet audio. Full-target clippy, formatting, name and Cargo-source checks
+pass. Native and capacity binary hashes still match the separable-mask checkpoint;
+the installed `80bbad8a...` repair remains frozen for the owner's desktop retest.
+
 **Separable bilateral mask verified, 2026-09-06:** the
 geometry shader factors its 9-by-9 validity conjunction into a nine-column
 horizontal scan and nine-row packed-word AND. Camera support, retained maps,
