@@ -14,6 +14,57 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Current worker/view timing, 2026-09-06:** a temporary probe now covers the
+actual resident worker's thirteen warm submissions and the exact staged source
+consumed by each view draw. One 2560x1440 cohort per camera authenticates 360
+displayed successors plus one explicitly drained successor. X4 view-pass
+timestamp p99 is 1.77 ms versus 10.13 ms completed-redraw wall time; ONE X2 is
+1.73 versus 7.40 ms. All measured view intervals stay below 3.3 ms, including
+the paused phases. Every over-budget playing redraw (612 X4, 362 X2) has a
+sub-budget view interval. This points to queue/host scheduling outside those
+view boundaries, not a need to change the image filter. The Vulkan timestamps
+are bottom-of-pipe intervals, not exclusive shader busy time or native-display
+latency. Repeated-source redraws also retain substantial tails.
+
+The first attempt stopped before measurement because an older diagnostic
+described the inactive legacy draw path. The corrected probe reads the actual
+resident draw capability; ordinal, source, count and timestamp checks pass.
+All temporary probe code is removed and the normal measured capacity binary
+is restored. No installed/native player, image arithmetic or broad RE changed.
+Evidence: `scratch/current-worker-timing-20260906/`.
+
+One warm L2-entry queue-prefix wait was then tested, distinct from the previously
+declined every-stage waits and five-chunk L2 pacing. Both actual-camera Scene
+route checks pass. Two alternating capacity pairs per camera improve redraw
+p95/p99 in all four pairs, but X4 over-budget redraws increase from 570/584 to
+679/655 and picture-arrival p99 worsens from 11.90/13.97 to 27.96/23.06 ms.
+ONE X2 over-budget counts improve from 387/387 to 226/210, with mixed arrival
+statistics. All eight arms retain 360 source changes and zero accounting
+failures. The candidate is declined and fully removed, including its trial-only
+counters/assertions. These prove successful route admission, not mutation-tested
+waiting at that call site. No candidate actual-image, native-window or full-suite
+gate is claimed. Evidence: `scratch/warm-l2-admission-20260906/`.
+The next decision concerns coordination of worker and view submissions; neither
+another shader micro-optimization nor another blanket wait policy is justified
+by this checkpoint. The installed repair remains frozen for owner desktop retest.
+
+**Parent square-root certificate declined, 2026-09-06:** a native estimate
+accepted only by an exact integer rounding certificate, with the original
+restoring fallback, passes eight required-Radeon parent tests. Two alternating
+capacity pairs per camera do not justify retention: both X4 pairs worsen
+throughput and redraw tails; ONE X2 is mixed with p99 worse in both pairs.
+All eight arms retain 360 source changes and zero drops, starvation or audio
+underruns. Candidate code and tests are removed; no candidate real-image,
+native-window or full-workspace gate is claimed. Evidence:
+`scratch/parent-sqrt-certificate-20260906/`.
+
+After both trial removals, all production/test source matches the prior
+checkpoint. The restored required-Radeon workspace passes 1,165 tests with zero
+failures and 30 ignored, using both real camera inputs and quiet audio.
+Formatting, full-target clippy, name, Cargo-source and diff checks pass. Native
+and normal capacity binary hashes are unchanged. This is evidence and a narrowed
+next decision, not a retained runtime speedup or a new native-window acceptance.
+
 **Bounded persistent PIS ranges declined, 2026-09-06:** a separately compiled
 128-lane L1 entry coalesced 47 diagonal dispatches into seven while preserving
 the six existing worker command buffers, five callback waits, exact shared
