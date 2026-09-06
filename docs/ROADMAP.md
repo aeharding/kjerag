@@ -14,6 +14,33 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Current branch installed-bundle check, 2026-09-06:** the shared-camera source
+now has a fresh local Flatpak build and two real-camera UI runs. Every tracked
+file copied into the build matched the recorded branch inputs. The manifest
+now also excludes `.target`, avoiding an unrelated 1.7 GB cache in that copy;
+runtime, dependencies and permissions are unchanged. The old installed app
+was preserved as a rollback bundle. The new installed commit is
+`5b23a6cea552df831bb0db1a962a02e1b8742957c16f04628d1488a72aa7180a`.
+Both exact reported views pass: X2 44 checks and X4 38, zero failures, including
+X2's backward seek, real scrubber drag and paired-file arrivals. The isolated
+bundle sessions played silently, so the sound-dependent check skipped; the
+injected stuck-import group also skips in Flatpak mode. X4 additionally skips
+four inapplicable paired-file checks. The harness's final Rust/WGSL helper is
+native, not an installed resident-solver gate.
+
+Root inspected both bundle captures and the prior native X4 view. Their
+structure looks closely similar in those samples, but the X4 picture is not
+byte-identical: most changed channels differ by one code, with 28 picture
+pixels exceeding four and a largest difference of 27. No cause, invisibility
+or parity is inferred. Mixed UI-run timing logs include slow initial intervals
+and later 29.80/30.00 fps source presentation; they are not a capacity pass.
+Repository gates pass 1,158 tests, zero failures, 30 ignored, full-target
+clippy, formatting, name and Cargo-source checks. Native executables remain
+unchanged. Evidence and the rollback bundle are in
+`scratch/flatpak-current-20260906-01/`. This test build is installed locally,
+not released or merged. Sound synchronization in the bundle, 4.17 ms active
+redraw tails, photometric implementation and owner acceptance remain open.
+
 **Image Fusion comparison available, 2026-09-06:** the required photometric
 follow-on now has one isolated X4 Studio 6.0.2 OFF export paired with the
 existing ON reference. Full project JSON differs only by Image Fusion and

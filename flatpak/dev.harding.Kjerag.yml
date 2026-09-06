@@ -130,6 +130,7 @@ modules:
           - .worktrees
           - scratch
           - target
+          - .target
       # One source per crate of Cargo.lock, which is what makes the build
       # offline. Regenerate it in any change that moves the lock file
       # (scripts/cargo-sources.sh, AGENTS.md). It covers the eleven git
