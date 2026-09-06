@@ -14,6 +14,29 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Bounded persistent PIS ranges declined, 2026-09-06:** a separately compiled
+128-lane L1 entry coalesced 47 diagonal dispatches into seven while preserving
+the six existing worker command buffers, five callback waits, exact shared
+arithmetic and stripe boundaries. Nine required-Radeon PIS tests pass, including
+range-start/count and stripe-boundary mutations. Two actual Scene tests prove
+the new dispatch-encoding route together with successful cold/warm worker
+submissions on both reported cameras; paused redraw adds no stitch work.
+
+Two alternating 2560x1440 baseline/candidate pairs per camera do not justify
+retention: X4 redraw p99 worsens from 9.86/10.52 to 10.54/10.77 ms despite
+fewer over-budget redraws, and X2 results are mixed (second p99 6.89 to 7.70 ms,
+over-budget count 378 to 405). All eight runs advance 360 source frames with
+zero reported drops, starvation and audio underruns. The candidate and its
+trial-only counters/tests are removed. The existing successful worker-submission
+regression is now also run on X4 Air, sharing its assertions with ONE X2.
+No candidate real-image sequence, native UI or full-workspace gate is claimed.
+Native and installed players remain unchanged. Evidence, source patch and
+candidate executable: `scratch/bounded-pis-ranges-20260906/`.
+After removal, the restored workspace passes 1,165 tests with zero failures
+and 30 ignored, including both real camera inputs and quiet audio. Full-target
+clippy, formatting, name and Cargo-source checks pass. No native-window rerun
+was needed for the retained test-only change; no new visual claim is made.
+
 **Bounded draw-box loops declined, 2026-09-06:** the unchanged 1.788-source-unit
 box filter was tested with a maximum of two loop iterations per axis, retaining
 the original early breaks, sampling and accumulation order. An independent

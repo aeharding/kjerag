@@ -7565,8 +7565,20 @@ mod tests {
         let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").map(PathBuf::from) else {
             return;
         };
+        assert_scene_submits_actual_cold_and_warm_l1_work(&path);
+    }
+
+    #[test]
+    fn selected_x4_scene_submits_actual_cold_and_warm_l1_work_on_its_worker() {
+        let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA").map(PathBuf::from) else {
+            return;
+        };
+        assert_scene_submits_actual_cold_and_warm_l1_work(&path);
+    }
+
+    fn assert_scene_submits_actual_cold_and_warm_l1_work(path: &Path) {
         let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
-        let mut scene = Scene::open(&path).unwrap();
+        let mut scene = Scene::open(path).unwrap();
         scene.set_muted(true);
         scene.pause(Instant::now());
         assert!(scene.primitive(Camera::default()).resident_next.is_none());
