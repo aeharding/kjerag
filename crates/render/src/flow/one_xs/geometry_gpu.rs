@@ -1205,22 +1205,10 @@ mod tests {
         let texture_a = texture("resident Cold0 source A");
         let texture_b = texture("resident Cold0 source B");
         let picture_layout = crate::scene::bind_group_layout(context.device());
-        let uniforms = context.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("resident installed draw uniforms"),
-            size: std::mem::size_of::<crate::Reframe>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let sampler = context.device().create_sampler(&Default::default());
-        let imported = crate::direct_type2::ImportedOneXsPicture::resident_test_draw_owner(
+        let imported = crate::direct_type2::ImportedOneXsPicture::resident_test_owner(
             &context,
             session.clone(),
             flight.frame.clone(),
-            &picture_layout,
-            &uniforms,
-            &sampler,
         );
         let belts = encoded
             .submit_belts(
@@ -1417,26 +1405,6 @@ mod tests {
             &picture_layout,
             wgpu::TextureFormat::Rgba8Unorm,
         ));
-        let recreated_uniforms = context.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("recreated resident draw uniforms"),
-            size: std::mem::size_of::<crate::Reframe>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let recreated_reframe = crate::Reframe::blank(2.0, true);
-        context
-            .queue()
-            .write_buffer(&recreated_uniforms, 0, recreated_reframe.bytes());
-        let _recreated_source = crate::direct_type2::ImportedOneXsPicture::resident_test_draw_owner(
-            &context,
-            crate::flow::one_xs_belt_gpu::ResidentSourceIdentity::for_test(),
-            FrameStamp::for_test(99, Duration::from_millis(99), None),
-            &picture_layout,
-            &recreated_uniforms,
-            &sampler,
-        );
         let _recreated_pipeline = Arc::new(crate::direct_type2::DirectType2Pipeline::new(
             context.device(),
             &picture_layout,
@@ -1460,10 +1428,6 @@ mod tests {
         .unwrap();
         let installed = install.install().unwrap();
         let reframe = crate::Reframe::blank(1.0, false);
-        assert_eq!(
-            read_uniform(&context, &recreated_uniforms),
-            recreated_reframe.bytes()
-        );
         let installed_snapshot = capture.snapshot();
         assert!(installed_snapshot.ready);
         assert!(!installed_snapshot.pending);
@@ -1517,13 +1481,10 @@ mod tests {
                 warm_encoder,
             )
             .unwrap();
-        let warm_source = crate::direct_type2::ImportedOneXsPicture::resident_test_draw_owner(
+        let warm_source = crate::direct_type2::ImportedOneXsPicture::resident_test_owner(
             &context,
             session.clone(),
             warm_flight.frame.clone(),
-            &picture_layout,
-            &uniforms,
-            &sampler,
         );
         let warm_terminal = warm_geometry
             .submit_belts(
@@ -1677,13 +1638,10 @@ mod tests {
                 later_encoder,
             )
             .unwrap();
-        let later_source = crate::direct_type2::ImportedOneXsPicture::resident_test_draw_owner(
+        let later_source = crate::direct_type2::ImportedOneXsPicture::resident_test_owner(
             &context,
             session.clone(),
             later_flight.frame.clone(),
-            &picture_layout,
-            &uniforms,
-            &sampler,
         );
         let later_terminal = later_geometry
             .submit_belts(
@@ -1792,13 +1750,10 @@ mod tests {
                     encoder,
                 )
                 .unwrap();
-            let source = crate::direct_type2::ImportedOneXsPicture::resident_test_draw_owner(
+            let source = crate::direct_type2::ImportedOneXsPicture::resident_test_owner(
                 &context,
                 session.clone(),
                 flight.frame.clone(),
-                &picture_layout,
-                &uniforms,
-                &sampler,
             );
             let terminal = geometry
                 .submit_belts(
@@ -1980,10 +1935,6 @@ mod tests {
             redraw_reframe.bytes()
         );
         assert_eq!(read_uniform(&context, &first_draw_uniform), reframe.bytes());
-        assert_eq!(
-            read_uniform(&context, &recreated_uniforms),
-            recreated_reframe.bytes()
-        );
         let second_draw = draw_once(&iced_draw);
         let error = iced_draw
             .prepare_redraw(&capture, &reframe)

@@ -74,11 +74,12 @@ that cannot live in a crate with no wgpu.
 
 The resident ONE X2 draw path has a separate, private source-import
 owner in `direct_type2`. Its only production constructor consumes the exact
-`Arc<Frames>`, requires two lenses, imports both descriptors directly into
-`[Planes; 2]` and builds their picture bind group. It has no raw-plane or
-stamp-only association boundary, and exposes no bind-group or texture handle:
-its only rendering capability binds and draws the exact picture internally.
-Field order releases the bind group, planes and frame owner in that order.
+`Arc<Frames>`, requires two lenses and imports both descriptors directly into
+`[Planes; 2]`. It has no raw-plane or stamp-only association boundary, and
+exposes no bind-group or texture handle. An actual render pass creates its
+own immutable picture binding, retained with that exact source owner until
+completion. Field order releases the pass binding before its source owner,
+and the imported planes before their decoder frame owner.
 Selected Scene playback reaches it only through the capture-owned resident
 session and renderer attachment; the legacy `VecDeque<Live>` path remains an
 explicit diagnostic/oracle boundary and is not a selected fallback.
@@ -438,6 +439,9 @@ is acknowledged. The direct type-2 draw consumes the native map and alpha
 without routing through the legacy seam-band displacement.
 
 Screen and screenshot reserve separate immutable resident draw permits. A
+source import owns only the exact imported planes, decoder frames, context,
+and capture identity. It does not allocate a picture binding or upload view
+uniforms; those are created only for an actual immutable draw permit. A
 screenshot prepares the exact shown capture and stamp, then draws its permit in
 an independent offscreen pass; it never calls the window draw. Explicit seam
 diagnostics may authenticate that same installed identity and read back packed
@@ -564,7 +568,7 @@ parity.
   "the draw call was recorded" is not "the GPU is done".
 - The selected resident ONE X2 path enforces the same rule with a sealed
   transition rather than a retention convention. `ImportedOneXsPicture` owns
-  the exact two imported plane pairs, their picture binding, GPU context and
+  the exact two imported plane pairs, GPU context and
   decoder `Frames`. Its consuming resident-front operation derives the exact
   frame identity and luma textures internally, refuses a foreign context
   before reservation or encoding, appends parent, geometry and belt work to

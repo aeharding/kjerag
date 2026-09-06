@@ -14,6 +14,61 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Import-time draw binding removed and verified, 2026-09-06:** the
+selected source owner no longer allocates an unused view-uniform buffer,
+queues its upload, creates four texture views, or retains a picture bind group
+at import. Actual window and screenshot passes already create their own
+immutable bindings; that path is unchanged. The duplicate session sampler,
+retained layout handle, dead source draw/write methods, and obsolete test
+fixture are removed. Exact imported planes-before-decoder-frame drop order
+and immutable first/second/screenshot pass coverage remain. Two alternating
+capacity pairs per camera do not establish a speedup: X4 p99 is slightly
+higher in both pairs, while X2 throughput improves modestly and tails are
+mixed. This is removal of proven unused work, not a speedup or 240 fps claim.
+Required-GPU workspace tests with both camera fixtures pass: 1,163 passed,
+zero failed, 30 ignored. Full-target clippy, formatting, name and Cargo-source
+checks pass. All 276 real Scene X2/X4 image, packed-map and alpha artifacts
+are byte-identical to the previous callback checkpoint. Root inspected both
+final sequence frames and the exact-view native X4 window capture. The saved
+native candidate passes 48 UI checks with zero failures; four paired-file
+checks are inapplicable to this X4 capture. The installed Flatpak is
+deliberately unchanged for the owner's retest, and no new performance or
+visible compromise is accepted. Evidence:
+`scratch/import-binding-cleanup-20260906/`.
+
+**Worker-wide stage admission declined, 2026-09-06:** a separate experiment
+waited for the previous queue prefix before every worker stage/chunk, instead
+of only between L1 chunks. It preserved shader arithmetic and used the current
+nonblocking 100-microsecond callback polling, with no duplicate L1 waits.
+Two alternating pairs per camera reject the policy: X4 redraw p99 improves
+from 10.42–10.50 ms to 5.15–5.55 ms, but source cadence falls to 28.66–28.92 fps,
+only 344/347 frames arrive versus 360, and arrival lateness reaches
+445–547 ms. X2 retains source cadence but redraw capacity falls from about
+388 to 358–359/s and p99 rises from 7.08–7.51 to 11.17–11.47 ms. The extra
+waits are removed, and the cleanup-only source patch matches its saved
+pre-experiment snapshot exactly. No installed build, visible compromise or
+performance acceptance changed. Evidence: `scratch/worker-stage-admission-20260906/`.
+
+**Sustained installed playback follow-up, 2026-09-06:** the unchanged
+`80bbad8a...` Flatpak also completes a from-zero ONE X2 run through the end
+of the 273.7-second clip. Post-start, pre-EOF five-second samples are
+29.80–30.21 fps; worst reported source lateness is 54.5 ms, with zero audio
+underruns. The player stops its clock at 273.67 seconds and exits normally.
+Root inspected the retained final picture. A separate 55-second installed
+X2 run reaches 68.1 ms worst lateness; the previous 739.4 ms native maximum
+did not recur in these two installed runs. These isolated 1280x720 results
+do not prove physical A/V synchronization or ordinary COSMIC presentation.
+No X2-specific source change is justified by the earlier single native spike.
+
+The current-source offscreen capacity checkpoint at 2560x1440 still misses
+the tail budget: X4 363.24 redraws/s with p99 7.61 ms; X2 399.40 with p99
+6.83 ms. Both advance 360 consecutive source frames. Paused redraw p99 is
+3.05/3.15 ms. The current diagnostic observes queue-prefix completion, which
+can include later concurrent worker submissions; it is not physical display
+latency. No 240 fps / 4.17 ms completion is claimed. Evidence:
+`scratch/flatpak-playback-defect-20260906/` and
+`scratch/capacity-after-playback-repair-20260906/`.
+
 **Owner-reported playback failure, 2026-09-06:** the owner likes the sampled
 clip appearance but reports actual installed X4 playback at only 17–19 fps
 with seconds of increasing video lateness. This takes priority over photometric

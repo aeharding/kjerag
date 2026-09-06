@@ -19,46 +19,35 @@ use crate::projection;
 use crate::studio_type2::{ALPHA_BYTES, OneXsMapFrame, PACKED_BYTES};
 use crate::{Fallible, FrameStamp, MAX_LENSES, Planes};
 
-/// One exact decoded ONE X2 pair and the picture binding made from it.
+/// One exact decoded ONE X2 pair imported for resident processing and drawing.
 ///
-/// This is deliberately private and currently unselected. Its only production
-/// constructor consumes the decoder owner, imports both of that owner's lens
-/// descriptors and creates the binding before publishing the aggregate. There
-/// is no constructor from planes or a frame stamp, so another allocation cannot
-/// be associated with already-imported textures afterward.
+/// This is deliberately private to the selected resident path. Its only
+/// production constructor consumes the decoder owner and imports both of that
+/// owner's lens descriptors before publishing the aggregate. There is no
+/// constructor from planes or a frame stamp, so another allocation cannot be
+/// associated with already-imported textures afterward.
 ///
-/// Field order is load-bearing Rust drop order: the binding is released first,
-/// then its imported textures, and only then the decoder surfaces they alias.
-/// The context and opaque session identity are last and have no source
-/// allocation to release.
+/// Field order is load-bearing Rust drop order: the imported textures are
+/// released before the decoder surfaces they alias. The context and opaque
+/// session identity are last and have no source allocation to release.
 /// The generic parameters exist solely so the unit test can exercise that exact
 /// struct's drop order without fabricating decoder allocations or dmabufs.
 #[allow(dead_code)]
 pub(crate) struct ImportedOneXsPicture<
-    B = wgpu::BindGroup,
     P = [Planes; 2],
     F = Arc<Frames>,
-    U = wgpu::Buffer,
     C = OneXsGpuContext,
     S = ResidentSourceIdentity,
 > {
-    picture: B,
     planes: P,
     frames: F,
-    uniforms: U,
     context: C,
     session: S,
 }
 
 #[allow(dead_code)]
 impl ImportedOneXsPicture {
-    fn import_for_capture(
-        capture: &ResidentSourceCapture,
-        layout: &wgpu::BindGroupLayout,
-        sampler: &wgpu::Sampler,
-        reframe: &crate::Reframe,
-        frames: Arc<Frames>,
-    ) -> Fallible<Self> {
+    fn import_for_capture(capture: &ResidentSourceCapture, frames: Arc<Frames>) -> Fallible<Self> {
         let context = capture.import_context();
         let device = context.device();
         let [a, b] = exact_one_xs_lenses(&frames.lenses)?;
@@ -68,19 +57,9 @@ impl ImportedOneXsPicture {
             dmabuf::import(device, a.descriptor(), frames.size)?,
             dmabuf::import(device, b.descriptor(), frames.size)?,
         ];
-        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ONE X2 resident picture uniforms"),
-            size: std::mem::size_of::<crate::Reframe>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        context.queue().write_buffer(&uniforms, 0, reframe.bytes());
-        let picture = bind_picture(device, layout, &uniforms, [&planes[0], &planes[1]], sampler);
         Ok(Self {
-            picture,
             planes,
             frames,
-            uniforms,
             context: context.clone(),
             session: capture.source_identity(),
         })
@@ -99,21 +78,6 @@ impl ImportedOneXsPicture {
         capture: &ResidentSourceCapture,
     ) -> Fallible<ResidentImportedFront> {
         capture.submit_imported(self)
-    }
-
-    /// Bind and draw this exact source without exposing its cloneable picture
-    /// group to the caller.
-    ///
-    /// A later Scene owner can retain the opaque aggregate through render-pass
-    /// retirement and invoke this operation, but it cannot detach the binding
-    /// from the planes and decoder surfaces that make it valid.
-    pub(crate) fn draw(
-        &self,
-        pipeline: &DirectType2Pipeline,
-        map: &wgpu::BindGroup,
-        pass: &mut wgpu::RenderPass<'_>,
-    ) {
-        pipeline.draw(pass, &self.picture, map);
     }
 
     /// Seal one draw-private Reframe allocation and picture binding around
@@ -179,12 +143,6 @@ impl ImportedOneXsPicture {
         Ok(())
     }
 
-    pub(crate) fn write_reframe(&self, reframe: &crate::Reframe) {
-        self.context
-            .queue()
-            .write_buffer(&self.uniforms, 0, reframe.bytes());
-    }
-
     #[cfg(test)]
     pub(crate) fn resident_test_owner(
         context: &OneXsGpuContext,
@@ -192,15 +150,6 @@ impl ImportedOneXsPicture {
         frame: FrameStamp,
     ) -> Self {
         let device = context.device();
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("ONE X2 resident test source owner"),
-            entries: &[],
-        });
-        let picture = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ONE X2 resident test source owner"),
-            layout: &layout,
-            entries: &[],
-        });
         let texture = |label| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
@@ -228,39 +177,11 @@ impl ImportedOneXsPicture {
             },
         ];
         Self {
-            picture,
             planes,
             frames: Arc::new(Frames::empty_for_test(frame, crate::Size::new(1, 1))),
-            uniforms: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("ONE X2 resident test uniforms"),
-                size: std::mem::size_of::<crate::Reframe>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }),
             context: context.clone(),
             session,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn resident_test_draw_owner(
-        context: &OneXsGpuContext,
-        session: ResidentSourceIdentity,
-        frame: FrameStamp,
-        layout: &wgpu::BindGroupLayout,
-        uniforms: &wgpu::Buffer,
-        sampler: &wgpu::Sampler,
-    ) -> Self {
-        let mut owner = Self::resident_test_owner(context, session, frame);
-        owner.picture = bind_picture(
-            context.device(),
-            layout,
-            uniforms,
-            [&owner.planes[0], &owner.planes[1]],
-            sampler,
-        );
-        owner.uniforms = uniforms.clone();
-        owner
     }
 }
 
@@ -309,14 +230,8 @@ impl ImportedOneXsSource for ImportedOneXsPicture {
 impl ResidentSourceCapture {
     /// Import one exact decoder-owned pair under this capture's unforgeable
     /// resident identity. The resulting owner can return only to this session.
-    pub(crate) fn import_picture(
-        &self,
-        layout: &wgpu::BindGroupLayout,
-        sampler: &wgpu::Sampler,
-        reframe: &crate::Reframe,
-        frames: Arc<Frames>,
-    ) -> Fallible<ImportedOneXsPicture> {
-        ImportedOneXsPicture::import_for_capture(self, layout, sampler, reframe, frames)
+    pub(crate) fn import_picture(&self, frames: Arc<Frames>) -> Fallible<ImportedOneXsPicture> {
+        ImportedOneXsPicture::import_for_capture(self, frames)
     }
 }
 
@@ -991,16 +906,14 @@ mod tests {
     }
 
     #[test]
-    fn imported_one_xs_picture_drops_binding_then_planes_then_frames() {
+    fn imported_one_xs_picture_drops_planes_before_decoder_frames() {
         let dropped = Arc::new(Mutex::new(Vec::new()));
         let imported = ImportedOneXsPicture {
-            picture: DropWitness::new("bind group", &dropped),
             planes: [
                 DropWitness::new("planes A", &dropped),
                 DropWitness::new("planes B", &dropped),
             ],
             frames: DropWitness::new("frames", &dropped),
-            uniforms: DropWitness::new("uniforms", &dropped),
             context: DropWitness::new("context", &dropped),
             session: DropWitness::new("session", &dropped),
         };
@@ -1008,26 +921,32 @@ mod tests {
         drop(imported);
         assert_eq!(
             *dropped.lock().unwrap(),
-            [
-                "bind group",
-                "planes A",
-                "planes B",
-                "frames",
-                "uniforms",
-                "context",
-                "session"
-            ]
+            ["planes A", "planes B", "frames", "context", "session"]
         );
     }
 
     #[test]
-    fn imported_one_xs_picture_exposes_only_its_draw_operation() {
+    fn imported_one_xs_picture_binds_only_when_a_draw_is_prepared() {
         let source = include_str!("direct_type2.rs");
         let owner = source
             .split_once("impl ImportedOneXsPicture {")
             .unwrap()
             .1
             .split_once("fn exact_one_xs_lenses")
+            .unwrap()
+            .0;
+        let fields = source
+            .split_once("pub(crate) struct ImportedOneXsPicture")
+            .unwrap()
+            .1
+            .split_once("impl ImportedOneXsPicture")
+            .unwrap()
+            .0;
+        let import = owner
+            .split_once("fn import_for_capture(")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn submit_resident_front")
             .unwrap()
             .0;
 
@@ -1039,7 +958,27 @@ mod tests {
         assert!(!owner.contains("pub(crate) fn import("));
         assert!(source.contains("pub(crate) fn import_picture("));
         assert!(owner.contains("capture.submit_imported(self)"));
-        assert!(owner.contains("pipeline.draw(pass, &self.picture, map);"));
+        assert!(fields.contains("planes: P"));
+        assert!(fields.contains("frames: F"));
+        assert!(!fields.contains("picture:"));
+        assert!(!fields.contains("uniforms:"));
+        for forbidden in [
+            "create_buffer",
+            "write_buffer",
+            "bind_picture",
+            "BindGroupLayout",
+            "Sampler",
+            "Reframe",
+        ] {
+            assert!(
+                !import.contains(forbidden),
+                "source import contains {forbidden}"
+            );
+        }
+        assert!(import.contains("dmabuf::import"));
+        assert!(owner.contains("pub(crate) fn prepare_resident_draw("));
+        assert!(owner.contains("pub(crate) fn draw_resident_binding("));
+        assert!(owner.contains("pipeline.draw(pass, &binding.picture, map);"));
     }
 
     #[test]

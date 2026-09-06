@@ -541,10 +541,10 @@ struct ResidentCaptureState {
     seek_restart: bool,
 }
 
-/// Capture-owned execution and draw resources. The picture layout, sampler,
-/// direct pipeline and retirement queue are intentionally not ScenePipeline
-/// fields. An installed source/map pair therefore keeps the exact association
-/// that created it when iced recreates its renderer pipeline.
+/// Capture-owned execution and draw resources. The direct pipeline and
+/// retirement queue are intentionally not ScenePipeline fields. An installed
+/// source/map pair therefore keeps the exact association that created it when
+/// iced recreates its renderer pipeline.
 struct ResidentCaptureSession {
     context: OneXsGpuContext,
     worker: Arc<ResidentStitchWorker>,
@@ -555,8 +555,6 @@ struct ResidentCaptureSession {
     front: Arc<pis_frontend_gpu::GpuPisFrontEnd>,
     solver: Arc<super::pis::gpu::GpuPisPipeline>,
     bridge: Arc<pis_frontend_gpu::GpuL2PostPisBridge>,
-    picture_layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
     direct: Arc<DirectType2Pipeline>,
     retirements: Arc<IcedDrawRetirements<InstalledOneXsPass>>,
     #[cfg(test)]
@@ -604,11 +602,6 @@ impl ResidentCaptureSession {
         require_resident_device_limits(&context.device().limits())?;
         let context = context.with_worker();
         let picture_layout = crate::scene::bind_group_layout(context.device());
-        let sampler = context.device().create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
         let direct = Arc::new(DirectType2Pipeline::new(
             context.device(),
             &picture_layout,
@@ -630,8 +623,6 @@ impl ResidentCaptureSession {
                 pis_frontend_gpu::GpuL2PostPisBridge::new(context.clone())
                     .map_err(|error| error.to_string())?,
             ),
-            picture_layout,
-            sampler,
             direct,
             retirements: Arc::new(IcedDrawRetirements::new(
                 context.device(),
@@ -659,8 +650,6 @@ impl ResidentCaptureSession {
             front: self.front.clone(),
             solver: self.solver.clone(),
             bridge: self.bridge.clone(),
-            picture_layout: self.picture_layout.clone(),
-            sampler: self.sampler.clone(),
             direct: self.direct.clone(),
             retirements: Arc::new(IcedDrawRetirements::new(
                 self.context.device(),
@@ -1174,7 +1163,6 @@ impl ResidentSceneFacade {
         context: &OneXsGpuContext,
         format: wgpu::TextureFormat,
         frames: Arc<Frames>,
-        reframe: &crate::Reframe,
     ) -> Fallible<ResidentSubmit> {
         let session = self.capture.bind_session(context.clone(), format)?;
         let stamp = frames.stamp();
@@ -1211,12 +1199,7 @@ impl ResidentSceneFacade {
         // resident root. Only this boundary can retry resource exhaustion.
         // Once submit starts, every failure keeps the existing fail-closed
         // handling for uncertain GPU work and exact causal state.
-        let source = match session.capture.import_picture(
-            &session.picture_layout,
-            &session.sampler,
-            reframe,
-            frames,
-        ) {
+        let source = match session.capture.import_picture(frames) {
             Ok(source) => source,
             Err(error) => return start.failed_import(error),
         };
@@ -1786,10 +1769,6 @@ impl Drop for InstalledDrawDropWitness {
 impl InstalledOneXsDraw {
     fn frame(&self) -> FrameStamp {
         self.source.resident_frame()
-    }
-
-    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        self.source.draw(&self.pipeline, self.map.read(), pass);
     }
 
     /// Allocate and bind one immutable Reframe for one exact render pass.
@@ -4257,8 +4236,8 @@ mod tests {
             .0;
         assert!(facade.contains("Arc<ResidentCaptureFacadeInner>"));
         assert!(facade.contains("Arc<IcedDrawRetirements<InstalledOneXsPass>>"));
-        assert!(facade.contains("picture_layout: wgpu::BindGroupLayout"));
-        assert!(facade.contains("sampler: wgpu::Sampler"));
+        assert!(!facade.contains("picture_layout: wgpu::BindGroupLayout"));
+        assert!(!facade.contains("sampler: wgpu::Sampler"));
         assert!(facade.contains("direct: Arc<DirectType2Pipeline>"));
         assert!(facade.contains("ResidentTransaction::Pending"));
         assert!(facade.contains("finish_after_poll_classified()"));
@@ -4277,17 +4256,31 @@ mod tests {
             assert!(!facade.contains(forbidden), "facade exposes {forbidden}");
         }
 
-        let imported = include_str!("../direct_type2.rs")
+        let direct_source = include_str!("../direct_type2.rs");
+        let imported = direct_source
             .split_once("fn import_for_capture(")
             .unwrap()
             .1
             .split_once("pub(crate) fn submit_resident_front")
             .unwrap()
             .0;
-        assert!(imported.contains("ONE X2 resident picture uniforms"));
-        assert!(imported.contains("write_buffer(&uniforms, 0, reframe.bytes())"));
-        assert!(!imported.contains("uniforms: &wgpu::Buffer"));
-        assert!(source.contains("ONE X2 resident draw-private uniforms"));
+        for forbidden in [
+            "resident picture uniforms",
+            "create_buffer",
+            "write_buffer",
+            "bind_picture",
+            "BindGroupLayout",
+            "Sampler",
+            "Reframe",
+        ] {
+            assert!(
+                !imported.contains(forbidden),
+                "source import contains {forbidden}"
+            );
+        }
+        assert!(imported.contains("dmabuf::import"));
+        assert!(direct_source.contains("ONE X2 resident draw-private uniforms"));
+        assert!(direct_source.contains("pub(crate) fn prepare_resident_draw("));
         assert!(source.contains("InstalledOneXsPass"));
     }
 
@@ -4406,7 +4399,6 @@ mod tests {
                 &context,
                 wgpu::TextureFormat::Rgba8Unorm,
                 Arc::new(Frames::empty_for_test(stamp, wrong_size)),
-                &crate::Reframe::blank(1.0, false),
             )
             .unwrap_err();
         assert_eq!(
@@ -4432,7 +4424,6 @@ mod tests {
                         height: ONE_XS_FRAME.height,
                     },
                 )),
-                &crate::Reframe::blank(1.0, false),
             )
             .unwrap_err();
         assert_eq!(
@@ -4455,7 +4446,6 @@ mod tests {
                         height: ONE_XS_FRAME.height,
                     },
                 )),
-                &crate::Reframe::blank(1.0, false),
             )
             .unwrap_err();
         assert_eq!(
@@ -4691,8 +4681,29 @@ mod tests {
         assert!(installed.contains("source: ImportedOneXsPicture"));
         assert!(installed.contains("map: map_patch_gpu::InstalledGpuMapBinding"));
         assert!(installed.contains("pipeline: Arc<DirectType2Pipeline>"));
-        assert!(installed.contains("fn draw("));
         assert!(installed.contains("fn prepare_pass("));
+        let carrier = installed
+            .split_once("impl InstalledOneXsDraw")
+            .unwrap()
+            .1
+            .split_once("struct InstalledOneXsPass")
+            .unwrap()
+            .0;
+        assert!(!carrier.contains("fn draw("));
+        let pass = installed.split_once("impl InstalledOneXsPass").unwrap().1;
+        let pass_owner = installed
+            .split_once("struct InstalledOneXsPass")
+            .unwrap()
+            .1
+            .split_once("impl InstalledOneXsPass")
+            .unwrap()
+            .0;
+        assert!(pass_owner.contains("binding: crate::direct_type2::ImportedOneXsDrawBinding"));
+        assert!(pass_owner.contains("draw: Arc<InstalledOneXsDraw>"));
+        assert!(pass_owner.find("binding:").unwrap() < pass_owner.find("draw:").unwrap());
+        assert!(pass.contains("fn draw("));
+        assert!(pass.contains("draw_resident_binding("));
+        assert!(pass.contains("&self.binding"));
         for forbidden in [
             "fn source(",
             "fn map(",

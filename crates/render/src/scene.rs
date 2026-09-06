@@ -3268,13 +3268,7 @@ impl ScenePipeline {
             } else {
                 due_view
             };
-            let reframe = self.resident_reframe(primitive, view, aspect);
-            match attachment.submit_frame(
-                &self.one_xs_gpu,
-                self.format,
-                view.frames.clone(),
-                &reframe,
-            )? {
+            match attachment.submit_frame(&self.one_xs_gpu, self.format, view.frames.clone())? {
                 ResidentSubmit::Submitted => {
                     primitive.resident_submitted.keep(view);
                     primitive.stalled.landed();
