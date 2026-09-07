@@ -1,136 +1,185 @@
 //! One bounded stitch worker shared by a capture and its seek restarts.
 //!
-//! Admission/import and publication remain on the caller. The worker owns the
-//! imported source while executing the existing typed GPU chain. A pending
-//! result stays in its capture's Working transaction until normal publication
-//! or replacement draining collects it; dropping a receiver is exceptional
-//! cancellation, never permission to recycle an uncertain source surface.
+//! Admission/import and publication remain on the caller. Once admitted, a
+//! capture actor owns source execution, final validity acknowledgement and
+//! temporal-future commit. It may run the second admitted source without a UI
+//! poll. A completed second result parks in capture state when the one future
+//! slot is occupied; the actor then ends until publication kicks it again.
 
 use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
 use super::{
-    ImportedOneXsPicture, ImportedOneXsSource, OneXsGpuContext, ResidentCaptureSession,
-    ResidentPendingMap, ResidentTransaction, native_lifecycle_event,
-    native_lifecycle_probe_enabled,
+    ResidentCaptureFacadeInner, ResidentPendingMap, ResidentPoll, ResidentReadyMap,
+    native_lifecycle_event, native_lifecycle_probe_enabled, prepare_resident_bound,
 };
 use crate::Fallible;
 
 struct Job {
-    session: Arc<ResidentCaptureSession>,
-    source: ImportedOneXsPicture,
-    result: mpsc::SyncSender<Fallible<ResidentPendingMap>>,
+    capture: Arc<ResidentCaptureFacadeInner>,
 }
 
 pub(super) struct ResidentStitchWorker {
     jobs: mpsc::SyncSender<Job>,
 }
 
-pub(super) struct ResidentWork {
-    result: mpsc::Receiver<Fallible<ResidentPendingMap>>,
-}
-
 impl ResidentStitchWorker {
-    pub(super) fn new(context: &OneXsGpuContext) -> Fallible<Self> {
-        // One executing job and one waiting replacement, across all restarts.
-        // A full channel is ordinary backpressure, never a UI-thread wait.
+    pub(super) fn new(context: &super::OneXsGpuContext) -> Fallible<Self> {
+        // One executing capture actor and one queued actor across seek
+        // restarts. Each capture independently limits accepted sources to two.
         let (jobs, incoming) = mpsc::sync_channel::<Job>(1);
         let thread = std::thread::Builder::new()
             .name("kjerag-stitch".into())
             .spawn(move || {
                 for job in incoming {
-                    let lifecycle = native_lifecycle_probe_enabled()
-                        .then(|| (job.source.resident_frame(), std::time::Instant::now()));
-                    if let Some((stamp, _)) = lifecycle.as_ref() {
-                        native_lifecycle_event("worker-start", stamp, None);
-                    }
-                    let result = catch_worker_panic(|| {
-                        if !job.session.context.is_worker_thread() {
-                            return Err("ONE X2 stitch job reached a different worker".into());
-                        }
-                        job.session.submit(job.source)
-                    });
-                    if let Some((stamp, started)) = lifecycle {
-                        native_lifecycle_event(
-                            if result.is_ok() {
-                                "worker-return-success"
-                            } else {
-                                "worker-return-error"
-                            },
-                            &stamp,
-                            Some(started.elapsed()),
-                        );
-                    }
-                    if let Err(unsent) = job.result.send(result)
-                        && let Ok(pending) = unsent.0
-                    {
-                        // Normal seek/reopen keeps the receiver until drained.
-                        // An abandoned receiver must not free a source without
-                        // the final validity/publication completion proof.
-                        ResidentTransaction::Pending(pending).quarantine_uncertain();
+                    let capture = Arc::clone(&job.capture);
+                    if let Err(error) = catch_capture_panic(|| service_capture(job.capture)) {
+                        capture.fail_worker(error);
                     }
                 }
             })?;
-        // No caller can enqueue until construction returns. Registering here
-        // makes the worker identity apply only to this thread, never constructor
-        // qualifiers or the UI even though they clone the same device and queue.
         context.register_worker_thread(thread.thread().id())?;
-        // No join in Drop: the last sender closes the channel, and the worker
-        // finishes its owned job before exiting without blocking the UI.
+        // The sender owns shutdown. The detached thread finishes any exact
+        // active source before the channel closes and never blocks the UI.
         drop(thread);
         Ok(Self { jobs })
     }
 
-    pub(super) fn try_submit(
+    /// Schedule one capture actor without waiting. The caller has already set
+    /// `worker_running`; a full channel must roll that marker back unless an
+    /// existing actor still owns this capture's queued work.
+    pub(super) fn try_kick(
         &self,
-        session: Arc<ResidentCaptureSession>,
-        source: ImportedOneXsPicture,
-    ) -> Fallible<Option<ResidentWork>> {
-        let (result, received) = mpsc::sync_channel(1);
-        match self.jobs.try_send(Job {
-            session,
-            source,
-            result,
-        }) {
-            Ok(()) => Ok(Some(ResidentWork { result: received })),
-            // This job has not run or acquired a GPU submission lease; its
-            // imported source can be dropped normally and retried by Scene.
-            Err(mpsc::TrySendError::Full(_)) => Ok(None),
-            Err(mpsc::TrySendError::Disconnected(_)) => {
-                Err("ONE X2 stitch worker stopped before accepting the frame".into())
+        capture: Arc<ResidentCaptureFacadeInner>,
+    ) -> Result<bool, mpsc::TrySendError<Arc<ResidentCaptureFacadeInner>>> {
+        match self.jobs.try_send(Job { capture }) {
+            Ok(()) => Ok(true),
+            Err(mpsc::TrySendError::Full(job)) => Err(mpsc::TrySendError::Full(job.capture)),
+            Err(mpsc::TrySendError::Disconnected(job)) => {
+                Err(mpsc::TrySendError::Disconnected(job.capture))
             }
         }
     }
 }
 
-impl ResidentWork {
-    pub(super) fn collect(self) -> Fallible<ResidentTransaction> {
-        match self.result.try_recv() {
-            Ok(result) => result.map(ResidentTransaction::Pending),
-            Err(mpsc::TryRecvError::Empty) => Ok(ResidentTransaction::Working(self)),
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Err("ONE X2 stitch worker stopped before returning the frame".into())
+fn service_capture(capture: Arc<ResidentCaptureFacadeInner>) -> Fallible<()> {
+    loop {
+        let Some(next) = capture.take_worker_input()? else {
+            return Ok(());
+        };
+        let (session, source, stamp) = match next {
+            super::ResidentWorkerInput::Source {
+                session,
+                source,
+                stamp,
+            } => (session, source, stamp),
+            super::ResidentWorkerInput::Ready { session, ready } => {
+                if !commit_or_park(&capture, &session, ready)? {
+                    return Ok(());
+                }
+                continue;
             }
+        };
+        if native_lifecycle_probe_enabled() {
+            native_lifecycle_event("worker-start", &stamp, None);
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn waiting_for_test() -> (mpsc::SyncSender<Fallible<ResidentPendingMap>>, Self) {
-        let (result, received) = mpsc::sync_channel(1);
-        (result, Self { result: received })
+        let started = std::time::Instant::now();
+        let pending = catch_submit_panic(|| session.submit(source));
+        if native_lifecycle_probe_enabled() {
+            native_lifecycle_event(
+                if pending.is_ok() {
+                    "worker-return-success"
+                } else {
+                    "worker-return-error"
+                },
+                &stamp,
+                Some(started.elapsed()),
+            );
+        }
+        let ready = finish_pending(&session, pending?)?;
+        native_lifecycle_event("worker-validity-ready", &stamp, None);
+        if !commit_or_park(&capture, &session, ready)? {
+            return Ok(());
+        }
     }
 }
 
-fn catch_worker_panic(
+fn finish_pending(
+    session: &super::ResidentCaptureSession,
+    mut pending: ResidentPendingMap,
+) -> Fallible<ResidentReadyMap> {
+    loop {
+        let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            session.context.device().poll(wgpu::PollType::Poll)
+        }));
+        match polled {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                pending.quarantine_uncertain();
+                return Err(error.into());
+            }
+            Err(payload) => {
+                pending.quarantine_uncertain();
+                return Err(payload
+                    .downcast_ref::<&str>()
+                    .map(|message| (*message).to_owned())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "ONE X2 GPU device poll panicked".to_owned())
+                    .into());
+            }
+        }
+        match pending.finish_after_poll_classified() {
+            ResidentPoll::Pending(value) => {
+                pending = value;
+                std::thread::park_timeout(Duration::from_micros(100));
+            }
+            ResidentPoll::Ready(value) => return Ok(value),
+            ResidentPoll::Refused(error) | ResidentPoll::Quarantined(error) => return Err(error),
+        }
+    }
+}
+
+fn commit_or_park(
+    capture: &Arc<ResidentCaptureFacadeInner>,
+    session: &Arc<super::ResidentCaptureSession>,
+    ready: ResidentReadyMap,
+) -> Fallible<bool> {
+    let ready = match capture.take_commit_permission(ready)? {
+        Some(ready) => ready,
+        None => return Ok(false),
+    };
+    let completed = ready.frame().clone();
+    // Binding creates immutable draw resources and must not hold capture
+    // state. Only the short future commit takes façade then root locks.
+    let bound = match ready {
+        ResidentReadyMap::Cold(map) => prepare_resident_bound(*map, Arc::clone(&session.direct)),
+        ResidentReadyMap::Warm(map) => prepare_resident_bound(*map, Arc::clone(&session.direct)),
+    }?;
+    if !capture.commit_worker_future(bound, &completed)? {
+        return Ok(false);
+    }
+    native_lifecycle_event("worker-temporal-committed", &completed, None);
+    Ok(true)
+}
+
+fn catch_capture_panic(submit: impl FnOnce() -> Fallible<()>) -> Fallible<()> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(submit))
+        .unwrap_or_else(|payload| Err(panic_message(payload).into()))
+}
+
+fn catch_submit_panic(
     submit: impl FnOnce() -> Fallible<ResidentPendingMap>,
 ) -> Fallible<ResidentPendingMap> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(submit)).unwrap_or_else(|payload| {
-        Err(payload
-            .downcast_ref::<&str>()
-            .map(|message| (*message).to_owned())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "ONE X2 stitch worker panicked".to_owned())
-            .into())
-    })
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(submit))
+        .unwrap_or_else(|payload| Err(panic_message(payload).into()))
+}
+
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "ONE X2 stitch worker panicked".to_owned())
 }
 
 #[cfg(test)]
@@ -138,37 +187,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn working_poll_is_nonblocking_and_keeps_the_exact_result_channel() {
-        let (sent, result) = mpsc::sync_channel(1);
-        let transaction = ResidentWork { result }.collect().unwrap();
-        let ResidentTransaction::Working(work) = transaction else {
-            panic!("an unfinished worker was published");
-        };
-        sent.send(Err("exact underlying worker error".into()))
-            .unwrap_or_else(|_| panic!("the result receiver was discarded"));
-        let error = work.collect().err().expect("worker failure was lost");
-        assert_eq!(error.to_string(), "exact underlying worker error");
-    }
-
-    #[test]
-    fn disconnected_worker_is_a_failure_not_an_infinite_pending_frame() {
-        let (sent, result) = mpsc::sync_channel(1);
-        drop(sent);
-        assert_eq!(
-            ResidentWork { result }
-                .collect()
-                .err()
-                .expect("disconnected worker was ignored")
-                .to_string(),
-            "ONE X2 stitch worker stopped before returning the frame"
-        );
-    }
-
-    #[test]
     fn worker_unwind_preserves_the_underlying_failure() {
-        let error = catch_worker_panic(|| panic!("exact GPU panic"))
-            .err()
-            .expect("worker unwind was ignored");
+        let error = catch_capture_panic(|| panic!("exact GPU panic"))
+            .expect_err("worker unwind was ignored");
         assert_eq!(error.to_string(), "exact GPU panic");
     }
 }

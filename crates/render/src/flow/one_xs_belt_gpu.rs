@@ -9,6 +9,7 @@
 //! boundary. No staging allocation or full CPU luma readback lies between the
 //! imported R8 textures and those inputs.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, mpsc};
 use std::{error::Error, fmt};
 
@@ -31,7 +32,7 @@ use kjerag_meta::{CalibrationSet, OrientationTrack, Readout};
 
 #[path = "one_xs/resident_worker.rs"]
 mod resident_worker;
-use resident_worker::{ResidentStitchWorker, ResidentWork};
+use resident_worker::ResidentStitchWorker;
 
 /// One admitted capture's immutable camera interpretation and CPU resources.
 ///
@@ -416,6 +417,48 @@ impl ResidentReadyMap {
     }
 }
 
+impl ResidentPendingMap {
+    fn finish_after_poll_classified(self) -> ResidentPoll {
+        match self {
+            Self::Cold(pending) => match (*pending).finish_after_poll_classified() {
+                map_patch_gpu::ClassifiedValidityPoll::Pending(value) => {
+                    ResidentPoll::Pending(Self::Cold(Box::new(value)))
+                }
+                map_patch_gpu::ClassifiedValidityPoll::Ready(value) => {
+                    ResidentPoll::Ready(ResidentReadyMap::Cold(Box::new(value)))
+                }
+                map_patch_gpu::ClassifiedValidityPoll::Refused(error) => {
+                    ResidentPoll::Refused(error)
+                }
+                map_patch_gpu::ClassifiedValidityPoll::Quarantined(error) => {
+                    ResidentPoll::Quarantined(error)
+                }
+            },
+            Self::Warm(pending) => match (*pending).finish_after_poll_classified() {
+                map_patch_gpu::ClassifiedValidityPoll::Pending(value) => {
+                    ResidentPoll::Pending(Self::Warm(Box::new(value)))
+                }
+                map_patch_gpu::ClassifiedValidityPoll::Ready(value) => {
+                    ResidentPoll::Ready(ResidentReadyMap::Warm(Box::new(value)))
+                }
+                map_patch_gpu::ClassifiedValidityPoll::Refused(error) => {
+                    ResidentPoll::Refused(error)
+                }
+                map_patch_gpu::ClassifiedValidityPoll::Quarantined(error) => {
+                    ResidentPoll::Quarantined(error)
+                }
+            },
+        }
+    }
+
+    fn quarantine_uncertain(self) {
+        match self {
+            Self::Cold(pending) => (*pending).quarantine_uncertain(),
+            Self::Warm(pending) => (*pending).quarantine_uncertain(),
+        }
+    }
+}
+
 enum ResidentPublication<'a> {
     Immediate,
     Due(Option<&'a FrameStamp>),
@@ -434,52 +477,24 @@ impl ResidentPublication<'_> {
 enum ResidentTransaction {
     Idle,
     Starting,
-    Working(ResidentWork),
-    Pending(ResidentPendingMap),
-    Ready(ResidentReadyMap),
     Quarantined,
 }
 
 enum ResidentPoll {
-    Continue(Box<ResidentTransaction>),
+    Pending(ResidentPendingMap),
+    Ready(ResidentReadyMap),
     Refused(Box<dyn Error + Send + Sync>),
     Quarantined(Box<dyn Error + Send + Sync>),
 }
 
-impl ResidentTransaction {
-    fn quarantine_uncertain(self) {
-        match self {
-            Self::Pending(ResidentPendingMap::Cold(pending)) => (*pending).quarantine_uncertain(),
-            Self::Pending(ResidentPendingMap::Warm(pending)) => (*pending).quarantine_uncertain(),
-            // Dropping Working closes its result receiver. The worker still
-            // owns the source and quarantines an undeliverable pending map.
-            // Ready has already acknowledged mapped completion.
-            other => drop(other),
-        }
-    }
-}
-
 struct ResidentStartGuard {
     inner: Arc<ResidentCaptureFacadeInner>,
-    quarantine: bool,
     armed: bool,
 }
 
 impl ResidentStartGuard {
-    fn rollback(inner: Arc<ResidentCaptureFacadeInner>) -> Self {
-        Self {
-            inner,
-            quarantine: false,
-            armed: true,
-        }
-    }
-
     fn quarantine(inner: Arc<ResidentCaptureFacadeInner>) -> Self {
-        Self {
-            inner,
-            quarantine: true,
-            armed: true,
-        }
+        Self { inner, armed: true }
     }
 
     fn disarm(&mut self) {
@@ -488,19 +503,27 @@ impl ResidentStartGuard {
 
     fn failed_import(mut self, error: Box<dyn Error + Send + Sync>) -> Fallible<ResidentSubmit> {
         let retry = crate::dmabuf::retryable_import_error(error.as_ref());
-        {
+        let concurrent_error = {
             let mut state = self
                 .inner
                 .state
                 .lock()
                 .map_err(|_| "ONE X2 resident capture state is poisoned")?;
-            state.transaction = if retry {
-                ResidentTransaction::Idle
-            } else {
-                ResidentTransaction::Quarantined
-            };
-        }
+            let owns_start = matches!(state.transaction, ResidentTransaction::Starting);
+            if owns_start {
+                state.transaction = if retry {
+                    ResidentTransaction::Idle
+                } else {
+                    state.worker_error = Some(error.to_string());
+                    ResidentTransaction::Quarantined
+                };
+            }
+            (!owns_start).then(|| state.worker_error.clone()).flatten()
+        };
         self.disarm();
+        if let Some(error) = concurrent_error {
+            return Err(error.into());
+        }
         if retry {
             Ok(ResidentSubmit::ImportFailed(error.to_string()))
         } else {
@@ -517,11 +540,7 @@ impl Drop for ResidentStartGuard {
         if let Ok(mut state) = self.inner.state.lock()
             && matches!(state.transaction, ResidentTransaction::Starting)
         {
-            state.transaction = if self.quarantine {
-                ResidentTransaction::Quarantined
-            } else {
-                ResidentTransaction::Idle
-            };
+            state.transaction = ResidentTransaction::Quarantined;
         }
     }
 }
@@ -541,6 +560,14 @@ struct ResidentCaptureState {
     session: Option<Arc<ResidentCaptureSession>>,
     transaction: ResidentTransaction,
     installed: Option<FrameStamp>,
+    queued: VecDeque<ImportedOneXsPicture>,
+    worker_running: bool,
+    worker_active: Option<FrameStamp>,
+    parked: Option<ResidentReadyMap>,
+    worker_error: Option<String>,
+    retired: bool,
+    #[cfg(test)]
+    worker_started: Option<FrameStamp>,
     /// Last pair accepted by the stitch worker, not merely offered by Scene.
     /// Historical admission, not readiness or permission to publish. A full
     /// worker queue must not advance this stamp.
@@ -548,6 +575,41 @@ struct ResidentCaptureState {
     /// A user seek starts a fresh estimator on the decoder's landing frame.
     /// Ordinary opens still require frame zero; successors remain adjacent.
     seek_restart: bool,
+}
+
+impl ResidentCaptureState {
+    fn new(session: Option<Arc<ResidentCaptureSession>>, seek_restart: bool) -> Self {
+        Self {
+            session,
+            transaction: ResidentTransaction::Idle,
+            installed: None,
+            queued: VecDeque::with_capacity(2),
+            worker_running: false,
+            worker_active: None,
+            parked: None,
+            worker_error: None,
+            retired: false,
+            #[cfg(test)]
+            worker_started: None,
+            submitted: None,
+            seek_restart,
+        }
+    }
+}
+
+// One transient worker-local handoff, never an array or queued population.
+// Keep the imported owner inline instead of allocating another box per source.
+#[allow(clippy::large_enum_variant)]
+enum ResidentWorkerInput {
+    Source {
+        session: Arc<ResidentCaptureSession>,
+        source: ImportedOneXsPicture,
+        stamp: FrameStamp,
+    },
+    Ready {
+        session: Arc<ResidentCaptureSession>,
+        ready: ResidentReadyMap,
+    },
 }
 
 /// Capture-owned execution and draw resources. The direct pipeline and
@@ -1001,6 +1063,129 @@ struct ResidentCaptureFacadeInner {
     state: Mutex<ResidentCaptureState>,
 }
 
+impl ResidentCaptureFacadeInner {
+    fn take_worker_input(&self) -> Fallible<Option<ResidentWorkerInput>> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "ONE X2 resident transaction facade is poisoned")?;
+        if state.retired || matches!(state.transaction, ResidentTransaction::Quarantined) {
+            state.worker_running = false;
+            state.worker_active = None;
+            return Ok(None);
+        }
+        let session = state
+            .session
+            .as_ref()
+            .cloned()
+            .ok_or("ONE X2 admitted worker has no capture session")?;
+        if state.parked.is_some() {
+            if session.capture.pipeline.root.has_future()? {
+                state.worker_running = false;
+                return Ok(None);
+            }
+            let ready = state.parked.take().expect("checked parked result");
+            state.worker_active = Some(ready.frame().clone());
+            return Ok(Some(ResidentWorkerInput::Ready { session, ready }));
+        }
+        let Some(source) = state.queued.pop_front() else {
+            state.worker_running = false;
+            state.worker_active = None;
+            return Ok(None);
+        };
+        let stamp = source.resident_frame();
+        state.worker_active = Some(stamp.clone());
+        #[cfg(test)]
+        {
+            state.worker_started = Some(stamp.clone());
+        }
+        Ok(Some(ResidentWorkerInput::Source {
+            session,
+            source,
+            stamp,
+        }))
+    }
+
+    /// Keep active and parked mutually exclusive. A full future parks the
+    /// mapped result and ends this actor without holding a worker thread.
+    fn take_commit_permission(
+        &self,
+        ready: ResidentReadyMap,
+    ) -> Fallible<Option<ResidentReadyMap>> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "ONE X2 resident transaction facade is poisoned")?;
+        if state.retired {
+            state.worker_active = None;
+            state.worker_running = false;
+            return Ok(None);
+        }
+        if matches!(state.transaction, ResidentTransaction::Quarantined) {
+            return Err(state
+                .worker_error
+                .clone()
+                .unwrap_or_else(|| "ONE X2 resident transaction facade is quarantined".into())
+                .into());
+        }
+        let session = state
+            .session
+            .as_ref()
+            .ok_or("ONE X2 completed worker has no capture session")?;
+        if session.capture.pipeline.root.has_future()? {
+            state.worker_active = None;
+            state.parked = Some(ready);
+            state.worker_running = false;
+            return Ok(None);
+        }
+        Ok(Some(ready))
+    }
+
+    fn commit_worker_future(
+        &self,
+        bound: ResidentBoundInstall,
+        completed: &FrameStamp,
+    ) -> Fallible<bool> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "ONE X2 resident transaction facade is poisoned")?;
+        if state.retired {
+            state.worker_active = None;
+            state.worker_running = false;
+            return Ok(false);
+        }
+        if matches!(state.transaction, ResidentTransaction::Quarantined) {
+            return Err(state
+                .worker_error
+                .clone()
+                .unwrap_or_else(|| "ONE X2 resident transaction facade is quarantined".into())
+                .into());
+        }
+        if state.worker_active.as_ref() != Some(completed) {
+            return Err("ONE X2 worker completion differs from its active source".into());
+        }
+        // This is the established façade-then-root order. Binding and all GPU
+        // waiting happened before this short atomic temporal commit.
+        bound.commit_future()?;
+        state.worker_active = None;
+        Ok(true)
+    }
+
+    fn fail_worker(&self, error: Box<dyn Error + Send + Sync>) {
+        let message = error.to_string();
+        if let Ok(mut state) = self.state.lock() {
+            state.worker_running = false;
+            state.worker_active = None;
+            state.queued.clear();
+            state.parked.take();
+            state.worker_error = Some(message.clone());
+            state.transaction = ResidentTransaction::Quarantined;
+        }
+        eprintln!("{message}");
+    }
+}
+
 /// One open capture's resident transaction owner. Clones are renderer
 /// attachments to the same root, pending validity word and retirement queue;
 /// they do not clone numeric history or a decoder surface owner.
@@ -1017,13 +1202,7 @@ impl ResidentCaptureFacade {
             inner: Arc::new(ResidentCaptureFacadeInner {
                 profile,
                 orientation,
-                state: Mutex::new(ResidentCaptureState {
-                    session: None,
-                    transaction: ResidentTransaction::Idle,
-                    installed: None,
-                    submitted: None,
-                    seek_restart: false,
-                }),
+                state: Mutex::new(ResidentCaptureState::new(None, false)),
             }),
         }
     }
@@ -1031,7 +1210,11 @@ impl ResidentCaptureFacade {
     pub(crate) fn restarted(&self) -> Fallible<Self> {
         let state = self.state()?;
         if matches!(state.transaction, ResidentTransaction::Quarantined) {
-            return Err("ONE X2 resident transaction facade is quarantined".into());
+            return Err(state
+                .worker_error
+                .clone()
+                .unwrap_or_else(|| "ONE X2 resident transaction facade is quarantined".into())
+                .into());
         }
         let session = state
             .session
@@ -1042,13 +1225,7 @@ impl ResidentCaptureFacade {
             inner: Arc::new(ResidentCaptureFacadeInner {
                 profile: self.inner.profile.clone(),
                 orientation: self.inner.orientation.clone(),
-                state: Mutex::new(ResidentCaptureState {
-                    session,
-                    transaction: ResidentTransaction::Idle,
-                    installed: None,
-                    submitted: None,
-                    seek_restart: true,
-                }),
+                state: Mutex::new(ResidentCaptureState::new(session, true)),
             }),
         })
     }
@@ -1096,6 +1273,37 @@ impl ResidentCaptureFacade {
             .map_err(|_| "ONE X2 resident transaction facade is poisoned".into())
     }
 
+    /// Ensure this capture has at most one scheduled actor. A full global
+    /// channel is ordinary backpressure and leaves no false running marker.
+    fn kick_worker(&self, session: &Arc<ResidentCaptureSession>) -> Fallible<bool> {
+        {
+            let mut state = self.state()?;
+            let parked_can_commit =
+                state.parked.is_some() && !session.capture.pipeline.root.has_future()?;
+            if state.retired
+                || matches!(state.transaction, ResidentTransaction::Quarantined)
+                || state.worker_running
+                || (state.queued.is_empty() && !parked_can_commit)
+            {
+                return Ok(true);
+            }
+            state.worker_running = true;
+        }
+        match session.worker.try_kick(Arc::clone(&self.inner)) {
+            Ok(true) => Ok(true),
+            Ok(false) => unreachable!("worker kick has no false success"),
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.state()?.worker_running = false;
+                Ok(false)
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                let message = "ONE X2 stitch worker stopped before accepting the capture";
+                self.inner.fail_worker(message.into());
+                Err(message.into())
+            }
+        }
+    }
+
     /// Exact capture-side acknowledgement for replay/pump code that has no
     /// renderer attachment. Readable indices alone never authorize reuse.
     pub(crate) fn acknowledged(&self, frame: &FrameStamp) -> Fallible<bool> {
@@ -1106,6 +1314,15 @@ impl ResidentCaptureFacade {
         let state = self.state()?;
         Ok(state.installed.as_ref() == Some(frame)
             || state.submitted.as_ref() == Some(frame)
+            || state.worker_active.as_ref() == Some(frame)
+            || state
+                .queued
+                .iter()
+                .any(|source| source.resident_frame() == *frame)
+            || state
+                .parked
+                .as_ref()
+                .is_some_and(|ready| ready.frame() == frame)
             || state
                 .session
                 .as_ref()
@@ -1146,10 +1363,23 @@ impl ResidentCaptureFacade {
         {
             return Ok(Some(frame));
         }
-        Ok(match &state.transaction {
-            ResidentTransaction::Ready(ready) => Some(ready.frame().clone()),
-            _ => None,
-        })
+        Ok(state.parked.as_ref().map(|ready| ready.frame().clone()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn future_committed_stamp_for_test(&self) -> Fallible<Option<FrameStamp>> {
+        let state = self.state()?;
+        state
+            .session
+            .as_ref()
+            .map(|session| session.capture.pipeline.root.future_stamp())
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn worker_started_stamp_for_test(&self) -> Fallible<Option<FrameStamp>> {
+        Ok(self.state()?.worker_started.clone())
     }
 
     #[cfg(test)]
@@ -1360,21 +1590,31 @@ impl ResidentSceneFacade {
         if matches!(state.transaction, ResidentTransaction::Quarantined) {
             return false;
         }
-        matches!(
-            state.transaction,
-            ResidentTransaction::Working(_) | ResidentTransaction::Pending(_)
-        ) || state
-            .session
-            .as_ref()
-            .is_some_and(|session| !session.retirements.is_empty())
+        let parked_can_commit = state.session.as_ref().is_some_and(|session| {
+            state.parked.is_some()
+                && session
+                    .capture
+                    .pipeline
+                    .root
+                    .has_future()
+                    .is_ok_and(|full| !full)
+        });
+        state.worker_running
+            || !state.queued.is_empty()
+            || parked_can_commit
+            || state
+                .session
+                .as_ref()
+                .is_some_and(|session| !session.retirements.is_empty())
     }
 
     pub(crate) fn quarantine_after_external_poll_failure(&self) {
         self.draw.staged().take();
         if let Ok(mut state) = self.capture.state() {
-            let transaction =
-                std::mem::replace(&mut state.transaction, ResidentTransaction::Quarantined);
-            transaction.quarantine_uncertain();
+            state.transaction = ResidentTransaction::Quarantined;
+            state.worker_error = Some("ONE X2 external GPU device poll failed".into());
+            state.queued.clear();
+            state.parked.take();
             if let Some(session) = &state.session {
                 session.retirements.quarantine_after_external_poll_failure();
             }
@@ -1389,18 +1629,41 @@ impl ResidentSceneFacade {
     ) -> Fallible<ResidentSubmit> {
         let session = self.capture.bind_session(context.clone(), format)?;
         let stamp = frames.stamp();
-        {
+        let previous_submitted = {
             let mut state = self.capture.state()?;
             if state.installed.as_ref() == Some(&stamp) {
                 return Ok(ResidentSubmit::AlreadyInstalled(stamp));
             }
             if matches!(state.transaction, ResidentTransaction::Quarantined) {
-                return Err("ONE X2 resident transaction facade is quarantined".into());
+                return Err(state
+                    .worker_error
+                    .clone()
+                    .unwrap_or_else(|| "ONE X2 resident transaction facade is quarantined".into())
+                    .into());
             }
-            if !matches!(state.transaction, ResidentTransaction::Idle) {
+            if state.retired || !matches!(state.transaction, ResidentTransaction::Idle) {
                 return Ok(ResidentSubmit::Retry(ResidentRetry::InFlight));
             }
-            if state.submitted.as_ref() == Some(&stamp) {
+            if state.submitted.as_ref() == Some(&stamp)
+                || state.worker_active.as_ref() == Some(&stamp)
+                || state
+                    .queued
+                    .iter()
+                    .any(|source| source.resident_frame() == stamp)
+                || state
+                    .parked
+                    .as_ref()
+                    .is_some_and(|ready| ready.frame() == &stamp)
+                || session.capture.pipeline.root.future_stamp()?.as_ref() == Some(&stamp)
+            {
+                return Ok(ResidentSubmit::Retry(ResidentRetry::InFlight));
+            }
+            debug_assert!(state.worker_active.is_none() || state.parked.is_none());
+            let accepted_unpublished = usize::from(session.capture.pipeline.root.has_future()?)
+                + usize::from(state.worker_active.is_some())
+                + state.queued.len()
+                + usize::from(state.parked.is_some());
+            if accepted_unpublished >= 2 {
                 return Ok(ResidentSubmit::Retry(ResidentRetry::InFlight));
             }
             if (frames.size.width, frames.size.height)
@@ -1419,7 +1682,8 @@ impl ResidentSceneFacade {
                 validate_resident_sequence(state.submitted.as_ref(), &stamp)?;
             }
             state.transaction = ResidentTransaction::Starting;
-        }
+            state.submitted.clone()
+        };
         let mut start = ResidentStartGuard::quarantine(Arc::clone(&self.capture.inner));
         // A failed import owns no submitted work and has not reserved the
         // resident root. Only this boundary can retry resource exhaustion.
@@ -1430,27 +1694,37 @@ impl ResidentSceneFacade {
             Err(error) => return start.failed_import(error),
         };
         native_lifecycle_event("enqueue-attempt", &stamp, None);
-        let work = session.worker.try_submit(session.clone(), source);
-        let mut state = self.capture.state()?;
-        match work {
-            Ok(Some(work)) => {
-                native_lifecycle_event("enqueue-accepted", &stamp, None);
-                state.submitted = Some(stamp);
-                state.transaction = ResidentTransaction::Working(work);
-                start.disarm();
-                Ok(ResidentSubmit::Submitted)
+        {
+            let mut state = self.capture.state()?;
+            if matches!(state.transaction, ResidentTransaction::Quarantined) {
+                return Err(state
+                    .worker_error
+                    .clone()
+                    .unwrap_or_else(|| "ONE X2 resident transaction facade is quarantined".into())
+                    .into());
             }
-            Ok(None) => {
-                state.transaction = ResidentTransaction::Idle;
-                start.disarm();
-                Ok(ResidentSubmit::Retry(ResidentRetry::InFlight))
+            if state.retired {
+                return Err("ONE X2 resident capture retired during source import".into());
             }
-            Err(error) => {
-                state.transaction = ResidentTransaction::Quarantined;
-                start.disarm();
-                Err(error)
-            }
+            state.queued.push_back(source);
+            state.submitted = Some(stamp.clone());
+            state.transaction = ResidentTransaction::Idle;
         }
+        start.disarm();
+        if !self.capture.kick_worker(&session)? {
+            let mut state = self.capture.state()?;
+            let rolled_back = state
+                .queued
+                .back()
+                .is_some_and(|source| source.resident_frame() == stamp);
+            if rolled_back {
+                state.queued.pop_back();
+                state.submitted = previous_submitted;
+            }
+            return Ok(ResidentSubmit::Retry(ResidentRetry::InFlight));
+        }
+        native_lifecycle_event("enqueue-accepted", &stamp, None);
+        Ok(ResidentSubmit::Submitted)
     }
 
     /// Drive the capture exactly once for this redraw, collect every callback
@@ -1497,233 +1771,69 @@ impl ResidentSceneFacade {
     ) -> Fallible<ResidentPrepare> {
         let session = self.capture.bind_session(context.clone(), format)?;
         self.draw.staged().take();
-        let (transaction, submitted_stamp) = {
-            let mut state = self.capture.state()?;
-            (
-                std::mem::replace(&mut state.transaction, ResidentTransaction::Starting),
-                native_lifecycle_probe_enabled()
-                    .then(|| state.submitted.clone())
-                    .flatten(),
-            )
-        };
-        let mut prepare_start = ResidentStartGuard::rollback(Arc::clone(&self.capture.inner));
-        let transaction = match transaction {
-            ResidentTransaction::Working(work) => match work.collect() {
-                Ok(transaction) => {
-                    if let Some(stamp) = submitted_stamp.as_ref() {
-                        native_lifecycle_event(
-                            match &transaction {
-                                ResidentTransaction::Working(_) => "renderer-working",
-                                ResidentTransaction::Pending(_) => "renderer-collected-pending",
-                                _ => "renderer-collected-other",
-                            },
-                            stamp,
-                            None,
-                        );
-                    }
-                    transaction
-                }
-                Err(error) => {
-                    self.capture.state()?.transaction = ResidentTransaction::Quarantined;
-                    prepare_start.disarm();
-                    return Err(error);
-                }
-            },
-            other => other,
-        };
-        let (transaction, externally_polled) = match transaction {
-            ResidentTransaction::Pending(pending) => {
-                if !externally_polled {
-                    let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        session.context.device().poll(wgpu::PollType::Poll)
-                    }));
-                    let poll_error: Option<Box<dyn Error + Send + Sync>> = match polled {
-                        Ok(Ok(_)) => None,
-                        Ok(Err(error)) => Some(Box::new(error)),
-                        Err(payload) => Some(
-                            payload
-                                .downcast_ref::<&str>()
-                                .map(|message| (*message).to_owned())
-                                .or_else(|| payload.downcast_ref::<String>().cloned())
-                                .unwrap_or_else(|| "ONE X2 GPU device poll panicked".to_owned())
-                                .into(),
-                        ),
-                    };
-                    if let Some(error) = poll_error {
-                        session.retirements.quarantine_after_external_poll_failure();
-                        self.capture.state()?.transaction = ResidentTransaction::Quarantined;
-                        prepare_start.disarm();
-                        ResidentTransaction::Pending(pending).quarantine_uncertain();
-                        return Err(error);
-                    }
-                }
-                let result = match pending {
-                    ResidentPendingMap::Cold(pending) => {
-                        match (*pending).finish_after_poll_classified() {
-                            map_patch_gpu::ClassifiedValidityPoll::Pending(value) => {
-                                ResidentPoll::Continue(Box::new(ResidentTransaction::Pending(
-                                    ResidentPendingMap::Cold(Box::new(value)),
-                                )))
-                            }
-                            map_patch_gpu::ClassifiedValidityPoll::Ready(value) => {
-                                ResidentPoll::Continue(Box::new(ResidentTransaction::Ready(
-                                    ResidentReadyMap::Cold(Box::new(value)),
-                                )))
-                            }
-                            map_patch_gpu::ClassifiedValidityPoll::Refused(error) => {
-                                ResidentPoll::Refused(error)
-                            }
-                            map_patch_gpu::ClassifiedValidityPoll::Quarantined(error) => {
-                                ResidentPoll::Quarantined(error)
-                            }
-                        }
-                    }
-                    ResidentPendingMap::Warm(pending) => {
-                        match (*pending).finish_after_poll_classified() {
-                            map_patch_gpu::ClassifiedValidityPoll::Pending(value) => {
-                                ResidentPoll::Continue(Box::new(ResidentTransaction::Pending(
-                                    ResidentPendingMap::Warm(Box::new(value)),
-                                )))
-                            }
-                            map_patch_gpu::ClassifiedValidityPoll::Ready(value) => {
-                                ResidentPoll::Continue(Box::new(ResidentTransaction::Ready(
-                                    ResidentReadyMap::Warm(Box::new(value)),
-                                )))
-                            }
-                            map_patch_gpu::ClassifiedValidityPoll::Refused(error) => {
-                                ResidentPoll::Refused(error)
-                            }
-                            map_patch_gpu::ClassifiedValidityPoll::Quarantined(error) => {
-                                ResidentPoll::Quarantined(error)
-                            }
-                        }
-                    }
-                };
-                if let (Some(stamp), ResidentPoll::Continue(transaction)) =
-                    (submitted_stamp.as_ref(), &result)
-                {
-                    let event = match transaction.as_ref() {
-                        ResidentTransaction::Pending(_) => "renderer-validity-pending",
-                        ResidentTransaction::Ready(_) => "renderer-validity-ready",
-                        _ => "renderer-validity-other",
-                    };
-                    native_lifecycle_event(event, stamp, None);
-                }
-                match result {
-                    ResidentPoll::Continue(transaction) => (*transaction, true),
-                    ResidentPoll::Refused(error) => {
-                        self.capture.state()?.transaction = ResidentTransaction::Idle;
-                        prepare_start.disarm();
-                        return Err(error);
-                    }
-                    ResidentPoll::Quarantined(error) => {
-                        self.capture.state()?.transaction = ResidentTransaction::Quarantined;
-                        prepare_start.disarm();
-                        return Err(error);
-                    }
-                }
-            }
-            ResidentTransaction::Quarantined => {
-                self.capture.state()?.transaction = ResidentTransaction::Quarantined;
-                prepare_start.disarm();
-                return Err("ONE X2 resident transaction facade is quarantined".into());
-            }
-            other => (other, externally_polled),
-        };
         let retirement_result = if externally_polled {
             session.retirements.collect_after_external_poll()
         } else {
             session.retirements.poll()
         };
         if let Err(error) = retirement_result {
-            transaction.quarantine_uncertain();
-            self.capture.state()?.transaction = ResidentTransaction::Quarantined;
-            prepare_start.disarm();
+            let mut state = self.capture.state()?;
+            state.transaction = ResidentTransaction::Quarantined;
+            state.worker_error = Some(error.to_string());
+            state.queued.clear();
+            state.parked.take();
             return Err(error);
         }
 
-        let mut state = self.capture.state()?;
-        state.transaction = transaction;
-        prepare_start.disarm();
-        if matches!(state.transaction, ResidentTransaction::Ready(_))
-            && let Some(stamp) = submitted_stamp.as_ref()
-        {
-            native_lifecycle_event("renderer-ready-before-publication", stamp, None);
-        }
-        // Keep one completed, unpublished picture and one active transaction.
-        // Advancing the temporal prior lets the worker prepare the following
-        // source; only Player's exact due stamp can advance the shown picture.
-        // Two passes cover both cases: publish an existing future then fill its
-        // slot, or fill an empty slot with the due result then publish it.
-        let root = &session.capture.pipeline.root;
-        let mut published = None;
-        for _ in 0..2 {
-            if let Some(frame) = root.future_stamp()?
-                && publication.permits(&frame)
-            {
-                let ready = match root.future_for_draw(&session.retirements) {
-                    Ok(Some(ready)) => ready,
-                    Ok(None) => {
-                        return Err("ONE X2 future picture disappeared before publication".into());
-                    }
-                    Err(DrawRetirementError::Full) => {
-                        return Ok(ResidentPrepare::Retry {
-                            reason: ResidentRetry::DrawRetirementFull,
-                            installed: state.installed.clone(),
-                        });
-                    }
-                    Err(error) => return Err(error.into()),
-                };
-                let reframe = reframe_for(&frame)?;
-                // Prepare the immutable draw before changing publication.
-                // Screenshots take this same façade-then-root lock order.
-                self.draw.prepare_installed(ready, &reframe);
-                if !root.publish_future(&frame)? {
-                    self.draw.staged().take();
-                    return Err("ONE X2 future picture changed before publication".into());
-                }
-                state.installed = Some(frame.clone());
-                native_lifecycle_event("renderer-published", &frame, None);
-                published = Some(frame);
-            }
+        // A full global worker channel is transient backpressure. Retry a
+        // parked result only after publication has made its future slot empty;
+        // a parked result behind a full future never causes busy redraws.
+        let kick_pending = !self.capture.kick_worker(&session)?;
 
-            if !root.has_future()? && matches!(state.transaction, ResidentTransaction::Ready(_)) {
-                let ResidentTransaction::Ready(ready_map) =
-                    std::mem::replace(&mut state.transaction, ResidentTransaction::Starting)
-                else {
-                    unreachable!("checked completed resident transaction")
-                };
-                let completed = ready_map.frame().clone();
-                drop(state);
-                let mut commit_start =
-                    ResidentStartGuard::quarantine(Arc::clone(&self.capture.inner));
-                let bound = match ready_map {
-                    ResidentReadyMap::Cold(map) => {
-                        prepare_resident_bound(*map, Arc::clone(&session.direct))
-                    }
-                    ResidentReadyMap::Warm(map) => {
-                        prepare_resident_bound(*map, Arc::clone(&session.direct))
-                    }
-                };
-                let committed = bound.and_then(ResidentBoundInstall::commit_future);
-                commit_start.disarm();
-                state = self.capture.state()?;
-                if let Err(error) = committed {
-                    state.transaction = ResidentTransaction::Quarantined;
-                    self.draw.staged().take();
-                    return Err(error);
+        let mut state = self.capture.state()?;
+        if matches!(state.transaction, ResidentTransaction::Quarantined) {
+            return Err(state
+                .worker_error
+                .clone()
+                .unwrap_or_else(|| "ONE X2 resident transaction facade is quarantined".into())
+                .into());
+        }
+        let root = &session.capture.pipeline.root;
+        if let Some(frame) = root.future_stamp()?
+            && publication.permits(&frame)
+        {
+            let ready = match root.future_for_draw(&session.retirements) {
+                Ok(Some(ready)) => ready,
+                Ok(None) => {
+                    return Err("ONE X2 future picture disappeared before publication".into());
                 }
-                state.transaction = ResidentTransaction::Idle;
-                native_lifecycle_event("renderer-temporal-committed", &completed, None);
+                Err(DrawRetirementError::Full) => {
+                    return Ok(ResidentPrepare::Retry {
+                        reason: ResidentRetry::DrawRetirementFull,
+                        installed: state.installed.clone(),
+                    });
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let reframe = reframe_for(&frame)?;
+            // Prepare the immutable draw before changing publication.
+            // Screenshots take this same façade-then-root lock order.
+            self.draw.prepare_installed(ready, &reframe);
+            if !root.publish_future(&frame)? {
+                self.draw.staged().take();
+                return Err("ONE X2 future picture changed before publication".into());
             }
+            state.installed = Some(frame.clone());
+            native_lifecycle_event("renderer-published", &frame, None);
+            drop(state);
+            // Publication only frees the future and wakes a parked autonomous
+            // actor. The renderer never consumes validity or commits history.
+            let _ = self.capture.kick_worker(&session)?;
+            return Ok(ResidentPrepare::Staged { installed: frame });
         }
-        if let Some(installed) = published {
-            return Ok(ResidentPrepare::Staged { installed });
-        }
-        let pending = matches!(
-            state.transaction,
-            ResidentTransaction::Working(_) | ResidentTransaction::Pending(_)
-        );
+        let parked_can_commit = state.parked.is_some() && !root.has_future()?;
+        let pending =
+            kick_pending || state.worker_running || !state.queued.is_empty() || parked_can_commit;
         let installed = state.installed.clone();
         let Some(installed_frame) = installed.as_ref() else {
             drop(state);
@@ -1785,10 +1895,21 @@ impl ResidentSceneFacade {
     /// Work that can make progress before the next source becomes due.
     /// A completed future and old draw retirements alone need no busy redraw.
     pub(crate) fn preparing_source(&self) -> Fallible<bool> {
-        Ok(matches!(
-            self.capture.state()?.transaction,
-            ResidentTransaction::Working(_) | ResidentTransaction::Pending(_)
-        ))
+        let state = self.capture.state()?;
+        let parked_can_commit = state
+            .session
+            .as_ref()
+            .map(|session| {
+                session
+                    .capture
+                    .pipeline
+                    .root
+                    .has_future()
+                    .map(|full| state.parked.is_some() && !full)
+            })
+            .transpose()?
+            .unwrap_or(false);
+        Ok(state.worker_running || !state.queued.is_empty() || parked_can_commit)
     }
 
     /// Nonblocking normal replacement drain. Completion-proven candidates are
@@ -1804,75 +1925,47 @@ impl ResidentSceneFacade {
 
     fn drain_replaced_inner(&self, externally_polled: bool) -> Fallible<ResidentDrain> {
         self.draw.staged().take();
-        let Some(session) = self.capture.state()?.session.clone() else {
-            return Ok(ResidentDrain::Drained);
-        };
-        let transaction = {
+        let (session, fail_closed) = {
             let mut state = self.capture.state()?;
-            std::mem::replace(&mut state.transaction, ResidentTransaction::Starting)
+            state.retired = true;
+            state.queued.clear();
+            state.parked.take();
+            (
+                state.session.clone(),
+                matches!(state.transaction, ResidentTransaction::Quarantined),
+            )
         };
-        if matches!(transaction, ResidentTransaction::Quarantined) {
-            self.capture.state()?.transaction = ResidentTransaction::Quarantined;
+        let Some(session) = session else {
+            return Ok(if fail_closed {
+                ResidentDrain::FailClosedRetained
+            } else {
+                ResidentDrain::Drained
+            });
+        };
+        if fail_closed {
             return Ok(ResidentDrain::FailClosedRetained);
         }
-        let polled = (!externally_polled).then(|| {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                session.context.device().poll(wgpu::PollType::Poll)
-            }))
-        });
-        if let Some(Err(payload)) = polled.as_ref() {
-            let message = payload
-                .downcast_ref::<&str>()
-                .map(|message| (*message).to_owned())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "ONE X2 GPU device poll panicked".to_owned());
+        let retirement = if externally_polled {
+            session.retirements.collect_after_external_poll()
+        } else {
+            session.retirements.poll()
+        };
+        if let Err(error) = retirement {
             session.retirements.quarantine_after_external_poll_failure();
-            transaction.quarantine_uncertain();
-            self.capture.state()?.transaction = ResidentTransaction::Quarantined;
-            eprintln!("{message}");
-            return Ok(ResidentDrain::FailClosedRetained);
-        }
-        if let Some(Ok(Err(error))) = polled {
-            session.retirements.quarantine_after_external_poll_failure();
-            transaction.quarantine_uncertain();
-            self.capture.state()?.transaction = ResidentTransaction::Quarantined;
+            let mut state = self.capture.state()?;
+            state.transaction = ResidentTransaction::Quarantined;
+            state.worker_error = Some(error.to_string());
             eprintln!("{error}");
             return Ok(ResidentDrain::FailClosedRetained);
         }
-        let transaction = match transaction {
-            ResidentTransaction::Working(work) => match work.collect() {
-                Ok(transaction) => transaction,
-                Err(error) => {
-                    self.capture.state()?.transaction = ResidentTransaction::Quarantined;
-                    eprintln!("{error}");
-                    return Ok(ResidentDrain::FailClosedRetained);
-                }
-            },
-            other => other,
-        };
-        let transaction = match transaction {
-            ResidentTransaction::Pending(pending) => match pending {
-                ResidentPendingMap::Cold(pending) => classify_retired_cold(*pending)?,
-                ResidentPendingMap::Warm(pending) => classify_retired_warm(*pending)?,
-            },
-            ResidentTransaction::Ready(ready) => {
-                drop(ready);
-                ResidentTransaction::Idle
-            }
-            other => other,
-        };
-        session.retirements.collect_after_external_poll()?;
-        let fail_closed = matches!(transaction, ResidentTransaction::Quarantined);
-        let idle =
-            matches!(transaction, ResidentTransaction::Idle) && session.retirements.is_empty();
-        self.capture.state()?.transaction = transaction;
-        Ok(if fail_closed {
-            ResidentDrain::FailClosedRetained
-        } else if idle {
-            ResidentDrain::Drained
+        let state = self.capture.state()?;
+        if matches!(state.transaction, ResidentTransaction::Quarantined) {
+            Ok(ResidentDrain::FailClosedRetained)
+        } else if state.worker_running || !session.retirements.is_empty() {
+            Ok(ResidentDrain::Pending)
         } else {
-            ResidentDrain::Pending
-        })
+            Ok(ResidentDrain::Drained)
+        }
     }
 
     /// Reserve a separate render-pass proof for an offscreen screenshot. It
@@ -1913,46 +2006,6 @@ impl ResidentSceneFacade {
             retirements: Arc::clone(&session.retirements),
         }))
     }
-}
-
-fn classify_retired_cold(pending: ColdPending) -> Fallible<ResidentTransaction> {
-    Ok(match pending.finish_after_poll_classified() {
-        map_patch_gpu::ClassifiedValidityPoll::Pending(value) => {
-            ResidentTransaction::Pending(ResidentPendingMap::Cold(Box::new(value)))
-        }
-        map_patch_gpu::ClassifiedValidityPoll::Ready(value) => {
-            drop(value);
-            ResidentTransaction::Idle
-        }
-        map_patch_gpu::ClassifiedValidityPoll::Refused(error) => {
-            eprintln!("{error}");
-            ResidentTransaction::Idle
-        }
-        map_patch_gpu::ClassifiedValidityPoll::Quarantined(error) => {
-            eprintln!("{error}");
-            ResidentTransaction::Quarantined
-        }
-    })
-}
-
-fn classify_retired_warm(pending: WarmPending) -> Fallible<ResidentTransaction> {
-    Ok(match pending.finish_after_poll_classified() {
-        map_patch_gpu::ClassifiedValidityPoll::Pending(value) => {
-            ResidentTransaction::Pending(ResidentPendingMap::Warm(Box::new(value)))
-        }
-        map_patch_gpu::ClassifiedValidityPoll::Ready(value) => {
-            drop(value);
-            ResidentTransaction::Idle
-        }
-        map_patch_gpu::ClassifiedValidityPoll::Refused(error) => {
-            eprintln!("{error}");
-            ResidentTransaction::Idle
-        }
-        map_patch_gpu::ClassifiedValidityPoll::Quarantined(error) => {
-            eprintln!("{error}");
-            ResidentTransaction::Quarantined
-        }
-    })
 }
 
 #[allow(dead_code)]
@@ -4601,7 +4654,7 @@ mod tests {
         assert!(!facade.contains("picture_layout: wgpu::BindGroupLayout"));
         assert!(!facade.contains("sampler: wgpu::Sampler"));
         assert!(facade.contains("direct: Arc<DirectType2Pipeline>"));
-        assert!(facade.contains("ResidentTransaction::Pending"));
+        assert!(facade.contains("ResidentPoll::Pending"));
         assert!(facade.contains("finish_after_poll_classified()"));
         assert!(facade.contains("collect_after_external_poll()"));
         assert!(facade.contains("prepare_screenshot("));
@@ -4644,6 +4697,21 @@ mod tests {
         assert!(direct_source.contains("ONE X2 resident draw-private uniforms"));
         assert!(direct_source.contains("pub(crate) fn prepare_resident_draw("));
         assert!(source.contains("InstalledOneXsPass"));
+
+        let prepare = facade
+            .split_once("fn prepare_redraw_inner(")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn arm_and_draw(")
+            .unwrap()
+            .0;
+        assert!(!prepare.contains("finish_after_poll_classified"));
+        assert!(!prepare.contains("PollType::Wait"));
+        let worker = include_str!("one_xs/resident_worker.rs");
+        assert!(worker.contains("fn finish_pending("));
+        assert!(worker.contains("pending.finish_after_poll_classified()"));
+        assert!(worker.contains("session.context.device().poll(wgpu::PollType::Poll)"));
+        assert!(!worker.contains("PollType::Wait"));
     }
 
     #[test]
@@ -4812,7 +4880,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "ONE X2 resident transaction facade is quarantined"
+            "ONE X2 source import requires exactly 2 lens frames, got 0"
         );
         assert_eq!(
             facade.restarted().unwrap_err().to_string(),
@@ -4838,7 +4906,7 @@ mod tests {
     }
 
     #[test]
-    fn bound_restart_drains_the_exact_old_working_receiver_only() {
+    fn bound_restart_isolates_the_exact_old_active_capture_markers() {
         let (device, queue, _foreign_device, _foreign_queue, adapter) = match gpu_pair() {
             Ok(gpu) => gpu,
             Err(why) => {
@@ -4846,7 +4914,7 @@ mod tests {
                     std::env::var("KJERAG_REQUIRE_GPU").is_err(),
                     "KJERAG_REQUIRE_GPU is set and there is no GPU to answer with: {why}"
                 );
-                eprintln!("skipping ONE X2 Working restart test: {why}");
+                eprintln!("skipping ONE X2 active restart test: {why}");
                 return;
             }
         };
@@ -4859,8 +4927,14 @@ mod tests {
             .attach_renderer(context, wgpu::TextureFormat::Rgba8Unorm)
             .unwrap_or_else(|error| panic!("resident facade failed on {adapter}: {error}"));
         let original_session = facade.state().unwrap().session.as_ref().unwrap().clone();
-        let (result, work) = ResidentWork::waiting_for_test();
-        facade.state().unwrap().transaction = ResidentTransaction::Working(work);
+        let old_active = FrameStamp::for_test(0, Duration::ZERO, None);
+        {
+            let mut state = facade.state().unwrap();
+            state.worker_running = true;
+            state.worker_active = Some(old_active.clone());
+            state.worker_started = Some(old_active.clone());
+            state.submitted = Some(old_active.clone());
+        }
 
         let restart = facade.restarted().unwrap();
         let restarted_session = restart.state().unwrap().session.as_ref().unwrap().clone();
@@ -4879,17 +4953,37 @@ mod tests {
             attachment.drain_replaced_after_external_poll().unwrap(),
             ResidentDrain::Pending
         );
-        result
-            .send(Err("injected retired worker failure".into()))
-            .unwrap_or_else(|_| panic!("old Working receiver was discarded during restart"));
+        {
+            let old = facade.state().unwrap();
+            assert!(old.retired);
+            assert!(old.worker_running);
+            assert_eq!(old.worker_active.as_ref(), Some(&old_active));
+            assert_eq!(old.worker_started.as_ref(), Some(&old_active));
+            assert!(old.queued.is_empty());
+            assert!(old.parked.is_none());
+        }
+        {
+            let fresh = restart.state().unwrap();
+            assert!(!fresh.retired);
+            assert!(!fresh.worker_running);
+            assert!(fresh.worker_active.is_none());
+            assert!(fresh.worker_started.is_none());
+            assert!(fresh.submitted.is_none());
+            assert!(matches!(fresh.transaction, ResidentTransaction::Idle));
+        }
+
+        // Exercise the old autonomous actor's actual terminal retired-capture
+        // branch. Its marker transition must affect only the old allocation.
+        assert!(facade.inner.take_worker_input().unwrap().is_none());
         assert_eq!(
             attachment.drain_replaced_after_external_poll().unwrap(),
-            ResidentDrain::FailClosedRetained
+            ResidentDrain::Drained
         );
-        assert!(matches!(
-            facade.state().unwrap().transaction,
-            ResidentTransaction::Quarantined
-        ));
+        let old = facade.state().unwrap();
+        assert!(old.retired);
+        assert!(!old.worker_running);
+        assert!(old.worker_active.is_none());
+        drop(old);
         assert!(matches!(
             restart.state().unwrap().transaction,
             ResidentTransaction::Idle
@@ -4965,6 +5059,38 @@ mod tests {
             facade.state().unwrap().transaction,
             ResidentTransaction::Quarantined
         ));
+    }
+
+    #[test]
+    fn retryable_import_cannot_erase_a_concurrent_worker_failure() {
+        let facade = ResidentCaptureFacade::new(
+            resident_profile(session_calibration(20.0, 0.0)),
+            session_orientation(1.0),
+        );
+        facade.state().unwrap().transaction = ResidentTransaction::Starting;
+        let start = ResidentStartGuard::quarantine(Arc::clone(&facade.inner));
+        // The GPU worker can fail while the UI imports another source with
+        // the state lock released. Retrying that import must not reopen it.
+        facade
+            .inner
+            .fail_worker("exact concurrent GPU failure".into());
+        let error = start
+            .failed_import(std::io::Error::from_raw_os_error(libc::EMFILE).into())
+            .unwrap_err();
+        assert_eq!(error.to_string(), "exact concurrent GPU failure");
+        let state = facade.state().unwrap();
+        assert!(matches!(
+            state.transaction,
+            ResidentTransaction::Quarantined
+        ));
+        assert_eq!(
+            state.worker_error.as_deref(),
+            Some("exact concurrent GPU failure")
+        );
+        assert!(!state.worker_running);
+        assert!(state.worker_active.is_none());
+        assert!(state.queued.is_empty());
+        assert!(state.parked.is_none());
     }
 
     #[test]

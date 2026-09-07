@@ -1395,10 +1395,35 @@ mod tests {
             1,
             "another bound-install constructor bypasses direct-pipeline validation"
         );
+        let worker = include_str!("flow/one_xs/resident_worker.rs");
+        let commit = worker
+            .split_once("fn commit_or_park(")
+            .unwrap()
+            .1
+            .split_once("fn catch_capture_panic(")
+            .unwrap()
+            .0;
+        assert_eq!(
+            commit.matches("prepare_resident_bound(").count(),
+            2,
+            "both typed ready-map variants must cross the validated bound-install boundary"
+        );
         assert!(
-            resident.contains("bound.and_then(ResidentBoundInstall::commit_future)"),
+            commit.find("let bound = match ready").unwrap()
+                < commit
+                    .find("capture.commit_worker_future(bound, &completed)")
+                    .unwrap(),
             "future commit bypasses the validated bound-install boundary"
         );
+        let typed_commit = resident
+            .split_once("fn commit_worker_future(")
+            .unwrap()
+            .1
+            .split_once("fn fail_worker(")
+            .unwrap()
+            .0;
+        assert!(typed_commit.contains("bound: ResidentBoundInstall"));
+        assert!(typed_commit.contains("bound.commit_future()?"));
     }
 
     #[test]

@@ -3455,14 +3455,21 @@ impl ScenePipeline {
                     .expect("selected view has capture"),
             )
         {
-            let accepted = capture.accepted_stamp()?;
-            if let Some(view) =
-                resident_submission_view(accepted.as_ref(), [Some(due_view), next, next_after])
-            {
+            // Admit both already-decoded successors in one renderer visit.
+            // Their bounded capture worker can then finish one source and
+            // start the next without another window redraw. Admission still
+            // selects consecutive stamps and cannot authorize publication.
+            for _ in 0..2 {
+                let accepted = capture.accepted_stamp()?;
+                let Some(view) =
+                    resident_submission_view(accepted.as_ref(), [Some(due_view), next, next_after])
+                else {
+                    break;
+                };
                 match attachment.submit_frame(&self.one_xs_gpu, self.format, view.frames.clone())? {
                     ResidentSubmit::Submitted => {
-                        if let Some(submitted) = submitted.as_ref() {
-                            primitive.resident_previous_submitted.keep(submitted);
+                        if let Some(submitted) = primitive.resident_submitted.get() {
+                            primitive.resident_previous_submitted.keep(&submitted);
                         }
                         primitive.resident_submitted.keep(view);
                         primitive.stalled.landed();
@@ -3481,10 +3488,11 @@ impl ScenePipeline {
                         primitive
                             .resident_refresh
                             .store(true, AtomicOrdering::Release);
+                        break;
                     }
                     ResidentSubmit::AlreadyInstalled(_)
                     | ResidentSubmit::Retry(ResidentRetry::InFlight)
-                    | ResidentSubmit::Retry(ResidentRetry::DrawRetirementFull) => {}
+                    | ResidentSubmit::Retry(ResidentRetry::DrawRetirementFull) => break,
                 }
             }
         }
@@ -6299,21 +6307,104 @@ mod tests {
             .split_once("pub(crate) fn arm_and_draw")
             .unwrap()
             .0;
-        let (import, submitted) = submit
-            .split_once("let work = session.worker.try_submit(session.clone(), source);")
-            .expect("the selected path sends the exact imported source to its worker");
-        assert!(import.contains("session.capture.import_picture("));
-        assert!(import.contains("Err(error) => return start.failed_import(error)"));
-        assert!(submitted.contains("ResidentTransaction::Working(work)"));
+        let imported = submit
+            .find("session.capture.import_picture(frames)")
+            .expect("selected path does not import the exact submitted frames");
+        let queued = submit
+            .find("state.queued.push_back(source)")
+            .expect("selected path does not move the imported owner into its bounded queue");
+        let kicked = submit
+            .find("self.capture.kick_worker(&session)")
+            .expect("selected path does not schedule its capture actor");
+        assert!(imported < queued && queued < kicked);
+        assert!(submit[..queued].contains("Err(error) => return start.failed_import(error)"));
+        assert!(submit[queued..].contains("state.submitted = Some(stamp.clone())"));
+        assert!(submit.contains("accepted_unpublished >= 2"));
+
         let worker = include_str!("flow/one_xs/resident_worker.rs");
-        assert!(worker.contains("job.session.submit(job.source)"));
-        assert!(worker.contains("self.jobs.try_send(Job"));
+        let service = worker
+            .split_once("fn service_capture(")
+            .unwrap()
+            .1
+            .split_once("fn finish_pending(")
+            .unwrap()
+            .0;
+        assert!(service.contains("capture.take_worker_input()?"));
+        assert!(service.contains("ResidentWorkerInput::Source"));
+        assert!(service.contains("catch_submit_panic(|| session.submit(source))"));
         assert!(
-            !submitted.contains("failed_import"),
+            service.find("session.submit(source)").unwrap()
+                < service.find("finish_pending(&session, pending?)").unwrap()
+        );
+        let input = facade
+            .split_once("fn take_worker_input(")
+            .unwrap()
+            .1
+            .split_once("fn take_commit_permission(")
+            .unwrap()
+            .0;
+        assert!(
+            input.find("state.queued.pop_front()").unwrap()
+                < input.find("let stamp = source.resident_frame()").unwrap()
+        );
+        assert!(
+            input.find("let stamp = source.resident_frame()").unwrap()
+                < input.find("ResidentWorkerInput::Source").unwrap()
+        );
+
+        let finish = worker
+            .split_once("fn finish_pending(")
+            .unwrap()
+            .1
+            .split_once("fn commit_or_park(")
+            .unwrap()
+            .0;
+        assert!(finish.contains("pending.finish_after_poll_classified()"));
+        assert!(finish.contains("session.context.device().poll(wgpu::PollType::Poll)"));
+        assert!(!finish.contains("PollType::Wait"));
+        let commit = worker
+            .split_once("fn commit_or_park(")
+            .unwrap()
+            .1
+            .split_once("fn catch_capture_panic(")
+            .unwrap()
+            .0;
+        assert_eq!(commit.matches("prepare_resident_bound(").count(), 2);
+        assert!(
+            commit.find("let bound = match ready").unwrap()
+                < commit
+                    .find("capture.commit_worker_future(bound, &completed)")
+                    .unwrap()
+        );
+        assert!(worker.contains("self.jobs.try_send(Job { capture })"));
+        assert!(
+            !submit[queued..].contains("failed_import"),
             "the pre-submit import retry must not catch a GPU submission failure"
         );
-        assert!(prepare.contains("finish_after_poll_classified"));
         assert!(prepare.contains("prepare_installed"));
+        assert!(!prepare.contains("finish_after_poll_classified"));
+        assert!(!prepare.contains("prepare_resident_bound"));
+        for (stage, body) in [
+            ("worker service", service),
+            ("worker validity", finish),
+            ("worker commit", commit),
+        ] {
+            for forbidden in [
+                "diagnostic_readback",
+                "PollType::Wait",
+                "MAP_READ",
+                "FrameOwner",
+                "PreparedFrame",
+                "ColdInputs",
+                "ColdPreparedSchedule",
+                ".upload(",
+            ] {
+                assert!(
+                    !body.contains(forbidden),
+                    "post-qualification {stage} contains {forbidden}"
+                );
+            }
+        }
         for (method, body) in [("submit_frame", submit), ("prepare_redraw_inner", prepare)] {
             for forbidden in [
                 "diagnostic_readback",
@@ -8422,16 +8513,43 @@ mod tests {
             );
             assert_eq!(scene.frame_stamp().as_ref(), Some(&first));
         }
+        scene.pause(Instant::now());
+        // Completion is worker-owned even with no redraw or main-thread GPU
+        // poll. Merely returning a Pending map to the renderer cannot pass.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while capture.future_committed_stamp_for_test().unwrap().as_ref() != Some(&first) {
+            assert!(
+                Instant::now() < deadline,
+                "cold source needed a renderer poll"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!capture.acknowledged(&first).unwrap());
         prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &first);
+        scene.play();
         let second = wait_for_new_scene_frame(&scene, Some(&first));
         let before_due = Instant::now();
-        prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &second);
-
-        // Hold the presentation clock input before the next source is due.
-        // The exact next pair may complete into the one unpublished slot while
-        // its successor is already admitted against that temporal result.
+        // Establish the display with only this source offered to preparation.
+        // The decoder may already have successors; expose them together below
+        // so their first admission is a deterministic single renderer visit.
+        let mut second_only = scene.primitive(Camera::default());
+        second_only.resident_next = None;
+        second_only.resident_next_after = None;
         let deadline = Instant::now() + Duration::from_secs(10);
-        let (future, second_future) = loop {
+        loop {
+            pipeline.prepare(&second_only, &device, &queue, 1.0);
+            if capture.acknowledged(&second).unwrap() {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        draw_resident_test_pass(&pipeline, &device, &queue);
+
+        // Fill decoded lookahead without renderer preparation. Neither future
+        // has been admitted yet, so one prepare must enqueue BOTH of them.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (primitive, future, second_future) = loop {
             assert!(!matches!(scene.pump(before_due), Next::Stopped(_)));
             let primitive = scene.primitive(Camera::default());
             let futures = primitive
@@ -8439,21 +8557,46 @@ mod tests {
                 .as_ref()
                 .zip(primitive.resident_next_after.as_ref())
                 .map(|(next, after)| (next.frames.stamp(), after.frames.stamp()));
-            pipeline.prepare(&primitive, &device, &queue, 1.0);
-            draw_resident_test_pass(&pipeline, &device, &queue);
             assert_eq!(scene.frame_stamp().as_ref(), Some(&second));
             assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&second));
-            if let Some((future, second_future)) = futures
-                && capture.prepared_stamp_for_test().unwrap().as_ref() == Some(&future)
-                && capture.accepted_stamp().unwrap().as_ref() == Some(&second_future)
-            {
-                break (future, second_future);
+            if let Some((future, second_future)) = futures {
+                break (primitive, future, second_future);
             }
             assert!(Instant::now() < deadline);
             std::thread::yield_now();
         };
         assert_eq!(future.index(), second.index() + 1);
         assert_eq!(second_future.index(), future.index() + 1);
+        assert_eq!(capture.accepted_stamp().unwrap().as_ref(), Some(&second));
+        assert!(!capture.accepted(&future).unwrap());
+        assert!(!capture.accepted(&second_future).unwrap());
+        pipeline.prepare(&primitive, &device, &queue, 1.0);
+        assert_eq!(
+            capture.accepted_stamp().unwrap().as_ref(),
+            Some(&second_future)
+        );
+        scene.pause(before_due);
+
+        // No pump, prepare, draw, device poll or readback is allowed in this
+        // interval. The worker must commit the first future and begin the
+        // second against that prior on its own, while the old picture stays
+        // the only acknowledged display. Inspect CPU-owned stamps only.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&second));
+            assert!(!capture.acknowledged(&future).unwrap());
+            assert!(!capture.acknowledged(&second_future).unwrap());
+            if capture.future_committed_stamp_for_test().unwrap().as_ref() == Some(&future)
+                && capture.worker_started_stamp_for_test().unwrap().as_ref() == Some(&second_future)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "buffered sources needed a renderer poll"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
         assert!(capture.accepted(&future).unwrap());
         assert!(capture.accepted(&second_future).unwrap());
         assert!(!capture.acknowledged(&future).unwrap());
@@ -8463,7 +8606,6 @@ mod tests {
 
         // Pausing hides both media lookaheads but does not lose either admitted
         // source owner. Recreating the renderer must still draw the old frame.
-        scene.pause(before_due);
         let paused = scene.primitive(Camera::default());
         assert!(paused.resident_next.is_none());
         assert!(paused.resident_next_after.is_none());
@@ -8536,8 +8678,12 @@ mod tests {
             .diagnostic_installed_map(&control_frame)
             .unwrap()
             .expect("serial control has no installed diagnostic map");
+        assert_eq!(overlapped.frame(), &future);
+        assert_eq!(serial.frame(), &control_frame);
         assert_eq!(overlapped.packed(), serial.packed());
         assert_eq!(overlapped.alpha(), serial.alpha());
+        assert!(overlapped.fusion().is_some());
+        assert_eq!(overlapped.fusion(), serial.fusion());
     }
 
     #[test]
@@ -8545,8 +8691,20 @@ mod tests {
         let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").map(PathBuf::from) else {
             return;
         };
+        assert_seek_retires_a_prefetched_ready_without_publishing_it(&path);
+    }
+
+    #[test]
+    fn x4_seek_retires_a_prefetched_ready_without_publishing_it() {
+        let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA").map(PathBuf::from) else {
+            return;
+        };
+        assert_seek_retires_a_prefetched_ready_without_publishing_it(&path);
+    }
+
+    fn assert_seek_retires_a_prefetched_ready_without_publishing_it(path: &Path) {
         let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
-        let mut scene = Scene::open(&path).unwrap();
+        let mut scene = Scene::open(path).unwrap();
         scene.set_muted(true);
         scene.pause(Instant::now());
         let first = wait_for_new_scene_frame(&scene, None);
@@ -8559,9 +8717,9 @@ mod tests {
         let before_due = Instant::now();
         prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &second);
 
-        // Let the actual decoded successor finish without advancing the logical
-        // presentation time. It is accepted and Ready, but is not publication
-        // authority until Player promotes this exact delivery.
+        // Admit the actual decoded successor without advancing logical time.
+        // Once accepted, the test main stops pumping, preparing, drawing and
+        // polling: only the worker can finish validity and commit this future.
         let deadline = Instant::now() + Duration::from_secs(10);
         let future = loop {
             assert!(!matches!(scene.pump(before_due), Next::Stopped(_)));
@@ -8573,13 +8731,26 @@ mod tests {
             };
             let stamp = next.frames.stamp();
             pipeline.prepare(&primitive, &device, &queue, 1.0);
-            if old_capture.prepared_stamp_for_test().unwrap().as_ref() == Some(&stamp) {
+            if old_capture.accepted(&stamp).unwrap() {
                 break stamp;
             }
             assert!(Instant::now() < deadline);
             std::thread::yield_now();
         };
         assert!(old_capture.accepted(&future).unwrap());
+        let worker_deadline = Instant::now() + Duration::from_secs(10);
+        while old_capture
+            .future_committed_stamp_for_test()
+            .unwrap()
+            .as_ref()
+            != Some(&future)
+        {
+            assert!(
+                Instant::now() < worker_deadline,
+                "worker did not commit the prefetched future without UI progress"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
         assert!(!old_capture.acknowledged(&future).unwrap());
         assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&second));
 

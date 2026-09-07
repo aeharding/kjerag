@@ -515,25 +515,30 @@ and acknowledged. A pause during startup cancels that autoplay intent. Generic
 projection opens still start immediately. This prevents cold GPU setup from
 charging time against a picture that has not been prepared yet; it does not
 solve sustained processing slower than the source cadence.
-Scene branches to this route
-before legacy prepare, import or draw. Admission and publication stay on the UI
-thread; a capture-shared stitch worker owns the exact imported pair while it runs
-the existing typed GPU chain. Its bounded channel permits one executing job and
-one queued job across capture restarts, while each facade owns one exact `Working`
-result receiver. UI preparation only tries those channels and polls the device;
-it never waits for the worker. A full channel leaves the source unsubmitted for
-a later redraw.
+Scene branches to this route before legacy prepare, import or draw. Admission
+and publication stay on the UI thread. The capture-shared worker now owns the
+whole computational transaction: the exact imported pair, existing GPU chain,
+final validity acknowledgement and unpublished temporal commit. This autonomous
+worker refactor is under qualification. Its bounded channel permits one active
+capture-service job and one queued job across capture restarts. A full channel
+does not authorize a source admission that has no worker to service it.
+UI preparation never waits for the worker or consumes an unfinished map.
 
 The source/audio clock does not reanchor on each source frame. The original
 slow-clock `EveryFrame` policy remains available to diagnostics. During ordinary
 play, `Player` keeps the current due frame and exposes at most two already-decoded
 successors without presenting either or moving the clock. The capture root
 holds one completed unpublished source/map pair separately from its displayed
-pair. A completed result advances the computational temporal prior, allowing
-the existing single transaction to start the following source. If that second
-result finishes before the future is published, it remains `Ready`; there is
-no third future slot. This absorbs uneven per-source work without changing
-the solver's numerical cadence or skipping causal input.
+pair. One renderer preparation can admit both decoded successors. The worker
+advances the computational temporal prior and starts the next admitted source
+without another renderer visit. The total accepted but unpublished population
+is bounded at two, including queued input, active computation, the committed
+future and any parked completed result. If the second result finishes while
+the future slot is occupied, the worker parks it and ends that service job.
+Publication frees the slot and schedules service again; there is no waiting
+thread or polling loop for a full future slot. This absorbs uneven per-source
+work without changing numerical cadence, skipping causal input or adding a
+third buffered source.
 
 Completion cannot publish a picture. Preparation reserves an ordinary draw
 permit and binds the exact future before moving it to the displayed slot,
@@ -549,15 +554,17 @@ not on every display refresh to poll speculative successors. An old-picture
 presentation just before that deadline arms winit's Wayland frame callback and
 can delay the due picture until a later refresh even when its map is ready.
 Input and UI redraws retain their independent scheduling; this is not a cap on
-changing-view rendering capacity. Preparation still services bounded lookahead
-whenever a redraw occurs. If the exact currently offered, unacknowledged source
+changing-view rendering capacity. Preparation admits bounded decoded lookahead
+whenever a redraw occurs, but completion and successor execution no longer
+require redraws. If the exact currently offered, unacknowledged source
 is not installed after preparation, Scene requests a follow-up through the
 renderer while keeping the old picture presentable. This flag is recomputed on
 every prepare and cleared on errors; it does not bypass compositor callbacks,
 publish early, or reject a drawable old picture. Draw-retirement refusal keeps
-its separate existing retry policy. Less eager idle polling can reduce future
-work headroom, so source readiness and ordinary playback require qualification
-alongside active-view capacity.
+its separate existing retry policy. Worker autonomy is intended to preserve
+preparation headroom while an idle window sleeps until its next deadline.
+Source readiness and ordinary playback still require qualification alongside
+active-view capacity; the architectural split alone is not proof of smoothness.
 
 The capture-owned session and Scene's two exact admitted views survive a
 renderer-pipeline recreation on the same device and queue. Pausing hides decoded
@@ -592,9 +599,11 @@ ray intersections. Regression requires exact coverage and bounds each mapped
 channel by CPU samples within 1/64 output pixel, plus the original arithmetic
 tolerance. Actual-footage review remains a separate owner gate.
 
-At most one nonblocking device poll, when callback or retirement work exists,
-drives the active attachment and every normally draining attachment replaced by
-seek or reopen. Callback collection and retirement never wait. Completion-proven
+At most one nonblocking renderer-side device poll drives draw retirement for
+the active attachment and every normally draining attachment replaced by seek
+or reopen. The worker independently drives its exact final validity callback
+with nonblocking polls and a 100-microsecond sleep fallback. It never uses a
+blocking GPU fence wait. Renderer retirement never waits. Completion-proven
 owners release normally; uncertain owners remain fail-closed without blocking or
 repeatedly scheduling the new lineage. A discontinuous user seek creates a new
 temporal root on the decoder's landing frame, sharing immutable GPU kernels but

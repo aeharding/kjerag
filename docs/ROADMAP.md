@@ -14,6 +14,41 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Autonomous source processing under qualification, 2026-09-07:** the owner
+challenged the prolonged micro-hitch investigation and the pipeline's design
+for smoothness. Further small scheduling sweeps are paused. The current branch
+is separating computational progress from window redraws: one renderer visit
+admits up to two decoded sources; the worker owns final validity completion,
+unpublished temporal commit and successor startup. Only the renderer can
+publish the exact due picture or reserve a draw. A completed second result
+parks when the one future slot is occupied, ending worker service until
+publication makes space. Shader arithmetic, source order, history, six L1
+submissions/five pacing waits and the two-source bound are unchanged.
+Paired real X2/X4 regressions now pass source progress with no main-thread
+pump, prepare, draw, GPU poll or readback, plus safe seek/recreation and exact
+map/alpha/color-ratio comparison. All 34 facade tests and the actor panic check
+pass. The 31-frame X4 and 61-frame X2 Scene sequences preserve all 460 image,
+packed-map, alpha and color-ratio artifacts byte for byte. Evidence and native
+candidate: `scratch/fusion-live-20260907/autonomous-worker-04/`.
+The full workspace gates pass (1240 tests, zero failures, 30 ignored), plus
+the UI device-limit/preflight checks. The rebuilt native player passes all
+50 X4 and 54 X2 UI checks, including both real scrubber/backward-seek paths.
+Both exact reported-view window captures are byte-identical to the preceding
+deadline build. Root inspected and linked the new captures; owner testing is
+still pending. UI evidence: `scratch/fusion-live-20260907/ui-07-autonomous/`.
+One isolated 60 Hz idle comparison, using identical source ranges with complete
+source/commit/completion records, reduces holds of at least 47 ms from 64 to 1
+on X2 (874 transitions) and 52 to 15 on X4 (877). Both p95 holds fall from about
+48 ms to 34 ms. X4's worst hold worsens from 66.4 to 91.8 ms; its target spends
+85.7 ms inside the worker body while autonomous predecessor handoff takes only
+0.011 ms. The specific internal operation is not identified by that log.
+Active-view A/B results are inconsistent, with refused traces and concurrent
+host load recorded; successful candidate runs cross 240 average changing FPS,
+not every-frame 4.17 ms timing. Whole-log integrity and physical scanout are
+not established by the selected cohorts. This is not a qualified smoothness
+fix, a new review package or owner acceptance. All existing owner packages and
+the installed application remain unchanged.
+
 **Smoothness candidate under qualification, 2026-09-07:** ordinary idle
 playback now waits for exact video deadlines instead of refreshing merely to
 poll speculative stitching. The measured previous refresh often presented the
