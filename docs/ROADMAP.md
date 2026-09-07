@@ -14,6 +14,34 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Candidate reported-view and runtime qualification, 2026-09-07:** the
+uninstalled candidate now passes the unchanged Flatpak UI harness at both
+exact owner views: ONE X2 44 checks, X4 Air 38, zero failures. Both actual
+reported-view video regions are byte-identical to the archived earlier branch
+Flatpak captures. This is two-frame regression evidence, not a new Studio
+or whole-video verdict. Earlier X4 from-zero blank-baseline and warm-to-cold
+copy/return failures remain recorded below; the exact-view pass does not waive
+them. Evidence: `scratch/flatpak-app-path-20260907/`.
+
+Separate audio-capable candidate observations at 2256x1504 on isolated 60 Hz
+Weston outputs sustain 29.8–30.0 source fps on X4 and 29.8–30.2 on X2 after
+startup, through source times 53.50/53.53 seconds. No drops, starvation, audio
+underruns or audio drops are reported. Reported worst lateness is 34.4/34.3 ms
+during these runs; first intervals are slower at 19.40/20.66 fps. Live binary
+hashes, Radeon driver maps, 2256x1504 window buffers and null-sink routing are
+authenticated.
+Root viewed both final captures. These are runtime playback observations,
+not physical A/V-sync, clean-exit or new 240-capacity evidence.
+
+Installed stable and candidate binary/bundle hashes remain unchanged. The owner approved
+trying the test build after the control-hold and seek-history behavior was
+explained in plain language. The exact-view launcher has been handed over;
+this is permission to test, not acceptance of the branch or shipping tradeoffs.
+Owner results and required photometric fusion remain open; no install,
+merge or release. Native source and executable are unchanged, so existing full
+gates apply. CI 34085222013 at ed3b2966 passes all six jobs. Runtime receipts:
+`scratch/candidate-desktop-load-20260907/`.
+
 **CI toolchain drift, 2026-09-07:** the pushed native-readiness candidate
 passes local Rust 1.97.1 gates, but CI's moving stable installs 1.98.1 and
 fails on the new `chunks_exact_to_as_chunks` lint in existing metadata parsers.
