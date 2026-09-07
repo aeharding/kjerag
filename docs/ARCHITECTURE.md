@@ -183,10 +183,16 @@ not the production estimator. It takes already-aligned BGR8 working images;
 it does not own decode, source geometry or scheduling. Its metric-reset flag
 and warm-solution population are separate: an empty observation after reset
 can run the first 100-step solve using retained spatial admission, without
-consuming the next valid observation's direct metric seed. Outer sampling,
-chart remapping and the eventual GPU producer remain separate unimplemented
-boundaries; existing sparse arithmetic is not claimed numerically identical
-to Studio.
+consuming the next valid observation's direct metric seed. The separate
+`image_fusion::spatial::Reference` now wraps this with the selected current-row
+replication, periodic 200-to-212 extension, center crop, same-ordinal ratios,
+ROI-local box filtering and original-chart remap. Its full ratio arrays start
+at one and retain the previous filtered left boundary row 40. The corrected
+binding/constant contract is `docs/research/studio-image-fusion-spatial.md`.
+Source sampling, the outer content gate and the eventual GPU producer remain
+separate unimplemented boundaries. Existing sparse arithmetic, box reductions
+and trigonometric implementations are not claimed numerically identical to
+Studio. Neither reference is selected by ordinary playback.
 
 ## Failures the pilot is told about (issue #124)
 

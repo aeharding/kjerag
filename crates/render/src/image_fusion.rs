@@ -9,7 +9,9 @@
 //! Explicit captured-map replay is not an automatic producer or a claim of
 //! source/output video parity. Ordinary playback remains unchanged.
 
+mod coordinates;
 pub mod solve;
+pub mod spatial;
 
 use crate::studio_type2::{MAP_HEIGHT, MAP_NODES, MAP_WIDTH, PACKED_BYTES};
 

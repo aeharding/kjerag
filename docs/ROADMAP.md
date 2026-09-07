@@ -27,8 +27,8 @@ Windows selected-X4 inner MGP reference are implemented. The latter
 reuses the existing normal-equation/CG primitives but replaces the legacy
 floating unaligned evidence with the recovered BGR-byte support, admission,
 retained metric, live iteration budget and same-ordinal byte correction.
-It does not yet implement source sampling, the ratio-map spatial stages,
-the outer content gate, or a GPU-resident automatic producer. Reused sparse
+It does not yet implement source sampling, the outer content gate, or a
+GPU-resident automatic producer. Reused sparse
 traversal/reduction order is not claimed bit-identical. Mac producer and
 other-camera equivalence are unverified. CPU reference and actual GPU
 consumer tests pass, as do the required-Radeon workspace tests, all-target
@@ -62,6 +62,27 @@ byte-identical to the frozen smoothness native build. Root viewed both native
 captures. The existing smoothness Flatpak review build remains byte-identical
 and uninstalled; this color change does not replace the owner's pending retest
 or establish a new rendering-capacity result.
+
+The next reference increment implements the selected Windows spatial stages
+from aligned 200x100 BGR8 working images through RGB ratio maps: current-row
+replication, periodic extension, inner solve, center crop, own-ordinal ratio
+construction, local box filtering and chart remap. Direct caller/literal
+review corrected older notes: neutral fills are one, the selected ratio
+margin is 40 rather than model id 23, X blur wraps, and the remap reads full
+100-row maps rather than 20-row blur ROIs. The actual ten-row ratio dispatch
+leaves left row 40 retained from the preceding blur; the reference preserves
+that recurrence. Give-back and endpoint normalization touch original rows
+which cannot enter these fixed-size outputs, so their unconsumed state is
+omitted. See `docs/research/studio-image-fusion-spatial.md`. Automatic source
+sampling/admission and GPU production remain unfinished; this is not a newly
+enabled player feature or a Mac-equivalence claim. All 27 photometric reference
+and consumer CPU tests pass, including an admitted non-gray end-to-end pair,
+neutral repeated observations, the retained boundary recurrence, exact ROI
+edges and poisoned unconsumed state. Required-Radeon workspace gates pass
+1,212 tests with zero failures and 30 ignored; all-target Clippy and static
+checks pass. Native and frozen review executables remain byte-identical to
+their pre-increment versions. No new UI or video-parity result is claimed for
+this unused reference module.
 
 **Owner test: seam accepted visually, micro-hitches next, 2026-09-07:** the
 owner says the frozen test build's seam looks good, but playback feels uneven
