@@ -145,6 +145,16 @@ solver on an admitted capture. Camera inputs are validated before changing
 presentation policy. A capture without usable orientation stays on the older
 projection path rather than entering a parent mapper that requires it.
 
+The source color matrix is container metadata, not a camera-profile constant.
+Media carries it beside depth/range in `Samples`; `Reframe::with_samples`
+packs its four coefficients for the shared `source_rgb` shader helper.
+Ordinary and resident drawing both use that helper. The tested ONE X2 stream
+declares SMPTE 170M (601); the X4 streams declare 709, matching their respective
+Studio source uniforms. Untagged or unhandled matrix tags retain the ordinary
+renderer's historical 709 fallback, not a claim of color-space support. This
+change leaves range normalization, the resident box footprint and the inner
+photometric solver's separate BGR/YCC transform alone.
+
 The fixed solver chart, displacement gates and native parent UV convention
 remain shared implementation choices, not evidence of Studio's X4 setup.
 Admission is deliberately limited to type-41 and model-6 type-131 pairs;

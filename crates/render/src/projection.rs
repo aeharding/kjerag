@@ -569,14 +569,18 @@ pub struct Reframe {
     /// rather than introducing a second side channel.
     /// WGSL twin: `Reframe::image_circle_centres`.
     image_circle_centres: [f32; 4],
+    /// Source YCbCr-to-RGB coefficients, selected from the container's matrix
+    /// tag independently of lens geometry, bit depth and range. The two green
+    /// coefficients are magnitudes; the shared shader subtracts them.
+    source_matrix: [f32; 4],
     // The three scalars before `image_circle_centres` occupy the words that
     // used to pad the block to sixteen bytes. The centre vec4 begins on that
-    // boundary, and the table follows it on the next one.
+    // boundary, followed by the source-matrix vec4 and then the table.
     //
     // **WGSL's alignment and not this struct's.** Every Rust member of this
     // block is an `f32` or an array of them, so `repr(C)` gives the whole thing
-    // an alignment of 4. WGSL gives the centre `vec4` and the table's
-    // `array<vec4<f32>, N>` sixteen-byte alignment, so both explicit offsets
+    // an alignment of 4. WGSL gives both vec4s and the table's
+    // `array<vec4<f32>, N>` sixteen-byte alignment, so their explicit offsets
     // below are layout invariants.
     //
     // **Nothing catches that at run time.** `min_binding_size` checks the
@@ -1105,6 +1109,16 @@ fn unit(ray: [f32; 3]) -> [f32; 3] {
     }
 }
 
+/// The coefficients observed in Studio's source TextureParam for the tagged
+/// ONE X2 (601) and X4 (709) inputs. These decode source video; they are not
+/// the separate BGR/YCC transform used inside the photometric solver.
+fn source_matrix(matrix: kjerag_media::ColorMatrix) -> [f32; 4] {
+    match matrix {
+        kjerag_media::ColorMatrix::Bt601 => [1.402, 0.344, 0.714, 1.772],
+        kjerag_media::ColorMatrix::Bt709 => [1.5748, 0.1873, 0.4681, 1.8556],
+    }
+}
+
 impl Reframe {
     /// The block for one camera pose and the lenses of one file, in file
     /// order. Anything past [`MAX_LENSES`] is dropped.
@@ -1153,6 +1167,7 @@ impl Reframe {
                     .get(component / 2)
                     .map_or(0.0, |lens| lens.image_circle_centre[component % 2])
             }),
+            source_matrix: source_matrix(kjerag_media::ColorMatrix::default()),
             // Nothing measured until a caller says otherwise
             // ([`Self::with_table`]), which is the picture stage 6 drew.
             table: super::band::Table::REST,
@@ -1166,11 +1181,12 @@ impl Reframe {
     /// A step of its own rather than an argument to [`Self::new`], for
     /// [`Self::with_table`]'s reason: every caller that asks this map about
     /// geometry rather than about pixels would otherwise have to say
-    /// something, and the thing it would be saying is 8-bit full range, which
-    /// is what this defaults to and what every `.insv` in the corpus is.
+    /// something. Geometry-only callers retain the 8-bit, full-range, BT.709
+    /// compatibility default; picture callers pass their actual frame metadata.
     pub fn with_samples(mut self, samples: kjerag_media::Samples) -> Self {
         self.wide = f32::from(u8::from(samples.wide));
         self.limited = f32::from(u8::from(samples.limited));
+        self.source_matrix = source_matrix(samples.matrix);
         self
     }
 
@@ -1544,6 +1560,7 @@ impl Reframe {
             wide: 0.0,
             limited: 0.0,
             image_circle_centres: [0.0; 4],
+            source_matrix: source_matrix(kjerag_media::ColorMatrix::default()),
             // No file, so no camera and no calibration to carry.
             table: super::band::Table::REST,
         }
@@ -3710,8 +3727,11 @@ struct Reframe {
   // No shader path reads them; the CPU mask reconstruction reads the Rust
   // twin. Keeping the declaration here preserves the one uniform layout.
   image_circle_centres: vec4<f32>,
+  // R/Cr, G/Cb magnitude, G/Cr magnitude, B/Cb. Read by source_rgb;
+  // independent of the camera calibration and range normalization.
+  source_matrix: vec4<f32>,
   // The three scalar words above put this vec4 on a 16-byte boundary; the
-  // table follows it on the next one.
+  // source-matrix vec4 and the table follow on successive boundaries.
   // What the along-seam axis still disagrees by after a pose, direction by
   // direction, in radians, four to a lane. Rust twin: `Reframe::table`.
   //
@@ -3722,6 +3742,14 @@ struct Reframe {
 };
 
 @group(0) @binding(0) var<uniform> reframe: Reframe;
+
+// Y and centred Cb/Cr have already been range-normalized by the caller.
+// Keep subtraction order shared by both draw paths and the source sampler.
+fn source_rgb(y: f32, c: vec2<f32>) -> vec3<f32> {
+  let m = reframe.source_matrix;
+  return vec3<f32>(y + m.x * c.g, y - m.y * c.r - m.z * c.g,
+    y + m.w * c.r);
+}
 
 
 struct Landing {
@@ -7679,11 +7707,11 @@ pub(crate) mod tests {
         assert_eq!(std::mem::size_of::<Screen>(), 16);
         // 288 before the band's two fields, which add a padded mat3x3 and a
         // padded vec3 (issue #103), then the four scalar words, the image
-        // circle vec4, and ONE table of a lane per four directions after
+        // circle and source-matrix vec4s, and ONE table of a lane per four directions after
         // them - the along-seam one from stage 9.
         let table = super::super::band::AZIMUTHS / 4 * 16;
         assert_eq!(std::mem::size_of::<super::super::band::Table>(), table);
-        assert_eq!(std::mem::size_of::<Reframe>(), 288 + 48 + 16 + 16 + table);
+        assert_eq!(std::mem::size_of::<Reframe>(), 288 + 48 + 16 + 32 + table);
         // The offset, not arithmetic that cannot fail: WGSL starts the table
         // at a multiple of sixteen and `repr(C)` does not have to, and
         // `min_binding_size` checks the block's size rather than any offset
@@ -7694,7 +7722,11 @@ pub(crate) mod tests {
             std::mem::offset_of!(Reframe, image_circle_centres),
             288 + 48 + 16
         );
-        assert_eq!(std::mem::offset_of!(Reframe, table), 288 + 48 + 16 + 16);
+        assert_eq!(
+            std::mem::offset_of!(Reframe, source_matrix),
+            288 + 48 + 16 + 16
+        );
+        assert_eq!(std::mem::offset_of!(Reframe, table), 288 + 48 + 16 + 32);
         // The three numbers that originally took the three padding words: the
         // seam anchor's one, and the two that say how the planes are written.
         let after = |words: usize| std::mem::offset_of!(Reframe, crossover) + 4 * words;
@@ -7702,12 +7734,45 @@ pub(crate) mod tests {
         assert_eq!(std::mem::offset_of!(Reframe, wide), after(2));
         assert_eq!(std::mem::offset_of!(Reframe, limited), after(3));
         // The centre vec4 starts the word after the last scalar, with nothing
-        // padding it there; the table follows the complete vec4.
+        // padding it there; source matrix and table follow complete vec4s.
         assert_eq!(
             std::mem::offset_of!(Reframe, image_circle_centres),
             after(4)
         );
-        assert_eq!(std::mem::offset_of!(Reframe, table), after(8));
+        assert_eq!(std::mem::offset_of!(Reframe, source_matrix), after(8));
+        assert_eq!(std::mem::offset_of!(Reframe, table), after(12));
+    }
+
+    #[test]
+    fn source_matrix_is_file_metadata_not_lens_geometry() {
+        use kjerag_media::{ColorMatrix, Samples};
+
+        for matrix in [ColorMatrix::Bt601, ColorMatrix::Bt709] {
+            let samples = Samples {
+                matrix,
+                ..Samples::default()
+            };
+            let x4 = fixture(Camera::default()).with_samples(samples);
+            let x2 = Reframe::new(
+                &one_xs_lenses(),
+                ONE_XS_FRAME,
+                Camera::default(),
+                Held::default(),
+                1.0,
+                false,
+                Sampling::Bilinear,
+            )
+            .with_samples(samples);
+            assert_eq!(x4.source_matrix, source_matrix(matrix));
+            assert_eq!(x2.source_matrix, x4.source_matrix);
+            assert_eq!(x2.wide, 0.0);
+            assert_eq!(x2.limited, 0.0);
+        }
+        // Exact f32 anchors retained from the previous ONE X2 source sampler.
+        assert_eq!(
+            source_matrix(ColorMatrix::Bt601).map(f32::to_bits),
+            [0x3fb374bc, 0x3eb020c5, 0x3f36c8b4, 0x3fe2d0e5]
+        );
     }
 
     /// **The anchor's null.** A map nobody has held a line on draws the

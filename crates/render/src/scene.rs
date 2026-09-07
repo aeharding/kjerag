@@ -5964,7 +5964,7 @@ fn picture(mix: Blend, ratio: vec2<f32>, look: vec3<f32>) -> vec4<f32> {
   return select(vec4<f32>(0.0), vec4<f32>(rgb, 1.0), total > 0.0);
 }
 
-// BT.709, off whichever of the two plane layouts this capture decodes to.
+// The container's color matrix, off whichever plane layout it decodes to.
 // The chroma plane is little endian and its first component is Cb.
 //
 // The two planes are handed the same magnification and reach their own
@@ -6005,11 +6005,7 @@ fn ycbcr(luma: texture_2d<f32>, chroma: texture_2d<f32>, uv: vec2<f32>, ratio: f
   // them mean something else entirely.
   let y = raw.x * range.luma.x + range.luma.y + fix.x / 255.0;
   let c = raw.yz * range.chroma.x + vec2<f32>(range.chroma.y) + fix.yz / 255.0;
-  return vec3<f32>(
-    y + 1.5748 * c.g,
-    y - 0.1873 * c.r - 0.4681 * c.g,
-    y + 1.8556 * c.r,
-  );
+  return source_rgb(y, c);
 }
 
 fn linearize(c: vec3<f32>) -> vec3<f32> {

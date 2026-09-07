@@ -110,16 +110,17 @@ pub type Fallible<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 /// How one decoded frame's samples are written, which the shader needs and
 /// the pixels do not say.
 ///
-/// Two facts, both read off the container rather than guessed from each
-/// other: an 8-bit stream decodes to NV12 and a 10-bit one to P010, and
-/// either can be written full range or studio swing. Insta360 writes 8-bit
-/// full range and DJI writes 10-bit studio swing, which is a coincidence of
-/// the corpus and not a rule, so neither flag is derived from the other.
+/// Three facts, all read off the container rather than guessed from each
+/// other: an 8-bit stream decodes to NV12 and a 10-bit one to P010, either
+/// can be written full range or studio swing, and either can name a different
+/// Y'CbCr matrix. The combinations cameras happen to write are not rules, so
+/// none is derived from another.
 ///
-/// [`Self::default`] is 8-bit full range, which is what every `.insv` in the
-/// corpus is and what the pass drew before this existed. A container that
-/// tags neither field is read as 8-bit STUDIO swing rather than as this, and
-/// `reader::written` is where that choice is made and argued.
+/// [`Self::default`] is 8-bit full-range BT.709, which is what the general
+/// pass drew before this existed. An unspecified range is read as studio
+/// swing rather than as this, while an unspecified matrix keeps the BT.709
+/// compatibility result; `reader::written` is where both choices are made
+/// and argued.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Samples {
     /// The two planes hold 16-bit little-endian words rather than bytes:
@@ -128,6 +129,23 @@ pub struct Samples {
     /// Studio swing: luma runs 64 to 940 of 1023 and chroma is centred on 512
     /// with 448 either side, rather than either using the whole range.
     pub limited: bool,
+    /// The matrix that turns the decoded Y'CbCr codes into RGB.
+    pub matrix: ColorMatrix,
+}
+
+/// The Y'CbCr matrices the renderer currently implements.
+///
+/// BT.709 is the compatibility default: it is what the general renderer used
+/// before the container's matrix travelled with a frame. `reader::written`
+/// also uses it for an unspecified or presently unsupported tag, preserving
+/// playback without pretending that tag was positively identified.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColorMatrix {
+    #[default]
+    Bt709,
+    /// BT.601 coefficients, named SMPTE 170M or BT.470BG by the files in the
+    /// supported families.
+    Bt601,
 }
 
 /// A frame size in pixels. NV12 chroma is half of luma in both axes, and

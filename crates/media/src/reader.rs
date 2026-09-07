@@ -376,14 +376,14 @@ struct Video {
     samples: Samples,
 }
 
-/// How one video stream's samples are written, off the container's own two
-/// fields.
+/// How one video stream's samples are written, off the container's own three
+/// fields: pixel format, range and Y'CbCr matrix.
 ///
-/// Read here rather than off a decoded frame because only one of the two is
-/// in a frame at all: a pixel format says how wide a sample is, and the range
-/// travels beside it and not in it. A depth this does not recognize is the
-/// 8-bit picture Kjerag drew before there was a second answer, which is what
-/// every `.insv` in the corpus is.
+/// Read from the container before decoder construction, where the capture's
+/// lens streams can be checked as one set. Range and matrix cannot be inferred
+/// from the plane layout. A depth this does not recognize is the 8-bit picture
+/// Kjerag drew before there was a second answer, which is what every `.insv`
+/// in the corpus is.
 ///
 /// **Big endian is refused rather than drawn.** The shader puts a 16-bit word
 /// back together itself, from two 8-bit components, in one order
@@ -408,7 +408,7 @@ struct Video {
 /// # Safety
 /// `parameters` must be a live `AVCodecParameters` of a video stream.
 unsafe fn written(parameters: &ff::ffi::AVCodecParameters) -> Fallible<Samples> {
-    use ff::ffi::{AVColorRange, AVPixelFormat};
+    use ff::ffi::{AVColorRange, AVColorSpace, AVPixelFormat};
     let is = |want: AVPixelFormat| parameters.format == want as i32;
     if is(AVPixelFormat::AV_PIX_FMT_P010BE) || is(AVPixelFormat::AV_PIX_FMT_YUV420P10BE) {
         return Err("this video's 10-bit samples are big endian, which Kjerag cannot read".into());
@@ -416,6 +416,17 @@ unsafe fn written(parameters: &ff::ffi::AVCodecParameters) -> Fallible<Samples> 
     Ok(Samples {
         wide: is(AVPixelFormat::AV_PIX_FMT_P010LE) || is(AVPixelFormat::AV_PIX_FMT_YUV420P10LE),
         limited: parameters.color_range != AVColorRange::AVCOL_RANGE_JPEG,
+        matrix: match parameters.color_space {
+            AVColorSpace::AVCOL_SPC_BT709 => crate::ColorMatrix::Bt709,
+            AVColorSpace::AVCOL_SPC_SMPTE170M | AVColorSpace::AVCOL_SPC_BT470BG => {
+                crate::ColorMatrix::Bt601
+            }
+            // BT.709 is the compatibility fallback for an unspecified or
+            // not-yet-supported matrix. This keeps drawing what the general
+            // renderer drew before the matrix was metadata rather than
+            // claiming a conversion we do not implement.
+            _ => crate::ColorMatrix::Bt709,
+        },
     })
 }
 
@@ -430,6 +441,7 @@ struct Shape {
     rate: (i32, i32),
     time_base: (i32, i32),
     frames: u64,
+    samples: Samples,
 }
 
 impl Shape {
@@ -454,6 +466,7 @@ impl Shape {
             && self.rate == other.rate
             && self.time_base == other.time_base
             && self.frames.abs_diff(other.frames) <= 1
+            && self.samples == other.samples
     }
 }
 
@@ -521,6 +534,14 @@ impl Reader {
     /// One decoder per video stream of every source, and the timing the
     /// whole capture is read on.
     fn over(sources: Vec<Opened>, hw: HwDevice) -> Fallible<Self> {
+        // One uniform describes all planes in a draw, so settle their complete
+        // sample interpretation before creating any decoder or GPU owner.
+        // `Opened::new` has already filtered these videos through `is_lens`,
+        // so an attached cover image with its own tags is not compared here.
+        let samples =
+            agreed_samples(sources.iter().enumerate().flat_map(|(source, opened)| {
+                opened.videos.iter().map(move |video| (source, video))
+            }))?;
         let mut lanes = Vec::new();
         for (source, opened) in sources.iter().enumerate() {
             for video in &opened.videos {
@@ -557,11 +578,6 @@ impl Reader {
         // X2 pairs on this box are one frame apart, always in lens 0's
         // favour.
         let frames = videos().map(|video| video.frames).min().unwrap_or(0);
-        let samples = videos()
-            .next()
-            .map(|video| video.samples)
-            .unwrap_or_default();
-
         Ok(Self {
             sources: sources.into_iter().map(Opened::into_source).collect(),
             lanes,
@@ -1082,8 +1098,40 @@ impl Opened {
             rate: pair(first.rate),
             time_base: pair(self.time_base),
             frames: first.frames,
+            samples: first.samples,
         })
     }
+}
+
+fn agreed_samples<'a>(mut videos: impl Iterator<Item = (usize, &'a Video)>) -> Fallible<Samples> {
+    let (first_source, first) = videos.next().ok_or("file has no video stream")?;
+    if let Some((source, video)) = videos.find(|(_, video)| video.samples != first.samples) {
+        return Err(format!(
+            "video stream {} of file {} is {}, but video stream {} of file {} is {}",
+            video.stream,
+            source,
+            sample_description(video.samples),
+            first.stream,
+            first_source,
+            sample_description(first.samples)
+        )
+        .into());
+    }
+    Ok(first.samples)
+}
+
+fn sample_description(samples: Samples) -> String {
+    let depth = if samples.wide { "10-bit" } else { "8-bit" };
+    let range = if samples.limited {
+        "studio swing"
+    } else {
+        "full range"
+    };
+    let matrix = match samples.matrix {
+        crate::ColorMatrix::Bt709 => "BT.709",
+        crate::ColorMatrix::Bt601 => "BT.601",
+    };
+    format!("{depth}, {range}, {matrix}")
 }
 
 /// The file holding this capture's other lens, opened and checked, or `None`
@@ -1170,6 +1218,86 @@ mod tests {
         Timing::new(ff::Rational::new(30000, 1001), 53940).unwrap()
     }
 
+    fn parameters(
+        format: ff::ffi::AVPixelFormat,
+        range: ff::ffi::AVColorRange,
+        space: ff::ffi::AVColorSpace,
+    ) -> ff::ffi::AVCodecParameters {
+        // All fields `written` does not read are inert here. The C struct has
+        // no Rust constructor because libavcodec normally allocates it.
+        let mut parameters: ff::ffi::AVCodecParameters = unsafe { std::mem::zeroed() };
+        parameters.format = format as i32;
+        parameters.color_range = range;
+        parameters.color_space = space;
+        parameters
+    }
+
+    #[test]
+    fn sample_matrix_is_container_metadata_not_depth_or_range() {
+        use ff::ffi::{AVColorRange as Range, AVColorSpace as Matrix, AVPixelFormat as Format};
+
+        let bt709 = unsafe {
+            written(&parameters(
+                Format::AV_PIX_FMT_YUV420P,
+                Range::AVCOL_RANGE_JPEG,
+                Matrix::AVCOL_SPC_BT709,
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            bt709,
+            Samples {
+                wide: false,
+                limited: false,
+                matrix: crate::ColorMatrix::Bt709,
+            }
+        );
+
+        let bt601 = unsafe {
+            written(&parameters(
+                Format::AV_PIX_FMT_P010LE,
+                Range::AVCOL_RANGE_MPEG,
+                Matrix::AVCOL_SPC_SMPTE170M,
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            bt601,
+            Samples {
+                wide: true,
+                limited: true,
+                matrix: crate::ColorMatrix::Bt601,
+            }
+        );
+
+        let bt470 = unsafe {
+            written(&parameters(
+                Format::AV_PIX_FMT_YUV420P,
+                Range::AVCOL_RANGE_JPEG,
+                Matrix::AVCOL_SPC_BT470BG,
+            ))
+            .unwrap()
+        };
+        assert_eq!(bt470.matrix, crate::ColorMatrix::Bt601);
+    }
+
+    #[test]
+    fn unspecified_or_unsupported_matrix_keeps_the_bt709_compatibility_default() {
+        use ff::ffi::{AVColorRange as Range, AVColorSpace as Matrix, AVPixelFormat as Format};
+
+        for matrix in [Matrix::AVCOL_SPC_UNSPECIFIED, Matrix::AVCOL_SPC_BT2020_NCL] {
+            let samples = unsafe {
+                written(&parameters(
+                    Format::AV_PIX_FMT_YUV420P,
+                    Range::AVCOL_RANGE_JPEG,
+                    matrix,
+                ))
+                .unwrap()
+            };
+            assert_eq!(samples.matrix, crate::ColorMatrix::Bt709);
+        }
+    }
+
     /// One lens of a ONE X2 pair, as the container describes it: 2880 square,
     /// 30000/1001, time base 1/30000. The real numbers off
     /// `VID_20000101_100000_00_001.insv`.
@@ -1180,6 +1308,10 @@ mod tests {
             rate: (30000, 1001),
             time_base: (1, 30000),
             frames,
+            samples: Samples {
+                matrix: crate::ColorMatrix::Bt601,
+                ..Samples::default()
+            },
         }
     }
 
@@ -1216,6 +1348,13 @@ mod tests {
             ..x2_lens(2516)
         }));
         assert!(!lens.pairs_with(x2_lens(2600)));
+        assert!(!lens.pairs_with(Shape {
+            samples: Samples {
+                matrix: crate::ColorMatrix::Bt709,
+                ..Samples::default()
+            },
+            ..x2_lens(2516)
+        }));
         // An X4-class file, which carries both lenses itself: neither side of
         // this is ever half a capture.
         let both = Shape {
@@ -1225,6 +1364,56 @@ mod tests {
         };
         assert!(!both.pairs_with(x2_lens(4546)));
         assert!(!x2_lens(4546).pairs_with(both));
+    }
+
+    #[test]
+    fn every_selected_lens_stream_agrees_on_complete_sample_metadata() {
+        let video = |stream, samples| Video {
+            stream,
+            rate: ff::Rational::new(30000, 1001),
+            frames: 100,
+            size: Size::new(3840, 3840),
+            samples,
+        };
+        let first = video(0, Samples::default());
+        let same = video(1, Samples::default());
+        assert_eq!(
+            agreed_samples([(0, &first), (0, &same)].into_iter()).unwrap(),
+            Samples::default()
+        );
+
+        for different in [
+            Samples {
+                wide: true,
+                ..Samples::default()
+            },
+            Samples {
+                limited: true,
+                ..Samples::default()
+            },
+            Samples {
+                matrix: crate::ColorMatrix::Bt601,
+                ..Samples::default()
+            },
+        ] {
+            let different = video(1, different);
+            assert!(agreed_samples([(0, &first), (0, &different)].into_iter()).is_err());
+        }
+
+        let different = video(
+            1,
+            Samples {
+                matrix: crate::ColorMatrix::Bt601,
+                ..Samples::default()
+            },
+        );
+        let error = agreed_samples([(0, &first), (0, &different)].into_iter())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "video stream 1 of file 0 is 8-bit, full range, BT.601, but video stream 0 of file 0 is 8-bit, full range, BT.709"
+        );
     }
 
     #[test]

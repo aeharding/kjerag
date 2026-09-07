@@ -883,11 +883,7 @@ fn type2_ycbcr(uv: vec2<f32>) -> vec3<f32> {
   let luma = type2_box(type2_luma0, type2_luma1, uv, source_size);
   let chroma = type2_box(type2_chroma0, type2_chroma1, uv, source_size * 0.5);
   let c = chroma.rg - vec2<f32>(0.50196081399917603);
-  return vec3<f32>(
-    luma.r + 1.4019999504089355 * c.g,
-    luma.r - 0.34400001168251038 * c.r - 0.71399998664855957 * c.g,
-    luma.r + 1.7719999551773071 * c.r,
-  );
+  return source_rgb(luma.r, c);
 }
 
 fn type2_color(map: Type2Sample) -> vec4<f32> {
@@ -960,6 +956,9 @@ mod sampling_tests;
 
 #[cfg(test)]
 mod fusion_tests;
+
+#[cfg(test)]
+mod color_tests;
 
 #[cfg(test)]
 mod tests {

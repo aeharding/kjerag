@@ -40,13 +40,28 @@ view; source conversion and uncaptured fisheye alpha remain replay limits.
 It is not a Studio-output parity comparison, an enabled automatic playback
 feature, or a replacement for the frozen smoothness test package.
 
-The next prerequisite is source color conversion: the shared direct consumer
-still hardcodes the ONE X2 BT.601 matrix, whereas both X4 container streams
+The source-color prerequisite is implemented and branch-verified: the shared
+direct consumer previously hardcoded the ONE X2 BT.601 matrix, whereas both X4 container streams
 and the captured Studio X4 uniforms specify BT.709. The ONE X2 container
-specifies SMPTE 170M (BT.601). Carrying this independent file metadata to the
-source sampler avoids camera-specific guesses and gives the later estimator
+specifies SMPTE 170M (BT.601). This independent file metadata now reaches the
+source sampler without camera-specific guesses and gives the later estimator
 and renderer the same RGB interpretation. The inner MGP BGR/YCC transform is
 a separate algorithm and is not changed by the source color-space metadata.
+Ordinary drawing shares the matrix helper; depth/range and box filtering are
+unchanged. Untagged and unhandled matrices retain the historical ordinary
+709 fallback, not a claim of supporting arbitrary color spaces. Required-Radeon
+workspace tests pass 1,197/0 failed/30 ignored, with all-target Clippy and
+static gates. The actual source-sampler GPU test covers neutral and colored
+NV12 samples on both lenses under each matrix. Both reported saved-map views
+render successfully; the ONE X2 full PNG is byte-identical to the previous
+consumer. Root viewed both. These are diagnostic frames, not new owner or
+whole-video acceptance. The native UI harness passes 48 X4 and 54 ONE X2
+checks with zero failures, including the reported views, backward seeking
+and the real scrubber. The full ONE X2 reported-view app screenshot is also
+byte-identical to the frozen smoothness native build. Root viewed both native
+captures. The existing smoothness Flatpak review build remains byte-identical
+and uninstalled; this color change does not replace the owner's pending retest
+or establish a new rendering-capacity result.
 
 **Owner test: seam accepted visually, micro-hitches next, 2026-09-07:** the
 owner says the frozen test build's seam looks good, but playback feels uneven
