@@ -1,37 +1,36 @@
-//! Detached sampling of the two exact source charts named by one type-2 map.
+//! Detached sampling of Studio's two photometric source bands.
 //!
-//! This is a diagnostic transaction. The caller associates a captured or
-//! computed map with a source frame; this module checks that association but
-//! does not authenticate the map's provenance and is never selected by live
-//! playback.
+//! This diagnostic transaction composes one externally associated type-2 map
+//! through the fixed native four-row lookup, then samples both exact source
+//! pictures. It is never selected by live playback.
 
 use std::sync::{Arc, mpsc};
 
 use kjerag_media::{FrameStamp, Frames};
+use wgpu::util::DeviceExt;
 
 use crate::direct_type2;
-use crate::flow::one_xs::{Lens, LensPair};
-use crate::flow::one_xs_belt_gpu::ResidentCameraProfile;
-use crate::map_oracle::local_uv;
-use crate::studio_type2::{
-    ALPHA_BYTES, MAP_HEIGHT, MAP_NODES, MAP_WIDTH, OneXsMapFrame, PACKED_BYTES,
-};
+use crate::flow::one_xs::LensPair;
+use crate::studio_type2::{MAP_WIDTH, OneXsMapFrame, PACKED_BYTES};
 use crate::{Fallible, Planes, Reframe};
 
-const OUTPUT_WORDS: usize = 16;
-const OUTPUT_BYTES: u64 = (MAP_NODES * OUTPUT_WORDS * size_of::<u32>()) as u64;
-const VALIDITY_ROWS: usize = 4;
-const VALIDITY_TOP: usize = 48;
+const MAP_ROWS: usize = 4;
+const COMPOSED_NODES: usize = MAP_WIDTH * MAP_ROWS;
+const COMPOSED_BYTES: u64 = (COMPOSED_NODES * size_of::<[f32; 4]>()) as u64;
+const BAND_WIDTH: usize = 800;
+const BAND_HEIGHT: usize = 16;
+const BAND_PIXELS: usize = BAND_WIDTH * BAND_HEIGHT;
+const BAND_BYTES: u64 = (BAND_PIXELS * 2 * size_of::<[f32; 4]>()) as u64;
+const READBACK_BYTES: u64 = COMPOSED_BYTES + BAND_BYTES;
 const EXTENSION: usize = 6;
 const EXTENDED_WIDTH: usize = MAP_WIDTH + 2 * EXTENSION;
 
 #[cfg(test)]
 mod gpu_tests;
 
-/// Exact-frame diagnostic source charts in renderer lens order.
 pub struct FusionInputs {
     frame: FrameStamp,
-    images: LensPair<Vec<u8>>,
+    bands: LensPair<Vec<u8>>,
     invalid: Vec<u8>,
 }
 
@@ -40,9 +39,9 @@ impl FusionInputs {
         &self.frame
     }
 
-    /// Left (`packed.xy`) and right (`packed.zw`) 200-by-100 BGR8 charts.
-    pub fn images(&self) -> [&[u8]; 2] {
-        [&self.images.a, &self.images.b]
+    /// Left (`packed.xy`) and right (`packed.zw`) 800-by-16 BGR8 bands.
+    pub fn bands(&self) -> [&[u8]; 2] {
+        [&self.bands.a, &self.bands.b]
     }
 
     /// Four rows by 212 columns, including the six-pixel periodic extension.
@@ -51,18 +50,17 @@ impl FusionInputs {
     }
 }
 
-/// One submitted diagnostic sample. Reading consumes its exact source owner.
-#[must_use = "the submitted ONE X2 fusion input sample has not been consumed"]
+#[must_use = "the submitted fusion input sample has not been consumed"]
 pub struct PendingOneXsFusionInputs {
     _picture: wgpu::BindGroup,
     _map: wgpu::BindGroup,
     _output_binding: wgpu::BindGroup,
     _uniforms: wgpu::Buffer,
-    _map_buffers: [wgpu::Buffer; 2],
-    _output: wgpu::Buffer,
+    _map_buffer: wgpu::Buffer,
+    _composed: wgpu::Buffer,
+    _bands: wgpu::Buffer,
     readback: wgpu::Buffer,
     device: wgpu::Device,
-    profile: Arc<ResidentCameraProfile>,
     frame: FrameStamp,
     submission: wgpu::SubmissionIndex,
     // Last: decoder storage must outlive every bind group which samples it.
@@ -76,7 +74,7 @@ impl PendingOneXsFusionInputs {
 
     pub fn read(self) -> Fallible<FusionInputs> {
         if self.frames.stamp() != self.frame {
-            return Err("ONE X2 fusion input source owner changed frame identity".into());
+            return Err("fusion input source owner changed frame identity".into());
         }
         self.device.poll(wgpu::PollType::Wait {
             submission_index: Some(self.submission),
@@ -90,79 +88,83 @@ impl PendingOneXsFusionInputs {
             });
         self.device.poll(wgpu::PollType::wait_indefinitely())?;
         answer.recv()??;
-
         let view = self.readback.slice(..).get_mapped_range();
-        let (images, invalid) = decode(&view, &self.profile)?;
+        let (bands, invalid) = decode(&view)?;
         drop(view);
         self.readback.unmap();
         Ok(FusionInputs {
             frame: self.frame,
-            images,
+            bands,
             invalid,
         })
     }
 }
 
 pub(crate) struct FusionInputPipeline {
-    pipeline: wgpu::ComputePipeline,
+    compose_pipeline: wgpu::ComputePipeline,
+    sample_pipeline: wgpu::ComputePipeline,
     map_layout: wgpu::BindGroupLayout,
     output_layout: wgpu::BindGroupLayout,
+    lookup: wgpu::Buffer,
 }
 
 impl FusionInputPipeline {
     pub(crate) fn new(device: &wgpu::Device, picture_layout: &wgpu::BindGroupLayout) -> Self {
-        let storage = |binding, bytes| wgpu::BindGroupLayoutEntry {
+        let storage = |binding, bytes, read_only| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                ty: wgpu::BufferBindingType::Storage { read_only },
                 has_dynamic_offset: false,
                 min_binding_size: std::num::NonZeroU64::new(bytes),
             },
             count: None,
         };
         let map_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("ONE X2 fusion input map"),
+            label: Some("fusion input map composition"),
             entries: &[
-                storage(0, PACKED_BYTES as u64),
-                storage(1, ALPHA_BYTES as u64),
+                storage(0, PACKED_BYTES as u64, true),
+                storage(1, (COMPOSED_NODES * size_of::<[f32; 2]>()) as u64, true),
+                storage(2, COMPOSED_BYTES, false),
             ],
         });
         let output_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("ONE X2 fusion input output"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: std::num::NonZeroU64::new(OUTPUT_BYTES),
-                },
-                count: None,
-            }],
+            label: Some("fusion source-band output"),
+            entries: &[storage(0, BAND_BYTES, false)],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("ONE X2 fusion input sampler"),
+            label: Some("fusion source-band sampler"),
             bind_group_layouts: &[picture_layout, &map_layout, &output_layout],
             immediate_size: 0,
         });
-        let shader = format!("{}\n{}", direct_type2::draw_wgsl(), SAMPLE_WGSL);
+        let shader = format!("{}\n{}", direct_type2::source_wgsl(), SAMPLE_WGSL);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("ONE X2 fusion input sampler"),
+            label: Some("fusion source-band sampler"),
             source: wgpu::ShaderSource::Wgsl(shader.into()),
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("ONE X2 fusion input sampler"),
-            layout: Some(&layout),
-            module: &module,
-            entry_point: Some("sample_fusion_inputs"),
-            compilation_options: Default::default(),
-            cache: None,
+        let make_pipeline = |label, entry_point| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout),
+                module: &module,
+                entry_point: Some(entry_point),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let coordinates = super::coordinates::selected_x4_band();
+        assert_eq!(coordinates.len(), COMPOSED_NODES);
+        let lookup = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("fusion fixed native band lookup"),
+            contents: bytes_of(&coordinates),
+            usage: wgpu::BufferUsages::STORAGE,
         });
         Self {
-            pipeline,
+            compose_pipeline: make_pipeline("fusion packed-map composition", "compose_fusion_map"),
+            sample_pipeline: make_pipeline("fusion source-band sampling", "sample_fusion_bands"),
             map_layout,
             output_layout,
+            lookup,
         }
     }
 
@@ -177,10 +179,9 @@ impl FusionInputPipeline {
         frames: Arc<Frames>,
         reframe: Reframe,
         map_frame: &OneXsMapFrame,
-        profile: Arc<ResidentCameraProfile>,
     ) -> PendingOneXsFusionInputs {
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ONE X2 fusion input private projection"),
+            label: Some("fusion input private source metadata"),
             size: size_of::<Reframe>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -188,87 +189,99 @@ impl FusionInputPipeline {
         queue.write_buffer(&uniforms, 0, reframe.bytes());
         let picture =
             direct_type2::bind_picture(device, picture_layout, &uniforms, planes, sampler);
-
-        let map_buffers = [
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("ONE X2 fusion input packed map"),
-                size: PACKED_BYTES as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }),
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("ONE X2 fusion input alpha map"),
-                size: ALPHA_BYTES as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }),
-        ];
-        queue.write_buffer(&map_buffers[0], 0, map_frame.packed().bytes());
-        queue.write_buffer(&map_buffers[1], 0, map_frame.alpha().bytes());
+        let map_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fusion input packed map"),
+            size: PACKED_BYTES as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&map_buffer, 0, map_frame.packed().bytes());
+        let composed = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fusion composed packed band"),
+            size: COMPOSED_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
         let map = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ONE X2 fusion input map"),
+            label: Some("fusion input map composition"),
             layout: &self.map_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: map_buffers[0].as_entire_binding(),
+                    resource: map_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: map_buffers[1].as_entire_binding(),
+                    resource: self.lookup.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: composed.as_entire_binding(),
                 },
             ],
         });
-        let output = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ONE X2 fusion input output"),
-            size: OUTPUT_BYTES,
+        let bands = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fusion source-band output"),
+            size: BAND_BYTES,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ONE X2 fusion input readback"),
-            size: OUTPUT_BYTES,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
         let output_binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ONE X2 fusion input output"),
+            label: Some("fusion source-band output"),
             layout: &self.output_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: output.as_entire_binding(),
+                resource: bands.as_entire_binding(),
             }],
         });
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fusion input readback"),
+            size: READBACK_BYTES,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("ONE X2 fusion input sampler"),
+            label: Some("fusion source-band sampler"),
         });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ONE X2 fusion input sampler"),
+                label: Some("fusion packed-map composition"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(&self.compose_pipeline);
+            pass.set_bind_group(0, &picture, &[]);
+            pass.set_bind_group(1, &map, &[]);
+            pass.set_bind_group(2, &output_binding, &[]);
+            pass.dispatch_workgroups((COMPOSED_NODES as u32).div_ceil(64), 1, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("fusion source-band sampling"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.sample_pipeline);
             pass.set_bind_group(0, &picture, &[]);
             pass.set_bind_group(1, &map, &[]);
             pass.set_bind_group(2, &output_binding, &[]);
             pass.dispatch_workgroups(
-                (MAP_WIDTH as u32).div_ceil(8),
-                (MAP_HEIGHT as u32).div_ceil(8),
+                (BAND_WIDTH as u32).div_ceil(8),
+                (BAND_HEIGHT as u32).div_ceil(8),
                 1,
             );
         }
-        encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, OUTPUT_BYTES);
+        encoder.copy_buffer_to_buffer(&composed, 0, &readback, 0, COMPOSED_BYTES);
+        encoder.copy_buffer_to_buffer(&bands, 0, &readback, COMPOSED_BYTES, BAND_BYTES);
         let frame = frames.stamp();
         PendingOneXsFusionInputs {
             _picture: picture,
             _map: map,
             _output_binding: output_binding,
             _uniforms: uniforms,
-            _map_buffers: map_buffers,
-            _output: output,
+            _map_buffer: map_buffer,
+            _composed: composed,
+            _bands: bands,
             readback,
             device: device.clone(),
-            profile,
             frame,
             submission: queue.submit([encoder.finish()]),
             frames,
@@ -276,54 +289,59 @@ impl FusionInputPipeline {
     }
 }
 
-fn decode(
-    mapped: &[u8],
-    profile: &ResidentCameraProfile,
-) -> Fallible<(LensPair<Vec<u8>>, Vec<u8>)> {
-    if mapped.len() != OUTPUT_BYTES as usize {
+fn decode(mapped: &[u8]) -> Fallible<(LensPair<Vec<u8>>, Vec<u8>)> {
+    if mapped.len() != READBACK_BYTES as usize {
         return Err(format!(
-            "ONE X2 fusion input readback mapped {} bytes, expected {OUTPUT_BYTES}",
+            "fusion input readback mapped {} bytes, expected {READBACK_BYTES}",
             mapped.len()
         )
         .into());
     }
-    let mut images = LensPair {
-        a: Vec::with_capacity(MAP_NODES * 3),
-        b: Vec::with_capacity(MAP_NODES * 3),
-    };
-    let mut validity = Vec::with_capacity(MAP_NODES);
-    for node in mapped.chunks_exact(OUTPUT_WORDS * size_of::<u32>()) {
-        let word = |at: usize| u32::from_le_bytes(node[at * 4..at * 4 + 4].try_into().unwrap());
-        let packed = std::array::from_fn(|component| f32::from_bits(word(8 + component)));
-        let mut source_covered = [false; 2];
-        for (lens, image, first) in [
-            (Lens::A, &mut images.a, 0usize),
-            (Lens::B, &mut images.b, 4usize),
-        ] {
-            let rgb = [
-                f32::from_bits(word(first)),
-                f32::from_bits(word(first + 1)),
-                f32::from_bits(word(first + 2)),
-            ];
-            image.extend(rgb.into_iter().rev().map(diagnostic_byte));
-            source_covered[lens.index()] =
-                profile.source_is_covered(lens, local_uv(packed, lens.index()));
-        }
-        validity.push([source_covered[0], source_covered[1], word(12) != 0]);
+    let mut validity = Vec::with_capacity(COMPOSED_NODES);
+    for node in mapped[..COMPOSED_BYTES as usize].chunks_exact(size_of::<[f32; 4]>()) {
+        let component = |at: usize| {
+            f32::from_bits(u32::from_le_bytes(
+                node[at * 4..at * 4 + 4].try_into().unwrap(),
+            ))
+        };
+        let packed = [component(0), component(1), component(2), component(3)];
+        validity.push([
+            ordered_unit([packed[0] * 2.0, packed[1]]),
+            ordered_unit([packed[2] * 2.0 - 1.0, packed[3]]),
+        ]);
     }
-    Ok((images, extend_invalid(&validity)))
+    let mut bands = LensPair {
+        a: Vec::with_capacity(BAND_PIXELS * 3),
+        b: Vec::with_capacity(BAND_PIXELS * 3),
+    };
+    for sample in mapped[COMPOSED_BYTES as usize..].chunks_exact(2 * size_of::<[f32; 4]>()) {
+        for (image, first) in [(&mut bands.a, 0usize), (&mut bands.b, 4usize)] {
+            let rgb = std::array::from_fn::<_, 3, _>(|channel| {
+                let at = (first + channel) * 4;
+                f32::from_bits(u32::from_le_bytes(sample[at..at + 4].try_into().unwrap()))
+            });
+            image.extend(rgb.into_iter().rev().map(diagnostic_byte));
+        }
+    }
+    Ok((bands, extend_invalid(&validity)))
 }
 
-fn extend_invalid(validity: &[[bool; 3]]) -> Vec<u8> {
-    debug_assert_eq!(validity.len(), MAP_NODES);
-    let mut invalid = Vec::with_capacity(EXTENDED_WIDTH * VALIDITY_ROWS);
-    for row in VALIDITY_TOP..VALIDITY_TOP + VALIDITY_ROWS {
+#[allow(
+    clippy::manual_range_contains,
+    reason = "native ordered comparisons do not reject NaN"
+)]
+fn ordered_unit(uv: [f32; 2]) -> bool {
+    !uv.into_iter().any(|value| value < 0.0 || value > 1.0)
+}
+
+fn extend_invalid(validity: &[[bool; 2]]) -> Vec<u8> {
+    debug_assert_eq!(validity.len(), COMPOSED_NODES);
+    let mut invalid = Vec::with_capacity(EXTENDED_WIDTH * MAP_ROWS);
+    for row in 0..MAP_ROWS {
         for extended_col in 0..EXTENDED_WIDTH {
             let col = (extended_col + MAP_WIDTH - EXTENSION) % MAP_WIDTH;
             invalid.push(u8::from(
-                !validity[row * MAP_WIDTH + col]
-                    .into_iter()
-                    .all(|value| value),
+                !validity[row * MAP_WIDTH + col].into_iter().all(|v| v),
             ));
         }
     }
@@ -334,37 +352,82 @@ fn diagnostic_byte(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round_ties_even() as u8
 }
 
-const SAMPLE_WGSL: &str = r#"
-struct FusionInputSample {
-  left: vec4<f32>,
-  right: vec4<f32>,
-  packed: vec4<f32>,
-  covered: u32,
-  padding: array<u32, 3>,
-};
+fn bytes_of<T>(values: &[T]) -> &[u8] {
+    // The source remains alive for the duration of DeviceExt's immediate copy.
+    unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), std::mem::size_of_val(values)) }
+}
 
-@group(2) @binding(0) var<storage, read_write> fusion_inputs: array<FusionInputSample>;
+const SAMPLE_WGSL: &str = r#"
+struct FusionBandSample { left: vec4<f32>, right: vec4<f32> };
+@group(1) @binding(0) var<storage, read> input_map: array<vec4<f32>>;
+@group(1) @binding(1) var<storage, read> band_lookup: array<vec2<f32>>;
+@group(1) @binding(2) var<storage, read_write> composed_map: array<vec4<f32>>;
+@group(2) @binding(0) var<storage, read_write> fusion_bands: array<FusionBandSample>;
+
+fn input_map_at(padded_x: i32, y: i32) -> vec4<f32> {
+  let source_x = (padded_x + 199) % 200;
+  return input_map[u32(clamp(y, 0, 99) * 200 + source_x)];
+}
+
+fn inter_linear_coordinate(value: f32) -> f32 {
+  let scaled = value * 32.0;
+  let low = floor(scaled);
+  let fraction = scaled - low;
+  let odd = (i32(low) & 1) != 0;
+  let rounded = select(low, low + 1.0, fraction > 0.5 || (fraction == 0.5 && odd));
+  return rounded / 32.0;
+}
+
+fn compose_at(coordinate: vec2<f32>) -> vec4<f32> {
+  // OpenCV INTER_LINEAR tabulates each remap fraction at five bits.
+  let q = vec2<f32>(inter_linear_coordinate(coordinate.x),
+    inter_linear_coordinate(coordinate.y));
+  let base = vec2<i32>(floor(q));
+  let f = fract(q);
+  let top = mix(input_map_at(base.x, base.y), input_map_at(base.x + 1, base.y), f.x);
+  let bottom = mix(input_map_at(base.x, base.y + 1), input_map_at(base.x + 1, base.y + 1), f.x);
+  return mix(top, bottom, f.y);
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn compose_fusion_map(@builtin(global_invocation_id) at: vec3<u32>) {
+  if at.x >= 800u { return; }
+  composed_map[at.x] = compose_at(band_lookup[at.x]);
+}
+
+fn composed_at(x: i32, y: i32) -> vec4<f32> {
+  return composed_map[u32(clamp(y, 0, 3) * 200 + clamp(x, 0, 199))];
+}
+
+fn endpoint_packed(at: vec2<u32>) -> vec4<f32> {
+  let p = vec2<f32>(f32(at.x) * 199.0 / 799.0, f32(at.y) * 3.0 / 15.0);
+  let base = vec2<i32>(floor(p));
+  let f = fract(p);
+  let top = mix(composed_at(base.x, base.y), composed_at(base.x + 1, base.y), f.x);
+  let bottom = mix(composed_at(base.x, base.y + 1), composed_at(base.x + 1, base.y + 1), f.x);
+  return mix(top, bottom, f.y);
+}
+
+fn source_lens_rgb(lens: u32, uv: vec2<f32>) -> vec3<f32> {
+  var luma: f32;
+  var chroma: vec2<f32>;
+  if lens == 0u {
+    luma = textureSampleLevel(type2_luma0, type2_sampler, uv, 0.0).r;
+    chroma = textureSampleLevel(type2_chroma0, type2_sampler, uv, 0.0).rg;
+  } else {
+    luma = textureSampleLevel(type2_luma1, type2_sampler, uv, 0.0).r;
+    chroma = textureSampleLevel(type2_chroma1, type2_sampler, uv, 0.0).rg;
+  }
+  return source_rgb(luma, chroma - vec2<f32>(0.50196081399917603));
+}
 
 @compute @workgroup_size(8, 8, 1)
-fn sample_fusion_inputs(@builtin(global_invocation_id) at: vec3<u32>) {
-  if at.x >= 200u || at.y >= 100u { return; }
-  let theta = f32(at.y) * TYPE2_PI / 99.0;
-  let phi = f32(at.x) * TYPE2_TAU / 200.0;
-  let q_working = vec3<f32>(sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta));
-  let angle = TYPE2_PI * 0.5;
-  let cb = cos(angle);
-  let sb = sin(angle);
-  let q_final = vec3<f32>(
-    cb * q_working.x + sb * q_working.z,
-    q_working.y,
-    -sb * q_working.x + cb * q_working.z,
-  );
-  let map = type2_mesh(vec3<f32>(-q_final.y, q_final.z, q_final.x));
-  let index = at.y * 200u + at.x;
-  fusion_inputs[index].left = vec4<f32>(type2_ycbcr(map.packed.xy), 0.0);
-  fusion_inputs[index].right = vec4<f32>(type2_ycbcr(map.packed.zw), 0.0);
-  fusion_inputs[index].packed = map.packed;
-  fusion_inputs[index].covered = u32(map.covered > 0.5);
+fn sample_fusion_bands(@builtin(global_invocation_id) at: vec3<u32>) {
+  if at.x >= 800u || at.y >= 16u { return; }
+  let packed = endpoint_packed(at.xy);
+  let index = at.y * 800u + at.x;
+  fusion_bands[index].left = vec4<f32>(source_lens_rgb(0u, vec2<f32>(packed.x * 2.0, packed.y)), 0.0);
+  fusion_bands[index].right = vec4<f32>(source_lens_rgb(1u, vec2<f32>(packed.z * 2.0 - 1.0, packed.w)), 0.0);
 }
 "#;
 
@@ -373,41 +436,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn output_shape_and_periodic_validity_extension_are_fixed() {
-        assert_eq!(OUTPUT_BYTES, 1_280_000);
-        assert_eq!(EXTENDED_WIDTH * VALIDITY_ROWS, 848);
-        let source = SAMPLE_WGSL;
-        assert!(source.contains("f32(at.y) * TYPE2_PI / 99.0"));
-        assert!(source.contains("f32(at.x) * TYPE2_TAU / 200.0"));
-        assert!(source.contains("type2_ycbcr(map.packed.xy)"));
-        assert!(source.contains("type2_ycbcr(map.packed.zw)"));
+    fn output_shapes_and_two_stage_entries_are_fixed() {
+        assert_eq!(COMPOSED_NODES, 800);
+        assert_eq!(BAND_PIXELS, 12_800);
+        assert_eq!(READBACK_BYTES, 422_400);
+        assert_eq!(EXTENDED_WIDTH * MAP_ROWS, 848);
+        assert_eq!(SAMPLE_WGSL.matches("fn compose_fusion_map").count(), 1);
+        assert_eq!(SAMPLE_WGSL.matches("fn sample_fusion_bands").count(), 1);
+        assert!(SAMPLE_WGSL.contains("199.0 / 799.0"));
+        assert!(SAMPLE_WGSL.contains("3.0 / 15.0"));
     }
 
     #[test]
-    fn atlas_coordinates_become_lens_local_and_validity_wraps_six_columns() {
-        let packed = [0.125, 0.25, 0.875, 0.75];
-        assert_eq!(local_uv(packed, Lens::A.index()), [0.25, 0.25]);
-        assert_eq!(local_uv(packed, Lens::B.index()), [0.75, 0.75]);
-
-        let mut validity = vec![[true; 3]; MAP_NODES];
-        for row in VALIDITY_TOP..VALIDITY_TOP + VALIDITY_ROWS {
-            validity[row * MAP_WIDTH + MAP_WIDTH - EXTENSION] = [false, true, true];
-            validity[row * MAP_WIDTH] = [true, false, true];
-            validity[row * MAP_WIDTH + 1] = [true, true, false];
+    fn ordered_range_and_periodic_validity_match_native_boundary() {
+        assert!(ordered_unit([0.0, 1.0]));
+        assert!(!ordered_unit([-f32::EPSILON, 0.5]));
+        assert!(!ordered_unit([0.5, 1.0 + f32::EPSILON]));
+        assert!(ordered_unit([f32::NAN, 0.5]));
+        let mut validity = vec![[true; 2]; COMPOSED_NODES];
+        for row in 0..MAP_ROWS {
+            validity[row * MAP_WIDTH + MAP_WIDTH - EXTENSION] = [false, true];
+            validity[row * MAP_WIDTH] = [true, false];
         }
         let invalid = extend_invalid(&validity);
-        assert_eq!(invalid.len(), EXTENDED_WIDTH * VALIDITY_ROWS);
         for row in invalid.chunks_exact(EXTENDED_WIDTH) {
-            assert_eq!(&row[..7], &[1, 0, 0, 0, 0, 0, 1]);
-            assert_eq!(row[7], 1);
-            assert!(row[8..MAP_WIDTH].iter().all(|&value| value == 0));
-            assert_eq!(row[MAP_WIDTH], 1);
-            assert!(
-                row[MAP_WIDTH + 1..EXTENDED_WIDTH - EXTENSION]
-                    .iter()
-                    .all(|&value| value == 0)
-            );
-            assert_eq!(&row[EXTENDED_WIDTH - EXTENSION..], &[1, 1, 0, 0, 0, 0]);
+            assert_eq!(row[0], 1);
+            assert_eq!(row[EXTENSION], 1);
+            assert_eq!(row[MAP_WIDTH + EXTENSION], 1);
         }
     }
 

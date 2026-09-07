@@ -2,7 +2,7 @@
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
-use crate::studio_type2::{MAP_HEIGHT, MAP_NODES, MAP_WIDTH};
+use crate::studio_type2::{MAP_HEIGHT, MAP_WIDTH};
 
 const EPSILON: f32 = f32::from_bits(0x2edb_e6ff);
 
@@ -12,18 +12,28 @@ const EPSILON: f32 = f32::from_bits(0x2edb_e6ff);
 /// trigonometric results are evaluated rather than replaced with ideal-axis
 /// constants, and the upper clamps leave an unordered value unchanged.
 pub(super) fn selected_x4() -> Vec<[f32; 2]> {
+    selected(-FRAC_PI_2, 0..MAP_HEIGHT, false)
+}
+
+/// Selected source-map lookup, before endpoint band expansion. These are the
+/// actual working rows 48..51 of the positive-rotation chart, not the inverse
+/// of the later ratio lookup sampled on a 99-step sphere.
+pub(super) fn selected_x4_band() -> Vec<[f32; 2]> {
+    selected(FRAC_PI_2, 48..52, true)
+}
+
+fn selected(angle: f32, rows: std::ops::Range<usize>, band: bool) -> Vec<[f32; 2]> {
     let width = MAP_WIDTH as f32;
     let height = MAP_HEIGHT as f32;
     let upper_x = (MAP_WIDTH - 1) as f32;
     let upper_y = (MAP_HEIGHT - 1) as f32;
 
-    let angle = -FRAC_PI_2;
     let cb = angle.cos();
     let sb = angle.sin();
     let neg_sb = -sb;
 
-    let mut coordinates = Vec::with_capacity(MAP_NODES);
-    for y in 0..MAP_HEIGHT {
+    let mut coordinates = Vec::with_capacity(rows.len() * MAP_WIDTH);
+    for y in rows {
         let theta = (y as f32 * PI) / height;
         let st = theta.sin();
         let ct = theta.cos();
@@ -43,7 +53,11 @@ pub(super) fn selected_x4() -> Vec<[f32; 2]> {
                 azimuth = TAU - azimuth;
             }
 
-            let raw_x = ((width * azimuth) / PI) * 0.5;
+            let raw_x = if band {
+                width * azimuth / TAU
+            } else {
+                ((width * azimuth) / PI) * 0.5
+            };
             let raw_y = (upper_y * vz.acos()) / PI;
             coordinates.push([
                 ordered_upper(raw_x, upper_x) + 1.0,
@@ -61,6 +75,7 @@ fn ordered_upper(value: f32, upper: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::studio_type2::MAP_NODES;
 
     fn at(coordinates: &[[f32; 2]], row: usize, column: usize) -> [f32; 2] {
         coordinates[row * MAP_WIDTH + column]
@@ -127,5 +142,21 @@ mod tests {
         assert!(ordered_upper(f32::NAN, 7.0).is_nan());
         assert_eq!(ordered_upper(8.0, 7.0), 7.0);
         assert_eq!(ordered_upper(-1.0, 7.0), -1.0);
+    }
+
+    #[test]
+    fn source_band_has_four_rows_and_positive_rotation_landmarks() {
+        let coords = selected_x4_band();
+        assert_eq!(coords.len(), MAP_WIDTH * 4);
+        assert!(coords.iter().flatten().all(|v| v.is_finite()));
+        near(coords[0][0], 1.0, 0.05);
+        near(coords[0][1], 97.02, 0.01);
+        near(coords[MAP_WIDTH][1], 98.01, 0.01);
+        // The equatorial quarter turn has a stable nonsingular azimuth.
+        near(coords[2 * MAP_WIDTH + 50][0], 51.0, 0.05);
+        near(coords[2 * MAP_WIDTH + 50][1], 49.5, 0.05);
+        // Its three-quarter counterpart is 151, not a half-circle chart.
+        near(coords[2 * MAP_WIDTH + 150][0], 151.0, 0.05);
+        near(coords[2 * MAP_WIDTH + 150][1], 49.5, 0.05);
     }
 }

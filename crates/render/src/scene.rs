@@ -3597,7 +3597,6 @@ impl ScenePipeline {
             frames,
             reframe,
             map,
-            profile,
         )))
     }
 

@@ -92,10 +92,6 @@ impl ResidentCameraProfile {
     fn calibration(&self) -> &CalibrationSet {
         &self.calibration
     }
-
-    pub(crate) fn source_is_covered(&self, lens: Lens, uv: [f32; 2]) -> bool {
-        self.support.contains(lens, uv)
-    }
 }
 
 /// Resident PIS preparation is nested under the belt owner so its only

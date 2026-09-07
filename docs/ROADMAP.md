@@ -107,6 +107,36 @@ byte-identical to the preceding source-color native build and were viewed.
 This is a regression check, not an additional smoothness or chromatic-video
 acceptance result. Evidence is ignored `scratch/fusion-sampling-20260907/`.
 
+The source-band replacement now implements the bounded native construction:
+positive-quarter-turn four-row packed-map composition, endpoint-aligned
+800x16 expansion, independent lens sampling, the retained three-strip content
+gate, 4x4 area reduction and sticky coordinate invalidity. The previous point
+sampler and its image-support substitution are removed. The CPU reference
+preserves binary64 mean comparison, including its exact-threshold rounding
+case. The sampler uses Kjerag's qualified packed maps and container-driven
+float color conversion; neither the native upstream map producer nor its
+runtime integer conversion branch is claimed equivalent.
+
+All 45 focused photometric CPU/GPU checks pass. The actual GPU fixture tests
+every composed map node against the scalar reference, distinguishes opposite
+rotation and repeated rather than endpoint-interpolated UVs, and checks both
+textured source lenses at byte precision. Both reported real frames render
+through band admission and the existing correction consumer. Root viewed the
+800x16 inputs, final corrected views and computed seam overlays, and sent the
+corrected views to the owner. Disabled final PNGs remain byte-identical to the
+preceding source-color diagnostic. This is still-frame implementation evidence,
+not Studio-output/video acceptance or a live calibration feature. No new export
+was needed. The automatic GPU producer is next; the native player and frozen
+smoothness review package remain unchanged. Evidence:
+`scratch/fusion-sampling-20260907/attempt-08/`.
+Required-Radeon full workspace gates pass 1,231 tests, zero failures and 30
+ignored, with all-target Clippy, formatting and static checks. Source hashes
+are unchanged across those gates. Evidence:
+`scratch/fusion-sampling-20260907/gates-03/`. The initial gate attempts retain
+the corrected test-typing, compute-binding, fixture and lint failures; no failed
+run is reported as passed. No new UI or playback-capacity result is claimed
+for this diagnostic/reference-only increment.
+
 **Owner test: seam accepted visually, micro-hitches next, 2026-09-07:** the
 owner says the frozen test build's seam looks good, but playback feels uneven
 despite its 30 fps counter. They request smoothness first, then photometric

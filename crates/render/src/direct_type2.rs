@@ -612,6 +612,13 @@ fn layout(device: &wgpu::Device, visibility: wgpu::ShaderStages) -> wgpu::BindGr
     })
 }
 
+/// Shared source metadata and texture declarations, without final-map bindings
+/// or draw entry points. Compute consumers can name their own map resources.
+pub(crate) fn source_wgsl() -> String {
+    format!("{}\n{SOURCE_BINDINGS}", projection::wgsl())
+}
+
+#[cfg(test)]
 pub(crate) fn draw_wgsl() -> String {
     draw_wgsl_with_fusion(false)
 }
@@ -624,11 +631,7 @@ fn draw_wgsl_with_fusion(fusion: bool) -> String {
         // introduces no resource binding or texture read.
         "fn type2_correct(color: vec3<f32>, uv: vec2<f32>, lens: u32) -> vec3<f32> { return color; }"
     };
-    format!(
-        "{}\n{}\n{correction}\n{DRAW}",
-        projection::wgsl(),
-        map_wgsl()
-    )
+    format!("{}\n{}\n{correction}\n{DRAW}", source_wgsl(), map_wgsl())
 }
 
 pub(crate) fn map_wgsl() -> &'static str {
@@ -801,6 +804,14 @@ fn type2_mesh(body: vec3<f32>) -> Type2Sample {
 }
 "#;
 
+const SOURCE_BINDINGS: &str = r#"
+@group(0) @binding(1) var type2_luma0: texture_2d<f32>;
+@group(0) @binding(2) var type2_chroma0: texture_2d<f32>;
+@group(0) @binding(3) var type2_luma1: texture_2d<f32>;
+@group(0) @binding(4) var type2_chroma1: texture_2d<f32>;
+@group(0) @binding(5) var type2_sampler: sampler;
+"#;
+
 const DRAW: &str = r#"
 struct Type2VsOut {
   @builtin(position) position: vec4<f32>,
@@ -816,12 +827,6 @@ fn vs(@builtin(vertex_index) index: u32) -> Type2VsOut {
   out.position = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
   return out;
 }
-
-@group(0) @binding(1) var type2_luma0: texture_2d<f32>;
-@group(0) @binding(2) var type2_chroma0: texture_2d<f32>;
-@group(0) @binding(3) var type2_luma1: texture_2d<f32>;
-@group(0) @binding(4) var type2_chroma1: texture_2d<f32>;
-@group(0) @binding(5) var type2_sampler: sampler;
 
 fn type2_atlas_load(a: texture_2d<f32>, b: texture_2d<f32>, p: vec2<i32>) -> vec4<f32> {
   let dims = textureDimensions(a);

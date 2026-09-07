@@ -9,6 +9,7 @@
 //! Explicit captured-map replay is not an automatic producer or a claim of
 //! source/output video parity. Ordinary playback remains unchanged.
 
+mod content;
 mod coordinates;
 pub(crate) mod sample;
 pub mod solve;

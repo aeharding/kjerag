@@ -15,6 +15,8 @@
 //! Instead, trailing `estimate-fusion` runs the explicit Windows selected-X4
 //! CPU reference on this decoded source through this saved Kjerag map. This
 //! is a diagnostic, not Studio source-sampler or other-camera equivalence.
+//! Its two 800x16 BGR bands use the selected map composition and endpoint
+//! expansion before the reference's content gate and area reduction.
 
 use std::fs;
 use std::path::Path;
@@ -155,10 +157,12 @@ fn main() -> Fallible<()> {
         }
         let samples = pending.read()?;
         let mut reference = kjerag_render::image_fusion::spatial::Reference::new();
-        let output = reference.observe(samples.images(), samples.invalid())?;
-        for (name, bgr) in ["left", "right"].into_iter().zip(samples.images()) {
-            fs::write(out.join(format!("fusion-input-{name}.bgr8")), bgr)?;
-            write_bgr_png(bgr, &out.join(format!("fusion-input-{name}.png")))?;
+        let output = reference
+            .observe_bands(samples.bands(), samples.invalid())?
+            .ok_or("first fusion source observation was not admitted")?;
+        for (name, bgr) in ["left", "right"].into_iter().zip(samples.bands()) {
+            fs::write(out.join(format!("fusion-band-{name}.bgr8")), bgr)?;
+            write_bgr_png(bgr, &out.join(format!("fusion-band-{name}.png")))?;
         }
         fs::write(out.join("fusion-invalid.bin"), samples.invalid())?;
         for (name, map) in [
@@ -226,8 +230,8 @@ fn write_bgr_png(bgr: &[u8], path: &Path) -> Fallible<()> {
         .collect();
     let mut encoder = png::Encoder::new(
         std::io::BufWriter::new(fs::File::create_new(path)?),
-        200,
-        100,
+        800,
+        16,
     );
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);

@@ -41,17 +41,22 @@ impl<'a> Inputs<'a> {
                 ));
             }
         }
-        if invalid.len() != VALIDITY_BYTES {
-            return Err(format!(
-                "selected X4 fusion validity has {} bytes, expected {VALIDITY_BYTES}",
-                invalid.len()
-            ));
-        }
+        validate_invalid(invalid)?;
         Ok(Self {
             lenses: [left, right],
             invalid,
         })
     }
+}
+
+pub(super) fn validate_invalid(invalid: &[u8]) -> Result<(), String> {
+    if invalid.len() != VALIDITY_BYTES {
+        return Err(format!(
+            "selected X4 fusion validity has {} bytes, expected {VALIDITY_BYTES}",
+            invalid.len()
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -129,10 +134,15 @@ impl Reference {
         }
     }
 
-    pub fn observe(&mut self, input: Inputs<'_>) -> Output {
-        for (held, &current) in self.sticky_invalid.iter_mut().zip(input.invalid) {
+    pub(super) fn accumulate_invalid(&mut self, invalid: &[u8]) {
+        debug_assert_eq!(invalid.len(), VALIDITY_BYTES);
+        for (held, &current) in self.sticky_invalid.iter_mut().zip(invalid) {
             *held |= current;
         }
+    }
+
+    pub fn observe(&mut self, input: Inputs<'_>) -> Output {
+        self.accumulate_invalid(input.invalid);
 
         let support = support_masks(input.lenses, &self.sticky_invalid);
         let differences = supported_byte_differences(input.lenses, &support);

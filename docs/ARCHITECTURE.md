@@ -189,20 +189,24 @@ replication, periodic 200-to-212 extension, center crop, same-ordinal ratios,
 ROI-local box filtering and original-chart remap. Its full ratio arrays start
 at one and retain the previous filtered left boundary row 40. The corrected
 binding/constant contract is `docs/research/studio-image-fusion-spatial.md`.
-The detached `prepare_one_xs_fusion_inputs` API now samples two 200x100
-working charts through the actual `type2_mesh` and `type2_ycbcr` functions.
+The detached `prepare_one_xs_fusion_inputs` API composes the final packed map
+through the recovered positive-quarter-turn lookup into 200x4 source UVs,
+then expands them endpoint-aligned and samples two 800x16 BGR bands. Each lens
+is bilinearly sampled locally, not through drawing's atlas box footprint.
 It retains private bindings, the exact decoded source owner and the immutable
 camera profile through a consuming readback. Stepped scenes retain that profile
-without enabling a live transaction. Conditioned source coverage uses lens-local
-UVs, not packed-atlas coordinates or invented map sentinels. The diagnostic's
-RGB-to-byte conversion clamps and rounds ties-to-even. It is not Studio's
-source producer: the selected native boundary first makes 800x16 BGR bands and
-area-resizes them into rows 48..51 after content admission. The diagnostic's
-full-chart point samples cannot stand in for that reduction. Source-band
-production, the outer content gate and the eventual GPU producer remain
-separate unfinished boundaries. Existing sparse arithmetic, box reductions
-and trigonometric implementations are not claimed numerically identical to
-Studio. Neither reference is selected by ordinary playback.
+without enabling a live transaction. Ordered lens-local UV range comparisons
+produce the four validity rows; no map sentinel or image-circle substitute is
+invented. Container-driven float RGB conversion and ties-to-even bytes are
+Kjerag choices, not authenticated native conversion-branch arithmetic.
+`spatial::Reference::observe_bands` accumulates sticky invalidity before testing
+the three 66x16 strips per lens against the last admitted means. Only an
+admitted observation area-reduces the full bands into working rows 48..51 and
+advances the solve/ratio history. The CPU gate retains binary64 mean arithmetic.
+Source-map provenance and video scheduling remain the caller's responsibility;
+the automatic GPU producer is unfinished. Existing sparse arithmetic, box
+reductions and trigonometric implementations are not claimed numerically
+identical to Studio. Neither reference is selected by ordinary playback.
 
 ## Failures the pilot is told about (issue #124)
 

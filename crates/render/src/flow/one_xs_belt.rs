@@ -564,10 +564,6 @@ impl CameraMaskSupport {
         lerp(top, bottom, row.frac)
     }
 
-    pub(crate) fn contains(&self, lens: Lens, uv: [f32; 2]) -> bool {
-        !conditioned_sample_clears(self.sample(lens, uv))
-    }
-
     pub(crate) fn apply(&self, base: &RetainedBaseMaps) -> (LensPair<Vec<u8>>, CameraMaskReport) {
         apply_camera_support(base, self)
     }

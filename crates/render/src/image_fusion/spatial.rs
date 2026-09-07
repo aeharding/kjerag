@@ -6,7 +6,7 @@
 //! Spatial filtering uses the recovered kernel and boundaries, but readable
 //! reductions rather than OpenCV's implementation-specific summation order.
 
-use super::{RatioMap, RatioPair, coordinates, solve};
+use super::{RatioMap, RatioPair, content, coordinates, solve};
 use crate::studio_type2::{MAP_HEIGHT as HEIGHT, MAP_NODES, MAP_WIDTH as WIDTH};
 
 const EXTENSION: usize = 6;
@@ -20,8 +20,8 @@ pub struct Output {
     pub diagnostics: solve::Diagnostics,
 }
 
-/// Inner MGP plus its selected fixed-size ratio-map stages. Input sampling,
-/// the outer content gate and production scheduling are deliberately separate.
+/// Outer content admission, inner MGP and selected fixed-size ratio-map stages.
+/// Input sampling and production scheduling are deliberately separate.
 ///
 /// The ratio matrices are retained, not fresh per observation. In particular,
 /// left row 40 is outside both the current ratio writes and the neutral fill;
@@ -29,6 +29,7 @@ pub struct Output {
 /// full matrices to one (`0x183c0317e`, `0x183c03210`).
 pub struct Reference {
     inner: solve::Reference,
+    content: content::Gate,
     ratios: [BgrMap; 2],
     coordinates: Vec<[f32; 2]>,
 }
@@ -43,9 +44,32 @@ impl Reference {
     pub fn new() -> Self {
         Self {
             inner: solve::Reference::new(),
+            content: content::Gate::default(),
             ratios: std::array::from_fn(|_| vec![[1.0; 3]; MAP_NODES]),
             coordinates: coordinates::selected_x4(),
         }
+    }
+
+    /// Admit two aligned 800x16 BGR8 source bands, area-reduce into the selected
+    /// working rows, and run the spatial reference. `None` means retain the
+    /// previous ratio output: neither the solve nor spatial ratios advanced.
+    /// Coordinate invalidity is still accumulated before the content decision,
+    /// because native map updates mark that mask independently of admission.
+    /// Sampling these source bands and constructing validity remain the caller's
+    /// responsibility. This method does not choose a playback update cadence.
+    pub fn observe_bands(
+        &mut self,
+        bands: [&[u8]; 2],
+        invalid: &[u8],
+    ) -> Result<Option<Output>, String> {
+        content::validate(bands)?;
+        solve::validate_invalid(invalid)?;
+        self.inner.accumulate_invalid(invalid);
+        if !self.content.admit(bands) {
+            return Ok(None);
+        }
+        let working = bands.map(content::working_chart);
+        self.observe([&working[0], &working[1]], invalid).map(Some)
     }
 
     /// Consume aligned 200x100 BGR8 images in the selected working chart,
@@ -359,6 +383,109 @@ mod tests {
         assert!(corrected[1][0] > source[1][0]);
         assert!(corrected[0][2] > source[0][2]);
         assert!(corrected[1][2] < source[1][2]);
+    }
+
+    #[test]
+    fn band_gate_holds_spatial_state_and_admitted_observations_match_direct_reference() {
+        let pixels = content::BAND_WIDTH * content::BAND_HEIGHT;
+        let mut bands = [[80, 100, 120].repeat(pixels), [110, 100, 90].repeat(pixels)];
+        let invalid = vec![0; WORK_WIDTH * 4];
+        let mut gated = Reference::new();
+        let mut direct = Reference::new();
+        for _ in 0..2 {
+            let actual = gated
+                .observe_bands([&bands[0], &bands[1]], &invalid)
+                .unwrap()
+                .unwrap();
+            let working = bands.each_ref().map(|band| content::working_chart(band));
+            let expected = direct
+                .observe([&working[0], &working[1]], &invalid)
+                .unwrap();
+            assert_eq!(actual.ratios, expected.ratios);
+            assert_eq!(actual.diagnostics, expected.diagnostics);
+            let retained = gated.ratios.clone();
+            assert!(
+                gated
+                    .observe_bands([&bands[0], &bands[1]], &invalid)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(gated.ratios, retained);
+            bands[0].iter_mut().for_each(|byte| *byte += 4);
+        }
+    }
+
+    #[test]
+    fn malformed_band_inputs_do_not_consume_first_admission() {
+        let band = vec![96; content::BAND_WIDTH * content::BAND_HEIGHT * 3];
+        let invalid = vec![0; WORK_WIDTH * 4];
+        let mut reference = Reference::new();
+        assert!(
+            reference
+                .observe_bands([&band[..3], &band], &invalid)
+                .is_err()
+        );
+        assert!(reference.observe_bands([&band, &band], &[0]).is_err());
+        assert!(
+            reference
+                .observe_bands([&band, &band], &invalid)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn unchanged_content_still_retains_invalid_coordinates_for_the_next_solve() {
+        let pixels = content::BAND_WIDTH * content::BAND_HEIGHT;
+        let mut bands = [[80, 100, 120].repeat(pixels), [110, 100, 90].repeat(pixels)];
+        let valid = vec![0; WORK_WIDTH * 4];
+        let mut reference = Reference::new();
+        let first = reference
+            .observe_bands([&bands[0], &bands[1]], &valid)
+            .unwrap()
+            .unwrap();
+        assert!(first.diagnostics.admitted > 0);
+        assert!(
+            reference
+                .observe_bands([&bands[0], &bands[1]], &vec![255; WORK_WIDTH * 4])
+                .unwrap()
+                .is_none()
+        );
+        bands[0].iter_mut().for_each(|byte| *byte += 4);
+        let next = reference
+            .observe_bands([&bands[0], &bands[1]], &valid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.diagnostics.admitted, first.diagnostics.admitted);
+        assert_eq!(next.diagnostics.current_metric, None);
+        assert!(next.diagnostics.used_stale_control);
+    }
+
+    #[test]
+    fn only_four_source_rows_can_feed_spatial_outputs_across_observations() {
+        let pixels = content::BAND_WIDTH * content::BAND_HEIGHT;
+        let bands = [[80, 100, 120].repeat(pixels), [110, 100, 90].repeat(pixels)];
+        let working = bands.each_ref().map(|band| content::working_chart(band));
+        let mut poisoned = working.clone();
+        for (lens, image) in poisoned.iter_mut().enumerate() {
+            for (index, byte) in image.iter_mut().enumerate() {
+                if !(48..52).contains(&(index / (WIDTH * 3))) {
+                    *byte = ((index * 19 + lens * 61) % 256) as u8;
+                }
+            }
+        }
+        let mut ordinary = Reference::new();
+        let mut altered = Reference::new();
+        for _ in 0..2 {
+            let a = ordinary
+                .observe([&working[0], &working[1]], &vec![0; WORK_WIDTH * 4])
+                .unwrap();
+            let b = altered
+                .observe([&poisoned[0], &poisoned[1]], &vec![0; WORK_WIDTH * 4])
+                .unwrap();
+            assert_eq!(a.ratios, b.ratios);
+            assert_eq!(a.diagnostics, b.diagnostics);
+        }
     }
 
     #[test]

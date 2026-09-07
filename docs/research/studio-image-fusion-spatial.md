@@ -4,10 +4,12 @@ This records the Windows 5.9.10.0 selected X4 CPU path, not proof of the Mac
 6.0.2 producer or other-camera equivalence. The DLL SHA-256 is
 `75801cc67d890d0769ed2182136e21d6dc3ca10281c5ec5dd8c8adc3ea95f6dc`.
 The readable implementation is `crates/render/src/image_fusion/spatial.rs`.
-It does not run automatically during playback. Its input is an already
-aligned pair of 200x100 BGR8 images in the working chart, plus the inner
-helper's extended 212x4 validity bytes. Source sampling and the outer content
-gate remain separate obligations.
+It does not run automatically during playback. `observe_bands` takes two
+aligned 800x16 BGR8 source bands and extended 212x4 validity bytes, performs
+content admission and reduction, then runs the spatial reference. The direct
+`observe` entry still accepts already-aligned 200x100 working images and
+explicitly bypasses content admission. Neither byte-image API establishes
+source identity or chooses playback scheduling.
 
 ## Source boundary clarified by direct binding review
 
@@ -28,15 +30,66 @@ header into a 200x4 Mat. Older notes asserting that degeneration are wrong.
 The recovered reduction is 4:1 in both dimensions. OpenCV's integer-area
 implementation averages the aligned source blocks before converting back to
 bytes ([OpenCV resize source](https://raw.githubusercontent.com/opencv/opencv/4.x/modules/imgproc/src/resize.cpp));
-this does not identify Studio's exact optimized dispatch or source ray law.
+this does not identify Studio's exact optimized dispatch. The reference uses
+integer sums followed by ties-to-even byte conversion. Surrounding working
+rows may start at zero: the subsequent row replication supplies every row
+which can affect these selected outputs. A poisoned-surroundings regression
+checks this over successive observations.
 
-The new detached Kjerag sampler uses the actual packed-map/source-color shader
-to make full-chart point samples. `stitch-layers ... estimate-fusion` can run
-the spatial reference on those samples and render its result, but that input
-does **not** replace the native 800x16 source production/reduction boundary.
-The exact source-band rays and automatic update owner remain unfinished.
+The native means use binary64 arithmetic. Replacing their comparison with
+an integer sum threshold is not bit-equivalent: sums 9 and 3177 differ by
+exactly `3*1056`, but their separately rounded means differ by
+`3.0000000000000004`. The CPU reference preserves that trigger. This is a
+boundary case to disclose when qualifying a cheaper GPU admission policy,
+not a reason to emulate binary64 throughout the GPU solver.
+
+The detached sampler now replaces full-chart point sampling with the source
+band construction below. `stitch-layers ... estimate-fusion` passes its bands
+through `observe_bands` and renders the resulting ratios. Automatic update
+ownership and a GPU-resident solve remain unfinished.
 Raw binding evidence is in ignored `photometric-static/review-content-gate-*`
 and `review-selected-getter-*` files. No new runtime capture was needed.
+
+## Source-band construction
+
+`0x183bec4a0` accepts two 200x100 normalized lens-local UV maps. For each lens,
+`0x183beb290` pads one periodic column on either side, then calls OpenCV remap
+with interpolation 1 and border 0 through the four-row lookup ROI
+`Rect(0,48,200,4)`. The lookup generator `0x183beb560` uses the same spherical
+form as the ratio coordinates below, with **positive** `Ry(PI/2)` and
+`coord_x = 1 + upper(200*az/TAU,199)`. Its theta denominator is 100, not 99;
+its four absolute rows are 48 through 51. This produces two 200x4 source-UV
+bands, not source colors yet.
+
+The source sampler interpolates these UVs at endpoint-aligned positions
+`(out_x*199/799, out_y*3/15)` to produce each 800x16 band. It then bilinearly
+samples the source planes and converts their values to BGR bytes. The native
+mode dispatch is `0x183bf5bc0`; the planar sampler and plane workers include
+`0x183bee510`, `0x183bf1690` and `0x183bf1800`.
+
+Kjerag uses its already-qualified final packed map, converting the two atlas
+X coordinates to lens-local coordinates once. The detached GPU implementation
+has separate map-composition and source-sampling dispatches. Map composition
+uses five fractional bits, corresponding to OpenCV's
+[`INTER_BITS=5`](https://raw.githubusercontent.com/opencv/opencv/4.x/modules/imgproc/include/opencv2/imgproc.hpp);
+the subsequent endpoint expansion is continuous. Each lens is sampled locally,
+without the drawing consumer's box filter or cross-lens atlas interpolation.
+Container-driven float RGB conversion followed by clamping and ties-to-even
+byte conversion is Kjerag policy. The native runtime conversion branch and
+upstream packed-map producer were not authenticated by this bounded CPU trace.
+This is therefore not a claim of bit-identical native source-band bytes.
+
+The native coordinate mask is initialized to zero at
+`0x183bec0eb..0x183bec118`. After a packed-map update, ordered `<0` or `>1`
+tests on any lens-local UV component mark invalidity; a valid value never
+clears it. These ordered comparisons do not reject NaN. Kjerag accumulates
+the resulting four rows, periodically extended by six columns, before content
+admission, including observations whose colors do not trigger a solve. This
+does not identify Studio's map-update or video-frame cadence. Shape validation
+precedes every reference state mutation.
+
+Raw lookup, matrix, mask-lifetime and sampler evidence is retained in
+`photometric-static/review-upstream-band-mapping.md` and its named disassemblies.
 
 ## Verified sequence
 
@@ -115,10 +168,28 @@ has its previously disclosed numerical-order differences. This reference
 does not establish source/output video parity or authorize enabling an
 unaligned estimator in playback.
 
-Qualification: 27 `image_fusion` CPU tests pass, including a non-gray pair
+Initial spatial qualification: 27 `image_fusion` CPU tests passed, including a non-gray pair
 through inner solve, spatial maps and RGB correction; neutral repeated input;
 the retained boundary recurrence; exact right-edge fill; and poisoning all
 rows touched by the omitted operations across successive observations.
-The full required-Radeon workspace passes 1,212 tests, zero failures, 30
+The initial full required-Radeon workspace passed 1,212 tests, zero failures, 30
 ignored, with all-target Clippy and static checks. These are implementation
-regressions, not new Studio video comparisons. Neither executable was rebuilt.
+regressions, not new Studio video comparisons. Neither executable was rebuilt
+for that initial spatial increment.
+
+Source-band qualification now passes 45 focused CPU/GPU tests, including the
+outer gate, exact area blocks, sticky invalidity on skipped color updates,
+all 800 nonconstant composed GPU nodes, opposite-rotation and repeated-UV
+negative controls, and textured source samples from both lenses. Normalized
+texture filtering is tested at one BGR code, not claimed bit-identical to
+scalar f32 interpolation. Both actual reported X4/X2 views render from the
+new bands, with finite ratio maps and byte-identical correction-disabled PNGs.
+The coordinator viewed both source pairs, corrected views and computed seam
+overlays. These do not establish Studio output parity or temporal quality.
+The native player and frozen owner review package are unchanged by this
+diagnostic build. Evidence is ignored
+`scratch/fusion-sampling-20260907/attempt-08/`.
+The subsequent full required-Radeon workspace passes 1,231 tests, zero
+failures, 30 ignored; all-target Clippy and static gates pass. The tested source
+files and both player executables remain unchanged across that run. Logs are
+in `scratch/fusion-sampling-20260907/gates-03/`.
