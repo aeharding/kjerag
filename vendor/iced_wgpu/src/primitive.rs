@@ -51,6 +51,20 @@ pub trait Primitive: Debug + MaybeSend + MaybeSync + 'static {
         false
     }
 
+    /// Request a follow-up window redraw after this preparation.
+    ///
+    /// A video may keep its old picture presentable while its currently due
+    /// picture is still being prepared. This lets its widget sleep until the
+    /// video deadline and request another tick only if that due work is not
+    /// ready, instead of redrawing merely to poll future work. Offscreen
+    /// preparation ignores this request. This does not defer presentation.
+    fn requests_redraw_after_prepare(
+        &self,
+        _pipeline: &Self::Pipeline,
+    ) -> bool {
+        false
+    }
+
     /// Draws the [`Primitive`] in the given [`wgpu::RenderPass`].
     ///
     /// When possible, this should be implemented over [`render`](Self::render)
@@ -130,6 +144,8 @@ pub(crate) trait Stored:
 
     fn schedules_retry(&self, storage: &Storage) -> bool;
 
+    fn requests_redraw_after_prepare(&self, storage: &Storage) -> bool;
+
     fn render(
         &self,
         storage: &Storage,
@@ -186,6 +202,16 @@ impl<P: Primitive> Stored for BlackBox<P> {
             .expect("renderer should have the proper type");
 
         self.primitive.schedules_retry(renderer)
+    }
+
+    fn requests_redraw_after_prepare(&self, storage: &Storage) -> bool {
+        let renderer = storage
+            .get::<P>()
+            .expect("renderer should be initialized")
+            .downcast_ref::<P::Pipeline>()
+            .expect("renderer should have the proper type");
+
+        self.primitive.requests_redraw_after_prepare(renderer)
     }
 
     fn draw(
@@ -354,5 +380,7 @@ mod tests {
 
         assert!(default.is_presentable(&storage));
         assert!(!not_ready.is_presentable(&storage));
+        assert!(!default.requests_redraw_after_prepare(&storage));
+        assert!(!not_ready.requests_redraw_after_prepare(&storage));
     }
 }

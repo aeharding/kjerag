@@ -110,6 +110,10 @@ impl shader::Primitive for ScenePrimitive {
         pipeline.schedules_retry(self)
     }
 
+    fn requests_redraw_after_prepare(&self, pipeline: &ScenePipeline) -> bool {
+        pipeline.requests_redraw_after_prepare(self)
+    }
+
     fn prepare(
         &self,
         pipeline: &mut ScenePipeline,
@@ -192,7 +196,43 @@ fn mouse_update<Message>(
 /// is what keeps 29.97 fps content off a 60 Hz grid; `kjerag::app` documents
 /// the pacing, and the measurement that rejected the alternative.
 fn tick<Message: From<Stall>>(scene: &Scene, now: Instant) -> Option<Action<Message>> {
-    match scene.pump(now) {
+    let observed = std::env::var_os("KJERAG_NATIVE_LIFECYCLE_PROBE")
+        .is_some()
+        .then(|| (Instant::now(), std::time::SystemTime::now()));
+    let next = scene.pump(now);
+    if let Some((entered, wall)) = observed {
+        // Diagnostic only. Keep the requested deadline and redraw event age
+        // alongside existing source/publication records. A present commit is
+        // not scanout, and a delayed redraw is not evidence of a slow solver.
+        let (request, due_delta_ns) = match &next {
+            Next::At(due) => (
+                "at",
+                if *due >= now {
+                    due.duration_since(now).as_nanos().to_string()
+                } else {
+                    format!("-{}", now.duration_since(*due).as_nanos())
+                },
+            ),
+            Next::Refresh => ("refresh", "null".to_owned()),
+            Next::Never => ("never", "null".to_owned()),
+            Next::Stopped(_) => ("stopped", "null".to_owned()),
+        };
+        let offered = scene
+            .frame()
+            .map_or_else(|| "null".to_owned(), |frame| frame.0.to_string());
+        let shown = scene
+            .displayed_frame()
+            .map_or_else(|| "null".to_owned(), |frame| frame.0.to_string());
+        eprintln!(
+            "native-pump: {{\"entered_unix_ns\":{},\"redraw_age_ns\":{},\"pump_ns\":{},\"request\":\"{request}\",\"due_delta_ns\":{due_delta_ns},\"offered\":{offered},\"shown\":{shown}}}",
+            wall.duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            entered.saturating_duration_since(now).as_nanos(),
+            entered.elapsed().as_nanos(),
+        );
+    }
+    match next {
         Next::At(due) => Some(Action::request_redraw_at(due)),
         Next::Refresh => Some(Action::request_redraw()),
         Next::Never => None,

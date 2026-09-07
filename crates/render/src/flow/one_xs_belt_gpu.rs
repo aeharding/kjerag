@@ -586,6 +586,152 @@ struct TestColdBlurredProbe {
     l1_terminals: Vec<wgpu::Buffer>,
 }
 
+#[cfg(test)]
+const SOURCE_GPU_PROFILE_ENV: &str = "KJERAG_STITCH_GPU_PROFILE";
+
+#[cfg(test)]
+struct TestSourceGpuProfile {
+    active: Option<ActiveSourceGpuProfile>,
+}
+
+#[cfg(test)]
+struct ActiveSourceGpuProfile {
+    frame: FrameStamp,
+    mode: &'static str,
+    timestamps: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    readback: wgpu::Buffer,
+    next: u32,
+}
+
+#[cfg(test)]
+impl TestSourceGpuProfile {
+    fn begin(context: &OneXsGpuContext, frame: &FrameStamp, warm: bool) -> Fallible<Self> {
+        if std::env::var_os(SOURCE_GPU_PROFILE_ENV).is_none() {
+            return Ok(Self { active: None });
+        }
+        if !context.device().features().contains(
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+        ) {
+            return Err(
+                "complete-source GPU profile device lacks encoder timestamp queries".into(),
+            );
+        }
+        // Remove earlier diagnostic/draw work from the first interval. This
+        // wait exists only in the explicitly requested real-scene test path.
+        context.device().poll(wgpu::PollType::wait_indefinitely())?;
+        let timestamps = context
+            .device()
+            .create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("complete source stitch timestamps"),
+                ty: wgpu::QueryType::Timestamp,
+                count: 5,
+            });
+        let resolve = context.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("complete source stitch timestamp resolve"),
+            size: 5 * 8,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback = context.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("complete source stitch timestamp readback"),
+            size: 5 * 8,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut profile = Self {
+            active: Some(ActiveSourceGpuProfile {
+                frame: frame.clone(),
+                mode: if warm { "warm" } else { "cold" },
+                timestamps,
+                resolve,
+                readback,
+                next: 0,
+            }),
+        };
+        profile.mark(context)?;
+        Ok(profile)
+    }
+
+    fn mark(&mut self, context: &OneXsGpuContext) -> Fallible<()> {
+        let Some(active) = &mut self.active else {
+            return Ok(());
+        };
+        if active.next >= 5 {
+            return Err("complete-source GPU profile wrote too many timestamp markers".into());
+        }
+        let mut encoder =
+            context
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("complete source stitch timestamp marker"),
+                });
+        encoder.write_timestamp(&active.timestamps, active.next);
+        context.queue().submit([encoder.finish()]);
+        active.next += 1;
+        Ok(())
+    }
+
+    fn finish(mut self, context: &OneXsGpuContext) -> Fallible<()> {
+        let Some(mut active) = self.active.take() else {
+            return Ok(());
+        };
+        if active.next != 4 {
+            return Err(format!(
+                "complete-source GPU profile reached final marker {} instead of 4",
+                active.next
+            )
+            .into());
+        }
+        let mut encoder =
+            context
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("complete source stitch timestamp completion"),
+                });
+        encoder.write_timestamp(&active.timestamps, active.next);
+        active.next += 1;
+        encoder.resolve_query_set(&active.timestamps, 0..active.next, &active.resolve, 0);
+        encoder.copy_buffer_to_buffer(&active.resolve, 0, &active.readback, 0, 5 * 8);
+        let submission = context.queue().submit([encoder.finish()]);
+        let slice = active.readback.slice(..);
+        let (sent, received) = mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |answer| {
+            let _ = sent.send(answer);
+        });
+        context.device().poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        })?;
+        received.recv()??;
+        let mapped = slice.get_mapped_range();
+        let ticks: Vec<u64> = mapped
+            .chunks_exact(8)
+            .map(|bytes| u64::from_ne_bytes(bytes.try_into().unwrap()))
+            .collect();
+        drop(mapped);
+        active.readback.unmap();
+        let milliseconds = |ticks: u64| {
+            ticks as f64 * f64::from(context.queue().get_timestamp_period()) / 1_000_000.0
+        };
+        let elapsed = |start: usize, end: usize| milliseconds(ticks[end] - ticks[start]);
+        eprintln!(
+            "complete source GPU profile frame={} mode={} total_ms={:.6} front_ms={:.6} motion_ms={:.6} pis_ms={:.6} final_fusion_ms={:.6}",
+            active.frame.index(),
+            active.mode,
+            elapsed(0, 4),
+            elapsed(0, 1),
+            elapsed(1, 2),
+            elapsed(2, 3),
+            elapsed(3, 4),
+        );
+        eprintln!(
+            "complete source GPU profile intervals include queue gaps while the CPU submits each following stage"
+        );
+        Ok(())
+    }
+}
+
 fn require_resident_device_limits(limits: &wgpu::Limits) -> Fallible<()> {
     if limits.max_bind_groups < 3 {
         return Err(format!(
@@ -724,7 +870,11 @@ impl ResidentCaptureSession {
         let warm = self.capture.pipeline.root.has_installed_successor()?;
         #[cfg(test)]
         let frame = source.resident_frame();
+        #[cfg(test)]
+        let mut gpu_profile = TestSourceGpuProfile::begin(&self.context, &frame, warm)?;
         let source = source.submit_resident_front(&self.capture)?;
+        #[cfg(test)]
+        gpu_profile.mark(&self.context)?;
         #[cfg(test)]
         if !warm && std::env::var_os("KJERAG_ONE_X2_COLD_STAGE_PROBE").is_some() {
             let mut probe = self
@@ -746,6 +896,8 @@ impl ResidentCaptureSession {
             });
         }
         let motion = source.prepare_motion(&self.motion)?;
+        #[cfg(test)]
+        gpu_profile.mark(&self.context)?;
         let controls = self.controls();
         if warm {
             let terminal = motion.submit_resident_warm(
@@ -756,16 +908,19 @@ impl ResidentCaptureSession {
                 controls.l1(),
             )?;
             let operands = terminal.complete_warm_final(&self.bridge)?;
-            Ok(ResidentPendingMap::Warm(Box::new(
-                self.capture.pipeline.final_map.materialize_final_fused(
-                    operands,
-                    &self.fusion_inputs,
-                    &mut *self
-                        .fusion
-                        .lock()
-                        .map_err(|_| "image fusion capture state is poisoned")?,
-                )?,
-            )))
+            #[cfg(test)]
+            gpu_profile.mark(&self.context)?;
+            let pending = self.capture.pipeline.final_map.materialize_final_fused(
+                operands,
+                &self.fusion_inputs,
+                &mut *self
+                    .fusion
+                    .lock()
+                    .map_err(|_| "image fusion capture state is poisoned")?,
+            )?;
+            #[cfg(test)]
+            gpu_profile.finish(&self.context)?;
+            Ok(ResidentPendingMap::Warm(Box::new(pending)))
         } else {
             #[cfg(test)]
             let probing = std::env::var_os("KJERAG_ONE_X2_COLD_STAGE_PROBE").is_some();
@@ -822,16 +977,19 @@ impl ResidentCaptureSession {
                 .resume(&self.bridge, &self.solver)?
                 .resume(&self.bridge, &self.solver)?;
             let operands = pis_frontend_gpu::admit_completed_cold_final(cold, &self.context)?;
-            Ok(ResidentPendingMap::Cold(Box::new(
-                self.capture.pipeline.final_map.materialize_final_fused(
-                    operands,
-                    &self.fusion_inputs,
-                    &mut *self
-                        .fusion
-                        .lock()
-                        .map_err(|_| "image fusion capture state is poisoned")?,
-                )?,
-            )))
+            #[cfg(test)]
+            gpu_profile.mark(&self.context)?;
+            let pending = self.capture.pipeline.final_map.materialize_final_fused(
+                operands,
+                &self.fusion_inputs,
+                &mut *self
+                    .fusion
+                    .lock()
+                    .map_err(|_| "image fusion capture state is poisoned")?,
+            )?;
+            #[cfg(test)]
+            gpu_profile.finish(&self.context)?;
+            Ok(ResidentPendingMap::Cold(Box::new(pending)))
         }
     }
 }

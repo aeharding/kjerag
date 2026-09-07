@@ -338,6 +338,19 @@ fn exact_selected_display<T: Eq>(current: &T, shown: Option<&T>, same_capture: b
     same_capture && shown == Some(current)
 }
 
+fn exact_due_requires_redraw<T: Eq>(
+    offered: &T,
+    shown: Option<&T>,
+    same_capture: bool,
+    acknowledged: bool,
+) -> bool {
+    !acknowledged && !exact_selected_display(offered, shown, same_capture)
+}
+
+fn due_redraw_after_prepare(due_unready: bool, stopped: bool) -> bool {
+    due_unready && !stopped
+}
+
 fn resident_frame_view<'a>(
     stamp: &FrameStamp,
     capture: &ResidentCaptureFacade,
@@ -1669,14 +1682,11 @@ impl Scene {
             };
         }
         next_after_pump(
-            // Preparation will submit the new stitch AFTER this pump. Do not
-            // sleep until the next video timestamp before polling its result:
-            // that adds a whole source-frame interval to every transaction.
-            resident_refresh
-                || show.replay.borrow().is_some()
-                || (capture_owned
-                    && (offered_new_frame
-                        || (player.is_playing() && player.needs_decoded_ahead(1)))),
+            // A normal playing frame is prepared after this pump. If that exact
+            // due source is not ready, the prepared primitive requests the
+            // callback-paced follow-up itself. Speculative successors do not
+            // keep an otherwise idle window redrawing between video deadlines.
+            resident_refresh || show.replay.borrow().is_some(),
             player.is_playing(),
             player.is_seeking(),
             player.next_due(),
@@ -2596,6 +2606,9 @@ pub struct ScenePipeline {
     resident_completed_view: Option<View>,
     retired_one_xs: Vec<(ResidentCaptureFacade, ResidentSceneFacade)>,
     resident_draw: ResidentDrawSelection,
+    /// Set by this exact window preparation only when the offered due source is
+    /// neither the exact shown delivery nor acknowledged by its capture map.
+    redraw_after_prepare: bool,
     pipeline: wgpu::RenderPipeline,
     /// The same draw with the Studio optical-flow apply compiled in, chosen per
     /// draw when the runtime flow toggle is on ([`ScenePipeline::draw`]). Built
@@ -2994,6 +3007,7 @@ impl ScenePipeline {
             resident_completed_view: None,
             retired_one_xs: Vec::new(),
             resident_draw: ResidentDrawSelection::None,
+            redraw_after_prepare: false,
             pipeline,
             flow_pipeline,
             one_xs_flow_pipeline,
@@ -3117,6 +3131,7 @@ impl ScenePipeline {
         queue: &wgpu::Queue,
         aspect: f32,
     ) {
+        self.redraw_after_prepare = false;
         self.report_device(device);
         primitive
             .resident_refresh
@@ -3187,6 +3202,7 @@ impl ScenePipeline {
                 return;
             }
             if let Err(error) = self.prepare_resident_one_xs(primitive, aspect) {
+                self.redraw_after_prepare = false;
                 self.resident_draw = ResidentDrawSelection::None;
                 primitive.shutter.fail(&error);
                 primitive.stalled.fail_now(error);
@@ -3251,6 +3267,10 @@ impl ScenePipeline {
         // and target-mismatch states may still need the renderer's fallback
         // wake; only an actual pending refresh can take over retry scheduling.
         primitive.resident_refresh.load(AtomicOrdering::Acquire)
+    }
+
+    pub(crate) fn requests_redraw_after_prepare(&self, primitive: &ScenePrimitive) -> bool {
+        due_redraw_after_prepare(self.redraw_after_prepare, primitive.stalled.stopped())
     }
 
     fn prepare_resident_one_xs(&mut self, primitive: &ScenePrimitive, aspect: f32) -> Fallible<()> {
@@ -3333,12 +3353,38 @@ impl ScenePipeline {
                     primitive.camera
                 );
             }
+            let due_unready = offered
+                .and_then(|view| {
+                    view.resident_one_xs
+                        .as_ref()
+                        .filter(|owner| owner.same_capture(capture))
+                        .map(|_| view.frames.stamp())
+                })
+                .map(|stamp| {
+                    let shown_stamp = shown.as_ref().map(|view| view.frames.stamp());
+                    let same_capture = shown.as_ref().is_some_and(|view| {
+                        view.resident_one_xs
+                            .as_ref()
+                            .is_some_and(|owner| owner.same_capture(capture))
+                    });
+                    capture.acknowledged(&stamp).map(|acknowledged| {
+                        exact_due_requires_redraw(
+                            &stamp,
+                            shown_stamp.as_ref(),
+                            same_capture,
+                            acknowledged,
+                        )
+                    })
+                })
+                .transpose()?
+                .unwrap_or(false);
+            self.redraw_after_prepare = due_unready;
             match prepared {
                 ResidentPrepare::Staged { installed } => {
-                    // Drawing the old picture does not mean the next source
-                    // has finished. Keep collecting its result before its PTS
-                    // so the worker can use the second decoded successor.
-                    if attachment.preparing_source()? {
+                    // Only an offered due source keeps a follow-up redraw in
+                    // flight. A speculative successor may continue working,
+                    // but it does not make an otherwise idle window poll.
+                    if due_unready && attachment.preparing_source()? {
                         primitive
                             .resident_refresh
                             .store(true, AtomicOrdering::Release);
@@ -3368,9 +3414,13 @@ impl ScenePipeline {
                         self.resident_draw = ResidentDrawSelection::Active;
                     }
                 }
-                ResidentPrepare::Pending { .. } => primitive
-                    .resident_refresh
-                    .store(true, AtomicOrdering::Release),
+                ResidentPrepare::Pending { .. } => {
+                    if due_unready {
+                        primitive
+                            .resident_refresh
+                            .store(true, AtomicOrdering::Release);
+                    }
+                }
                 ResidentPrepare::Retry { reason, .. } => {
                     primitive
                         .resident_refresh
@@ -3416,9 +3466,11 @@ impl ScenePipeline {
                         }
                         primitive.resident_submitted.keep(view);
                         primitive.stalled.landed();
-                        primitive
-                            .resident_refresh
-                            .store(true, AtomicOrdering::Release);
+                        if self.redraw_after_prepare {
+                            primitive
+                                .resident_refresh
+                                .store(true, AtomicOrdering::Release);
+                        }
                     }
                     ResidentSubmit::ImportFailed(error) => {
                         primitive.stalled.failed(
@@ -7023,13 +7075,35 @@ mod tests {
     }
 
     #[test]
-    fn a_new_resident_offer_wakes_before_the_next_video_timestamp() {
+    fn idle_playback_waits_for_the_deadline_until_due_work_requests_a_retry() {
         let due = Instant::now() + Duration::from_millis(33);
-        assert_eq!(next_after_pump(true, true, false, Some(due)), Next::Refresh);
         assert_eq!(
             next_after_pump(false, true, false, Some(due)),
             Next::At(due)
         );
+        assert_eq!(next_after_pump(true, true, false, Some(due)), Next::Refresh);
+    }
+
+    #[test]
+    fn post_prepare_retry_requires_the_exact_unshown_due_delivery() {
+        let due = 9_u64;
+        let previous = 8_u64;
+        assert!(exact_due_requires_redraw(
+            &due,
+            Some(&previous),
+            true,
+            false
+        ));
+        assert!(!exact_due_requires_redraw(&due, Some(&due), true, false));
+        assert!(exact_due_requires_redraw(&due, Some(&due), false, false));
+        assert!(!exact_due_requires_redraw(
+            &due,
+            Some(&previous),
+            true,
+            true
+        ));
+        assert!(due_redraw_after_prepare(true, false));
+        assert!(!due_redraw_after_prepare(true, true));
     }
 
     #[test]
@@ -7709,7 +7783,17 @@ mod tests {
             if pipeline.resident_draw == ResidentDrawSelection::Active
                 && capture.installed_stamp().ok().flatten().as_ref() == Some(expected)
             {
+                assert!(
+                    !pipeline.requests_redraw_after_prepare(&primitive),
+                    "an installed due picture must not busy-redraw for future work"
+                );
                 break;
+            }
+            if pipeline.is_presentable(&primitive) && !capture.acknowledged(expected).unwrap() {
+                assert!(
+                    pipeline.requests_redraw_after_prepare(&primitive),
+                    "a presentable old picture lost the exact due source's completion wake"
+                );
             }
             assert!(
                 Instant::now() < deadline,
@@ -8041,6 +8125,31 @@ mod tests {
             24,
             "adjacent warm Scene frame did not submit six L1 chunks on its worker"
         );
+        if std::env::var_os("KJERAG_STITCH_GPU_PROFILE").is_some() {
+            let mut previous = second;
+            // Together with the ordinary adjacent successor above, this gives
+            // the opt-in profiler four real warm transactions after its cold
+            // observation without changing the default qualification path.
+            for _ in 0..3 {
+                scene.step(Instant::now(), 1);
+                let next = wait_for_new_scene_frame(&scene, Some(&previous));
+                let continued = prepare_and_draw_exact_resident_frame(
+                    &scene,
+                    &mut pipeline,
+                    &device,
+                    &queue,
+                    &next,
+                );
+                assert!(continued.same_capture(&capture));
+                let map = scene
+                    .diagnostic_one_xs_map()
+                    .unwrap()
+                    .expect("profiled warm resident Scene frame has no installed map");
+                assert_eq!(map.frame(), &next);
+                assert_finite_fusion(&map);
+                previous = next;
+            }
+        }
     }
 
     fn assert_resident_fusion_matches_cpu_reference(
@@ -9123,7 +9232,12 @@ mod tests {
             ..Default::default()
         }))
         .map_err(|error| error.to_string())?;
-        let primary = dmabuf::open_device(&adapter).map_err(|error| error.to_string())?;
+        let primary = if std::env::var_os("KJERAG_STITCH_GPU_PROFILE").is_some() {
+            dmabuf::open_device_for_timestamp_test(&adapter)
+        } else {
+            dmabuf::open_device(&adapter)
+        }
+        .map_err(|error| error.to_string())?;
         let foreign = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("foreign selected ONE X2 Scene context"),
             required_features: wgpu::Features::empty(),
@@ -9149,17 +9263,22 @@ mod tests {
             if let Some(frame) = scene.frame_stamp()
                 && previous.is_none_or(|previous| &frame != previous)
             {
-                assert_eq!(
-                    next,
-                    if scene.draw_retirement_full.load(AtomicOrdering::Acquire) {
-                        // This fixture submits real draws. The existing two-slot
-                        // backpressure contract substitutes a bounded 1 ms retry.
-                        Next::At(now + Duration::from_millis(1))
-                    } else {
-                        Next::Refresh
-                    },
-                    "a new resident source needs an immediate or retirement-timed completion redraw"
-                );
+                let video_deadline = matches!(next, Next::At(due)
+                    if scene.player(Player::is_playing) == Some(true)
+                        && scene.player(Player::next_due) == Some(Some(due)));
+                if !video_deadline {
+                    assert_eq!(
+                        next,
+                        if scene.draw_retirement_full.load(AtomicOrdering::Acquire) {
+                            // The two-slot backpressure contract still substitutes
+                            // a bounded 1 ms retry for an immediate redraw.
+                            Next::At(now + Duration::from_millis(1))
+                        } else {
+                            Next::Refresh
+                        },
+                        "a new source must retain its video deadline or completion retry"
+                    );
+                }
                 return frame;
             }
             assert!(

@@ -544,6 +544,21 @@ one is acknowledged. Two decoded successors, one unpublished completed result,
 one active transaction and two render-retirement slots are independent bounds;
 none treats computation as display or permits an unbounded queue.
 
+Idle playback schedules its next redraw at Player's exact media deadline,
+not on every display refresh to poll speculative successors. An old-picture
+presentation just before that deadline arms winit's Wayland frame callback and
+can delay the due picture until a later refresh even when its map is ready.
+Input and UI redraws retain their independent scheduling; this is not a cap on
+changing-view rendering capacity. Preparation still services bounded lookahead
+whenever a redraw occurs. If the exact currently offered, unacknowledged source
+is not installed after preparation, Scene requests a follow-up through the
+renderer while keeping the old picture presentable. This flag is recomputed on
+every prepare and cleared on errors; it does not bypass compositor callbacks,
+publish early, or reject a drawable old picture. Draw-retirement refusal keeps
+its separate existing retry policy. Less eager idle polling can reduce future
+work headroom, so source readiness and ordinary playback require qualification
+alongside active-view capacity.
+
 The capture-owned session and Scene's two exact admitted views survive a
 renderer-pipeline recreation on the same device and queue. Pausing hides decoded
 lookahead from preparation but does not discard a job or completed future result;

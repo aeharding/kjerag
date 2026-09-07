@@ -69,11 +69,23 @@ storm without changing draw-slot capacity or source ownership. The 1 ms value
 is a Kjerag host scheduling policy, not a recovered Studio timing. It is still
 under native performance qualification, not a shipping or 240 Hz claim.
 
+A separate default-false `requests_redraw_after_prepare` hook lets a presentable
+primitive request a follow-up after discovering that its currently due picture
+is not ready. Kjerag uses this to sleep until video deadlines without repeatedly
+presenting the old picture just to poll future work. The renderer combines
+requests from visible, presentable primitives and requests one redraw for a
+ready window. A refused window keeps the existing refusal/retry policy instead;
+offscreen preparation ignores the hook. This neither defers an otherwise ready
+presentation nor changes Wayland frame callbacks. Scene recomputes the request
+on every prepare and suppresses it on terminal failure.
+
 The env-gated `preflight_tests` renderer regression uses a real GPU and checks
 refusal with zero UI preparations/submissions, once-only custom preparation,
 the first bridge and self-scheduled suppression, default fallback and mixed
 owner transitions, ready recovery with an actual submit, clipping and ungated
-offscreen rendering.
+offscreen rendering. A third real-GPU test checks presentable old-picture
+follow-ups, clearing the request on the next preparation, clipped primitives
+and the offscreen boundary.
 Run it with `KJERAG_WGPU_PREFLIGHT_TEST=1 cargo test -p iced_wgpu --lib preflight_tests`.
 Skipping the environment-gated test is not GPU verification.
 

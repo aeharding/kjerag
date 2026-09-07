@@ -34,6 +34,7 @@ struct TestPrimitive {
     ready: Arc<AtomicBool>,
     counts: Arc<Counts>,
     schedules_retry: bool,
+    requests_redraw: bool,
 }
 
 impl Primitive for TestPrimitive {
@@ -57,6 +58,13 @@ impl Primitive for TestPrimitive {
 
     fn schedules_retry(&self, _pipeline: &Self::Pipeline) -> bool {
         self.schedules_retry
+    }
+
+    fn requests_redraw_after_prepare(
+        &self,
+        _pipeline: &Self::Pipeline,
+    ) -> bool {
+        self.requests_redraw
     }
 
     fn draw(
@@ -179,7 +187,80 @@ fn primitive(
         ready: Arc::clone(ready),
         counts: Arc::clone(counts),
         schedules_retry: false,
+        requests_redraw: false,
     }
+}
+
+#[test]
+fn presentable_due_work_can_request_followup_without_deferring_the_picture() {
+    let Some((mut renderer, device, _queue, redraws)) = test_renderer() else {
+        eprintln!("skipping preflight GPU test; set {GPU_TEST}=1 to run it");
+        return;
+    };
+    let viewport = Viewport::with_physical_size(Size::new(64, 64), 1.0);
+    let frame = Rectangle::with_size(Size::new(64.0, 64.0));
+    let ready = Arc::new(AtomicBool::new(true));
+    let counts = Arc::new(Counts::default());
+    let mut waiting = primitive(0, &ready, &counts);
+    waiting.requests_redraw = true;
+    primitive::Renderer::draw_primitive(&mut renderer, frame, waiting);
+    let encoder = renderer.prepare_window(&viewport).unwrap();
+    assert_eq!(redraws.load(Ordering::SeqCst), 1);
+    assert_eq!(renderer.prepared_ui_count, 1);
+    let (_texture, view) = target(&device);
+    let submission = renderer.present_prepared(encoder, &view, &viewport, None);
+    let _ = device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        })
+        .unwrap();
+    assert_eq!(renderer.submit_count, 1);
+    assert_eq!(counts.drawn[0].load(Ordering::SeqCst), 1);
+
+    // A fresh ready primitive with no due work neither inherits nor issues
+    // another request; the previous request is not a persistent mode.
+    core::Renderer::reset(&mut renderer, frame);
+    primitive::Renderer::draw_primitive(
+        &mut renderer,
+        frame,
+        primitive(0, &ready, &counts),
+    );
+    let encoder = renderer.prepare_window(&viewport).unwrap();
+    renderer.discard_prepared(encoder);
+    assert_eq!(redraws.load(Ordering::SeqCst), 1);
+
+    // A clipped primitive cannot wake the window, and offscreen rendering
+    // must remain independent of native follow-up scheduling.
+    core::Renderer::reset(&mut renderer, frame);
+    let mut clipped = primitive(0, &ready, &counts);
+    clipped.requests_redraw = true;
+    primitive::Renderer::draw_primitive(
+        &mut renderer,
+        Rectangle::new(Point::new(1000.0, 1000.0), Size::new(10.0, 10.0)),
+        clipped,
+    );
+    let encoder = renderer.prepare_window(&viewport).unwrap();
+    renderer.discard_prepared(encoder);
+    assert_eq!(redraws.load(Ordering::SeqCst), 1);
+
+    core::Renderer::reset(&mut renderer, frame);
+    let mut waiting = primitive(0, &ready, &counts);
+    waiting.requests_redraw = true;
+    primitive::Renderer::draw_primitive(&mut renderer, frame, waiting);
+    let submission = renderer.present(
+        None,
+        wgpu::TextureFormat::Rgba8Unorm,
+        &view,
+        &viewport,
+    );
+    let _ = device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        })
+        .unwrap();
+    assert_eq!(redraws.load(Ordering::SeqCst), 1);
 }
 
 #[test]

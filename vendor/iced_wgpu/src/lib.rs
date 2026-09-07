@@ -217,7 +217,8 @@ impl Renderer {
         viewport: &Viewport,
     ) -> Option<wgpu::CommandEncoder> {
         self.layers.merge();
-        let (presentable, schedules_retry) = self.prepare_primitives(viewport);
+        let (presentable, schedules_retry, requests_redraw) =
+            self.prepare_primitives(viewport);
         if !presentable {
             self.engine
                 .primitive_storage
@@ -231,6 +232,9 @@ impl Renderer {
             return None;
         }
         self.deferred_retry_started = false;
+        if requests_redraw {
+            self.engine._shell.request_redraw();
+        }
 
         let mut encoder = self.engine.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor {
@@ -382,7 +386,7 @@ impl Renderer {
         viewport: &Viewport,
     ) -> bool {
         self.layers.merge();
-        let (presentable, _) = self.prepare_primitives(viewport);
+        let (presentable, _, _) = self.prepare_primitives(viewport);
         self.prepare_ui(encoder, viewport);
         presentable
     }
@@ -393,10 +397,14 @@ impl Renderer {
     /// This local renderer prepares shaders before built-in batches on both
     /// window and offscreen paths. Kjerag's Scene primitive has no dependency
     /// on those batches; each custom primitive is still prepared exactly once.
-    fn prepare_primitives(&mut self, viewport: &Viewport) -> (bool, bool) {
+    fn prepare_primitives(
+        &mut self,
+        viewport: &Viewport,
+    ) -> (bool, bool, bool) {
         let scale_factor = viewport.scale_factor();
         let mut presentable = true;
         let mut schedules_retry = true;
+        let mut requests_redraw = false;
         let physical_bounds = Rectangle::<f32>::from(Rectangle::with_size(
             viewport.physical_size(),
         ));
@@ -445,6 +453,12 @@ impl Renderer {
                             schedules_retry &= instance
                                 .primitive
                                 .schedules_retry(&primitive_storage);
+                        } else {
+                            requests_redraw |= instance
+                                .primitive
+                                .requests_redraw_after_prepare(
+                                    &primitive_storage,
+                                );
                         }
                     }
                 }
@@ -453,7 +467,7 @@ impl Renderer {
             }
         }
 
-        (presentable, schedules_retry)
+        (presentable, schedules_retry, requests_redraw)
     }
 
     /// Prepare built-in batches after custom primitives. Windows gate this on

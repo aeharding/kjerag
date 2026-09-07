@@ -63,7 +63,27 @@ pub fn force_extensions(args: wgpu::hal::vulkan::CreateDeviceCallbackArgs<'_, '_
 /// of this: its device is iced's, and the `[patch.crates-io]` wgpu entry is
 /// what puts the extension on that one.
 pub fn open_device(adapter: &wgpu::Adapter) -> Fallible<(wgpu::Device, wgpu::Queue)> {
-    let features = adapter.features() & wgpu::Features::FLOAT32_FILTERABLE;
+    open_device_with_features(adapter, wgpu::Features::empty())
+}
+
+#[cfg(test)]
+pub(crate) fn open_device_for_timestamp_test(
+    adapter: &wgpu::Adapter,
+) -> Fallible<(wgpu::Device, wgpu::Queue)> {
+    open_device_with_features(
+        adapter,
+        wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+    )
+}
+
+fn open_device_with_features(
+    adapter: &wgpu::Adapter,
+    required: wgpu::Features,
+) -> Fallible<(wgpu::Device, wgpu::Queue)> {
+    if !adapter.features().contains(required) {
+        return Err(format!("GPU lacks required test features {required:?}").into());
+    }
+    let features = (adapter.features() & wgpu::Features::FLOAT32_FILTERABLE) | required;
     let opened = unsafe {
         let hal = adapter.as_hal::<Vulkan>().ok_or("not a Vulkan adapter")?;
         hal.open_with_callback(

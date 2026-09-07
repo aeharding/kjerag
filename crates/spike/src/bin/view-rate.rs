@@ -1,8 +1,12 @@
 //! High-refresh view diagnostic through the player's resident Scene path.
 //!
 //! Run through scripts/quiet.sh:
-//! view-rate <file.insv> [width] [height] [time] [yaw] [pitch] [fov].
+//! view-rate <file.insv> [width] [height] [time] [yaw] [pitch] [fov] [unorm|srgb].
 //! View angles are degrees; omitted angles retain the ONE X2 review view.
+//! An explicit format compares BGRA8 targets with or without sRGB encoding.
+//! The default remains the screenshot instrument's RGBA8 unorm. Native iced
+//! normally selects an sRGB target, which also enables the view shader's
+//! inverse transfer function; unorm timings do not include that work.
 //! Both phases measure uncapped changing-view capacity, first paused then
 //! with ordinary decoding and stitching running. These are NOT
 //! native-window fps: compositor/input/presentation are absent, and each draw
@@ -24,9 +28,9 @@ const HZ: f64 = 240.0;
 
 fn main() -> Fallible<()> {
     let args: Vec<_> = std::env::args().collect();
-    let input = args
-        .get(1)
-        .ok_or("usage: view-rate <file.insv> [width] [height] [time] [yaw] [pitch] [fov]")?;
+    let input = args.get(1).ok_or(
+        "usage: view-rate <file.insv> [width] [height] [time] [yaw] [pitch] [fov] [unorm|srgb]",
+    )?;
     let width = args.get(2).map_or(Ok(2560), |s| s.parse::<u32>())?;
     let height = args.get(3).map_or(Ok(1440), |s| s.parse::<u32>())?;
     let time = args.get(4).map_or(Ok(0.0), |s| s.parse::<f64>())?;
@@ -54,6 +58,7 @@ fn main() -> Fallible<()> {
     if width == 0 || height == 0 || !time.is_finite() || time < 0.0 {
         return Err("view-rate needs nonzero dimensions and a finite nonnegative time".into());
     }
+    let format = target_format(args.get(8).map(String::as_str))?;
     let gpu = Gpu::open()?;
     let mut scene = Scene::open(Path::new(input))?;
     scene.pause(Instant::now());
@@ -62,8 +67,8 @@ fn main() -> Fallible<()> {
         return Err("view-rate needs at least 12 seconds of footage after its start time".into());
     }
     scene.seek(Duration::from_secs_f64(time), Accuracy::Exact);
-    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
-    let target = Offscreen::new(&gpu.device, Size::new(width, height), FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, format);
+    let target = Offscreen::new(&gpu.device, Size::new(width, height), format);
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         redraw(&scene, &mut pipeline, &gpu, &target, camera)?;
@@ -87,6 +92,7 @@ fn main() -> Fallible<()> {
     println!(
         "{}",
         json!({"gpu": gpu.name, "output": [width, height], "target_hz": HZ,
+            "target_format": format!("{format:?}"),
             "view_degrees": [camera.yaw.to_degrees(), camera.pitch.to_degrees(), camera.fov.to_degrees()],
             "measurement": "offscreen CPU+GPU completed redraw, not native presentation",
             "completion": "queue-prefix callback, nonblocking poll, 100 us timeout",
@@ -95,6 +101,15 @@ fn main() -> Fallible<()> {
     measure(&scene, &mut pipeline, &gpu, &target, camera, false)?;
     scene.play();
     measure(&scene, &mut pipeline, &gpu, &target, camera, true)
+}
+
+fn target_format(argument: Option<&str>) -> Fallible<wgpu::TextureFormat> {
+    match argument {
+        None => Ok(FORMAT),
+        Some("unorm") => Ok(wgpu::TextureFormat::Bgra8Unorm),
+        Some("srgb") => Ok(wgpu::TextureFormat::Bgra8UnormSrgb),
+        Some(_) => Err("view-rate target format must be unorm or srgb".into()),
+    }
 }
 
 fn redraw(
@@ -227,6 +242,17 @@ fn measure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_formats_change_only_the_bgra_transfer_encoding() {
+        assert_eq!(target_format(None).unwrap(), FORMAT);
+        let unorm = target_format(Some("unorm")).unwrap();
+        let srgb = target_format(Some("srgb")).unwrap();
+        assert!(!unorm.is_srgb());
+        assert!(srgb.is_srgb());
+        assert_eq!(unorm.add_srgb_suffix(), srgb);
+        assert!(target_format(Some("unknown")).is_err());
+    }
 
     #[test]
     fn clock_relative_age_keeps_either_sign() {

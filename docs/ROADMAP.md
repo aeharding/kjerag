@@ -14,6 +14,35 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Smoothness candidate under qualification, 2026-09-07:** ordinary idle
+playback now waits for exact video deadlines instead of refreshing merely to
+poll speculative stitching. The measured previous refresh often presented the
+old picture just before its successor was due, arming the Wayland callback and
+delaying publication of an already-ready successor. Input redraws, source order,
+two draw-retirement slots and stitching/color arithmetic are unchanged. A
+post-prepare follow-up handles an exact due picture that is not ready yet.
+In matched 25-second native COSMIC runs, X4 source-hold p95 fell from 49.04 to
+34.22 ms, with holds at least 47 ms falling from 47 to zero. ONE X2 p95 fell
+from 48.05 to 37.71 ms and long holds from 36 to 13, but its maximum rose
+from 64.99 to 68.19 ms. Remaining X2 holds coincide with unavailable due
+results; reduced idle lookahead headroom is not an accepted compromise.
+Both traces retain six source-less startup commits and fail whole-run strict
+accounting. These are native commit timings, not scanout measurements. Three
+real-GPU renderer preflight checks and 62 Scene tests pass. Fresh full gates
+pass 1,240 workspace tests, zero failures and 30 ignored; native UI passes
+50 X4 and 54 ONE X2 checks. Both exact reported-view captures and all 460
+artifacts across 31 X4/61 X2 consecutive frames remain byte-identical to the
+preceding color build. Two 40-second native panning runs at 2256x1504 reach
+257.87/255.50 changing commits/s on X4, with 29.975/29.950 source fps and
+bounded lateness. ONE X2 reaches 272.47/257.60 changing commits/s, but its
+second run drops to 29.425 source fps and accumulates 733 ms worst lateness;
+that repeat fails the full-source-cadence requirement. All four pointer
+cohorts pass strict trace accounting, while whole-run traces retain failures
+outside that cohort. Commit p99 is 10.21 to 12.06 ms, not an all-frame
+4.17 ms pass. This is a measured X4 improvement, not a qualified two-camera
+smoothness fix. The candidate is held for investigation of the X2 failure.
+No owner review package, installed application or main branch has changed.
+
 **Latest qualified follow-up, 2026-09-07:** live GPU photometric matching now
 has one immutable texture publication instead of duplicate buffers. Full gates
 pass 1,238 tests and native UI passes 50 X4/54 ONE X2 checks, now including the
