@@ -6,11 +6,13 @@
 //! component is not consumed. See the private capture receipt in
 //! `scratch/x4-fusion-maps-20260907-01/` and the public on/off oracle manifest.
 //!
-//! Explicit captured-map replay is not an automatic producer or a claim of
-//! source/output video parity. Ordinary playback remains unchanged.
+//! The shared resident capture also owns an automatic GPU producer. Its
+//! immutable per-frame outputs use this same consumer; neither captured replay
+//! nor numerical reference agreement establishes Studio-output video parity.
 
 mod content;
 mod coordinates;
+pub(crate) mod gpu;
 pub(crate) mod sample;
 pub mod solve;
 pub mod spatial;
@@ -84,13 +86,14 @@ pub fn correct(color: [f32; 3], ratio: [f32; 3]) -> [f32; 3] {
 }
 
 pub(crate) const WGSL: &str = r#"
-@group(2) @binding(0) var<storage, read> fusion_left: array<vec4<f32>>;
-@group(2) @binding(1) var<storage, read> fusion_right: array<vec4<f32>>;
+@group(2) @binding(0) var fusion_left: texture_2d<f32>;
+@group(2) @binding(1) var fusion_right: texture_2d<f32>;
 
 fn fusion_at(lens: u32, x: i32, y: i32) -> vec3<f32> {
-  let index = type2_map_index(x, y);
-  if lens == 0u { return fusion_left[index].xyz; }
-  return fusion_right[index].xyz;
+  let at = vec2<i32>(((x % TYPE2_MAP_W) + TYPE2_MAP_W) % TYPE2_MAP_W,
+    clamp(y, 0, TYPE2_MAP_H - 1));
+  if lens == 0u { return textureLoad(fusion_left, at, 0).xyz; }
+  return textureLoad(fusion_right, at, 0).xyz;
 }
 
 fn type2_correct(color: vec3<f32>, uv: vec2<f32>, lens: u32) -> vec3<f32> {
@@ -101,6 +104,23 @@ fn type2_correct(color: vec3<f32>, uv: vec2<f32>, lens: u32) -> vec3<f32> {
   let c = fusion_at(lens, at.x, at.y + 1);
   let d = fusion_at(lens, at.x + 1, at.y + 1);
   let ratio = mix(mix(a, b, q.z), mix(c, d, q.z), q.w);
+  return clamp((color + vec3<f32>(1.0)) * ratio - vec3<f32>(1.0),
+    vec3<f32>(0.0), vec3<f32>(1.0));
+}
+"#;
+
+pub(crate) const FILTERED_WGSL: &str = r#"
+@group(2) @binding(0) var fusion_left: texture_2d<f32>;
+@group(2) @binding(1) var fusion_right: texture_2d<f32>;
+@group(2) @binding(2) var fusion_linear: sampler;
+
+fn type2_correct(color: vec3<f32>, uv: vec2<f32>, lens: u32) -> vec3<f32> {
+  var ratio: vec3<f32>;
+  if lens == 0u {
+    ratio = textureSampleLevel(fusion_left, fusion_linear, uv, 0.0).xyz;
+  } else {
+    ratio = textureSampleLevel(fusion_right, fusion_linear, uv, 0.0).xyz;
+  }
   return clamp((color + vec3<f32>(1.0)) * ratio - vec3<f32>(1.0),
     vec3<f32>(0.0), vec3<f32>(1.0));
 }

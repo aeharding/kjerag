@@ -2,15 +2,16 @@
 
 use super::*;
 use crate::image_fusion::{RatioMap, RatioPair, correct};
-use crate::studio_type2::{MAP_HEIGHT, MAP_NODES, MAP_WIDTH, PACKED_BYTES};
+use crate::studio_type2::{MAP_HEIGHT, MAP_NODES, MAP_WIDTH};
 
 #[test]
 fn optional_fusion_shader_declares_only_its_enabled_group() {
     use wgpu::naga::valid::{Capabilities, ValidationFlags, Validator};
 
     let enabled = draw_wgsl_with_fusion(true);
+    let filtered = draw_wgsl_with_fusion_mode(true, true);
     let disabled = draw_wgsl_with_fusion(false);
-    for source in [&enabled, &disabled] {
+    for source in [&enabled, &filtered, &disabled] {
         let module = wgpu::naga::front::wgsl::parse_str(source)
             .unwrap_or_else(|error| panic!("direct fusion WGSL did not parse: {error}"));
         Validator::new(ValidationFlags::all(), Capabilities::all())
@@ -18,8 +19,14 @@ fn optional_fusion_shader_declares_only_its_enabled_group() {
             .unwrap_or_else(|error| panic!("direct fusion WGSL did not validate: {error}"));
     }
 
-    assert!(enabled.contains("@group(2) @binding(0) var<storage, read> fusion_left"));
-    assert!(enabled.contains("@group(2) @binding(1) var<storage, read> fusion_right"));
+    assert!(enabled.contains("@group(2) @binding(0) var fusion_left: texture_2d<f32>"));
+    assert!(enabled.contains("@group(2) @binding(1) var fusion_right: texture_2d<f32>"));
+    assert!(enabled.contains("textureLoad(fusion_left, at, 0).xyz"));
+    assert!(enabled.contains("textureLoad(fusion_right, at, 0).xyz"));
+    assert!(!enabled.contains("fusion_linear"));
+    assert!(filtered.contains("@group(2) @binding(2) var fusion_linear: sampler"));
+    assert!(filtered.contains("textureSampleLevel(fusion_left, fusion_linear, uv, 0.0).xyz"));
+    assert!(filtered.contains("textureSampleLevel(fusion_right, fusion_linear, uv, 0.0).xyz"));
     assert!(enabled.contains("let ratio = mix(mix(a, b, q.z), mix(c, d, q.z), q.w);"));
     assert!(enabled.contains("if map.alpha == 0.0"));
     assert!(enabled.contains("} else if map.alpha == 1.0"));
@@ -33,11 +40,33 @@ fn optional_fusion_shader_declares_only_its_enabled_group() {
 
 #[test]
 fn gpu_fusion_sampling_and_preblend_match_the_scalar_consumer() {
-    let (device, queue) = match super::tests::gpu() {
+    qualify_gpu_fusion(false);
+}
+
+#[test]
+fn gpu_hardware_fusion_sampling_stays_within_half_an_output_code() {
+    qualify_gpu_fusion(true);
+}
+
+fn qualify_gpu_fusion(hardware_fusion: bool) {
+    // Hardware filtering quantizes interpolation weights. Its separate gate
+    // permits at most half an 8-bit output code, not numerical identity with
+    // explicit f32 mixes. Preserve the manual consumer's original bound.
+    let tolerance = if hardware_fusion { 0.5 / 255.0 } else { 2.0e-6 };
+    let (device, queue) = match fusion_gpu(hardware_fusion) {
         Ok(gpu) => gpu,
         Err(error) => {
+            assert!(
+                !hardware_fusion || !error.contains("advertised FLOAT32_FILTERABLE"),
+                "{error}"
+            );
             assert!(std::env::var_os("KJERAG_REQUIRE_GPU").is_none(), "{error}");
-            eprintln!("skipping direct fusion consumer: {error}");
+            let mode = if hardware_fusion {
+                "optional filtered"
+            } else {
+                "manual"
+            };
+            eprintln!("skipping {mode} direct fusion consumer: {error}");
             return;
         }
     };
@@ -62,6 +91,33 @@ fn gpu_fusion_sampling_and_preblend_match_the_scalar_consumer() {
         Sample::new([-0.0025, -0.1], 0.75, [0.0, 0.4, 1.0], [1.0, 0.4, 0.0]),
         Sample::new([1.0025, 1.1], 0.125, [0.6, 0.2, 0.8], [0.2, 0.8, 0.6]),
         Sample::new([0.25125, 0.335], 0.625, [0.3, 0.6, 0.9], [0.9, 0.3, 0.6]),
+        // Arbitrary f32 fractions exercise hardware filter-coordinate
+        // rounding. The first two approach the periodic join from each side
+        // and select one lens apiece; the others exercise pre-blend sampling.
+        Sample::new(
+            [-0.000617283, 0.503271],
+            0.0,
+            [0.17, 0.53, 0.91],
+            [0.93, 0.41, 0.08],
+        ),
+        Sample::new(
+            [1.0006173, 0.497193],
+            1.0,
+            [0.81, 0.27, 0.63],
+            [0.11, 0.79, 0.37],
+        ),
+        Sample::new(
+            [0.1234567, 0.2345679],
+            0.37,
+            [0.23, 0.61, 0.97],
+            [0.89, 0.31, 0.07],
+        ),
+        Sample::new(
+            [0.7312345, 0.8765432],
+            0.83,
+            [0.74, 0.19, 0.58],
+            [0.16, 0.86, 0.43],
+        ),
     ];
     let packed_inputs: Vec<[f32; 4]> = samples
         .iter()
@@ -74,7 +130,10 @@ fn gpu_fusion_sampling_and_preblend_match_the_scalar_consumer() {
         })
         .collect();
 
-    let source = format!("{}\n{PROBE}", draw_wgsl_with_fusion(true));
+    let source = format!(
+        "{}\n{PROBE}",
+        draw_wgsl_with_fusion_mode(true, hardware_fusion)
+    );
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("direct fusion consumer qualification"),
         source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -95,27 +154,66 @@ fn gpu_fusion_sampling_and_preblend_match_the_scalar_consumer() {
             mapped_at_creation: false,
         })
     };
-    let ratios = [
-        buffer(
-            "left fusion ratio fixture",
-            PACKED_BYTES as u64,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        ),
-        buffer(
-            "right fusion ratio fixture",
-            PACKED_BYTES as u64,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        ),
-    ];
-    queue.write_buffer(&ratios[0], 0, pair.left.bytes());
-    queue.write_buffer(&ratios[1], 0, pair.right.bytes());
+    let ratios = ["left fusion ratio fixture", "right fusion ratio fixture"].map(|label| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: MAP_WIDTH as u32,
+                height: MAP_HEIGHT as u32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    });
+    for (texture, ratio) in ratios.iter().zip([&pair.left, &pair.right]) {
+        queue.write_texture(
+            texture.as_image_copy(),
+            ratio.bytes(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some((MAP_WIDTH * std::mem::size_of::<[f32; 4]>()) as u32),
+                rows_per_image: Some(MAP_HEIGHT as u32),
+            },
+            texture.size(),
+        );
+    }
+    let ratio_views = ratios
+        .each_ref()
+        .map(|ratio| ratio.create_view(&Default::default()));
+    let fusion_sampler = hardware_fusion.then(|| {
+        device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("qualified image fusion full-f32 bilinear sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        })
+    });
+    let mut fusion_entries = ratio_views
+        .iter()
+        .enumerate()
+        .map(|(binding, view)| wgpu::BindGroupEntry {
+            binding: binding as u32,
+            resource: wgpu::BindingResource::TextureView(view),
+        })
+        .collect::<Vec<_>>();
+    if let Some(sampler) = fusion_sampler.as_ref() {
+        fusion_entries.push(wgpu::BindGroupEntry {
+            binding: 2,
+            resource: wgpu::BindingResource::Sampler(sampler),
+        });
+    }
     let fusion = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("direct fusion ratio fixtures"),
         layout: &pipeline.get_bind_group_layout(2),
-        entries: &std::array::from_fn::<_, 2, _>(|binding| wgpu::BindGroupEntry {
-            binding: binding as u32,
-            resource: ratios[binding].as_entire_binding(),
-        }),
+        entries: &fusion_entries,
     });
 
     let input = buffer(
@@ -170,6 +268,12 @@ fn gpu_fusion_sampling_and_preblend_match_the_scalar_consumer() {
     let bytes = readback.slice(..).get_mapped_range();
 
     let mut saw_clamp = false;
+    let mut worst = (0.0f32, 0usize, 0usize, 0.0f32, 0.0f32);
+    let mode = if hardware_fusion {
+        "hardware"
+    } else {
+        "manual"
+    };
     for (index, (sample, actual)) in samples
         .iter()
         .zip(bytes.chunks_exact(16).map(|bytes| {
@@ -199,17 +303,82 @@ fn gpu_fusion_sampling_and_preblend_match_the_scalar_consumer() {
             })
         };
         for channel in 0..3 {
-            let error = (actual[channel] - expected[channel]).abs();
-            assert!(
-                actual[channel].is_finite() && error <= 2.0e-6,
-                "fusion sample {index} channel {channel}: GPU {} CPU {} error {error}",
-                actual[channel],
-                expected[channel]
-            );
+            let error = if actual[channel].is_finite() {
+                (actual[channel] - expected[channel]).abs()
+            } else {
+                f32::INFINITY
+            };
+            if error > worst.0 {
+                worst = (error, index, channel, actual[channel], expected[channel]);
+            }
+            if error > tolerance {
+                eprintln!(
+                    "{mode} fusion mismatch sample {index} channel {channel}: GPU {} CPU {} error {error}",
+                    actual[channel], expected[channel]
+                );
+            }
         }
         assert_eq!(actual[3].to_bits(), sample.alpha.to_bits());
     }
     assert!(saw_clamp, "fixture did not exercise correction clamping");
+    eprintln!(
+        "{mode} fusion worst sample {} channel {}: GPU {} CPU {} error {}",
+        worst.1, worst.2, worst.3, worst.4, worst.0
+    );
+    assert!(
+        worst.0 <= tolerance,
+        "{mode} fusion worst sample {} channel {}: GPU {} CPU {} error {}",
+        worst.1,
+        worst.2,
+        worst.3,
+        worst.4,
+        worst.0
+    );
+}
+
+fn fusion_gpu(hardware_fusion: bool) -> Result<(wgpu::Device, wgpu::Queue), String> {
+    if !hardware_fusion {
+        return super::tests::gpu();
+    }
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        ..Default::default()
+    });
+    let adapter = block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN))
+        .into_iter()
+        .next()
+        .ok_or("no Vulkan adapter")?;
+    let feature = wgpu::Features::FLOAT32_FILTERABLE;
+    let info = adapter.get_info();
+    if !adapter.features().contains(feature) {
+        return Err(format!(
+            "adapter {} does not support optional FLOAT32_FILTERABLE",
+            info.name
+        ));
+    }
+    block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("direct type-2 filtered fusion qualification"),
+        required_features: feature,
+        required_limits: adapter.limits(),
+        ..Default::default()
+    }))
+    .map_err(|error| {
+        format!(
+            "adapter {} advertised FLOAT32_FILTERABLE but its device request failed: {error}",
+            info.name
+        )
+    })
+}
+
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    loop {
+        match future.as_mut().poll(&mut context) {
+            std::task::Poll::Ready(answer) => return answer,
+            std::task::Poll::Pending => std::thread::yield_now(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

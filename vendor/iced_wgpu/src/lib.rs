@@ -1134,9 +1134,10 @@ impl renderer::Headless for Renderer {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("iced_wgpu [headless]"),
-                required_features: wgpu::Features::empty(),
+                required_features: adapter.features()
+                    & wgpu::Features::FLOAT32_FILTERABLE,
                 required_limits: wgpu::Limits {
-                    max_bind_groups: 2,
+                    max_bind_groups: 3,
                     ..wgpu::Limits::default()
                 },
                 memory_hints: wgpu::MemoryHints::MemoryUsage,

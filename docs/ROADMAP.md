@@ -22,6 +22,129 @@ identity nor a new usable video oracle is claimed. The previously isolated
 ON/OFF video pair remains the visual reference. The sanitized capture
 contract is `docs/research/studio-image-fusion-maps-602.json`.
 
+**Latest working-branch increment:** the GPU photometric producer and live
+capture integration are implemented. Each valid source observation samples
+its own final packed map, computes correction on the GPU and carries immutable
+ratios into its own draw. View redraws reuse them; seek restarts color history.
+No new host readback/solve/wait or source submission is added. Standalone
+captured X4/X2 comparisons reached maximum ratio error `9.54e-7` against the
+CPU reference, with identity/lens-swap/channel-swap decoys rejected. Integration
+corrected the global-validity convention to native `u32::MAX` success. The
+two real-source Scene comparisons now pass, including installed ratios against
+the CPU reference and final mesh-rendered RGBA within one code per channel.
+The initial pixel test compared the diagnostic fullscreen path with the live
+mesh path and failed; using the same mesh corrected the test without widening
+its tolerance. Full integrated gates and the two short rendered sequences now
+pass; new Flatpak and owner qualification remain pending. The integer content
+gate's binary64-edge difference and GPU reduction order are disclosed in the
+architecture and reference contract. The frozen smoothness test package and
+installed application are unchanged. Subsequent paragraphs record earlier
+implementation checkpoints, not the current live-feature status.
+
+The first real-window run failed because iced requested only two bind groups;
+the fused consumer requires three. That device request and its pre-construction
+guard are corrected. Native window retests pass 48 X4 and 54 ONE X2 checks with
+zero failures, and root viewed/sent both reported-view captures. The first color
+candidate failed active-playback performance on both cameras (roughly 22–28
+source fps). A same-harness archived pre-color X4 control retained 30 fps.
+GPU timestamps located expensive scalar admission/measurement, then the three
+serial channel solves. Parallel integer admission/histograms and independent
+channel workgroups reduce the sampled changed-warm color update from about
+24.7 ms to 2.6 ms, with unchanged CPU-reference error and 51 focused checks
+passing. These are isolated producer timings, not actual-player capacity.
+
+**The buffer-backed color candidate fails on X4:** in the third 40-second
+2256x1504 nominal-300-Hz panning run, ONE X2 sustains roughly 30 source fps, but
+X4 remains around 26–28 fps and accumulates about five seconds of delay. The
+X4 trace also contains malformed/interleaved JSON, so it cannot establish a
+validated rendering-capacity result. This is not an accepted compromise or a
+shipping result. Reducing native draw retirement from two slots to one restored
+X4 source cadence but reduced changing-view capacity to about 178 fps (208 fps
+on X2), so that trial was rejected and two slots restored.
+
+A diagnostic bypass of only the final color consumer, with the GPU producer
+still running, restored X4 source cadence and about 240 changing commits/s.
+That bypass is archived, not selected by normal source. The current candidate
+therefore writes the same final f32 ratios into immutable RGBA32F textures in
+the existing remap pass. Explicit texture loads retained X4's deficit: the
+direct-coordinate trial reached 27.825 source fps and 233.85 changing commits/s;
+X2 reached 30.050 and 241.92, respectively. Both strict traces also fail on a
+source-less commit. That trial does not qualify the candidate.
+
+The next candidate uses optional full-f32 hardware bilinear filtering, retaining
+explicit interpolation on devices without that feature. No extra pass or
+half-precision conversion is introduced, but interpolation rounding can differ.
+The 51 color tests, three consumer tests and two real-source Scene comparisons
+pass, including bitwise texture/buffer publication equality and the unchanged
+one-code-per-channel final-pixel bound. Adding arbitrary off-grid UVs then
+exposed the anticipated hardware interpolation rounding: the manual consumer
+still passes `2e-6`, while the filtered test fails that bound. All-sample
+measurement finds a maximum `0.00054196` (0.138 of an 8-bit code) at the
+synthetic map's discontinuous periodic join. Hardware now has a separately
+named half-code test, while the manual bound and real-frame one-code gate
+remain unchanged. This is disclosed interpolation rounding, not exact parity.
+
+The filtered native run reaches 240.42/261.25 changing commits/s on X4/X2 at
+2256x1504 with nominal 300 Hz panning. Source cadence is 29.375/29.975 fps:
+X4 still accumulates about 1.4 seconds of delay and is not accepted. Commit
+p99 is 8.74/8.76 ms, maxima 15.72/31.25 ms. The X2 pointer cohort passes strict
+accounting; X4 fails on one source-less commit, and both whole-run checks
+retain source-less records. These are not all-frame 4.17 ms passes. A bounded
+warm-playback admission experiment prioritized an already-submitted exact due
+source over further old-picture redraws, keeping both retirement slots. It
+restored X4 to 29.975 source fps but cut changing capacity to 140.80 fps and
+raised commit p99 to 19.73 ms. That policy and its tests were removed; ordinary
+two-slot redraw admission is restored. The full-gate attempt stopped at one
+test-helper `let_and_return` Clippy error, subsequently corrected. The workspace
+test and UI gates did not run in that attempt.
+
+The next trial uses RGBA16F only for terminal live ratio-map storage and
+filtering, keeping all solver history, arithmetic and diagnostic buffers f32.
+CPU saved-map replay remains RGBA32F, so the real Scene pixel comparison can
+independently check the production storage conversion. This precision trial
+passes 52 color, four consumer and two real-source Scene checks. The original
+texture test incorrectly assumed nearest rounding; the observed downward
+conversion is allowed by WGSL. Its corrected representation test requires
+exact storage for representable values and at most one half-float spacing
+otherwise. Both captured fixtures reach maximum storage error `0.00097644`;
+the f32 producer/reference error remains `9.54e-7`, and the actual Scene
+one-code-per-channel pixel gate is unchanged and passes. However, native X4
+reaches only 29.275 source fps and 239.47 changing commits/s, and X2 reaches
+29.975/260.75. Neither improves meaningfully over full f32. The half-storage
+trial is therefore removed, with no precision compromise retained.
+
+**Current qualification boundary:** retain the full-f32 hardware-filtered
+implementation, complete the integrated gates, rendered sequences, native UI
+and actual-display checks, and keep the unresolved X4 saturated-capacity
+deficit explicit. This does not lower the 240 fps goal or qualify chromatic
+playback for release. It prevents further speculative performance trials from
+postponing the implementation's complete correctness and video review.
+The restored implementation passes all-target Clippy and static gates,
+1,238 workspace tests with zero failures and 30 ignored, two device-policy
+tests and both opt-in real-Radeon window-readiness tests. Source hashes remain
+unchanged across those gates. The rebuilt native UI passes all 48 X4 and 54 ONE
+X2 checks, including the reported views, real scrubber and backward seeks. The
+actual resident Scene captures 31 consecutive X4 frames and 61 consecutive X2
+frames with their exact packed maps, alpha and ratio pairs. Root inspected
+sampled pixels and computed seam overlays and sent both videos and overlays to
+the owner. The overlays use the diagnostic ray consumer, not the live mesh;
+the sequences use the actual resident screenshot path. Neither establishes
+whole-video parity or new owner acceptance.
+
+Both 25-second native checks on the actual 60 Hz COSMIC desktop retain roughly
+30 source fps after startup, with zero drops, starvation or audio underruns;
+worst reported lateness is 29.2/30.0 ms for X4/X2. The X4 strict cadence parser
+refuses a draw cut off before commit at timed termination. X2's complete log
+retains six source-less startup commits, so its strict result also fails.
+Its closed steady-source subset has dwell p95/p99/max 46.37/50.99/62.85 ms,
+not uniformly spaced source changes. These counters are
+not proof that micro-hitches are resolved or that the uncapped target passes.
+The current native executable is archived as `ui-03/kjerag`, SHA-256
+`e1b8a4292243464aad2130fe2e8a3a7489e8f091ee651fb99eddb4a5f7387e92`.
+There is no new Flatpak acceptance.
+The frozen smoothness package remains unchanged. Evidence:
+`scratch/fusion-live-20260907/`.
+
 An explicit captured-map replay consumer and a separate readable
 Windows selected-X4 inner MGP reference are implemented. The latter
 reuses the existing normal-equation/CG primitives but replaces the legacy

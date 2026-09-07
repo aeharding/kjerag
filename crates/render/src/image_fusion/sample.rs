@@ -1,8 +1,9 @@
 //! Detached sampling of Studio's two photometric source bands.
 //!
-//! This diagnostic transaction composes one externally associated type-2 map
-//! through the fixed native four-row lookup, then samples both exact source
-//! pictures. It is never selected by live playback.
+//! The shared encoder composes one externally associated type-2 map through
+//! the fixed native four-row lookup, then samples both exact source pictures.
+//! The detached submit/read transaction below remains diagnostic; live
+//! playback appends the same encoder directly to its resident command stream.
 
 use std::sync::{Arc, mpsc};
 
@@ -21,9 +22,11 @@ const BAND_WIDTH: usize = 800;
 const BAND_HEIGHT: usize = 16;
 const BAND_PIXELS: usize = BAND_WIDTH * BAND_HEIGHT;
 const BAND_BYTES: u64 = (BAND_PIXELS * 2 * size_of::<[f32; 4]>()) as u64;
+const PACKED_BAND_BYTES: u64 = (BAND_PIXELS * size_of::<u32>()) as u64;
 const READBACK_BYTES: u64 = COMPOSED_BYTES + BAND_BYTES;
 const EXTENSION: usize = 6;
 const EXTENDED_WIDTH: usize = MAP_WIDTH + 2 * EXTENSION;
+const INVALID_BYTES: u64 = (EXTENDED_WIDTH * MAP_ROWS * size_of::<u32>()) as u64;
 
 #[cfg(test)]
 mod gpu_tests;
@@ -32,6 +35,31 @@ pub struct FusionInputs {
     frame: FrameStamp,
     bands: LensPair<Vec<u8>>,
     invalid: Vec<u8>,
+}
+
+/// Encoded, not necessarily complete, GPU source-band inputs.
+///
+/// This owner retains every allocation and binding used by the commands
+/// appended by [`FusionInputPipeline::encode`]. It never submits, polls, or
+/// maps them. Coordinate invalidity is local to these source bands and is not
+/// the producer's separate global observation-failure signal.
+pub(crate) struct GpuBandInputs {
+    _map: wgpu::BindGroup,
+    _output_binding: wgpu::BindGroup,
+    composed: wgpu::Buffer,
+    float_bands: wgpu::Buffer,
+    bands: [wgpu::Buffer; 2],
+    invalid: wgpu::Buffer,
+}
+
+impl GpuBandInputs {
+    pub(crate) fn bands(&self) -> [&wgpu::Buffer; 2] {
+        [&self.bands[0], &self.bands[1]]
+    }
+
+    pub(crate) fn invalid(&self) -> &wgpu::Buffer {
+        &self.invalid
+    }
 }
 
 impl FusionInputs {
@@ -53,12 +81,9 @@ impl FusionInputs {
 #[must_use = "the submitted fusion input sample has not been consumed"]
 pub struct PendingOneXsFusionInputs {
     _picture: wgpu::BindGroup,
-    _map: wgpu::BindGroup,
-    _output_binding: wgpu::BindGroup,
     _uniforms: wgpu::Buffer,
     _map_buffer: wgpu::Buffer,
-    _composed: wgpu::Buffer,
-    _bands: wgpu::Buffer,
+    _gpu: GpuBandInputs,
     readback: wgpu::Buffer,
     device: wgpu::Device,
     frame: FrameStamp,
@@ -105,6 +130,8 @@ pub(crate) struct FusionInputPipeline {
     sample_pipeline: wgpu::ComputePipeline,
     map_layout: wgpu::BindGroupLayout,
     output_layout: wgpu::BindGroupLayout,
+    picture_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
     lookup: wgpu::Buffer,
 }
 
@@ -130,7 +157,12 @@ impl FusionInputPipeline {
         });
         let output_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fusion source-band output"),
-            entries: &[storage(0, BAND_BYTES, false)],
+            entries: &[
+                storage(0, BAND_BYTES, false),
+                storage(1, PACKED_BAND_BYTES, false),
+                storage(2, PACKED_BAND_BYTES, false),
+                storage(3, INVALID_BYTES, false),
+            ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("fusion source-band sampler"),
@@ -159,12 +191,189 @@ impl FusionInputPipeline {
             contents: bytes_of(&coordinates),
             usage: wgpu::BufferUsages::STORAGE,
         });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("fusion resident source-band sampler"),
+            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         Self {
             compose_pipeline: make_pipeline("fusion packed-map composition", "compose_fusion_map"),
             sample_pipeline: make_pipeline("fusion source-band sampling", "sample_fusion_bands"),
             map_layout,
             output_layout,
+            picture_layout: picture_layout.clone(),
+            sampler,
             lookup,
+        }
+    }
+
+    /// Bind a caller-owned exact source pair without exposing its planes.
+    /// The caller must retain both the returned binding and its source owner
+    /// through submission; this helper performs no identity inference.
+    pub(crate) fn bind_source(
+        &self,
+        device: &wgpu::Device,
+        uniforms: &wgpu::Buffer,
+        planes: [&Planes; 2],
+    ) -> wgpu::BindGroup {
+        direct_type2::bind_picture(
+            device,
+            &self.picture_layout,
+            uniforms,
+            planes,
+            &self.sampler,
+        )
+    }
+
+    /// Append the two source-band passes without submitting or waiting.
+    ///
+    /// `picture` must be the caller's draw-private exact source binding and
+    /// `packed` its already-sealed map. Their identity is deliberately not
+    /// inferred here; the lease-bound caller owns that proof.
+    pub(crate) fn encode(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        picture: &wgpu::BindGroup,
+        packed: &wgpu::Buffer,
+    ) -> GpuBandInputs {
+        self.encode_inner(device, encoder, picture, packed, None)
+    }
+
+    #[cfg(test)]
+    fn encode_profiled(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        picture: &wgpu::BindGroup,
+        packed: &wgpu::Buffer,
+        timestamps: &wgpu::QuerySet,
+    ) -> GpuBandInputs {
+        self.encode_inner(device, encoder, picture, packed, Some(timestamps))
+    }
+
+    fn encode_inner(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        picture: &wgpu::BindGroup,
+        packed: &wgpu::Buffer,
+        timestamps: Option<&wgpu::QuerySet>,
+    ) -> GpuBandInputs {
+        let composed = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fusion composed packed band"),
+            size: COMPOSED_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let map = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fusion input map composition"),
+            layout: &self.map_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: packed.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.lookup.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: composed.as_entire_binding(),
+                },
+            ],
+        });
+        let float_bands = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fusion source-band output"),
+            size: BAND_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let bands = std::array::from_fn(|lens| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(if lens == 0 {
+                    "fusion packed left source band"
+                } else {
+                    "fusion packed right source band"
+                }),
+                size: PACKED_BAND_BYTES,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            })
+        });
+        let invalid = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fusion coordinate-invalid band"),
+            size: INVALID_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let output_binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fusion source-band output"),
+            layout: &self.output_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: float_bands.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: bands[0].as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: bands[1].as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: invalid.as_entire_binding(),
+                },
+            ],
+        });
+        {
+            let timestamp_writes = timestamps.map(|query_set| wgpu::ComputePassTimestampWrites {
+                query_set,
+                beginning_of_pass_write_index: Some(0),
+                end_of_pass_write_index: Some(1),
+            });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("fusion packed-map composition"),
+                timestamp_writes,
+            });
+            pass.set_pipeline(&self.compose_pipeline);
+            pass.set_bind_group(0, picture, &[]);
+            pass.set_bind_group(1, &map, &[]);
+            pass.set_bind_group(2, &output_binding, &[]);
+            pass.dispatch_workgroups((COMPOSED_NODES as u32).div_ceil(64), 1, 1);
+        }
+        {
+            let timestamp_writes = timestamps.map(|query_set| wgpu::ComputePassTimestampWrites {
+                query_set,
+                beginning_of_pass_write_index: Some(2),
+                end_of_pass_write_index: Some(3),
+            });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("fusion source-band sampling"),
+                timestamp_writes,
+            });
+            pass.set_pipeline(&self.sample_pipeline);
+            pass.set_bind_group(0, picture, &[]);
+            pass.set_bind_group(1, &map, &[]);
+            pass.set_bind_group(2, &output_binding, &[]);
+            pass.dispatch_workgroups(
+                (BAND_WIDTH as u32).div_ceil(8),
+                (BAND_HEIGHT as u32).div_ceil(8),
+                1,
+            );
+        }
+        GpuBandInputs {
+            _map: map,
+            _output_binding: output_binding,
+            composed,
+            float_bands,
+            bands,
+            invalid,
         }
     }
 
@@ -196,44 +405,6 @@ impl FusionInputPipeline {
             mapped_at_creation: false,
         });
         queue.write_buffer(&map_buffer, 0, map_frame.packed().bytes());
-        let composed = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("fusion composed packed band"),
-            size: COMPOSED_BYTES,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let map = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("fusion input map composition"),
-            layout: &self.map_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: map_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.lookup.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: composed.as_entire_binding(),
-                },
-            ],
-        });
-        let bands = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("fusion source-band output"),
-            size: BAND_BYTES,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let output_binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("fusion source-band output"),
-            layout: &self.output_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: bands.as_entire_binding(),
-            }],
-        });
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fusion input readback"),
             size: READBACK_BYTES,
@@ -243,43 +414,15 @@ impl FusionInputPipeline {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("fusion source-band sampler"),
         });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("fusion packed-map composition"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.compose_pipeline);
-            pass.set_bind_group(0, &picture, &[]);
-            pass.set_bind_group(1, &map, &[]);
-            pass.set_bind_group(2, &output_binding, &[]);
-            pass.dispatch_workgroups((COMPOSED_NODES as u32).div_ceil(64), 1, 1);
-        }
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("fusion source-band sampling"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.sample_pipeline);
-            pass.set_bind_group(0, &picture, &[]);
-            pass.set_bind_group(1, &map, &[]);
-            pass.set_bind_group(2, &output_binding, &[]);
-            pass.dispatch_workgroups(
-                (BAND_WIDTH as u32).div_ceil(8),
-                (BAND_HEIGHT as u32).div_ceil(8),
-                1,
-            );
-        }
-        encoder.copy_buffer_to_buffer(&composed, 0, &readback, 0, COMPOSED_BYTES);
-        encoder.copy_buffer_to_buffer(&bands, 0, &readback, COMPOSED_BYTES, BAND_BYTES);
+        let gpu = self.encode(device, &mut encoder, &picture, &map_buffer);
+        encoder.copy_buffer_to_buffer(&gpu.composed, 0, &readback, 0, COMPOSED_BYTES);
+        encoder.copy_buffer_to_buffer(&gpu.float_bands, 0, &readback, COMPOSED_BYTES, BAND_BYTES);
         let frame = frames.stamp();
         PendingOneXsFusionInputs {
             _picture: picture,
-            _map: map,
-            _output_binding: output_binding,
             _uniforms: uniforms,
             _map_buffer: map_buffer,
-            _composed: composed,
-            _bands: bands,
+            _gpu: gpu,
             readback,
             device: device.clone(),
             frame,
@@ -363,19 +506,24 @@ struct FusionBandSample { left: vec4<f32>, right: vec4<f32> };
 @group(1) @binding(1) var<storage, read> band_lookup: array<vec2<f32>>;
 @group(1) @binding(2) var<storage, read_write> composed_map: array<vec4<f32>>;
 @group(2) @binding(0) var<storage, read_write> fusion_bands: array<FusionBandSample>;
+@group(2) @binding(1) var<storage, read_write> packed_left_band: array<u32>;
+@group(2) @binding(2) var<storage, read_write> packed_right_band: array<u32>;
+@group(2) @binding(3) var<storage, read_write> coordinate_invalid: array<u32>;
 
 fn input_map_at(padded_x: i32, y: i32) -> vec4<f32> {
   let source_x = (padded_x + 199) % 200;
   return input_map[u32(clamp(y, 0, 99) * 200 + source_x)];
 }
 
-fn inter_linear_coordinate(value: f32) -> f32 {
-  let scaled = value * 32.0;
-  let low = floor(scaled);
-  let fraction = scaled - low;
+fn round_ties_even(value: f32) -> f32 {
+  let low = floor(value);
+  let fraction = value - low;
   let odd = (i32(low) & 1) != 0;
-  let rounded = select(low, low + 1.0, fraction > 0.5 || (fraction == 0.5 && odd));
-  return rounded / 32.0;
+  return select(low, low + 1.0, fraction > 0.5 || (fraction == 0.5 && odd));
+}
+
+fn inter_linear_coordinate(value: f32) -> f32 {
+  return round_ties_even(value * 32.0) / 32.0;
 }
 
 fn compose_at(coordinate: vec2<f32>) -> vec4<f32> {
@@ -421,13 +569,39 @@ fn source_lens_rgb(lens: u32, uv: vec2<f32>) -> vec3<f32> {
   return source_rgb(luma, chroma - vec2<f32>(0.50196081399917603));
 }
 
+fn packed_bgr(rgb: vec3<f32>) -> u32 {
+  let scaled = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0;
+  let bytes = vec3<u32>(u32(round_ties_even(scaled.r)),
+    u32(round_ties_even(scaled.g)), u32(round_ties_even(scaled.b)));
+  return bytes.b | (bytes.g << 8u) | (bytes.r << 16u);
+}
+
+fn outside_unit(value: f32) -> bool {
+  // Ordered comparisons deliberately do not reject NaN, matching the native
+  // coordinate scan. Public map construction admits only finite payloads.
+  return value < 0.0 || value > 1.0;
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn sample_fusion_bands(@builtin(global_invocation_id) at: vec3<u32>) {
+  if at.x < 212u && at.y < 4u {
+    let column = (at.x + 194u) % 200u;
+    let packed = composed_map[at.y * 200u + column];
+    let left = vec2<f32>(packed.x * 2.0, packed.y);
+    let right = vec2<f32>(packed.z * 2.0 - 1.0, packed.w);
+    coordinate_invalid[at.y * 212u + at.x] = u32(
+      outside_unit(left.x) || outside_unit(left.y) ||
+      outside_unit(right.x) || outside_unit(right.y));
+  }
   if at.x >= 800u || at.y >= 16u { return; }
   let packed = endpoint_packed(at.xy);
   let index = at.y * 800u + at.x;
-  fusion_bands[index].left = vec4<f32>(source_lens_rgb(0u, vec2<f32>(packed.x * 2.0, packed.y)), 0.0);
-  fusion_bands[index].right = vec4<f32>(source_lens_rgb(1u, vec2<f32>(packed.z * 2.0 - 1.0, packed.w)), 0.0);
+  let left = source_lens_rgb(0u, vec2<f32>(packed.x * 2.0, packed.y));
+  let right = source_lens_rgb(1u, vec2<f32>(packed.z * 2.0 - 1.0, packed.w));
+  fusion_bands[index].left = vec4<f32>(left, 0.0);
+  fusion_bands[index].right = vec4<f32>(right, 0.0);
+  packed_left_band[index] = packed_bgr(left);
+  packed_right_band[index] = packed_bgr(right);
 }
 "#;
 

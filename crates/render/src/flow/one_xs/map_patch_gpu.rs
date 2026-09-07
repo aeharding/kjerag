@@ -337,6 +337,7 @@ pub(super) struct GpuPackedMapFrame<O: Operands> {
     _actions: wgpu::Buffer,
     context: OneXsGpuContext,
     statics: Arc<GpuFinalMapStatics>,
+    fusion: Option<GpuFusionFrame>,
     #[cfg(test)]
     input_readback: wgpu::Buffer,
 }
@@ -355,6 +356,7 @@ pub(super) struct PendingGpuPackedMapFrame<O: Operands> {
     actions: wgpu::Buffer,
     context: OneXsGpuContext,
     statics: Arc<GpuFinalMapStatics>,
+    fusion: Option<GpuFusionFrame>,
     validity: wgpu::Buffer,
     mapped: mpsc::Receiver<Result<(), String>>,
     #[cfg(test)]
@@ -370,6 +372,7 @@ struct UnsubmittedGpuPackedMapFrame<O: Operands> {
     actions: wgpu::Buffer,
     context: OneXsGpuContext,
     statics: Arc<GpuFinalMapStatics>,
+    fusion: Option<GpuFusionFrame>,
     validity: wgpu::Buffer,
     #[cfg(test)]
     input_readback: wgpu::Buffer,
@@ -379,8 +382,19 @@ struct EncodedFinalMap {
     packed: wgpu::Buffer,
     actions: wgpu::Buffer,
     command: wgpu::CommandBuffer,
+    fusion: Option<GpuFusionFrame>,
     #[cfg(test)]
     input_readback: wgpu::Buffer,
+}
+
+/// Color output belongs to the same source lease and delivery as its UV map.
+/// The inputs remain owned through asynchronous completion; immutable ratios
+/// then travel with the installed draw, never with a renderer-global history.
+struct GpuFusionFrame {
+    frame: FrameStamp,
+    output: crate::image_fusion::gpu::Output,
+    _inputs: crate::direct_type2::ResidentGpuBandInputs,
+    _validity: wgpu::Buffer,
 }
 
 pub(super) enum ValidityPoll<O: Operands> {
@@ -467,6 +481,7 @@ impl<O: Operands> PendingGpuPackedMapFrame<O> {
             _actions: self.actions,
             context: self.context,
             statics: self.statics,
+            fusion: self.fusion,
             #[cfg(test)]
             input_readback: self.input_readback,
         })
@@ -718,6 +733,8 @@ pub(super) struct GpuBoundFinalMap {
 pub(super) struct InstalledGpuMapBinding {
     frame: FrameStamp,
     read: wgpu::BindGroup,
+    fusion_read: Option<wgpu::BindGroup>,
+    fusion: Option<GpuFusionFrame>,
     packed: wgpu::Buffer,
     _actions: wgpu::Buffer,
     context: OneXsGpuContext,
@@ -763,6 +780,10 @@ impl InstalledGpuMapBinding {
         &self.read
     }
 
+    pub(super) fn fusion_read(&self) -> Option<&wgpu::BindGroup> {
+        self.fusion_read.as_ref()
+    }
+
     pub(super) fn matches_root(
         &self,
         root: &super::resident_frame_gpu::GpuResidentIdentity,
@@ -781,12 +802,34 @@ impl InstalledGpuMapBinding {
         .into_iter()
         .map(f32::from_bits)
         .collect();
-        Ok(crate::OneXsMapFrame::new(
+        let map = crate::OneXsMapFrame::new(
             self.frame.clone(),
             packed,
             crate::studio_type2::AlphaMap::new(alpha)?,
             crate::studio_type2::PisBackend::Gpu,
-        ))
+        );
+        match &self.fusion {
+            None => Ok(map),
+            Some(fusion) => {
+                let read = |buffer| -> Fallible<crate::image_fusion::RatioMap> {
+                    let words = readback_u32(
+                        self.context.device(),
+                        self.context.queue(),
+                        buffer,
+                        PACKED_BYTES as u64,
+                    )?;
+                    let values = words
+                        .chunks_exact(4)
+                        .map(|word| std::array::from_fn(|c| f32::from_bits(word[c])))
+                        .collect();
+                    Ok(crate::image_fusion::RatioMap::new(values)?)
+                };
+                Ok(map.with_fusion(crate::image_fusion::RatioPair {
+                    left: read(&fusion.output.ratios[0])?,
+                    right: read(&fusion.output.ratios[1])?,
+                }))
+            }
+        }
     }
 
     #[cfg(test)]
@@ -838,14 +881,36 @@ where
     pub(super) fn bind_for_install(
         self,
         context: &OneXsGpuContext,
-        layout: &wgpu::BindGroupLayout,
+        pipeline: &crate::direct_type2::DirectType2Pipeline,
     ) -> Fallible<GpuBoundFinalMap> {
         self.context.ensure_same(context)?;
+        pipeline.ensure_device(context)?;
+        if self.fusion.is_some() != pipeline.fusion_layout().is_some() {
+            return Err(
+                "image fusion map and draw pipeline disagree about color correction".into(),
+            );
+        }
+        let fusion_read = self
+            .fusion
+            .as_ref()
+            .map(|fusion| {
+                if fusion.frame != self.frame {
+                    return Err(
+                        "image fusion ratios name a different source frame than the stitch map"
+                            .into(),
+                    );
+                }
+                pipeline.bind_fusion_textures(
+                    context.device(),
+                    [&fusion.output.textures[0], &fusion.output.textures[1]],
+                )
+            })
+            .transpose()?;
         let read = context
             .device()
             .create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ONE X2 installed resident native type-2 resources"),
-                layout,
+                layout: pipeline.map_layout(),
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -861,6 +926,8 @@ where
         let binding = InstalledGpuMapBinding {
             frame: self.frame.clone(),
             read,
+            fusion_read,
+            fusion: self.fusion,
             packed: self.packed,
             _actions: self._actions,
             context: self.context,
@@ -1110,6 +1177,52 @@ impl GpuMapMaterializer {
         self.materialize_inner(operands)
     }
 
+    /// Append color sampling and correction to the final-map command, before
+    /// its existing completion word. All source reads therefore advance the
+    /// same upstream lease; no post-install read can outlive decoder ownership.
+    pub(super) fn materialize_final_fused<P>(
+        &self,
+        operands: GpuFinalOperands<P>,
+        sampler: &crate::image_fusion::sample::FusionInputPipeline,
+        producer: &mut crate::image_fusion::gpu::Producer,
+    ) -> Fallible<PendingGpuPackedMapFrame<GpuFinalOperands<P>>>
+    where
+        P: GpuPriorPublicLevelTwo,
+    {
+        self.materialize_inner_with(operands, |operands, encoder, packed| {
+            let inputs = operands.encode_fusion_inputs(
+                &self.context,
+                operands.frame(),
+                encoder,
+                sampler,
+                packed,
+            )?;
+            let validity = self
+                .context
+                .device()
+                .create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("image fusion resident validity"),
+                    size: VALIDITY_BYTES,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            operands.encode_validity_copy(encoder, &validity);
+            let output = producer.encode(
+                self.context.device(),
+                encoder,
+                inputs.bands(),
+                inputs.invalid(),
+                &validity,
+            )?;
+            Ok(Some(GpuFusionFrame {
+                frame: operands.frame().clone(),
+                output,
+                _inputs: inputs,
+                _validity: validity,
+            }))
+        })
+    }
+
     #[cfg(test)]
     pub(in crate::flow::one_xs::one_xs_belt_gpu) fn validate_completed_cold_for_test(
         &self,
@@ -1124,6 +1237,18 @@ impl GpuMapMaterializer {
     }
 
     fn materialize_inner<O: Operands>(&self, operands: O) -> Fallible<PendingGpuPackedMapFrame<O>> {
+        self.materialize_inner_with(operands, |_, _, _| Ok(None))
+    }
+
+    fn materialize_inner_with<O: Operands>(
+        &self,
+        operands: O,
+        encode_fusion: impl FnOnce(
+            &O,
+            &mut wgpu::CommandEncoder,
+            &wgpu::Buffer,
+        ) -> Fallible<Option<GpuFusionFrame>>,
+    ) -> Fallible<PendingGpuPackedMapFrame<O>> {
         self.context.ensure_same(operands.context())?;
         let frame = operands.frame().clone();
         let input_usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
@@ -1147,7 +1272,7 @@ impl GpuMapMaterializer {
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-        let encoded = self.encode(&operands, &input, &validity);
+        let encoded = self.encode(&operands, &input, &validity, encode_fusion)?;
         let mut unsubmitted = UnsubmittedGpuPackedMapFrame {
             upstream: operands,
             frame,
@@ -1155,6 +1280,7 @@ impl GpuMapMaterializer {
             actions: encoded.actions,
             context: self.context.clone(),
             statics: Arc::clone(&self.statics),
+            fusion: encoded.fusion,
             validity,
             #[cfg(test)]
             input_readback: encoded.input_readback,
@@ -1174,6 +1300,7 @@ impl GpuMapMaterializer {
             actions: unsubmitted.actions,
             context: unsubmitted.context,
             statics: unsubmitted.statics,
+            fusion: unsubmitted.fusion,
             validity: unsubmitted.validity,
             mapped,
             #[cfg(test)]
@@ -1186,7 +1313,12 @@ impl GpuMapMaterializer {
         operands: &O,
         input: &wgpu::Buffer,
         validity: &wgpu::Buffer,
-    ) -> EncodedFinalMap {
+        encode_fusion: impl FnOnce(
+            &O,
+            &mut wgpu::CommandEncoder,
+            &wgpu::Buffer,
+        ) -> Fallible<Option<GpuFusionFrame>>,
+    ) -> Fallible<EncodedFinalMap> {
         let device = self.context.device();
         let packed = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ONE X2 GPU-resident packed type-2 map"),
@@ -1232,7 +1364,7 @@ impl GpuMapMaterializer {
             pass.set_bind_group(0, &resources, &[]);
             pass.dispatch_workgroups((MAP_NODES as u32).div_ceil(WORKGROUP_SIZE), 1, 1);
         }
-        operands.encode_validity_copy(&mut encoder, validity);
+        let fusion = encode_fusion(operands, &mut encoder, &packed)?;
         #[cfg(test)]
         let input_readback = {
             let readback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1244,13 +1376,15 @@ impl GpuMapMaterializer {
             encoder.copy_buffer_to_buffer(input, 0, &readback, 0, INPUT_BYTES);
             readback
         };
-        EncodedFinalMap {
+        operands.encode_validity_copy(&mut encoder, validity);
+        Ok(EncodedFinalMap {
             packed,
             actions,
             command: encoder.finish(),
+            fusion,
             #[cfg(test)]
             input_readback,
-        }
+        })
     }
 
     #[cfg(test)]

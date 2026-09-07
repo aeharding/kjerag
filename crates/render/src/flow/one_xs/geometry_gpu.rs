@@ -118,6 +118,19 @@ impl GpuGeometryFrameOwner<crate::direct_type2::ImportedOneXsPicture> {
             DynamicBufferCopy::new(public, 0),
         );
     }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn encode_fusion_inputs(
+        &self,
+        context: &OneXsGpuContext,
+        expected: &kjerag_media::FrameStamp,
+        encoder: &mut wgpu::CommandEncoder,
+        sampler: &crate::image_fusion::sample::FusionInputPipeline,
+        packed: &wgpu::Buffer,
+    ) -> Fallible<crate::direct_type2::ResidentGpuBandInputs> {
+        self.ensure_final_map_sources(expected)?;
+        self._source_owner
+            .encode_fusion_inputs(context, expected, encoder, sampler, packed)
+    }
 }
 
 /// Source owner carried by the sole submission lease after geometry enters

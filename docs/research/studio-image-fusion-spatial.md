@@ -45,8 +45,10 @@ not a reason to emulate binary64 throughout the GPU solver.
 
 The detached sampler now replaces full-chart point sampling with the source
 band construction below. `stitch-layers ... estimate-fusion` passes its bands
-through `observe_bands` and renders the resulting ratios. Automatic update
-ownership and a GPU-resident solve remain unfinished.
+through `observe_bands` and renders the resulting ratios. A separate GPU
+producer and capture-owned automatic integration are now implemented on the
+working branch; real playback qualification is pending. The CPU reference
+remains available rather than being replaced by shader-specific arithmetic.
 Raw binding evidence is in ignored `photometric-static/review-content-gate-*`
 and `review-selected-getter-*` files. No new runtime capture was needed.
 

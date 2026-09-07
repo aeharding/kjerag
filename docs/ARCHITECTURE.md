@@ -164,10 +164,10 @@ different camera's seam outside this chart. Existing native oracle APIs and
 module names remain available for comparison.
 
 Studio's Chromatic Calibration means photometric lens color/brightness
-matching. It is required follow-on work at the geometrically aligned
-source-sampling/fusion boundary. The shared resident path does not yet apply
-it; the old projection path's unaligned color estimator is not silently reused
-as a parity implementation.
+matching. The shared resident capture applies it at the geometrically aligned
+source-sampling/fusion boundary. This automatic branch implementation is under
+qualification, not owner-accepted Studio parity. The old projection path's
+unaligned color estimator is not reused as a parity implementation.
 
 The explicit saved-map diagnostic can attach an `image_fusion::RatioPair` to
 its `OneXsMapFrame`. A separate shader variant samples these two 200x100 RGB
@@ -176,7 +176,8 @@ centering transform, and corrects each lens before blending. Missing maps use
 an actual arithmetic bypass with no extra binding, not a constant-one map
 whose rounding or RGB clamp could change the neutral picture. The diagnostic
 recreates its private binding when correction presence changes. Ordinary
-resident playback does not select this variant or load captured coefficients.
+resident playback selects this variant with its own computed coefficients,
+never captured coefficients.
 
 `image_fusion::solve` is a readable Windows selected-X4 inner MGP reference,
 not the production estimator. It takes already-aligned BGR8 working images;
@@ -203,10 +204,56 @@ Kjerag choices, not authenticated native conversion-branch arithmetic.
 the three 66x16 strips per lens against the last admitted means. Only an
 admitted observation area-reduces the full bands into working rows 48..51 and
 advances the solve/ratio history. The CPU gate retains binary64 mean arithmetic.
-Source-map provenance and video scheduling remain the caller's responsibility;
-the automatic GPU producer is unfinished. Existing sparse arithmetic, box
+Source-map provenance and video scheduling remain the reference caller's responsibility.
+Existing sparse arithmetic, box
 reductions and trigonometric implementations are not claimed numerically
 identical to Studio. Neither reference is selected by ordinary playback.
+
+`image_fusion::gpu::Producer` owns the analogous retained GPU state inside one
+`ResidentCaptureSession`. The final-map materializer appends source sampling
+and photometric dispatches before its existing asynchronous validity copy,
+advancing the same inherited source lease with one final-map submission. No
+ordinary source or ratio readback, host solve or new host wait is added. Only
+resident status `u32::MAX` authorizes history changes; a global failure leaves
+baseline, invalidity, solve and ratios untouched. Coordinate invalidity on a
+globally valid but content-skipped observation remains sticky.
+
+History follows successful source processing, not display publication. This
+matches the existing computational lookahead: a future may compute before it
+is due, but its immutable ratio pair remains attached to that exact map and
+source. A later install refusal does not roll photometric history back. A seek
+gets a new producer and causal root; renderer reattachment retains both.
+Pending/ready ownership and uncertain-completion quarantine include the color
+inputs and outputs. Installed draws retain their own ratio binding across newer
+source computation and draw retirement. Diagnostic installed-map readback can
+explicitly include the ratio pair; ordinary redraws only sample it.
+
+The GPU content gate deliberately uses integer sum delta `>3168`, so it does
+not reproduce the CPU reference's binary64 threshold-rounding edge (9 to 3177).
+CG and box reductions use GPU float arithmetic. These disclosed implementation
+choices require real-output and playback-capacity qualification, not further
+optimization reverse engineering.
+
+The current photometric candidate writes the final ratio values into immutable
+RGBA32F textures in the existing remap pass. Hardware bilinear interpolation is
+selected only when optional full-f32 filtering is enabled on the device;
+otherwise the consumer uses explicit texture loads and wrap/clamp interpolation.
+Saved-map CPU replay uses the same format and feature policy. Both the
+half-storage and due-source-priority trials were removed after they failed to
+improve the combined source-cadence and changing-view performance result.
+No half-precision storage or arithmetic remains. Full-f32 hardware interpolation
+rounding is separately qualified; this candidate is not owner-accepted.
+
+The full-f32 hardware consumer's adversarial fractional-UV test uses a
+separate half-of-one-8-bit-code bound; the explicit consumer retains `2e-6`.
+On the test Radeon, their measured maxima are `0.00054196` and `1.79e-7`,
+respectively. The hardware maximum is at the synthetic map's discontinuous
+periodic join. Actual Scene comparisons retain their one-code-per-channel
+bound; none of these gates establishes whole-video or owner acceptance.
+Tight float4 buffers remain available
+for diagnostic comparisons; they do not supply the live fragment reads. This
+change is being qualified against the actual player: bypassing only the final
+color consumer restored X4 source cadence while leaving the producer active.
 
 ## Failures the pilot is told about (issue #124)
 

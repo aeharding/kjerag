@@ -565,6 +565,10 @@ struct ResidentCaptureSession {
     solver: Arc<super::pis::gpu::GpuPisPipeline>,
     bridge: Arc<pis_frontend_gpu::GpuL2PostPisBridge>,
     direct: Arc<DirectType2Pipeline>,
+    fusion_inputs: Arc<crate::image_fusion::sample::FusionInputPipeline>,
+    // Encoded only by the stitch worker. View redraws never solve or mutate
+    // photometric history; each installed map owns its immutable ratio pair.
+    fusion: Mutex<crate::image_fusion::gpu::Producer>,
     retirements: Arc<IcedDrawRetirements<InstalledOneXsPass>>,
     #[cfg(test)]
     cold_blurred_probe: Mutex<Option<TestColdBlurredProbe>>,
@@ -583,6 +587,13 @@ struct TestColdBlurredProbe {
 }
 
 fn require_resident_device_limits(limits: &wgpu::Limits) -> Fallible<()> {
+    if limits.max_bind_groups < 3 {
+        return Err(format!(
+            "stitching with color matching needs 3 GPU resource groups, but this device allows {}",
+            limits.max_bind_groups
+        )
+        .into());
+    }
     // Warm post-L1 has the largest selected layout: fifteen storage buffers.
     // Check before any pipeline construction so a UI device with insufficient
     // requested limits reports through Scene's ordinary failure path, not wgpu's
@@ -611,7 +622,7 @@ impl ResidentCaptureSession {
         require_resident_device_limits(&context.device().limits())?;
         let context = context.with_worker();
         let picture_layout = crate::scene::bind_group_layout(context.device());
-        let direct = Arc::new(DirectType2Pipeline::new(
+        let direct = Arc::new(DirectType2Pipeline::new_resident_fused(
             context.device(),
             &picture_layout,
             format,
@@ -633,6 +644,11 @@ impl ResidentCaptureSession {
                     .map_err(|error| error.to_string())?,
             ),
             direct,
+            fusion_inputs: Arc::new(crate::image_fusion::sample::FusionInputPipeline::new(
+                context.device(),
+                &picture_layout,
+            )),
+            fusion: Mutex::new(crate::image_fusion::gpu::Producer::new(context.device())?),
             retirements: Arc::new(IcedDrawRetirements::new(
                 context.device(),
                 IcedInstalledDrawAdapter::RETIREMENT_CAPACITY,
@@ -646,8 +662,8 @@ impl ResidentCaptureSession {
         })
     }
 
-    fn restarted(&self) -> Self {
-        Self {
+    fn restarted(&self) -> Fallible<Self> {
+        Ok(Self {
             context: self.context.clone(),
             worker: self.worker.clone(),
             format: self.format,
@@ -660,13 +676,17 @@ impl ResidentCaptureSession {
             solver: self.solver.clone(),
             bridge: self.bridge.clone(),
             direct: self.direct.clone(),
+            fusion_inputs: self.fusion_inputs.clone(),
+            fusion: Mutex::new(crate::image_fusion::gpu::Producer::new(
+                self.context.device(),
+            )?),
             retirements: Arc::new(IcedDrawRetirements::new(
                 self.context.device(),
                 IcedInstalledDrawAdapter::RETIREMENT_CAPACITY,
             )),
             #[cfg(test)]
             cold_blurred_probe: Mutex::new(None),
-        }
+        })
     }
 
     fn ensure_renderer(
@@ -737,10 +757,14 @@ impl ResidentCaptureSession {
             )?;
             let operands = terminal.complete_warm_final(&self.bridge)?;
             Ok(ResidentPendingMap::Warm(Box::new(
-                self.capture
-                    .pipeline
-                    .final_map
-                    .materialize_final(operands)?,
+                self.capture.pipeline.final_map.materialize_final_fused(
+                    operands,
+                    &self.fusion_inputs,
+                    &mut *self
+                        .fusion
+                        .lock()
+                        .map_err(|_| "image fusion capture state is poisoned")?,
+                )?,
             )))
         } else {
             #[cfg(test)]
@@ -797,8 +821,16 @@ impl ResidentCaptureSession {
                 .complete(&self.bridge)?
                 .resume(&self.bridge, &self.solver)?
                 .resume(&self.bridge, &self.solver)?;
+            let operands = pis_frontend_gpu::admit_completed_cold_final(cold, &self.context)?;
             Ok(ResidentPendingMap::Cold(Box::new(
-                self.capture.pipeline.materialize_completed_cold(cold)?,
+                self.capture.pipeline.final_map.materialize_final_fused(
+                    operands,
+                    &self.fusion_inputs,
+                    &mut *self
+                        .fusion
+                        .lock()
+                        .map_err(|_| "image fusion capture state is poisoned")?,
+                )?,
             )))
         }
     }
@@ -846,7 +878,8 @@ impl ResidentCaptureFacade {
         let session = state
             .session
             .as_ref()
-            .map(|session| Arc::new(session.restarted()));
+            .map(|session| session.restarted().map(Arc::new))
+            .transpose()?;
         Ok(Self {
             inner: Arc::new(ResidentCaptureFacadeInner {
                 profile: self.inner.profile.clone(),
@@ -1935,6 +1968,7 @@ impl InstalledOneXsPass {
             &self.draw.pipeline,
             &self.binding,
             self.draw.map.read(),
+            self.draw.map.fusion_read(),
             pass,
         );
         if let Some(view) = self.native_capacity_view {
@@ -2279,7 +2313,7 @@ where
 {
     let context = map.install_context();
     pipeline.ensure_device(&context)?;
-    let bound = map.bind_for_install(&context, pipeline.map_layout())?;
+    let bound = map.bind_for_install(&context, &pipeline)?;
     Ok(ResidentBoundInstall {
         draw: Some(Arc::new(InstalledOneXsDraw {
             source: bound.source,
@@ -3469,6 +3503,21 @@ impl SubmissionLease<geometry_gpu::GpuGeometryFrameOwner<ImportedOneXsPicture>> 
             .copy_final_map_dynamic_inputs(encoder, target, public);
         Ok(())
     }
+
+    fn encode_fusion_inputs(
+        &self,
+        context: &OneXsGpuContext,
+        expected: &FrameStamp,
+        encoder: &mut wgpu::CommandEncoder,
+        sampler: &crate::image_fusion::sample::FusionInputPipeline,
+        packed: &wgpu::Buffer,
+    ) -> Fallible<crate::direct_type2::ResidentGpuBandInputs> {
+        self.validate_provenance(context)?;
+        self.source_owner
+            .as_ref()
+            .ok_or("image fusion source sampling lost its imported source owner")?
+            .encode_fusion_inputs(context, expected, encoder, sampler, packed)
+    }
 }
 
 impl<K> Drop for SubmissionLease<K> {
@@ -3928,6 +3977,21 @@ fn blur_vertical(@builtin(global_invocation_id) id: vec3<u32>) {
 mod tests {
     #[test]
     fn resident_device_limits_refuse_ui_defaults_before_pipeline_construction() {
+        for available in [0, 1, 2] {
+            let limits = wgpu::Limits {
+                max_bind_groups: available,
+                max_storage_buffers_per_shader_stage: 15,
+                ..wgpu::Limits::default()
+            };
+            assert_eq!(
+                super::require_resident_device_limits(&limits)
+                    .unwrap_err()
+                    .to_string(),
+                format!(
+                    "stitching with color matching needs 3 GPU resource groups, but this device allows {available}"
+                )
+            );
+        }
         for available in [0, 8, 11, 14] {
             let limits = wgpu::Limits {
                 max_storage_buffers_per_shader_stage: available,
@@ -3944,6 +4008,7 @@ mod tests {
         }
         for available in [15, 16, 32] {
             let limits = wgpu::Limits {
+                max_bind_groups: 3,
                 max_storage_buffers_per_shader_stage: available,
                 ..wgpu::Limits::default()
             };

@@ -1009,6 +1009,24 @@ impl<P: GpuPriorPublicLevelTwo> GpuFinalOperands<P> {
             candidate,
         })
     }
+
+    pub(in crate::flow::one_xs::one_xs_belt_gpu) fn encode_fusion_inputs(
+        &self,
+        context: &OneXsGpuContext,
+        expected: &kjerag_media::FrameStamp,
+        encoder: &mut wgpu::CommandEncoder,
+        sampler: &crate::image_fusion::sample::FusionInputPipeline,
+        packed: &wgpu::Buffer,
+    ) -> Fallible<crate::direct_type2::ResidentGpuBandInputs> {
+        self.context.ensure_same(context)?;
+        if &self.flight.frame != expected {
+            return Err("image fusion source sampling names a different capture flight".into());
+        }
+        self.prepared
+            .belts
+            .lease
+            .encode_fusion_inputs(context, expected, encoder, sampler, packed)
+    }
 }
 
 #[cfg(test)]

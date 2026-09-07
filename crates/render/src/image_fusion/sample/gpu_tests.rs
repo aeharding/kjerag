@@ -6,6 +6,7 @@ use kjerag_media::{ColorMatrix, Samples};
 use std::sync::mpsc;
 use wgpu::util::DeviceExt;
 
+const PROFILE_ENV: &str = "KJERAG_FUSION_PROFILE";
 const FRAME: Size = Size {
     width: 32,
     height: 16,
@@ -113,7 +114,12 @@ fn gpu_composes_four_packed_rows_then_samples_both_source_bands() {
         .map(|node| {
             let x = (node % MAP_WIDTH) as f32 / (MAP_WIDTH - 1) as f32;
             let y = (node / MAP_WIDTH) as f32 / 99.0;
-            [0.1 + 0.3 * x, 0.2 + 0.6 * y, 0.6 + 0.3 * x, 0.8 - 0.6 * y]
+            let left_u = if node % MAP_WIDTH < 20 {
+                -0.1
+            } else {
+                0.1 + 0.3 * x
+            };
+            [left_u, 0.2 + 0.6 * y, 0.6 + 0.3 * x, 0.8 - 0.6 * y]
         })
         .collect();
     let lookup = super::super::coordinates::selected_x4_band();
@@ -140,73 +146,39 @@ fn gpu_composes_four_packed_rows_then_samples_both_source_bands() {
         contents: bytes_of(&packed),
         usage: wgpu::BufferUsages::STORAGE,
     });
-    let composed = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("fusion band qualification composed"),
-        size: COMPOSED_BYTES,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-    let map = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("fusion band qualification map"),
-        layout: &pipeline.map_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: pipeline.lookup.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: composed.as_entire_binding(),
-            },
-        ],
-    });
-    let bands = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("fusion band qualification output"),
-        size: BAND_BYTES,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-    let output = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("fusion band qualification output"),
-        layout: &pipeline.output_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: bands.as_entire_binding(),
-        }],
-    });
+    const GPU_READBACK_BYTES: u64 = READBACK_BYTES + 2 * PACKED_BAND_BYTES + INVALID_BYTES;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("fusion band qualification readback"),
-        size: READBACK_BYTES,
+        size: GPU_READBACK_BYTES,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
     let mut encoder = device.create_command_encoder(&Default::default());
-    {
-        let mut pass = encoder.begin_compute_pass(&Default::default());
-        pass.set_pipeline(&pipeline.compose_pipeline);
-        pass.set_bind_group(0, &picture, &[]);
-        pass.set_bind_group(1, &map, &[]);
-        pass.set_bind_group(2, &output, &[]);
-        pass.dispatch_workgroups((COMPOSED_NODES as u32).div_ceil(64), 1, 1);
-    }
-    {
-        let mut pass = encoder.begin_compute_pass(&Default::default());
-        pass.set_pipeline(&pipeline.sample_pipeline);
-        pass.set_bind_group(0, &picture, &[]);
-        pass.set_bind_group(1, &map, &[]);
-        pass.set_bind_group(2, &output, &[]);
-        pass.dispatch_workgroups(
-            (BAND_WIDTH as u32).div_ceil(8),
-            (BAND_HEIGHT as u32).div_ceil(8),
-            1,
-        );
-    }
-    encoder.copy_buffer_to_buffer(&composed, 0, &readback, 0, COMPOSED_BYTES);
-    encoder.copy_buffer_to_buffer(&bands, 0, &readback, COMPOSED_BYTES, BAND_BYTES);
+    let gpu_inputs = pipeline.encode(&device, &mut encoder, &picture, &input);
+    encoder.copy_buffer_to_buffer(&gpu_inputs.composed, 0, &readback, 0, COMPOSED_BYTES);
+    encoder.copy_buffer_to_buffer(
+        &gpu_inputs.float_bands,
+        0,
+        &readback,
+        COMPOSED_BYTES,
+        BAND_BYTES,
+    );
+    let [left, right] = gpu_inputs.bands();
+    encoder.copy_buffer_to_buffer(left, 0, &readback, READBACK_BYTES, PACKED_BAND_BYTES);
+    encoder.copy_buffer_to_buffer(
+        right,
+        0,
+        &readback,
+        READBACK_BYTES + PACKED_BAND_BYTES,
+        PACKED_BAND_BYTES,
+    );
+    encoder.copy_buffer_to_buffer(
+        gpu_inputs.invalid(),
+        0,
+        &readback,
+        READBACK_BYTES + 2 * PACKED_BAND_BYTES,
+        INVALID_BYTES,
+    );
     queue.submit([encoder.finish()]);
     let mapped = map_read(&device, &readback);
 
@@ -255,8 +227,118 @@ fn gpu_composes_four_packed_rows_then_samples_both_source_bands() {
                 // scale, not as bit identity with scalar f32 bilinear math.
                 near(actual(channel), expected, 1.0 / 255.0);
             }
+            let packed_at = READBACK_BYTES as usize
+                + (lens * PACKED_BAND_BYTES as usize)
+                + (y * BAND_WIDTH + x) * 4;
+            let actual_packed =
+                u32::from_le_bytes(mapped[packed_at..packed_at + 4].try_into().unwrap());
+            let byte = diagnostic_byte(expected) as u32;
+            assert_eq!(actual_packed, byte | (byte << 8) | (byte << 16));
         }
     }
+    let invalid_at = (READBACK_BYTES + 2 * PACKED_BAND_BYTES) as usize;
+    let expected_validity: Vec<[bool; 2]> = expected_composed
+        .iter()
+        .map(|packed| {
+            [
+                ordered_unit([packed[0] * 2.0, packed[1]]),
+                ordered_unit([packed[2] * 2.0 - 1.0, packed[3]]),
+            ]
+        })
+        .collect();
+    let expected_invalid = extend_invalid(&expected_validity);
+    assert!(expected_invalid.contains(&1));
+    for (index, &expected) in expected_invalid.iter().enumerate() {
+        let at = invalid_at + index * 4;
+        assert_eq!(
+            u32::from_le_bytes(mapped[at..at + 4].try_into().unwrap()),
+            expected as u32,
+            "coordinate invalidity differs at {index}"
+        );
+    }
+
+    drop(mapped);
+    readback.unmap();
+    if std::env::var_os(PROFILE_ENV).is_some() {
+        profile_sampler(&device, &queue, &pipeline, &picture, &input);
+    }
+}
+
+fn profile_sampler(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &FusionInputPipeline,
+    picture: &wgpu::BindGroup,
+    input: &wgpu::Buffer,
+) {
+    const OBSERVATIONS: usize = 16;
+    let timestamps = device.create_query_set(&wgpu::QuerySetDescriptor {
+        label: Some("fusion source-band timestamps"),
+        ty: wgpu::QueryType::Timestamp,
+        count: 4,
+    });
+    let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("fusion source-band timestamp resolve"),
+        size: 4 * 8,
+        usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("fusion source-band timestamp readback"),
+        size: 4 * 8,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut cpu = Vec::with_capacity(OBSERVATIONS);
+    let mut compose = Vec::with_capacity(OBSERVATIONS);
+    let mut sample = Vec::with_capacity(OBSERVATIONS);
+    let mut total = Vec::with_capacity(OBSERVATIONS);
+    for _ in 0..OBSERVATIONS {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("fusion source-band profile"),
+        });
+        let started = std::time::Instant::now();
+        let _inputs = pipeline.encode_profiled(device, &mut encoder, picture, input, &timestamps);
+        cpu.push(started.elapsed().as_secs_f64() * 1_000.0);
+        encoder.resolve_query_set(&timestamps, 0..4, &resolve, 0);
+        encoder.copy_buffer_to_buffer(&resolve, 0, &readback, 0, 4 * 8);
+        let submission = queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        let (sent, received) = mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |answer| {
+            let _ = sent.send(answer);
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .unwrap();
+        received.recv().unwrap().unwrap();
+        let mapped = slice.get_mapped_range();
+        let ticks: Vec<u64> = mapped
+            .chunks_exact(8)
+            .map(|bytes| u64::from_ne_bytes(bytes.try_into().unwrap()))
+            .collect();
+        drop(mapped);
+        readback.unmap();
+        let milliseconds =
+            |ticks: u64| ticks as f64 * f64::from(queue.get_timestamp_period()) / 1_000_000.0;
+        compose.push(milliseconds(ticks[1] - ticks[0]));
+        sample.push(milliseconds(ticks[3] - ticks[2]));
+        total.push(milliseconds(ticks[3] - ticks[0]));
+    }
+    let median = |mut values: Vec<f64>| {
+        values.sort_by(f64::total_cmp);
+        values[values.len() / 2]
+    };
+    eprintln!(
+        "fusion sampler profile fixture=qualified-800x16 observations={OBSERVATIONS} encode_cpu_ms={:.6} gpu_total_ms={:.6} compose_ms={:.6} sample_ms={:.6}",
+        median(cpu),
+        median(total),
+        median(compose),
+        median(sample),
+    );
 }
 
 fn compose_cpu(map: &[[f32; 4]], coordinate: [f32; 2]) -> [f32; 4] {
@@ -389,9 +471,20 @@ fn gpu() -> Result<(wgpu::Device, wgpu::Queue), String> {
         .into_iter()
         .next()
         .ok_or("no Vulkan adapter")?;
+    eprintln!("fusion source-band GPU adapter: {:?}", adapter.get_info());
+    let required_features = if std::env::var_os(PROFILE_ENV).is_some() {
+        let timestamps =
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
+        if !adapter.features().contains(timestamps) {
+            return Err("fusion source-band profile adapter lacks pass timestamp queries".into());
+        }
+        timestamps
+    } else {
+        wgpu::Features::empty()
+    };
     block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("fusion source-band qualification"),
-        required_features: wgpu::Features::empty(),
+        required_features,
         required_limits: adapter.limits(),
         ..Default::default()
     }))

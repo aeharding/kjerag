@@ -5356,11 +5356,10 @@ pub(crate) fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout 
 /// The state buffer alone, as the draw sees it: read-only, on a group of its
 /// own (see [`band::STATE_BINDING`]).
 fn read_layout(device: &wgpu::Device, flow_bytes: Option<u64>) -> wgpu::BindGroupLayout {
-    // The grid rides in this group and not one of its own: the app's device
-    // reports max_bind_groups = 2, so zero and one are the whole budget. The
-    // flow displacement rides here too, on binding 3, and only in a typed flow
-    // layout built with that payload's exact size, so the plain layout the
-    // shipped draw uses is untouched.
+    // The grid historically rode in group one beside the band state, leaving
+    // group zero for the picture. The flow displacement rides here too, on
+    // binding 3, and only in a typed flow layout built with that payload's
+    // exact size, so the plain layout the shipped draw uses is untouched.
     let mut entries = vec![
         wgpu::BindGroupLayoutEntry {
             binding: band::STATE_BINDING,
@@ -7978,6 +7977,18 @@ mod tests {
         let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
         let capture =
             prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &first);
+        let cold_map = scene
+            .diagnostic_one_xs_map()
+            .unwrap()
+            .expect("cold resident Scene frame has no installed map");
+        assert_eq!(cold_map.frame(), &first);
+        assert_resident_fusion_matches_cpu_reference(
+            &scene,
+            &mut pipeline,
+            &device,
+            &queue,
+            &cold_map,
+        );
         assert_eq!(
             capture.worker_l1_submissions_for_test().unwrap(),
             18,
@@ -8019,11 +8030,196 @@ mod tests {
         let continued =
             prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &second);
         assert!(continued.same_capture(&capture));
+        let warm_map = scene
+            .diagnostic_one_xs_map()
+            .unwrap()
+            .expect("warm resident Scene frame has no installed map");
+        assert_eq!(warm_map.frame(), &second);
+        assert_finite_fusion(&warm_map);
         assert_eq!(
             capture.worker_l1_submissions_for_test().unwrap(),
             24,
             "adjacent warm Scene frame did not submit six L1 chunks on its worker"
         );
+    }
+
+    fn assert_resident_fusion_matches_cpu_reference(
+        scene: &Scene,
+        resident: &mut ScenePipeline,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        map: &OneXsMapFrame,
+    ) {
+        assert_finite_fusion(map);
+        let mut diagnostic = ScenePipeline::new(device, queue, wgpu::TextureFormat::Rgba8Unorm);
+        let samples = diagnostic
+            .prepare_one_xs_fusion_inputs(&scene.primitive(Camera::default()), 1.0, map)
+            .unwrap()
+            .expect("installed cold source was unavailable to the fusion diagnostic")
+            .read()
+            .unwrap();
+        assert_eq!(samples.frame(), map.frame());
+        let expected = crate::image_fusion::spatial::Reference::new()
+            .observe_bands(samples.bands(), samples.invalid())
+            .unwrap()
+            .expect("cold source bands were not admitted by the CPU reference")
+            .ratios;
+        let actual = map.fusion().unwrap();
+        for (lens, (actual, expected)) in [
+            (&actual.left, &expected.left),
+            (&actual.right, &expected.right),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for (index, (actual, expected)) in
+                actual.values().iter().zip(expected.values()).enumerate()
+            {
+                for channel in 0..4 {
+                    let error = (actual[channel] - expected[channel]).abs();
+                    assert!(
+                        error <= 1.0 / 510.0,
+                        "resident fusion differs from CPU reference at lens {lens}, node {index}, channel {channel}: GPU={}, CPU={}, error={error}",
+                        actual[channel],
+                        expected[channel],
+                    );
+                }
+            }
+        }
+
+        let reference_map = OneXsMapFrame::new(
+            map.frame().clone(),
+            map.packed().clone(),
+            map.alpha().clone(),
+            map.pis_backend(),
+        )
+        .with_fusion(expected);
+        let (send, receive) = mpsc::channel();
+        scene.capture(Request {
+            width: 64,
+            then: Box::new(move |shot| {
+                let _ = send.send(shot);
+            }),
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let resident_pixels = loop {
+            resident.prepare(&scene.primitive(Camera::default()), device, queue, 1.0);
+            if let Ok(shot) = receive.recv_timeout(Duration::from_millis(10)) {
+                break shot.unwrap().rgba;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "resident fusion comparison screenshot did not complete"
+            );
+        };
+        let reference_pixels =
+            render_direct_map_pixels(device, queue, &mut diagnostic, &reference_map);
+        assert_eq!(resident_pixels.len(), reference_pixels.len());
+        for (index, (&resident, &reference)) in
+            resident_pixels.iter().zip(&reference_pixels).enumerate()
+        {
+            assert!(
+                resident.abs_diff(reference) <= 1,
+                "resident fusion draw differs from the CPU-reference consumer at byte {index}: resident={resident}, reference={reference}"
+            );
+        }
+    }
+
+    fn render_direct_map_pixels(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipeline: &mut ScenePipeline,
+        map: &OneXsMapFrame,
+    ) -> Vec<u8> {
+        const SIDE: u32 = 64;
+        const BYTES: u64 = SIDE as u64 * SIDE as u64 * 4;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("CPU-reference fusion consumer"),
+            size: wgpu::Extent3d {
+                width: SIDE,
+                height: SIDE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let mut draw = DirectMapDraw::new(device, &pipeline.layout, pipeline.format, true);
+        draw.upload(queue, map);
+        assert_eq!(draw.bound_frame(), Some(map.frame()));
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("CPU-reference fusion consumer readback"),
+            size: BYTES,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let view = texture.create_view(&Default::default());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("CPU-reference fusion rectilinear mesh consumer"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            draw.draw_mesh_for_test(&mut pass, &pipeline.bind_group);
+        }
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(SIDE * 4),
+                    rows_per_image: Some(SIDE),
+                },
+            },
+            texture.size(),
+        );
+        let submission = queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        let (send, receive) = mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = send.send(result);
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .unwrap();
+        receive.recv().unwrap().unwrap();
+        slice.get_mapped_range().to_vec()
+    }
+
+    fn assert_finite_fusion(map: &OneXsMapFrame) {
+        let fusion = map
+            .fusion()
+            .expect("installed resident map has no image-fusion ratios");
+        for (lens, ratios) in [&fusion.left, &fusion.right].into_iter().enumerate() {
+            for (index, value) in ratios.values().iter().enumerate() {
+                assert!(
+                    value[..3]
+                        .iter()
+                        .all(|value| value.is_finite() && *value > 0.0),
+                    "resident fusion has an unusable RGB ratio at lens {lens}, node {index}: {value:?}"
+                );
+                assert_eq!(
+                    value[3], 0.0,
+                    "resident fusion channel four changed at lens {lens}, node {index}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -8574,6 +8770,18 @@ mod tests {
                 map.alpha().bytes(),
             )
             .unwrap();
+            if let Some(fusion) = map.fusion() {
+                std::fs::write(
+                    output.join(format!("frame-{index:010}.fusion-left.float4")),
+                    fusion.left.bytes(),
+                )
+                .unwrap();
+                std::fs::write(
+                    output.join(format!("frame-{index:010}.fusion-right.float4")),
+                    fusion.right.bytes(),
+                )
+                .unwrap();
+            }
             let mut file = std::io::BufWriter::new(
                 std::fs::File::create(output.join(format!("frame-{index:010}.ppm"))).unwrap(),
             );
@@ -8919,7 +9127,10 @@ mod tests {
         let foreign = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("foreign selected ONE X2 Scene context"),
             required_features: wgpu::Features::empty(),
-            required_limits: adapter.limits(),
+            required_limits: wgpu::Limits {
+                max_bind_groups: 3,
+                ..adapter.limits()
+            },
             ..Default::default()
         }))
         .map_err(|error| error.to_string())?;

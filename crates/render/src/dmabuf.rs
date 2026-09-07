@@ -63,10 +63,11 @@ pub fn force_extensions(args: wgpu::hal::vulkan::CreateDeviceCallbackArgs<'_, '_
 /// of this: its device is iced's, and the `[patch.crates-io]` wgpu entry is
 /// what puts the extension on that one.
 pub fn open_device(adapter: &wgpu::Adapter) -> Fallible<(wgpu::Device, wgpu::Queue)> {
+    let features = adapter.features() & wgpu::Features::FLOAT32_FILTERABLE;
     let opened = unsafe {
         let hal = adapter.as_hal::<Vulkan>().ok_or("not a Vulkan adapter")?;
         hal.open_with_callback(
-            wgpu::Features::empty(),
+            features,
             &wgpu::MemoryHints::default(),
             Some(Box::new(force_extensions)),
         )?
@@ -76,7 +77,7 @@ pub fn open_device(adapter: &wgpu::Adapter) -> Fallible<(wgpu::Device, wgpu::Que
             opened,
             &wgpu::DeviceDescriptor {
                 label: Some("headless"),
-                required_features: wgpu::Features::empty(),
+                required_features: features,
                 required_limits: adapter.limits(),
                 ..Default::default()
             },

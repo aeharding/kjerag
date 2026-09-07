@@ -7,22 +7,34 @@ The local changes are in `src/window/compositor.rs`, `src/engine.rs`,
 The manifest expands that workspace's inherited values and keeps sibling
 packages at the exact same git revision. It disables publishing.
 
-The compositor now requests the adapter's supported storage-buffer count
-instead of leaving shader widgets at wgpu's default limit of eight.
-Other limits, fallback device attempts and features are unchanged. There is
-no new hardware requirement for the UI. Kjerag's selected
+The compositor requests the adapter's supported storage-buffer count
+instead of leaving shader widgets at wgpu's default limit of eight. It also
+provides three bind groups for source, stitch map and photometric ratios.
+Fallback device attempts remain. There is no new hardware requirement for the
+UI. Kjerag's selected
 ONE X2 path checks its own requirement before constructing GPU pipelines and
 reports an ordinary playback error on a device below that requirement.
 
 This fixes a real-window startup validation panic: the prepared-source stage
 declares eleven storage buffers, and warm post-L1 declares fifteen. Headless
 instruments requested adapter limits already and concealed the UI mismatch.
-There is no shader, arithmetic, cadence or stitched-pixel change in this patch.
+This device-limit correction does not alter shader arithmetic or stitched pixels.
 
-Why local: libcosmic does not expose device-limit configuration. Keeping only
+The photometric performance candidate additionally requests
+`FLOAT32_FILTERABLE` only when the adapter advertises it. Window rendering
+retains its existing optional `SHADER_F16` request. Kjerag uses f32 filtering
+to read its full-precision color ratio textures and retains explicit bilinear
+interpolation on devices without the feature. Hardware interpolation can
+round differently; real-output checks and actual-player performance qualify
+that consumer choice separately. A half-storage trial provided no useful
+performance gain and was removed.
+
+Why local: libcosmic exposes neither device-limit nor optional-feature settings.
+Keeping only
 this renderer crate avoids forking both libcosmic and its iced submodule or
 changing the GPU pipeline's qualified buffer layout just to fit a UI default.
-Remove this patch when the pinned UI renderer supports requesting these limits.
+Remove this configuration patch when the pinned UI renderer supports requesting
+these limits and optional features.
 Do not send it or an issue to an outside project.
 
 The current branch additionally evaluates native video readiness. Custom

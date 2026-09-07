@@ -16,7 +16,7 @@ use crate::flow::one_xs::one_xs_belt_gpu::{
     ResidentSourceIdentity, SourceTextures,
 };
 use crate::projection;
-use crate::studio_type2::{ALPHA_BYTES, OneXsMapFrame, PACKED_BYTES};
+use crate::studio_type2::{ALPHA_BYTES, MAP_HEIGHT, MAP_WIDTH, OneXsMapFrame, PACKED_BYTES};
 use crate::{Fallible, FrameStamp, MAX_LENSES, Planes};
 
 /// One exact decoded ONE X2 pair imported for resident processing and drawing.
@@ -122,13 +122,83 @@ impl ImportedOneXsPicture {
         }
     }
 
+    /// Append source-band sampling while this exact imported picture remains
+    /// inside its resident submission lease. Neither the decoder owner nor a
+    /// raw plane handle crosses this boundary.
+    pub(crate) fn encode_fusion_inputs(
+        &self,
+        context: &OneXsGpuContext,
+        expected: &FrameStamp,
+        encoder: &mut wgpu::CommandEncoder,
+        sampler: &crate::image_fusion::sample::FusionInputPipeline,
+        packed: &wgpu::Buffer,
+    ) -> Fallible<ResidentGpuBandInputs> {
+        self.context.ensure_same(context)?;
+        self.ensure_resident_frame(expected)?;
+        if !context.is_worker_thread() {
+            return Err("image fusion source sampling was called outside its stitch worker".into());
+        }
+        if packed.size() != PACKED_BYTES as u64 {
+            return Err(format!(
+                "image fusion packed source map is {} bytes, expected {PACKED_BYTES}",
+                packed.size()
+            )
+            .into());
+        }
+
+        // This pass reads only source size, plane encoding/range and colour
+        // matrix from the uniform. Camera/view fields are deliberately empty:
+        // the frame-bound packed map has already performed projection.
+        let reframe = crate::Reframe::new(
+            &[],
+            self.frames.size,
+            crate::Camera::default(),
+            crate::Held::default(),
+            1.0,
+            false,
+            crate::Sampling::Bilinear,
+        )
+        .with_samples(self.frames.samples);
+        let uniforms = context.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("image fusion capture-owned source metadata"),
+            size: std::mem::size_of::<crate::Reframe>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: true,
+        });
+        {
+            let mut mapped = uniforms.slice(..).get_mapped_range_mut();
+            mapped.copy_from_slice(reframe.bytes());
+        }
+        uniforms.unmap();
+        let picture = sampler.bind_source(
+            context.device(),
+            &uniforms,
+            [&self.planes[0], &self.planes[1]],
+        );
+        let inputs = sampler.encode(context.device(), encoder, &picture, packed);
+        Ok(ResidentGpuBandInputs {
+            inputs,
+            _picture: picture,
+            _uniforms: uniforms,
+        })
+    }
+
     pub(crate) fn draw_resident_binding(
         &self,
         pipeline: &DirectType2Pipeline,
         binding: &ImportedOneXsDrawBinding,
         map: &wgpu::BindGroup,
+        fusion: Option<&wgpu::BindGroup>,
         pass: &mut wgpu::RenderPass<'_>,
     ) {
+        assert_eq!(
+            pipeline.fusion_layout().is_some(),
+            fusion.is_some(),
+            "resident direct map pipeline and photometric binding presence differ"
+        );
+        if let Some(fusion) = fusion {
+            pass.set_bind_group(2, fusion, &[]);
+        }
         if binding.rectilinear {
             pipeline.draw_mesh(pass, &binding.picture, map);
         } else {
@@ -192,6 +262,25 @@ pub(crate) struct ImportedOneXsDrawBinding {
     picture: wgpu::BindGroup,
     _uniforms: wgpu::Buffer,
     rectilinear: bool,
+}
+
+/// Capture-owned source-band inputs and every binding used to encode them.
+/// The imported picture itself remains outside this value in the submission
+/// lease; this owner only prevents its GPU bindings from being dropped early.
+pub(crate) struct ResidentGpuBandInputs {
+    inputs: crate::image_fusion::sample::GpuBandInputs,
+    _picture: wgpu::BindGroup,
+    _uniforms: wgpu::Buffer,
+}
+
+impl ResidentGpuBandInputs {
+    pub(crate) fn bands(&self) -> [&wgpu::Buffer; 2] {
+        self.inputs.bands()
+    }
+
+    pub(crate) fn invalid(&self) -> &wgpu::Buffer {
+        self.inputs.invalid()
+    }
 }
 
 #[cfg(test)]
@@ -259,9 +348,11 @@ pub(crate) struct DirectType2Pipeline {
     sampler: wgpu::Sampler,
     map_layout: wgpu::BindGroupLayout,
     fusion_layout: Option<wgpu::BindGroupLayout>,
+    fusion_sampler: Option<wgpu::Sampler>,
 }
 
 impl DirectType2Pipeline {
+    #[cfg(test)]
     pub(crate) fn new(
         device: &wgpu::Device,
         picture_layout: &wgpu::BindGroupLayout,
@@ -270,33 +361,71 @@ impl DirectType2Pipeline {
         Self::with_fusion(device, picture_layout, format, false)
     }
 
+    pub(crate) fn new_resident_fused(
+        device: &wgpu::Device,
+        picture_layout: &wgpu::BindGroupLayout,
+        format: wgpu::TextureFormat,
+    ) -> Self {
+        Self::with_fusion(device, picture_layout, format, true)
+    }
+
     fn with_fusion(
         device: &wgpu::Device,
         picture_layout: &wgpu::BindGroupLayout,
         format: wgpu::TextureFormat,
         fusion: bool,
     ) -> Self {
+        let hardware_fusion = fusion
+            && device
+                .features()
+                .contains(wgpu::Features::FLOAT32_FILTERABLE);
         let map_layout = layout(
             device,
             wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
         );
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ONE X2 direct type-2 map"),
-            source: wgpu::ShaderSource::Wgsl(draw_wgsl_with_fusion(fusion).into()),
+            source: wgpu::ShaderSource::Wgsl(
+                draw_wgsl_with_fusion_mode(fusion, hardware_fusion).into(),
+            ),
         });
         let fusion_layout = fusion.then(|| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("per-lens image fusion ratios"),
-                entries: &std::array::from_fn::<_, 2, _>(|binding| wgpu::BindGroupLayoutEntry {
-                    binding: binding as u32,
+            let mut entries = (0..2)
+                .map(|binding| wgpu::BindGroupLayoutEntry {
+                    binding,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(PACKED_BYTES as u64),
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float {
+                            filterable: hardware_fusion,
+                        },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
                     count: None,
-                }),
+                })
+                .collect::<Vec<_>>();
+            if hardware_fusion {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                });
+            }
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("per-lens image fusion ratios"),
+                entries: &entries,
+            })
+        });
+        let fusion_sampler = hardware_fusion.then(|| {
+            device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("image fusion bilinear sampler"),
+                address_mode_u: wgpu::AddressMode::Repeat,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+                ..Default::default()
             })
         });
         let mut layouts = vec![picture_layout, &map_layout];
@@ -368,6 +497,7 @@ impl DirectType2Pipeline {
             }),
             map_layout,
             fusion_layout,
+            fusion_sampler,
         }
     }
 
@@ -381,6 +511,79 @@ impl DirectType2Pipeline {
 
     pub(crate) fn map_layout(&self) -> &wgpu::BindGroupLayout {
         &self.map_layout
+    }
+
+    pub(crate) fn fusion_layout(&self) -> Option<&wgpu::BindGroupLayout> {
+        self.fusion_layout.as_ref()
+    }
+
+    pub(crate) fn bind_fusion_textures(
+        &self,
+        device: &wgpu::Device,
+        ratios: [&wgpu::Texture; 2],
+    ) -> Fallible<wgpu::BindGroup> {
+        // The resident producer's Output is sealed to its capture context.
+        // wgpu exposes no owning device from a Texture at this boundary.
+        if self.device != *device {
+            return Err(
+                "ONE X2 image fusion binding belongs to a different graphics device".into(),
+            );
+        }
+        let Some(layout) = self.fusion_layout() else {
+            return Err("ONE X2 direct type-2 pipeline has image fusion disabled".into());
+        };
+        for (lens, ratio) in ratios.iter().enumerate() {
+            if ratio.size()
+                != (wgpu::Extent3d {
+                    width: MAP_WIDTH as u32,
+                    height: MAP_HEIGHT as u32,
+                    depth_or_array_layers: 1,
+                })
+            {
+                return Err(format!(
+                    "ONE X2 lens {lens} image fusion texture is {} by {} by {}, expected {MAP_WIDTH} by {MAP_HEIGHT} by 1",
+                    ratio.width(),
+                    ratio.height(),
+                    ratio.depth_or_array_layers()
+                )
+                .into());
+            }
+            if ratio.format() != wgpu::TextureFormat::Rgba32Float
+                || ratio.dimension() != wgpu::TextureDimension::D2
+                || ratio.sample_count() != 1
+            {
+                return Err(format!(
+                    "ONE X2 lens {lens} image fusion texture must be single-sampled 2D Rgba32Float"
+                )
+                .into());
+            }
+            if !ratio.usage().contains(wgpu::TextureUsages::TEXTURE_BINDING) {
+                return Err(format!(
+                    "ONE X2 lens {lens} image fusion texture is not GPU sampleable"
+                )
+                .into());
+            }
+        }
+        let views = ratios.map(|ratio| ratio.create_view(&Default::default()));
+        let mut entries = views
+            .iter()
+            .enumerate()
+            .map(|(binding, view)| wgpu::BindGroupEntry {
+                binding: binding as u32,
+                resource: wgpu::BindingResource::TextureView(view),
+            })
+            .collect::<Vec<_>>();
+        if let Some(sampler) = self.fusion_sampler.as_ref() {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            });
+        }
+        Ok(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident frame-bound image fusion ratio pair"),
+            layout,
+            entries: &entries,
+        }))
     }
 
     pub(crate) fn ensure_device(&self, context: &OneXsGpuContext) -> Fallible<()> {
@@ -467,30 +670,33 @@ struct DirectType2CpuBinding {
     fusion: Option<FusionBinding>,
 }
 
-/// Explicit replay resources. The bind group drops before its buffers.
+/// Explicit replay resources. The bind group drops before its textures.
 struct FusionBinding {
     read: wgpu::BindGroup,
-    ratios: [wgpu::Buffer; 2],
+    ratios: [wgpu::Texture; 2],
 }
 
 impl FusionBinding {
-    fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> Self {
+    fn new(device: &wgpu::Device, pipeline: &DirectType2Pipeline) -> Self {
         let ratios = std::array::from_fn(|_| {
-            device.create_buffer(&wgpu::BufferDescriptor {
+            device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("image fusion ratio map"),
-                size: PACKED_BYTES as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
+                size: wgpu::Extent3d {
+                    width: MAP_WIDTH as u32,
+                    height: MAP_HEIGHT as u32,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
             })
         });
-        let read = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("frame-bound image fusion ratio pair"),
-            layout,
-            entries: &std::array::from_fn::<_, 2, _>(|binding| wgpu::BindGroupEntry {
-                binding: binding as u32,
-                resource: ratios[binding].as_entire_binding(),
-            }),
-        });
+        let read = pipeline
+            .bind_fusion_textures(device, [&ratios[0], &ratios[1]])
+            .expect("new replay fusion textures match their pipeline");
         Self { read, ratios }
     }
 }
@@ -531,7 +737,7 @@ impl DirectType2CpuBinding {
             fusion: pipeline
                 .fusion_layout
                 .as_ref()
-                .map(|layout| FusionBinding::new(device, layout)),
+                .map(|_| FusionBinding::new(device, pipeline)),
         }
     }
 
@@ -540,8 +746,20 @@ impl DirectType2CpuBinding {
         queue.write_buffer(&self.alpha, 0, map.alpha().bytes());
         match (&self.fusion, map.fusion()) {
             (Some(binding), Some(pair)) => {
-                queue.write_buffer(&binding.ratios[0], 0, pair.left.bytes());
-                queue.write_buffer(&binding.ratios[1], 0, pair.right.bytes());
+                for (texture, ratio) in binding.ratios.iter().zip([&pair.left, &pair.right]) {
+                    queue.write_texture(
+                        texture.as_image_copy(),
+                        ratio.bytes(),
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(
+                                (MAP_WIDTH * std::mem::size_of::<[f32; 4]>()) as u32,
+                            ),
+                            rows_per_image: Some(MAP_HEIGHT as u32),
+                        },
+                        texture.size(),
+                    );
+                }
             }
             (None, None) => {}
             _ => panic!("direct map pipeline and photometric map presence differ"),
@@ -590,6 +808,18 @@ impl DirectMapDraw {
         }
         self.pipeline.draw(pass, picture, &self.binding.read);
     }
+
+    #[cfg(test)]
+    pub(crate) fn draw_mesh_for_test(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        picture: &wgpu::BindGroup,
+    ) {
+        if let Some(fusion) = &self.binding.fusion {
+            pass.set_bind_group(2, &fusion.read, &[]);
+        }
+        self.pipeline.draw_mesh(pass, picture, &self.binding.read);
+    }
 }
 
 fn layout(device: &wgpu::Device, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayout {
@@ -623,9 +853,18 @@ pub(crate) fn draw_wgsl() -> String {
     draw_wgsl_with_fusion(false)
 }
 
+#[cfg(test)]
 fn draw_wgsl_with_fusion(fusion: bool) -> String {
+    draw_wgsl_with_fusion_mode(fusion, false)
+}
+
+fn draw_wgsl_with_fusion_mode(fusion: bool, hardware_fusion: bool) -> String {
     let correction = if fusion {
-        crate::image_fusion::WGSL
+        if hardware_fusion {
+            crate::image_fusion::FILTERED_WGSL
+        } else {
+            crate::image_fusion::WGSL
+        }
     } else {
         // An actual bypass, so disabled mode does not round or clamp RGB and
         // introduces no resource binding or texture read.

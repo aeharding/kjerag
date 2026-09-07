@@ -51,10 +51,11 @@ impl From<Error> for graphics::Error {
 }
 
 // Kjerag: shader widgets share this device. Expose supported storage-buffer
-// capacity instead of imposing the UI-only default. Keep all other limits.
+// capacity instead of imposing the UI-only default. Source, stitch map and
+// frame-owned photometric ratios need three groups. Keep all other limits.
 fn device_limits(limits: wgpu::Limits, adapter: &wgpu::Limits) -> wgpu::Limits {
     wgpu::Limits {
-        max_bind_groups: 2,
+        max_bind_groups: 3,
         max_non_sampler_bindings: 2048,
         max_storage_buffers_per_shader_stage: adapter
             .max_storage_buffers_per_shader_stage,
@@ -62,9 +63,29 @@ fn device_limits(limits: wgpu::Limits, adapter: &wgpu::Limits) -> wgpu::Limits {
     }
 }
 
+fn device_features(supported: wgpu::Features) -> wgpu::Features {
+    supported
+        & (wgpu::Features::SHADER_F16 | wgpu::Features::FLOAT32_FILTERABLE)
+}
+
 #[cfg(test)]
 mod device_limits_tests {
-    use super::device_limits;
+    use super::{device_features, device_limits};
+
+    #[test]
+    fn device_features_request_only_supported_optional_features() {
+        let selected =
+            wgpu::Features::SHADER_F16 | wgpu::Features::FLOAT32_FILTERABLE;
+        for supported in [
+            wgpu::Features::empty(),
+            wgpu::Features::SHADER_F16,
+            wgpu::Features::FLOAT32_FILTERABLE,
+            selected,
+            selected | wgpu::Features::TIMESTAMP_QUERY,
+        ] {
+            assert_eq!(device_features(supported), supported & selected);
+        }
+    }
 
     #[test]
     fn device_limits_expose_supported_storage_without_changing_other_limits() {
@@ -77,7 +98,7 @@ mod device_limits_tests {
                     ..wgpu::Limits::default()
                 };
                 let expected = wgpu::Limits {
-                    max_bind_groups: 2,
+                    max_bind_groups: 3,
                     max_non_sampler_bindings: 2048,
                     max_storage_buffers_per_shader_stage: supported,
                     ..base.clone()
@@ -307,13 +328,9 @@ impl Compositor {
             .into_iter()
             .map(|limits| device_limits(limits, &adapter_limits));
 
-        // Request SHADER_F16 only if the adapter supports it (e.g., not available in WebGL2)
-        let required_features =
-            if adapter.features().contains(wgpu::Features::SHADER_F16) {
-                wgpu::Features::SHADER_F16
-            } else {
-                wgpu::Features::empty()
-            };
+        // Optional f32 filtering accelerates Kjerag's full-precision color
+        // maps. Unsupported devices keep its explicit interpolation path.
+        let required_features = device_features(adapter.features());
 
         let mut errors = Vec::new();
 
