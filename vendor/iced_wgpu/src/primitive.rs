@@ -31,6 +31,26 @@ pub trait Primitive: Debug + MaybeSend + MaybeSync + 'static {
         viewport: &Viewport,
     );
 
+    /// Returns whether this [`Primitive`] is ready to be presented.
+    ///
+    /// This is queried immediately after [`prepare`](Self::prepare). Window
+    /// renderers may defer presentation while a visible primitive is not
+    /// ready, without changing offscreen rendering behavior.
+    fn is_presentable(&self, _pipeline: &Self::Pipeline) -> bool {
+        true
+    }
+
+    /// Whether this primitive schedules further retries after the renderer
+    /// requests the first redraw of an unavailable frame.
+    ///
+    /// Opt in only when its widget guarantees future redraws even while
+    /// paused. Otherwise the renderer continues requesting every retry.
+    /// This local bridge supports one self-scheduled widget per window;
+    /// multiple independent retry owners must leave this disabled.
+    fn schedules_retry(&self, _pipeline: &Self::Pipeline) -> bool {
+        false
+    }
+
     /// Draws the [`Primitive`] in the given [`wgpu::RenderPass`].
     ///
     /// When possible, this should be implemented over [`render`](Self::render)
@@ -106,6 +126,10 @@ pub(crate) trait Stored:
         render_pass: &mut wgpu::RenderPass<'_>,
     ) -> bool;
 
+    fn is_presentable(&self, storage: &Storage) -> bool;
+
+    fn schedules_retry(&self, storage: &Storage) -> bool;
+
     fn render(
         &self,
         storage: &Storage,
@@ -142,6 +166,26 @@ impl<P: Primitive> Stored for BlackBox<P> {
 
         self.primitive
             .prepare(renderer, device, queue, bounds, viewport);
+    }
+
+    fn is_presentable(&self, storage: &Storage) -> bool {
+        let renderer = storage
+            .get::<P>()
+            .expect("renderer should be initialized")
+            .downcast_ref::<P::Pipeline>()
+            .expect("renderer should have the proper type");
+
+        self.primitive.is_presentable(renderer)
+    }
+
+    fn schedules_retry(&self, storage: &Storage) -> bool {
+        let renderer = storage
+            .get::<P>()
+            .expect("renderer should be initialized")
+            .downcast_ref::<P::Pipeline>()
+            .expect("renderer should have the proper type");
+
+        self.primitive.schedules_retry(renderer)
     }
 
     fn draw(
@@ -238,5 +282,77 @@ impl Storage {
         for pipeline in self.pipelines.values_mut() {
             pipeline.trim();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct TestPipeline;
+
+    impl Pipeline for TestPipeline {
+        fn new(
+            _device: &wgpu::Device,
+            _queue: &wgpu::Queue,
+            _format: wgpu::TextureFormat,
+        ) -> Self {
+            Self
+        }
+    }
+
+    #[derive(Debug)]
+    struct ReadyByDefault;
+
+    impl Primitive for ReadyByDefault {
+        type Pipeline = TestPipeline;
+
+        fn prepare(
+            &self,
+            _pipeline: &mut Self::Pipeline,
+            _device: &wgpu::Device,
+            _queue: &wgpu::Queue,
+            _bounds: &Rectangle,
+            _viewport: &Viewport,
+        ) {
+        }
+    }
+
+    #[derive(Debug)]
+    struct NotReady;
+
+    impl Primitive for NotReady {
+        type Pipeline = TestPipeline;
+
+        fn prepare(
+            &self,
+            _pipeline: &mut Self::Pipeline,
+            _device: &wgpu::Device,
+            _queue: &wgpu::Queue,
+            _bounds: &Rectangle,
+            _viewport: &Viewport,
+        ) {
+        }
+
+        fn is_presentable(&self, _pipeline: &Self::Pipeline) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn stored_primitive_forwards_default_and_false_presentability() {
+        let default = BlackBox {
+            primitive: ReadyByDefault,
+        };
+        let not_ready = BlackBox {
+            primitive: NotReady,
+        };
+        let mut storage = Storage::default();
+        storage.store::<ReadyByDefault, _>(TestPipeline);
+        storage.store::<NotReady, _>(TestPipeline);
+
+        assert!(default.is_presentable(&storage));
+        assert!(!not_ready.is_presentable(&storage));
     }
 }

@@ -18,7 +18,7 @@ pub struct Engine {
     #[cfg(any(feature = "image", feature = "svg"))]
     pub(crate) image_pipeline: crate::image::Pipeline,
     pub(crate) primitive_storage: Arc<RwLock<primitive::Storage>>,
-    _shell: Shell,
+    pub(crate) _shell: Shell,
 }
 
 impl Engine {

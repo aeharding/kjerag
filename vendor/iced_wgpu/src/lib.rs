@@ -37,6 +37,9 @@ mod quad;
 mod text;
 mod triangle;
 
+#[cfg(test)]
+mod preflight_tests;
+
 #[cfg(any(feature = "image", feature = "svg"))]
 #[path = "image/mod.rs"]
 mod image;
@@ -95,6 +98,11 @@ pub struct Renderer {
     image_cache: std::cell::RefCell<image::Cache>,
 
     staging_belt: wgpu::util::StagingBelt,
+    deferred_retry_started: bool,
+    #[cfg(test)]
+    prepared_ui_count: usize,
+    #[cfg(test)]
+    submit_count: usize,
 }
 
 impl Renderer {
@@ -131,6 +139,11 @@ impl Renderer {
             ),
 
             engine,
+            deferred_retry_started: false,
+            #[cfg(test)]
+            prepared_ui_count: 0,
+            #[cfg(test)]
+            submit_count: 0,
         }
     }
 
@@ -146,9 +159,15 @@ impl Renderer {
             },
         );
 
-        self.prepare(&mut encoder, viewport);
+        let _ = self.prepare(&mut encoder, viewport);
         self.render(&mut encoder, target, clear_color, viewport);
 
+        self.trim();
+
+        encoder
+    }
+
+    fn trim(&mut self) {
         self.quad.trim();
         self.triangle.trim();
         self.text.trim();
@@ -161,8 +180,20 @@ impl Renderer {
             self.image.trim();
             self.image_cache.borrow_mut().trim();
         }
+    }
 
-        encoder
+    fn submit(
+        &mut self,
+        encoder: wgpu::CommandEncoder,
+    ) -> wgpu::SubmissionIndex {
+        #[cfg(test)]
+        {
+            self.submit_count += 1;
+        }
+        self.staging_belt.finish();
+        let submission = self.engine.queue.submit([encoder.finish()]);
+        self.staging_belt.recall();
+        submission
     }
 
     pub fn present(
@@ -173,11 +204,60 @@ impl Renderer {
         viewport: &Viewport,
     ) -> wgpu::SubmissionIndex {
         let encoder = self.draw(clear_color, frame, viewport);
+        self.submit(encoder)
+    }
 
-        self.staging_belt.finish();
-        let submission = self.engine.queue.submit([encoder.finish()]);
-        self.staging_belt.recall();
-        submission
+    /// Prepares a window frame before its surface texture is acquired.
+    ///
+    /// If a visible custom primitive is not ready, no ordinary UI preparation
+    /// or submission is performed. The first refusal always requests a
+    /// redraw; subsequent retries may be scheduled by the unavailable widgets.
+    fn prepare_window(
+        &mut self,
+        viewport: &Viewport,
+    ) -> Option<wgpu::CommandEncoder> {
+        self.layers.merge();
+        let (presentable, schedules_retry) = self.prepare_primitives(viewport);
+        if !presentable {
+            self.engine
+                .primitive_storage
+                .write()
+                .expect("primitive storage should be writable")
+                .trim();
+            if !self.deferred_retry_started || !schedules_retry {
+                self.engine._shell.request_redraw();
+            }
+            self.deferred_retry_started = schedules_retry;
+            return None;
+        }
+        self.deferred_retry_started = false;
+
+        let mut encoder = self.engine.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor {
+                label: Some("iced_wgpu encoder"),
+            },
+        );
+        self.prepare_ui(&mut encoder, viewport);
+        Some(encoder)
+    }
+
+    /// Renders and submits a window frame whose preparation was accepted.
+    fn present_prepared(
+        &mut self,
+        mut encoder: wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        viewport: &Viewport,
+        clear_color: Option<Color>,
+    ) -> wgpu::SubmissionIndex {
+        self.render(&mut encoder, target, clear_color, viewport);
+        self.trim();
+        self.submit(encoder)
+    }
+
+    /// Submits preparation work when a ready frame cannot use its surface.
+    fn discard_prepared(&mut self, encoder: wgpu::CommandEncoder) {
+        self.trim();
+        let _ = self.submit(encoder);
     }
 
     /// Renders the current surface to an offscreen buffer.
@@ -275,9 +355,7 @@ impl Renderer {
             texture_extent,
         );
 
-        self.staging_belt.finish();
-        let index = self.engine.queue.submit([encoder.finish()]);
-        self.staging_belt.recall();
+        let index = self.submit(encoder);
 
         let slice = output_buffer.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
@@ -302,26 +380,110 @@ impl Renderer {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         viewport: &Viewport,
-    ) {
+    ) -> bool {
+        self.layers.merge();
+        let (presentable, _) = self.prepare_primitives(viewport);
+        self.prepare_ui(encoder, viewport);
+        presentable
+    }
+
+    /// Prepare custom shader primitives before spending any work on the
+    /// ordinary UI. The layers must already be merged by the caller.
+    ///
+    /// This local renderer prepares shaders before built-in batches on both
+    /// window and offscreen paths. Kjerag's Scene primitive has no dependency
+    /// on those batches; each custom primitive is still prepared exactly once.
+    fn prepare_primitives(&mut self, viewport: &Viewport) -> (bool, bool) {
         let scale_factor = viewport.scale_factor();
-
-        self.text_viewport
-            .update(&self.engine.queue, viewport.physical_size());
-
+        let mut presentable = true;
+        let mut schedules_retry = true;
         let physical_bounds = Rectangle::<f32>::from(Rectangle::with_size(
             viewport.physical_size(),
         ));
 
-        self.layers.merge();
+        for layer in self.layers.iter() {
+            let clip_bounds = layer.bounds * scale_factor as f32;
+
+            let Some(layer_bounds) = physical_bounds.intersection(&clip_bounds)
+            else {
+                continue;
+            };
+
+            if Rectangle::snap(layer_bounds).is_none() {
+                continue;
+            }
+
+            if !layer.primitives.is_empty() {
+                let prepare_span = debug::prepare(debug::Primitive::Shader);
+
+                let mut primitive_storage = self
+                    .engine
+                    .primitive_storage
+                    .write()
+                    .expect("Write primitive storage");
+
+                for instance in &layer.primitives {
+                    instance.primitive.prepare(
+                        &mut primitive_storage,
+                        &self.engine.device,
+                        &self.engine.queue,
+                        self.engine.format,
+                        &instance.bounds,
+                        viewport,
+                    );
+
+                    if (instance.bounds * scale_factor as f32)
+                        .intersection(&layer_bounds)
+                        .and_then(Rectangle::snap)
+                        .is_some()
+                    {
+                        let ready = instance
+                            .primitive
+                            .is_presentable(&primitive_storage);
+                        presentable &= ready;
+                        if !ready {
+                            schedules_retry &= instance
+                                .primitive
+                                .schedules_retry(&primitive_storage);
+                        }
+                    }
+                }
+
+                prepare_span.finish();
+            }
+        }
+
+        (presentable, schedules_retry)
+    }
+
+    /// Prepare built-in batches after custom primitives. Windows gate this on
+    /// readiness; offscreen rendering remains ungated. The layers must already
+    /// be merged by the caller.
+    fn prepare_ui(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        viewport: &Viewport,
+    ) {
+        #[cfg(test)]
+        {
+            self.prepared_ui_count += 1;
+        }
+        let scale_factor = viewport.scale_factor();
+        self.text_viewport
+            .update(&self.engine.queue, viewport.physical_size());
+        let physical_bounds = Rectangle::<f32>::from(Rectangle::with_size(
+            viewport.physical_size(),
+        ));
 
         for layer in self.layers.iter() {
             let clip_bounds = layer.bounds * scale_factor as f32;
 
-            if physical_bounds
-                .intersection(&clip_bounds)
-                .and_then(Rectangle::snap)
-                .is_none()
-            {
+            let Some(layer_bounds) = physical_bounds.intersection(&clip_bounds)
+            else {
+                continue;
+            };
+
+            if Rectangle::snap(layer_bounds).is_none() {
                 continue;
             }
 
@@ -353,29 +515,6 @@ impl Renderer {
                     Transformation::scale(scale_factor as f32),
                     viewport.physical_size(),
                 );
-
-                prepare_span.finish();
-            }
-
-            if !layer.primitives.is_empty() {
-                let prepare_span = debug::prepare(debug::Primitive::Shader);
-
-                let mut primitive_storage = self
-                    .engine
-                    .primitive_storage
-                    .write()
-                    .expect("Write primitive storage");
-
-                for instance in &layer.primitives {
-                    instance.primitive.prepare(
-                        &mut primitive_storage,
-                        &self.engine.device,
-                        &self.engine.queue,
-                        self.engine.format,
-                        &instance.bounds,
-                        viewport,
-                    );
-                }
 
                 prepare_span.finish();
             }

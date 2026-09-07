@@ -379,11 +379,40 @@ pub fn present(
     background_color: Color,
     on_pre_present: impl FnOnce(),
 ) -> Result<(), compositor::SurfaceError> {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static NEXT: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> =
+        std::sync::OnceLock::new();
+    let probe = (*ENABLED.get_or_init(|| std::env::var_os("KJERAG_NATIVE_CAPACITY_PROBE").is_some())).then(|| {
+        let origin = *ORIGIN.get_or_init(std::time::Instant::now);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let unix_us = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+        eprintln!("native-present: {{\"id\":{id},\"unix_us\":{unix_us},\"trace_ns\":{},\"width\":{},\"height\":{}}}", origin.elapsed().as_nanos(), viewport.physical_width(), viewport.physical_height());
+        (id, std::time::Instant::now(), origin)
+    });
+
+    let Some(encoder) = renderer.prepare_window(viewport) else {
+        if let Some((id, _, origin)) = probe {
+            let unix_us = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros();
+            eprintln!(
+                "native-present-deferred: {{\"id\":{id},\"unix_us\":{unix_us},\"trace_ns\":{}}}",
+                origin.elapsed().as_nanos()
+            );
+        }
+
+        return Ok(());
+    };
+
     match surface.get_current_texture() {
         Ok(frame) => {
             if frame.texture.width() != viewport.physical_width()
                 || frame.texture.height() != viewport.physical_height()
             {
+                renderer.discard_prepared(encoder);
                 return Err(compositor::SurfaceError::Outdated);
             }
 
@@ -393,16 +422,30 @@ pub fn present(
                 .texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
 
-            let _submission = renderer.present(
-                Some(background_color),
-                frame.texture.format(),
+            let _submission = renderer.present_prepared(
+                encoder,
                 view,
                 viewport,
+                Some(background_color),
             );
 
             // Present the frame
             on_pre_present();
             frame.present();
+            if let Some((id, start, origin)) = probe {
+                let unix_us = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_micros();
+                eprintln!(
+                    "native-present-commit: {{\"id\":{id},\"unix_us\":{unix_us},\"trace_ns\":{}}}",
+                    origin.elapsed().as_nanos()
+                );
+                renderer.engine.queue.on_submitted_work_done(move || {
+                    let unix_us = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+                    eprintln!("native-present-done: {{\"id\":{id},\"unix_us\":{unix_us},\"trace_ns\":{},\"elapsed_ns\":{}}}", origin.elapsed().as_nanos(), start.elapsed().as_nanos());
+                });
+            }
 
             if suboptimal {
                 return Err(compositor::SurfaceError::Outdated);
@@ -410,19 +453,24 @@ pub fn present(
 
             Ok(())
         }
-        Err(error) => match error {
-            wgpu::SurfaceError::Timeout => {
-                Err(compositor::SurfaceError::Timeout)
+        Err(error) => {
+            renderer.discard_prepared(encoder);
+            match error {
+                wgpu::SurfaceError::Timeout => {
+                    Err(compositor::SurfaceError::Timeout)
+                }
+                wgpu::SurfaceError::Outdated => {
+                    Err(compositor::SurfaceError::Outdated)
+                }
+                wgpu::SurfaceError::Lost => Err(compositor::SurfaceError::Lost),
+                wgpu::SurfaceError::OutOfMemory => {
+                    Err(compositor::SurfaceError::OutOfMemory)
+                }
+                wgpu::SurfaceError::Other => {
+                    Err(compositor::SurfaceError::Other)
+                }
             }
-            wgpu::SurfaceError::Outdated => {
-                Err(compositor::SurfaceError::Outdated)
-            }
-            wgpu::SurfaceError::Lost => Err(compositor::SurfaceError::Lost),
-            wgpu::SurfaceError::OutOfMemory => {
-                Err(compositor::SurfaceError::OutOfMemory)
-            }
-            wgpu::SurfaceError::Other => Err(compositor::SurfaceError::Other),
-        },
+        }
     }
 }
 

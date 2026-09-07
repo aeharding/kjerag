@@ -1778,6 +1778,12 @@ impl InstalledOneXsDraw {
                 .pipeline
                 .prepare_resident_picture(&self.source, reframe),
             draw: Arc::clone(self),
+            native_capacity_view: native_capacity_probe_enabled().then(|| {
+                use std::hash::{Hash, Hasher};
+                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                reframe.bytes().hash(&mut hash);
+                hash.finish()
+            }),
         })
     }
 
@@ -1807,6 +1813,12 @@ impl InstalledOneXsDraw {
 struct InstalledOneXsPass {
     binding: crate::direct_type2::ImportedOneXsDrawBinding,
     draw: Arc<InstalledOneXsDraw>,
+    native_capacity_view: Option<u64>,
+}
+
+fn native_capacity_probe_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("KJERAG_NATIVE_CAPACITY_PROBE").is_some())
 }
 
 impl InstalledOneXsPass {
@@ -1817,6 +1829,27 @@ impl InstalledOneXsPass {
             self.draw.map.read(),
             pass,
         );
+        if let Some(view) = self.native_capacity_view {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let ordinal = NEXT.fetch_add(1, Ordering::Relaxed);
+            let frame = self.draw.frame();
+            let start = std::time::Instant::now();
+            let unix_us = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros();
+            eprintln!(
+                "native-draw: {{\"id\":{ordinal},\"unix_us\":{unix_us},\"source\":{},\"pts_ns\":{},\"view_hash\":{view}}}",
+                frame.index(),
+                frame.timestamp().as_nanos()
+            );
+            pass.on_submitted_work_done(move || {
+                let unix_us = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+                eprintln!("native-draw-done: {{\"id\":{ordinal},\"unix_us\":{unix_us},\"elapsed_ns\":{}}}", start.elapsed().as_nanos());
+            });
+        }
     }
 }
 

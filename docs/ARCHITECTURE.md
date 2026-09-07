@@ -67,6 +67,30 @@ device configuration: no renderer arithmetic or stitch layout changes.
 The selected capture session checks its fifteen-buffer requirement before
 pipeline construction and reports an ordinary failure when it is unavailable.
 
+The same local renderer patch owns native presentation readiness. Window
+rendering prepares visible custom shader primitives before acquiring a surface
+image or preparing iced's built-in UI batches. When the selected Scene has a
+previous resident picture but preparation has no exact resident draw, it
+reports the window unavailable. Exhausting its two draw-retirement slots is
+the measured frequent cause. The compositor skips that physical
+presentation, so the previous complete compositor buffer remains visible;
+there is no cleared or UI-only replacement. Ready windows retain one combined
+UI preparation and render submission, and offscreen rendering remains ungated.
+
+The first unavailable preparation always asks the shell for an immediate
+redraw. This bridge is required because `Scene::pump` runs before preparation
+discovers the first Full result. On that next tick, a Full pending refresh is
+scheduled for `now + 1 ms` instead of requesting another immediate redraw.
+Scene advertises self-scheduling only while its post-prepare pending-refresh
+flag is set; Empty and target-mismatch states keep the renderer's default
+per-attempt redraw fallback. A ready aggregate resets the episode. The vendor
+trait defaults to that fallback and explicitly supports one independent
+self-scheduled widget per window; Kjerag has one Scene. This is admission and
+host retry scheduling only: it neither waits for GPU completion nor changes
+the two-slot capacity, source lease, shader arithmetic or presentation clock.
+The 1 ms interval is a measured Kjerag policy under qualification, not a Studio
+constant and not proof of 240 Hz physical presentation.
+
 `Size` and `Fallible` live in `media`: they are frame types, and `render`
 depends on `media` rather than the other way round. `render` re-exports both
 and adds the `Extent` trait, which is the `wgpu::Extent3d` half of `Size`

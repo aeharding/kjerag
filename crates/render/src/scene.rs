@@ -83,6 +83,10 @@ const SAMPLER_BINDING: u32 = 1 + 2 * MAX_LENSES as u32;
 /// released only once this many newer ones have been bound.
 const RETAINED: usize = 3;
 
+/// How long a retirement-full redraw yields before polling again. This is a
+/// host scheduling interval, not a Studio timing or solver semantic.
+const DRAW_RETIREMENT_RETRY: Duration = Duration::from_millis(1);
+
 /// When the widget should come back, which is the whole of frame pacing:
 /// the shell sleeps until the instant the next frame is due rather than
 /// polling, so 29.97 fps content costs 29.97 redraws a second.
@@ -91,7 +95,8 @@ pub enum Next {
     /// Whenever the compositor will take a frame: playback that is still
     /// waiting for its first decoded frame, and a seek that has not landed.
     Refresh,
-    /// At this instant, when the frame after the one just taken is due.
+    /// At this instant, when either the next frame or bounded GPU polling is
+    /// due.
     At(Instant),
     /// Nothing changes by itself: paused, ended, or a still frame.
     Never,
@@ -198,6 +203,10 @@ pub struct Scene {
     /// And what it last managed to draw of this file, for the same reason.
     shown: Shown,
     resident_refresh: Arc<AtomicBool>,
+    /// Set only when bounded draw-retirement admission refused preparation.
+    /// The presentation tick uses it to yield instead of requesting an
+    /// immediate compositor redraw loop.
+    draw_retirement_full: Arc<AtomicBool>,
     /// Exact view of the pair in flight. Shared across renderer recreation;
     /// unlike `shown`, this is never a screenshot or displayed-position source.
     resident_submitted: Shown,
@@ -309,6 +318,14 @@ fn next_after_pump(
         (false, false, false, _) => Next::Never,
         (false, true, _, Some(due)) => Next::At(due),
         (false, true, _, None) => Next::Refresh,
+    }
+}
+
+fn defer_draw_retirement_retry(now: Instant, full: bool, next: Next) -> Next {
+    if full && next == Next::Refresh {
+        Next::At(now + DRAW_RETIREMENT_RETRY)
+    } else {
+        next
     }
 }
 
@@ -1164,6 +1181,7 @@ impl Scene {
             stalled: Stalled::default(),
             shown: Shown::default(),
             resident_refresh: Arc::new(AtomicBool::new(false)),
+            draw_retirement_full: Arc::new(AtomicBool::new(false)),
             resident_submitted: Shown::default(),
         }
     }
@@ -1498,6 +1516,14 @@ impl Scene {
     /// come back. Call it on every redraw: this is the presentation clock's
     /// only tick.
     pub fn pump(&self, now: Instant) -> Next {
+        defer_draw_retirement_retry(
+            now,
+            self.draw_retirement_full.load(AtomicOrdering::Acquire),
+            self.pump_inner(now),
+        )
+    }
+
+    fn pump_inner(&self, now: Instant) -> Next {
         // Nothing open is nothing that changes by itself: no clock, no decode
         // thread, and a pane the shell paints. This asked for a redraw on
         // every compositor refresh while the pass carried an animation, which
@@ -2018,6 +2044,7 @@ impl Scene {
             stalled: self.stalled.clone(),
             shown: self.shown.clone(),
             resident_refresh: Arc::clone(&self.resident_refresh),
+            draw_retirement_full: Arc::clone(&self.draw_retirement_full),
             resident_submitted: self.resident_submitted.clone(),
         }
     }
@@ -2446,6 +2473,7 @@ pub struct ScenePrimitive {
     /// in, which it both writes and reads.
     shown: Shown,
     resident_refresh: Arc<AtomicBool>,
+    draw_retirement_full: Arc<AtomicBool>,
     resident_submitted: Shown,
 }
 
@@ -3033,6 +3061,9 @@ impl ScenePipeline {
         primitive
             .resident_refresh
             .store(false, AtomicOrdering::Release);
+        primitive
+            .draw_retirement_full
+            .store(false, AtomicOrdering::Release);
         let selected_one_xs = one_xs_playback_selected(
             ONE_XS_PLAYBACK_ENABLED,
             primitive
@@ -3143,6 +3174,25 @@ impl ScenePipeline {
         .with_table(view.table)
     }
 
+    /// Preserve the previous window when its installed video cannot reserve a
+    /// draw yet. Startup and error UI must still be allowed to paint, including
+    /// when there is no completed video to preserve.
+    pub(crate) fn is_presentable(&self, primitive: &ScenePrimitive) -> bool {
+        self.resident_draw != ResidentDrawSelection::None
+            || primitive.stalled.stopped()
+            || primitive
+                .shown
+                .get()
+                .is_none_or(|view| view.resident_one_xs.is_none())
+    }
+
+    pub(crate) fn schedules_retry(&self, primitive: &ScenePrimitive) -> bool {
+        // A false presentability result alone is not a promised timer. Empty
+        // and target-mismatch states may still need the renderer's fallback
+        // wake; only an actual pending refresh can take over retry scheduling.
+        primitive.resident_refresh.load(AtomicOrdering::Acquire)
+    }
+
     fn prepare_resident_one_xs(&mut self, primitive: &ScenePrimitive, aspect: f32) -> Fallible<()> {
         self.resident_draw = ResidentDrawSelection::None;
         self.flow_draw = FlowDraw::Nothing;
@@ -3212,6 +3262,12 @@ impl ScenePipeline {
                     Ok(self.resident_reframe(primitive, view, aspect))
                 },
             )?;
+            if std::env::var_os("KJERAG_NATIVE_LIFECYCLE_PROBE").is_some() {
+                eprintln!(
+                    "native-prepare: {prepared:?}, camera={:?}",
+                    primitive.camera
+                );
+            }
             match prepared {
                 ResidentPrepare::Staged { installed } => {
                     let view = resident_frame_view(
@@ -3237,9 +3293,19 @@ impl ScenePipeline {
                         self.resident_draw = ResidentDrawSelection::Active;
                     }
                 }
-                ResidentPrepare::Pending { .. } | ResidentPrepare::Retry { .. } => primitive
+                ResidentPrepare::Pending { .. } => primitive
                     .resident_refresh
                     .store(true, AtomicOrdering::Release),
+                ResidentPrepare::Retry { reason, .. } => {
+                    primitive
+                        .resident_refresh
+                        .store(true, AtomicOrdering::Release);
+                    if reason == ResidentRetry::DrawRetirementFull {
+                        primitive
+                            .draw_retirement_full
+                            .store(true, AtomicOrdering::Release);
+                    }
+                }
                 ResidentPrepare::Empty => {}
             }
         }
@@ -3733,6 +3799,11 @@ impl ScenePipeline {
                 return;
             }
         };
+        if matches!(prepared, ResidentScreenshotPrepare::RetryFull) {
+            primitive
+                .draw_retirement_full
+                .store(true, AtomicOrdering::Release);
+        }
         let ResidentScreenshotPrepare::Ready(draw) = prepared else {
             primitive.shutter.arm(request);
             primitive
@@ -6769,6 +6840,33 @@ mod tests {
     }
 
     #[test]
+    fn draw_retirement_full_defers_only_an_immediate_refresh() {
+        let now = Instant::now();
+        let due = now + Duration::from_millis(33);
+        assert_eq!(
+            defer_draw_retirement_retry(now, true, Next::Refresh),
+            Next::At(now + DRAW_RETIREMENT_RETRY)
+        );
+        assert_eq!(
+            defer_draw_retirement_retry(now, false, Next::Refresh),
+            Next::Refresh
+        );
+        assert_eq!(
+            defer_draw_retirement_retry(now, true, Next::At(due)),
+            Next::At(due)
+        );
+        assert_eq!(
+            defer_draw_retirement_retry(now, true, Next::Never),
+            Next::Never
+        );
+        let stopped = Next::Stopped(Stall::new("exact retirement scheduling test failure"));
+        assert_eq!(
+            defer_draw_retirement_retry(now, true, stopped.clone()),
+            stopped
+        );
+    }
+
+    #[test]
     fn terminal_stop_retires_the_scene_owned_replay() {
         let replay = RefCell::new(Some(OneXsReplay {
             accuracy: Accuracy::Exact,
@@ -7448,6 +7546,13 @@ mod tests {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) {
+        queue.submit([encode_resident_test_pass(pipeline, device)]);
+    }
+
+    fn encode_resident_test_pass(
+        pipeline: &ScenePipeline,
+        device: &wgpu::Device,
+    ) -> wgpu::CommandBuffer {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("selected resident Scene test target"),
             size: wgpu::Extent3d {
@@ -7480,7 +7585,99 @@ mod tests {
             });
             pipeline.draw(&mut pass);
         }
-        queue.submit([encoder.finish()]);
+        encoder.finish()
+    }
+
+    #[test]
+    fn selected_window_defers_when_two_exact_draws_are_pending_then_recovers() {
+        let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").map(PathBuf::from) else {
+            return;
+        };
+        check_selected_window_deferral(&path);
+    }
+
+    #[test]
+    fn x4_window_defers_when_two_exact_draws_are_pending_then_recovers() {
+        let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA").map(PathBuf::from) else {
+            return;
+        };
+        check_selected_window_deferral(&path);
+    }
+
+    fn check_selected_window_deferral(path: &Path) {
+        let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
+        let presentable = |pipeline: &ScenePipeline, primitive: &ScenePrimitive| {
+            cosmic::iced::widget::shader::Primitive::is_presentable(primitive, pipeline)
+        };
+        let schedules_retry = |pipeline: &ScenePipeline, primitive: &ScenePrimitive| {
+            cosmic::iced::widget::shader::Primitive::schedules_retry(primitive, pipeline)
+        };
+        let mut scene = Scene::open(path).unwrap();
+        scene.set_muted(true);
+        let frame = wait_for_new_scene_frame(&scene, None);
+        let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &frame);
+        scene.pause(Instant::now());
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+
+        // Hold real encoded draws before submission, so a device poll cannot
+        // complete either permit. Unlike the normal helper, do not wait for a
+        // drawable selection before exercising the third native prepare.
+        let primitive = scene.primitive(Camera::default());
+        pipeline.prepare(&primitive, &device, &queue, 1.0);
+        assert!(presentable(&pipeline, &primitive));
+        let first = encode_resident_test_pass(&pipeline, &device);
+        pipeline.prepare(&primitive, &device, &queue, 1.0);
+        assert!(presentable(&pipeline, &primitive));
+        let second = encode_resident_test_pass(&pipeline, &device);
+
+        let moved = scene.primitive(Camera {
+            yaw: 0.25,
+            ..Camera::default()
+        });
+        pipeline.prepare(&moved, &device, &queue, 1.0);
+        assert_eq!(pipeline.resident_draw, ResidentDrawSelection::None);
+        assert!(!presentable(&pipeline, &moved));
+        assert!(schedules_retry(&pipeline, &moved));
+        assert!(scene.resident_refresh.load(AtomicOrdering::Acquire));
+        assert!(scene.draw_retirement_full.load(AtomicOrdering::Acquire));
+        let retry_now = Instant::now();
+        assert_eq!(
+            scene.pump(retry_now),
+            Next::At(retry_now + DRAW_RETIREMENT_RETRY),
+            "paused retirement-full preparation requested an immediate redraw"
+        );
+        assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&frame));
+
+        queue.submit([first, second]);
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        pipeline.prepare(&moved, &device, &queue, 1.0);
+        assert_eq!(pipeline.resident_draw, ResidentDrawSelection::Active);
+        assert!(presentable(&pipeline, &moved));
+        assert!(!scene.resident_refresh.load(AtomicOrdering::Acquire));
+        assert!(!scene.draw_retirement_full.load(AtomicOrdering::Acquire));
+        assert_eq!(scene.pump(Instant::now()), Next::Never);
+        assert!(!schedules_retry(&pipeline, &moved));
+        // Unavailability alone must not opt into self-scheduling. A state
+        // without a pending refresh still needs the renderer's fallback wake.
+        pipeline.resident_draw = ResidentDrawSelection::None;
+        assert!(!presentable(&pipeline, &moved));
+        assert!(!schedules_retry(&pipeline, &moved));
+        pipeline.resident_draw = ResidentDrawSelection::Active;
+        draw_resident_test_pass(&pipeline, &device, &queue);
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        pipeline.prepare(&moved, &device, &queue, 1.0);
+
+        // A terminal failure must not hide its error UI behind the last frame.
+        scene
+            .stalled
+            .fail_now("injected window readiness test failure");
+        pipeline.resident_draw = ResidentDrawSelection::None;
+        assert!(presentable(&pipeline, &moved));
+        assert!(presentable(
+            &pipeline,
+            &Scene::blank().primitive(Camera::default())
+        ));
     }
 
     #[test]

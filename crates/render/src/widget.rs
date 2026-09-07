@@ -39,6 +39,15 @@ impl<Message: From<Stall>> shader::Program<Message> for Scene {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<Action<Message>> {
+        if std::env::var_os("KJERAG_NATIVE_LIFECYCLE_PROBE").is_some()
+            && matches!(event, Event::Mouse(_))
+        {
+            eprintln!(
+                "native-input: {event:?}, dragging={}, camera={:?}, bounds={bounds:?}, cursor={cursor:?}",
+                self.viewpoint().is_dragging(),
+                self.viewpoint().camera()
+            );
+        }
         match event {
             Event::Mouse(event) => mouse_update(self, event, bounds, cursor),
             Event::Window(window::Event::RedrawRequested(now)) => {
@@ -90,6 +99,16 @@ impl<Message: From<Stall>> shader::Program<Message> for Scene {
 
 impl shader::Primitive for ScenePrimitive {
     type Pipeline = ScenePipeline;
+
+    fn is_presentable(&self, pipeline: &ScenePipeline) -> bool {
+        pipeline.is_presentable(self)
+    }
+
+    fn schedules_retry(&self, pipeline: &ScenePipeline) -> bool {
+        // After the renderer bridges the first refusal, tick drives pending
+        // work, using a short deadline when draw-retirement slots are full.
+        pipeline.schedules_retry(self)
+    }
 
     fn prepare(
         &self,

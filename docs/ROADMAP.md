@@ -14,6 +14,75 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Timed draw-backpressure retry retained for qualification, 2026-09-06:**
+the next candidate replaces immediate retry spinning specifically when both
+draw-retirement slots are full with a 1 ms Scene deadline. The renderer sends
+one initial wakeup, then honors the Scene's scheduled retry; primitives without
+their own pending retry keep the immediate fallback. Shader-first preparation,
+pre-acquire readiness, exact source ownership and the two-slot limit remain.
+This is Kjerag scheduling, not new Studio arithmetic or reverse engineering.
+
+Contemporary battery-powered native runs at 2256x1504, under a 12-second
+changing-view pan on a 1000 Hz virtual output, improve X4 Air from 204 to
+305 sourced draws/s and ONE X2 from 204 to 321. Both candidates sustain about
+30 source advances/s versus about 23 in their controls. Candidate commit-period
+p99 is 7.43/7.73 ms and maximum 15.32/15.79 ms respectively, so the averages
+do not imply every draw meets the 4.17 ms budget. Every arm retains one UI-only
+commit, consistent with the excluded COSMIC controls-relayout issue; strict
+trace validation still fails that frame. No physical 240 Hz scanout is claimed.
+
+Longer qualification distinguishes capacity from overload. X2 sustains about
+30 source fps and 335 sourced draws/s for 40 seconds under the 1000 Hz stress
+output. X4's 60-second run delivers 294 draws/s but only 27.87 source fps, with
+4.27 seconds of growing lag; a tracing-disabled repeat also accumulates lag.
+At 300 Hz virtual output, unchanged X4 instead sustains 262.07 actual sourced
+draws/s and 29.925 source advances/s for 40 seconds at 2256x1504, with no growing
+lag. Source-or-view changes account for 242.6 transitions/s, so duplicate poses
+do not alone establish the 240 capacity result. Strict trace validation passes
+at that operating point. Commit-period mean 3.816 ms, p99 10.090 ms, maximum
+21.443 ms; 2649/10482 intervals exceed 4.167 ms. These are native rendering
+capacity results, not physical scanout or an all-frame-latency guarantee.
+No additional scheduler trial is justified by the 1000 Hz overload behavior alone.
+
+The candidate passes both real-camera Full/recovery tests, two real-Radeon
+renderer readiness/retry regressions, and the native ONE X2 UI harness
+(51 checks, zero failures). Required-Radeon full workspace: 1171 passed,
+zero failures, 30 ignored; both camera inputs and quiet audio. Full-target
+clippy, formatting, name, Cargo-source and diff checks pass. One initial X2
+scripted quit failed; unchanged repeats and the UI harness exit normally.
+Owner branch acceptance remains pending, including retaining controls with
+the previous complete window during backpressure. The installed Flatpak is
+unchanged. Full results, limits and raw runs:
+`scratch/native-retry-timer-20260906/`. This supersedes the preflight-only
+assessment below, which remains historical evidence.
+
+**Native draw-backpressure fix in progress, 2026-09-06:** an actual-window
+high-refresh trace reproduced hundreds of cleared video frames when both
+draw-retirement slots were occupied. The branch candidate checks video
+readiness before acquiring a window buffer, retaining the previous window
+on retry without changing source ownership, the two-slot limit or shaders.
+An initial acquire-then-discard prototype stalled and is replaced. The revised
+candidate completes native runs on both cameras, and 60 Hz runs recover
+29.8–30 source fps after startup with no audio underruns. It is **not ready to
+ship**: X4 still delivers only 25–27 source fps under high-refresh load, retry
+traffic is excessive, and full candidate gates/owner acceptance remain open.
+One empty controls-relayout frame remains, consistent with the separately
+documented COSMIC issue the owner excluded. Installed Flatpak stays frozen.
+Evidence and test limits: `scratch/native-capacity-20260906/`.
+
+The next candidate prepares custom primitives before built-in UI batches, so
+refused window attempts do not stage or submit UI work. Both real-camera Scene
+readiness tests and an actual-Radeon renderer regression pass. The latter
+checks zero UI preparations/submissions on refusal, once-only preparation,
+recovery, clipping and ungated offscreen rendering. Native trials do **not**
+establish a retained speedup: the contemporary X4 pair advances 25.42 versus
+26.00 sources/s but loses sourced redraws and worsens completion tails. Both
+arms are on battery; comparisons against earlier AC runs are confounded, and
+X2 shows substantial unexplained variability. Tracing-disabled X4 controls
+remain below 30 source fps. No 240 fps acceptance or installed update follows.
+The callback-association review does not justify a wgpu extension as a speed
+fix; that proposal is held. Details: `scratch/exact-draw-retirement-20260906/`.
+
 **View-cache and preencoding trials declined, 2026-09-06:** a lazy source-owned
 cache removed four texture-view creations per repeated-source draw but did not
 produce a repeatable shared-camera gain. Seven direct-render tests and both
