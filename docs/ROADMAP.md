@@ -98,11 +98,35 @@ This is not a controlled same-runtime A/B or physical scanout measurement.
 Sources remain consecutive with bounded phase error; full-run reported worst
 lateness is 29.7 ms and no audio underruns occur. Its strict inventory retains
 five startup UI-only commits and the final present/draw callbacks cut off by
-intentional termination. Owner smoothness retest and refreshed package remain
-pending. Shader and
+intentional termination. Shader and
 temporal arithmetic are unchanged. The reviewed packaged candidate and
 installed app stay frozen. Evidence and current diagnostic identities:
 `scratch/microhitch-20260907/`.
+
+**Smoothness package ready for retest, 2026-09-07:** clean source af85908a is
+packaged without installation. Candidate executable `01b4b80b`, bundle
+`32c6a925`, passes the unchanged Flatpak UI harness: 38 X4 checks and 44 X2,
+zero failures. Both entire reported-view captures are byte-identical to the
+previously reviewed package; root viewed both. This is a two-frame regression,
+not whole-video identity. The isolated sandbox harness has no audio device
+and skips import-failure injection; its shader-twin helper remains native.
+
+A separate actual-COSMIC package run reports 30 source fps after startup,
+no drops, starvation or audio underruns, and worst lateness 30.1 ms. Its full
+cadence parser refuses one interleaved native/Wayland JSON record, so no
+package cadence percentiles or strict pass are claimed. The native-COSMIC
+statistics above remain the measured cadence result. This run used quiet
+routing flags, but an independent sink probe arrived after exit.
+
+CI 34094150584 at af85908a passes. The new hash-checked launcher is
+`scratch/review-smoothness-20260907/run.sh`, with `x4` and `x2` arguments.
+It runs via app-path, not installation. Owner smoothness retest and branch
+acceptance remain required. Installed stable and the previous candidate are
+unchanged. Packaging's temporary repository uses a 10 GB free-space reserve
+instead of its default percentage; this changes no application permissions.
+Evidence: `scratch/flatpak-candidate-af85908a/` and
+`scratch/flatpak-buffer-review-20260907/`. Chromatic work proceeds separately;
+this review candidate stays frozen.
 
 **Candidate reported-view and runtime qualification, 2026-09-07:** the
 uninstalled candidate now passes the unchanged Flatpak UI harness at both
