@@ -14,6 +14,35 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**View-cache and preencoding trials declined, 2026-09-06:** a lazy source-owned
+cache removed four texture-view creations per repeated-source draw but did not
+produce a repeatable shared-camera gain. Seven direct-render tests and both
+actual-camera Scene routes passed; X4 redraw p99 worsened in both alternating
+pairs, with mixed ONE X2 results. Full evidence:
+`scratch/source-view-cache-20260906/`.
+
+A separate warm-only experiment prepared stages 2–13 before dispatch, retaining
+the source-owning initial submission, each subsequent exact submission index,
+command order and the existing five L1 callback pacing boundaries. Independent
+source review found no intermediate CPU readback dependency or host-upload
+overwrite hazard. Two new required-Radeon ownership/order tests and both
+actual-camera cold/warm Scene routes passed. All eight capacity arms retained
+360 sources with zero reported accounting failures. X4 throughput rose slightly
+and over-budget redraws fell, but p99 worsened from 9.62/10.35 to 10.71/10.93 ms.
+ONE X2 throughput fell and over-budget counts rose in both pairs, with mixed
+tails. No shared-camera optimization is retained. Full evidence and review/test
+limits: `scratch/preencoded-worker-20260906/` and
+`scratch/deferred-worker-feasibility-20260906/`.
+
+Both prototypes and their tests are fully removed; restored source and normal
+binaries match the prior verified checkpoint. Formatting, name, Cargo-source
+and diff checks pass; the prior identical-source full suite remains applicable.
+No candidate full suite, pixel sequence, native run or installed update is
+claimed. Next, verify the smallest actual-native changing-view capacity test:
+the owner requires 240 fps active rendering capacity with spikes reported,
+not an independently added no-spikes diagnostic-p99 shipping gate. Existing
+offscreen averages above 240 do not alone establish complete native-app capacity.
+
 **Demand-aware submission trial declined, 2026-09-06:** an admission-only
 candidate gave an announced view request priority before the next worker
 submission, with one owed worker turn to prevent starvation between adjacent
