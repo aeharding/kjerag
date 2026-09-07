@@ -27,19 +27,36 @@ now skips only absent adapters when neither `KJERAG_REQUIRE_GPU` nor
 `KJERAG_REQUIRE_RADV` is set. Device creation and shader/arithmetic failures
 remain fatal. All seven skip explicitly without a GPU and fail as required
 under either strict flag alone. On the real Radeon all eleven L2-module tests
-execute and pass. Full strict-Radeon workspace with both clips passes1171
-tests, zero failures,30 ignored; full-target Clippy and static gates pass.
+execute and pass. Full strict-Radeon workspace with both clips passes 1,171
+tests, zero failures, 30 ignored; full-target Clippy and static gates pass.
 The native executable hash is unchanged. Evidence and test limits:
-`scratch/gpu-ci-policy-20260907/`. No playback code changes in this repair;
-the next pushed CI run must still confirm both architectures.
+`scratch/gpu-ci-policy-20260907/`. No playback code changes in this repair.
+CI run 34084410699 at 1c698c25 passes all six jobs, including x86 and ARM gates.
 
 **Uninstalled candidate bundle, 2026-09-07:** clean archived source 95850005
 builds and exports the native-readiness candidate into
 `scratch/flatpak-candidate-95850005/kjerag-candidate.flatpak`. Candidate metadata
 matches the installed app, and its version command runs in the Flatpak runtime.
-These are packaging smoke checks, not playback or installed-transaction gates.
-Installed stable remains 80bbad8a; owner tradeoff approval and branch testing
-remain outstanding. No install, main change or release follows from this build.
+Initial version/metadata checks are packaging smoke only. Subsequent actual
+candidate playback uses `flatpak run --app-path` with identical installed
+permissions and the unchanged UI harness, without replacing stable 80bbad8a.
+An in-runtime hash proves which candidate executable runs. ONE X2 at the exact
+reported view passes 44 checks, including backward seek, real scrubber movement
+to unseen content and all paired-file arrival orders. X4 from-zero passes 34
+of 36 checks: the toast baseline is blank below the header, and copy/return
+reaches the same reported view but does not reproduce warm-history pixels.
+Both failures and actual images remain recorded, not waived.
+
+A bounded unchanged-assertion control compares two fresh exact X4 seeks:
+their entire video areas are byte-identical, whereas the uninterrupted warm
+picture differs from the first cold return. Together with the explicit facade
+restart, this supports temporal-history reset as the cause in that sample,
+not a universal source-identity or acceptable-quality verdict. No harness or
+runtime fix is introduced. Audio is unavailable in these isolated sandbox
+sessions; the final shader twin helper is native. This is not an installed
+transaction, A/V-sync, new capacity or owner-acceptance gate. Full evidence:
+`scratch/flatpak-app-path-20260907/`. Owner tradeoff approval and branch testing
+remain outstanding; no install, main change or release.
 
 **Timed draw-backpressure retry retained for qualification, 2026-09-06:**
 the next candidate replaces immediate retry spinning specifically when both
