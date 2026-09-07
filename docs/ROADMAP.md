@@ -14,6 +14,27 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Demand-aware submission trial declined, 2026-09-06:** an admission-only
+candidate gave an announced view request priority before the next worker
+submission, with one owed worker turn to prevent starvation between adjacent
+view scopes. A small vendored renderer hook held scopes through the actual
+host submit, not GPU completion. Session-owned gates covered renderer reuse;
+no shader, source ownership or completion-proof semantics changed.
+
+Four gate tests, one vendor scope test, both actual-camera cold/warm Scene
+routes, renderer recreation and worker-context checks passed after two test
+compile corrections. Two alternating capacity pairs per camera retained all
+360 source changes and zero reported drops, starvation or audio underruns.
+X4 redraw p99 worsened from 9.29/10.15 to 10.63/10.93 ms, with lower throughput
+and worse source arrival in both pairs. X2 was mixed, with worse arrival p99
+in both. The candidate and temporary instrument are fully removed; restored
+source and normal binaries match the prior verified checkpoint. No native
+candidate run, candidate full suite, pixel gate or installed update is claimed.
+The existing source-identical full gates still apply; formatting, name,
+Cargo-source and diff checks pass after restoration. Evidence and limitations:
+`scratch/demand-admission-20260906/`. This is a rejected policy, not a speedup
+or proof that every priority-scheduling design must fail.
+
 **Installed desktop-sized playback observed, 2026-09-06:** the unchanged
 `80bbad8a...` repair now has an actual-window observation at 2256x1504 rather
 than only the earlier 1280x720 harness size. Isolated Weston 13 reports a
