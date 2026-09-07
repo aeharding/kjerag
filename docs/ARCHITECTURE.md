@@ -410,24 +410,34 @@ a later redraw.
 
 The source/audio clock does not reanchor on each source frame. The original
 slow-clock `EveryFrame` policy remains available to diagnostics. During ordinary
-play, `Player` keeps the current due frame and exposes at most one already-decoded
-successor without presenting it or moving the clock. Once the current frame is
-installed, Scene may start that successor's stitch before its PTS is due. GPU
-completion alone cannot publish it: preparation keeps a completed future result
-`Ready`, continues staging the prior installed draw, and installs only when
-Player's current delivery supplies the exact same opaque `FrameStamp`. Player
-does not promote another frame until its current one is acknowledged. Thus
-decode, stitching and presentation lookahead stay bounded without treating
-submission as display or dropping causal input.
+play, `Player` keeps the current due frame and exposes at most two already-decoded
+successors without presenting either or moving the clock. The capture root
+holds one completed unpublished source/map pair separately from its displayed
+pair. A completed result advances the computational temporal prior, allowing
+the existing single transaction to start the following source. If that second
+result finishes before the future is published, it remains `Ready`; there is
+no third future slot. This absorbs uneven per-source work without changing
+the solver's numerical cadence or skipping causal input.
 
-The capture-owned session and Scene's exact submitted/completed views survive a
+Completion cannot publish a picture. Preparation reserves an ordinary draw
+permit and binds the exact future before moving it to the displayed slot,
+only when Player's current delivery supplies the same opaque `FrameStamp`.
+Screenshots and redraws continue sampling the displayed pair, never the newer
+computational prior. Player does not promote another frame until its current
+one is acknowledged. Two decoded successors, one unpublished completed result,
+one active transaction and two render-retirement slots are independent bounds;
+none treats computation as display or permits an unbounded queue.
+
+The capture-owned session and Scene's two exact admitted views survive a
 renderer-pipeline recreation on the same device and queue. Pausing hides decoded
 lookahead from preparation but does not discard a job or completed future result;
 resuming returns publication authority to Player's due delivery. Seeking and
 stepping still require installation, create a new causal root where required and
 drain the replaced facade without reusing uncertain source surfaces. At EOF the
 clock stops, but redraws continue until the last offered transaction installs.
-Pending work and full render-retirement admission always leave the prior exact
+An adjacent forward replay re-anchors its landing without discarding the second
+already-decoded successor; a real seek clears both decoded slots. Pending work
+and full render-retirement admission always leave the prior exact
 shown result drawable; there is no legacy recovery route.
 
 Selected PIS uses independent 16-patch-row stripes. Vertical candidates do not

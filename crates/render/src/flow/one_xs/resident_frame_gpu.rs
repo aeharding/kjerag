@@ -2,9 +2,9 @@
 //!
 //! A capture is constructed once. Seeking or reopening constructs another
 //! capture; there is deliberately no reset operation. The mutex owns the one
-//! monotonic generation, exact pending seal, committed successor and
-//! ready capability. GPU work happens only after a linear reservation has
-//! taken an immutable snapshot of the committed successor.
+//! monotonic generation, exact pending seal, committed successor, one future
+//! draw and the ready capability. GPU work happens only after a linear
+//! reservation has taken an immutable snapshot of the committed successor.
 
 use std::sync::{Arc, Mutex, Weak};
 
@@ -463,6 +463,7 @@ struct RootState {
     generation: u64,
     pending: Option<PendingSeal>,
     committed: Option<Arc<ResidentSuccessor>>,
+    future: Option<Arc<InstalledOneXsDraw>>,
     ready: Option<Arc<InstalledOneXsDraw>>,
     quarantined: bool,
     quarantined_successors: Vec<Arc<ResidentSuccessor>>,
@@ -517,6 +518,7 @@ impl GpuResidentCapture {
                     generation: 0,
                     pending: None,
                     committed: None,
+                    future: None,
                     ready: None,
                     quarantined: false,
                     quarantined_successors: Vec::new(),
@@ -583,6 +585,52 @@ impl GpuResidentCapture {
         Ok(state.committed.is_some())
     }
 
+    pub(super) fn has_future(&self) -> Fallible<bool> {
+        let state = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| "ONE X2 resident capture root is poisoned and quarantined")?;
+        if state.quarantined {
+            return Err("ONE X2 resident capture root is quarantined".into());
+        }
+        Ok(state.future.is_some())
+    }
+
+    pub(super) fn future_stamp(&self) -> Fallible<Option<FrameStamp>> {
+        let state = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| "ONE X2 resident capture root is poisoned and quarantined")?;
+        if state.quarantined {
+            return Err("ONE X2 resident capture root is quarantined".into());
+        }
+        Ok(state.future.as_ref().map(|draw| draw.frame()))
+    }
+
+    /// Publish the one completed future only for its exact delivered frame.
+    /// A mismatch leaves both the displayed draw and future untouched.
+    pub(super) fn publish_future(&self, due: &FrameStamp) -> Fallible<bool> {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| "ONE X2 resident capture root is poisoned and quarantined")?;
+        if state.quarantined {
+            return Err("ONE X2 resident capture root is quarantined".into());
+        }
+        let matches = state
+            .future
+            .as_ref()
+            .is_some_and(|draw| draw.frame() == *due);
+        if !matches {
+            return Ok(false);
+        }
+        state.ready = state.future.take();
+        Ok(true)
+    }
+
     /// Snapshot the complete installed draw and reserve a fresh retirement
     /// slot. This does not touch committed history and never exposes a piece of
     /// the payload.
@@ -597,6 +645,28 @@ impl GpuResidentCapture {
             .lock()
             .map_err(|_| DrawRetirementError::Quarantined)?;
         Ok(state.ready.as_ref().map(|draw| InstalledOneXsReady {
+            draw: Arc::clone(draw),
+            permit,
+            pass: None,
+        }))
+    }
+
+    /// Snapshot the completed unpublished draw and reserve its one retirement
+    /// slot before the facade prepares a binding or publishes the future.
+    pub(super) fn future_for_draw(
+        &self,
+        retirements: &IcedDrawRetirements<InstalledOneXsPass>,
+    ) -> Result<Option<InstalledOneXsReady>, DrawRetirementError> {
+        let permit = retirements.reserve()?;
+        let state = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| DrawRetirementError::Quarantined)?;
+        if state.quarantined {
+            return Err(DrawRetirementError::Quarantined);
+        }
+        Ok(state.future.as_ref().map(|draw| InstalledOneXsReady {
             draw: Arc::clone(draw),
             permit,
             pass: None,
@@ -852,6 +922,50 @@ impl GpuResidentCandidate {
         Ok(())
     }
 
+    /// Commit one whole completed successor without publishing it for draw.
+    ///
+    /// The future owns the exact source/map associated with this successor.
+    /// The previously published draw remains available until an exact due
+    /// delivery moves this future into the ready slot.
+    pub(super) fn commit_future(&mut self, draw: &Arc<InstalledOneXsDraw>) -> Fallible<()> {
+        let reservation = self
+            .reservation
+            .as_mut()
+            .expect("resident candidate retains its reservation");
+        let mut state = match reservation.shared.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                return Err(
+                    "ONE X2 resident future commit found a poisoned root; candidate quarantined"
+                        .into(),
+                );
+            }
+        };
+        let exact_seal = state.pending.as_ref() == Some(&reservation.seal);
+        let exact_prior = same_successor(state.committed.as_ref(), reservation.prior.as_ref());
+        if !exact_seal || !exact_prior || state.future.is_some() || state.quarantined {
+            state.quarantined = true;
+            state
+                .quarantined_successors
+                .push(Arc::clone(&self.successor));
+            return Err("ONE X2 resident future commit does not match its seal and prior allocation, or the future slot is occupied; candidate quarantined".into());
+        }
+        let root_identity = reservation.identity();
+        let identity = state
+            .context
+            .as_ref()
+            .zip(state.session.as_ref())
+            .ok_or("ONE X2 resident root has no capture context or session");
+        let (context, session) = identity?;
+        draw.ensure_install_identity(context, session, &root_identity, &reservation.seal.flight)?;
+        state.committed = Some(Arc::clone(&self.successor));
+        state.future = Some(Arc::clone(draw));
+        state.pending = None;
+        reservation.active = false;
+        self.disarmed = true;
+        Ok(())
+    }
+
     /// Test-only stand-in for the future atomic successor plus ready install.
     /// It intentionally installs no ready capability.
     #[cfg(test)]
@@ -951,6 +1065,17 @@ mod tests {
     use kjerag_media::FrameStamp;
 
     use super::*;
+
+    #[test]
+    fn empty_future_cannot_replace_the_ready_slot() {
+        let capture = GpuResidentCapture::new();
+        let due = frame(1);
+
+        assert!(!capture.has_future().unwrap());
+        assert_eq!(capture.future_stamp().unwrap(), None);
+        assert!(!capture.publish_future(&due).unwrap());
+        assert!(!capture.snapshot().ready);
+    }
 
     #[test]
     fn root_identity_distinguishes_equal_flights_from_distinct_captures() {

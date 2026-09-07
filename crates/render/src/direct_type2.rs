@@ -1018,20 +1018,36 @@ mod tests {
             "ONE X2 direct type-2 pipeline belongs to a different graphics device"
         );
 
-        let install = include_str!("flow/one_xs_belt_gpu.rs")
+        let resident = include_str!("flow/one_xs_belt_gpu.rs");
+        let install = resident
             .split_once("fn prepare_resident_install<")
             .unwrap()
             .1
-            .split_once("const CODES_PER_WORD")
+            .split_once("fn prepare_resident_bound<")
+            .unwrap()
+            .0;
+        let bound = resident
+            .split_once("fn prepare_resident_bound<")
+            .unwrap()
+            .1
+            .split_once("impl ResidentImportedFront")
             .unwrap()
             .0;
         assert!(
-            install.find("pipeline.ensure_device").unwrap()
-                < install.find("bind_for_install").unwrap()
+            install.find("prepare_resident_bound").unwrap()
+                < install.find(".reserve(retirements)").unwrap()
         );
         assert!(
-            install.find("pipeline.ensure_device").unwrap()
-                < install.find(".reserve(retirements)").unwrap()
+            bound.find("pipeline.ensure_device").unwrap() < bound.find("bind_for_install").unwrap()
+        );
+        assert_eq!(
+            resident.matches("Ok(ResidentBoundInstall {").count(),
+            1,
+            "another bound-install constructor bypasses direct-pipeline validation"
+        );
+        assert!(
+            resident.contains("bound.and_then(ResidentBoundInstall::commit_future)"),
+            "future commit bypasses the validated bound-install boundary"
         );
     }
 

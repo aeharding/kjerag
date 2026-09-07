@@ -14,6 +14,96 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Owner test: seam accepted visually, micro-hitches next, 2026-09-07:** the
+owner says the frozen test build's seam looks good, but playback feels uneven
+despite its 30 fps counter. They request smoothness first, then photometric
+lens matching. This is not approval to merge a smoothness fix without retest.
+The exact X4 command handed over is the initial reproduction assumption; the
+owner did not explicitly name a camera in the hitch report.
+
+The unchanged packaged candidate reproduces uneven source delivery on actual
+COSMIC: a 25-second detailed trace sustains roughly 30 source fps but has
+steady source-commit dwell p95 49.96 ms, p99 51.00 ms, maximum 64.48 ms, against
+33.37 ms source spacing. Sources are consecutive; many native window commits
+continue at roughly one display refresh while the same source is repeated.
+An earlier desktop run additionally fell to 1 Hz after about six seconds;
+that abnormal phase is retained separately, not assigned to COSMIC #149.
+Frame commits are not physical scanout evidence. Startup UI-only commits and
+the detailed run's final callback cut off by timed termination remain explicit
+trace-integrity failures, not waived by these cadence statistics.
+
+A diagnostic-only extension of the existing Scene lifecycle log prints the
+already borrowed due and lookahead stamps. In a native sibling run, 68 staged
+draws still use the previous source after its successor is due, affecting
+66 distinct due frames; 60 of those share one modulo-ten phase. This narrows
+the investigation to resident readiness and preparation lead time, with the
+ten-frame full-work cadence initially a hypothesis, not a proven cost center.
+
+Worker timing subsequently confirms that the exact full-work phase crosses
+the source interval: an isolated run records 55 of 56 such warm jobs above
+33.37 ms, median 37.52 ms, versus 16.55 ms for ordinary jobs. Admission delay
+is below 0.1 ms. Worker time includes host submission and callback pacing, not
+isolated GPU execution. A two-chunk pacing trial lowers worker time, but a
+60 Hz native comparison does not improve source-dwell p95 (48.15/48.20 ms)
+or median full-work readiness (47.41/47.42 ms); that trial is removed.
+
+A bounded-buffer candidate is now implemented and under runtime verification: one completed
+unpublished source/map pair may advance the temporal prior while the next
+source is computed. Exact due publication, sequential source processing and
+the two-draw retirement cap remain separate gates. Media exposes two decoded
+successors; pause, seek, EOF and renderer-recreation coverage is being extended.
+The first native 2256x1504 comparison shows fewer periodic holds on both cameras.
+For source-aligned steady cohorts, source holds above 40 ms associated with the
+full-work phase fall from 57/59 to 6/56 on X4 and 39/57 to 3/57 on X2. All steady
+sources are consecutive. Full-log instances of staging an older map after
+the next source is already due fall from 115 to 8 on X4 and 113 to 1 on X2; all
+remaining candidate instances are in the initial 11/1 successors respectively.
+Both candidates sustain about 30 source fps, no audio underruns, and no growing
+lag in these 25-second samples. Null-sink routing and live executable identity
+are authenticated; root viewed both native captures.
+
+These are isolated native API commits on a nominal 60 Hz wlroots output whose
+observed grid is about 16 ms, not physical 60 Hz scanout. Steady p95 remains about
+48 ms, consistent with some three-tick holds on that grid; the comparisons do
+not establish hitch-free COSMIC playback. X4 full-run reported worst lateness
+increases from 35.4 to 44.3 ms in this pair; the candidate maximum is already in
+its first interval. Do not erase startup behind the steady cohort.
+Strict trace inventory retains startup UI-only commits and final callbacks
+cut off by exit. Required-Radeon full workspace passes 1,178 tests, zero
+failures, 30 ignored; all-target Clippy, formatting and static checks pass.
+Real-camera overlap tests exercise pause, renderer recreation, exact due
+publication and bit-identical packed maps/alpha against serial processing
+through frame two on both cameras. This is a bounded arithmetic regression,
+not whole-video identity. The unchanged native UI harness passes 48 X4 and
+54 X2 checks, including the exact reported views, pause/resume and the real
+X2 scrubber/backward-seek path. Root viewed both reported-view captures.
+Compared with the earlier Flatpak, these native screenshots have sparse,
+predominantly one-code differences, not byte identity across runtimes.
+
+Renewed 40-second active-pan runs at 2256x1504 on a nominal 300 Hz headless
+output record 274.92/297.67 sourced draws per second for X4/X2 and 29.975
+consecutive source advances per second on both. Changed-source-or-view rates
+are 250.05/272.97 per second. Neither accumulates lag. Commit-spacing p99 is
+9.13/6.60 ms, maximum 22.22/17.11 ms; this is not an every-draw 4.17 ms result.
+Each strict trace still fails one UI-only committed frame, so those rates
+are observational sourced subsets, not strict passes or physical scanout.
+Full-run reported worst lateness is 253.7/260.3 ms, retained rather than hidden
+by the steady rates. Evidence: `scratch/microhitch-20260907/buffer-candidate/`.
+
+A subsequent 25-second actual-COSMIC X4 run does not enter the earlier 1 Hz
+phase. Only the first successor is staged late; no later already-due source
+uses an older map. Steady source dwell p95 is 43.76 ms, p99 48.32 ms, maximum
+50.99 ms, versus 49.96/51.00/64.48 ms in the earlier packaged reproduction.
+This is not a controlled same-runtime A/B or physical scanout measurement.
+Sources remain consecutive with bounded phase error; full-run reported worst
+lateness is 29.7 ms and no audio underruns occur. Its strict inventory retains
+five startup UI-only commits and the final present/draw callbacks cut off by
+intentional termination. Owner smoothness retest and refreshed package remain
+pending. Shader and
+temporal arithmetic are unchanged. The reviewed packaged candidate and
+installed app stay frozen. Evidence and current diagnostic identities:
+`scratch/microhitch-20260907/`.
+
 **Candidate reported-view and runtime qualification, 2026-09-07:** the
 uninstalled candidate now passes the unchanged Flatpak UI harness at both
 exact owner views: ONE X2 44 checks, X4 Air 38, zero failures. Both actual

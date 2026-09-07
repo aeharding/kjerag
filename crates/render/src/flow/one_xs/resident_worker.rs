@@ -9,8 +9,9 @@
 use std::sync::{Arc, mpsc};
 
 use super::{
-    ImportedOneXsPicture, OneXsGpuContext, ResidentCaptureSession, ResidentPendingMap,
-    ResidentTransaction,
+    ImportedOneXsPicture, ImportedOneXsSource, OneXsGpuContext, ResidentCaptureSession,
+    ResidentPendingMap, ResidentTransaction, native_lifecycle_event,
+    native_lifecycle_probe_enabled,
 };
 use crate::Fallible;
 
@@ -37,12 +38,28 @@ impl ResidentStitchWorker {
             .name("kjerag-stitch".into())
             .spawn(move || {
                 for job in incoming {
+                    let lifecycle = native_lifecycle_probe_enabled()
+                        .then(|| (job.source.resident_frame(), std::time::Instant::now()));
+                    if let Some((stamp, _)) = lifecycle.as_ref() {
+                        native_lifecycle_event("worker-start", stamp, None);
+                    }
                     let result = catch_worker_panic(|| {
                         if !job.session.context.is_worker_thread() {
                             return Err("ONE X2 stitch job reached a different worker".into());
                         }
                         job.session.submit(job.source)
                     });
+                    if let Some((stamp, started)) = lifecycle {
+                        native_lifecycle_event(
+                            if result.is_ok() {
+                                "worker-return-success"
+                            } else {
+                                "worker-return-error"
+                            },
+                            &stamp,
+                            Some(started.elapsed()),
+                        );
+                    }
                     if let Err(unsent) = job.result.send(result)
                         && let Ok(pending) = unsent.0
                     {

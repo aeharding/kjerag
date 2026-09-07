@@ -904,7 +904,21 @@ impl ResidentCaptureFacade {
 
     pub(crate) fn accepted(&self, frame: &FrameStamp) -> Fallible<bool> {
         let state = self.state()?;
-        Ok(state.installed.as_ref() == Some(frame) || state.submitted.as_ref() == Some(frame))
+        Ok(state.installed.as_ref() == Some(frame)
+            || state.submitted.as_ref() == Some(frame)
+            || state
+                .session
+                .as_ref()
+                .map(|session| session.capture.pipeline.root.future_stamp())
+                .transpose()?
+                .flatten()
+                .as_ref()
+                == Some(frame))
+    }
+
+    /// Computational admission head, never permission to present a picture.
+    pub(crate) fn accepted_stamp(&self) -> Fallible<Option<FrameStamp>> {
+        Ok(self.state()?.submitted.clone())
     }
 
     pub(crate) fn same_capture(&self, other: &Self) -> bool {
@@ -923,6 +937,11 @@ impl ResidentCaptureFacade {
     #[cfg(test)]
     pub(crate) fn prepared_stamp_for_test(&self) -> Fallible<Option<FrameStamp>> {
         let state = self.state()?;
+        if let Some(session) = state.session.as_ref()
+            && let Some(frame) = session.capture.pipeline.root.future_stamp()?
+        {
+            return Ok(Some(frame));
+        }
         Ok(match &state.transaction {
             ResidentTransaction::Ready(ready) => Some(ready.frame().clone()),
             _ => None,
@@ -1177,6 +1196,9 @@ impl ResidentSceneFacade {
             if !matches!(state.transaction, ResidentTransaction::Idle) {
                 return Ok(ResidentSubmit::Retry(ResidentRetry::InFlight));
             }
+            if state.submitted.as_ref() == Some(&stamp) {
+                return Ok(ResidentSubmit::Retry(ResidentRetry::InFlight));
+            }
             if (frames.size.width, frames.size.height)
                 != (session.source_size.width, session.source_size.height)
             {
@@ -1189,8 +1211,8 @@ impl ResidentSceneFacade {
                 )
                 .into());
             }
-            if !state.seek_restart || state.installed.is_some() {
-                validate_resident_sequence(state.installed.as_ref(), &stamp)?;
+            if !state.seek_restart || state.submitted.is_some() {
+                validate_resident_sequence(state.submitted.as_ref(), &stamp)?;
             }
             state.transaction = ResidentTransaction::Starting;
         }
@@ -1203,10 +1225,12 @@ impl ResidentSceneFacade {
             Ok(source) => source,
             Err(error) => return start.failed_import(error),
         };
+        native_lifecycle_event("enqueue-attempt", &stamp, None);
         let work = session.worker.try_submit(session.clone(), source);
         let mut state = self.capture.state()?;
         match work {
             Ok(Some(work)) => {
+                native_lifecycle_event("enqueue-accepted", &stamp, None);
                 state.submitted = Some(stamp);
                 state.transaction = ResidentTransaction::Working(work);
                 start.disarm();
@@ -1269,14 +1293,32 @@ impl ResidentSceneFacade {
     ) -> Fallible<ResidentPrepare> {
         let session = self.capture.bind_session(context.clone(), format)?;
         self.draw.staged().take();
-        let transaction = {
+        let (transaction, submitted_stamp) = {
             let mut state = self.capture.state()?;
-            std::mem::replace(&mut state.transaction, ResidentTransaction::Starting)
+            (
+                std::mem::replace(&mut state.transaction, ResidentTransaction::Starting),
+                native_lifecycle_probe_enabled()
+                    .then(|| state.submitted.clone())
+                    .flatten(),
+            )
         };
         let mut prepare_start = ResidentStartGuard::rollback(Arc::clone(&self.capture.inner));
         let transaction = match transaction {
             ResidentTransaction::Working(work) => match work.collect() {
-                Ok(transaction) => transaction,
+                Ok(transaction) => {
+                    if let Some(stamp) = submitted_stamp.as_ref() {
+                        native_lifecycle_event(
+                            match &transaction {
+                                ResidentTransaction::Working(_) => "renderer-working",
+                                ResidentTransaction::Pending(_) => "renderer-collected-pending",
+                                _ => "renderer-collected-other",
+                            },
+                            stamp,
+                            None,
+                        );
+                    }
+                    transaction
+                }
                 Err(error) => {
                     self.capture.state()?.transaction = ResidentTransaction::Quarantined;
                     prepare_start.disarm();
@@ -1353,6 +1395,16 @@ impl ResidentSceneFacade {
                         }
                     }
                 };
+                if let (Some(stamp), ResidentPoll::Continue(transaction)) =
+                    (submitted_stamp.as_ref(), &result)
+                {
+                    let event = match transaction.as_ref() {
+                        ResidentTransaction::Pending(_) => "renderer-validity-pending",
+                        ResidentTransaction::Ready(_) => "renderer-validity-ready",
+                        _ => "renderer-validity-other",
+                    };
+                    native_lifecycle_event(event, stamp, None);
+                }
                 match result {
                     ResidentPoll::Continue(transaction) => (*transaction, true),
                     ResidentPoll::Refused(error) => {
@@ -1389,78 +1441,79 @@ impl ResidentSceneFacade {
         let mut state = self.capture.state()?;
         state.transaction = transaction;
         prepare_start.disarm();
-        let publish_ready = match &state.transaction {
-            ResidentTransaction::Ready(ready) => publication.permits(ready.frame()),
-            _ => false,
-        };
-        if publish_ready {
-            let permit = match session.retirements.reserve() {
-                Ok(permit) => permit,
-                Err(DrawRetirementError::Full) => {
-                    return Ok(ResidentPrepare::Retry {
-                        reason: ResidentRetry::DrawRetirementFull,
-                        installed: state.installed.clone(),
-                    });
-                }
-                Err(error) => return Err(error.into()),
-            };
-            let ready_map =
-                match std::mem::replace(&mut state.transaction, ResidentTransaction::Starting) {
-                    ResidentTransaction::Ready(ResidentReadyMap::Cold(map)) => {
-                        ResidentReadyMap::Cold(map)
+        if matches!(state.transaction, ResidentTransaction::Ready(_))
+            && let Some(stamp) = submitted_stamp.as_ref()
+        {
+            native_lifecycle_event("renderer-ready-before-publication", stamp, None);
+        }
+        // Keep one completed, unpublished picture and one active transaction.
+        // Advancing the temporal prior lets the worker prepare the following
+        // source; only Player's exact due stamp can advance the shown picture.
+        // Two passes cover both cases: publish an existing future then fill its
+        // slot, or fill an empty slot with the due result then publish it.
+        let root = &session.capture.pipeline.root;
+        let mut published = None;
+        for _ in 0..2 {
+            if let Some(frame) = root.future_stamp()?
+                && publication.permits(&frame)
+            {
+                let ready = match root.future_for_draw(&session.retirements) {
+                    Ok(Some(ready)) => ready,
+                    Ok(None) => {
+                        return Err("ONE X2 future picture disappeared before publication".into());
                     }
-                    ResidentTransaction::Ready(ResidentReadyMap::Warm(map)) => {
-                        ResidentReadyMap::Warm(map)
+                    Err(DrawRetirementError::Full) => {
+                        return Ok(ResidentPrepare::Retry {
+                            reason: ResidentRetry::DrawRetirementFull,
+                            installed: state.installed.clone(),
+                        });
                     }
-                    _ => unreachable!("checked resident ready transaction"),
+                    Err(error) => return Err(error.into()),
                 };
-            drop(state);
-            let mut install_start = ResidentStartGuard::quarantine(Arc::clone(&self.capture.inner));
-            let install = match ready_map {
-                ResidentReadyMap::Cold(map) => {
-                    prepare_resident_install_with_permit(*map, Arc::clone(&session.direct), permit)
+                let reframe = reframe_for(&frame)?;
+                // Prepare the immutable draw before changing publication.
+                // Screenshots take this same façade-then-root lock order.
+                self.draw.prepare_installed(ready, &reframe);
+                if !root.publish_future(&frame)? {
+                    self.draw.staged().take();
+                    return Err("ONE X2 future picture changed before publication".into());
                 }
-                ResidentReadyMap::Warm(map) => {
-                    prepare_resident_install_with_permit(*map, Arc::clone(&session.direct), permit)
-                }
-            };
-            let install = match install {
-                Ok(install) => install,
-                Err(error) => {
-                    let mut state = self.capture.state()?;
+                state.installed = Some(frame.clone());
+                native_lifecycle_event("renderer-published", &frame, None);
+                published = Some(frame);
+            }
+
+            if !root.has_future()? && matches!(state.transaction, ResidentTransaction::Ready(_)) {
+                let ResidentTransaction::Ready(ready_map) =
+                    std::mem::replace(&mut state.transaction, ResidentTransaction::Starting)
+                else {
+                    unreachable!("checked completed resident transaction")
+                };
+                let completed = ready_map.frame().clone();
+                drop(state);
+                let mut commit_start =
+                    ResidentStartGuard::quarantine(Arc::clone(&self.capture.inner));
+                let bound = match ready_map {
+                    ResidentReadyMap::Cold(map) => {
+                        prepare_resident_bound(*map, Arc::clone(&session.direct))
+                    }
+                    ResidentReadyMap::Warm(map) => {
+                        prepare_resident_bound(*map, Arc::clone(&session.direct))
+                    }
+                };
+                let committed = bound.and_then(ResidentBoundInstall::commit_future);
+                commit_start.disarm();
+                state = self.capture.state()?;
+                if let Err(error) = committed {
                     state.transaction = ResidentTransaction::Quarantined;
-                    install_start.disarm();
+                    self.draw.staged().take();
                     return Err(error);
                 }
-            };
-            let installed = install.frame();
-            let reframe = match reframe_for(&installed) {
-                Ok(reframe) => reframe,
-                Err(error) => {
-                    drop(install);
-                    let mut state = self.capture.state()?;
-                    state.transaction = ResidentTransaction::Idle;
-                    install_start.disarm();
-                    return Err(error);
-                }
-            };
-            // Lock order is façade then root: screenshot takes the same order.
-            // Keep the acknowledgement hidden until the exact ready has also
-            // been staged, so no observer can see an undrawable publication.
-            let mut state = self.capture.state()?;
-            let ready = match install.install() {
-                Ok(ready) => ready,
-                Err(error) => {
-                    state.transaction = ResidentTransaction::Quarantined;
-                    install_start.disarm();
-                    return Err(error);
-                }
-            };
-            self.draw.prepare_installed(ready, &reframe);
-            state.installed = Some(installed.clone());
-            state.transaction = ResidentTransaction::Idle;
-            install_start.disarm();
-            drop(state);
+                state.transaction = ResidentTransaction::Idle;
+                native_lifecycle_event("renderer-temporal-committed", &completed, None);
+            }
+        }
+        if let Some(installed) = published {
             return Ok(ResidentPrepare::Staged { installed });
         }
         let pending = matches!(
@@ -1523,6 +1576,15 @@ impl ResidentSceneFacade {
 
     pub(crate) fn acknowledged(&self) -> Fallible<Option<FrameStamp>> {
         Ok(self.capture.state()?.installed.clone())
+    }
+
+    /// Work that can make progress before the next source becomes due.
+    /// A completed future and old draw retirements alone need no busy redraw.
+    pub(crate) fn preparing_source(&self) -> Fallible<bool> {
+        Ok(matches!(
+            self.capture.state()?.transaction,
+            ResidentTransaction::Working(_) | ResidentTransaction::Pending(_)
+        ))
     }
 
     /// Nonblocking normal replacement drain. Completion-proven candidates are
@@ -1821,6 +1883,39 @@ fn native_capacity_probe_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("KJERAG_NATIVE_CAPACITY_PROBE").is_some())
 }
 
+fn native_lifecycle_probe_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("KJERAG_NATIVE_LIFECYCLE_PROBE").is_some())
+}
+
+fn native_lifecycle_event(
+    event: &'static str,
+    frame: &FrameStamp,
+    elapsed: Option<std::time::Duration>,
+) {
+    if !native_lifecycle_probe_enabled() {
+        return;
+    }
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let host_ns = ORIGIN
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_nanos();
+    match elapsed {
+        Some(elapsed) => eprintln!(
+            "native-source: {{\"host_ns\":{host_ns},\"event\":\"{event}\",\"source\":{},\"pts_ns\":{},\"elapsed_ns\":{}}}",
+            frame.index(),
+            frame.timestamp().as_nanos(),
+            elapsed.as_nanos()
+        ),
+        None => eprintln!(
+            "native-source: {{\"host_ns\":{host_ns},\"event\":\"{event}\",\"source\":{},\"pts_ns\":{}}}",
+            frame.index(),
+            frame.timestamp().as_nanos()
+        ),
+    }
+}
+
 impl InstalledOneXsPass {
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
         self.draw.source.draw_resident_binding(
@@ -1878,6 +1973,20 @@ struct ResidentBoundInstall {
 
 #[allow(dead_code)]
 impl ResidentBoundInstall {
+    /// The final validity proof already owns the complete source/map pair.
+    /// Commit its temporal successor without reserving a draw or displaying it.
+    fn commit_future(mut self) -> Fallible<()> {
+        self.root
+            .as_mut()
+            .expect("bound resident result lost its root")
+            .commit_future(
+                self.draw
+                    .as_ref()
+                    .expect("bound resident result lost its picture"),
+            )?;
+        Ok(())
+    }
+
     fn reserve(
         mut self,
         retirements: &IcedDrawRetirements<InstalledOneXsPass>,
@@ -2145,28 +2254,13 @@ pub(in crate::flow::one_xs::one_xs_belt_gpu) fn prepare_resident_install<P>(
 where
     P: geometry_gpu::temporal_gpu::GpuPriorPublicLevelTwo + Send + Sync + 'static,
 {
-    let context = map.install_context();
-    pipeline.ensure_device(&context)?;
-    let bound = map.bind_for_install(&context, pipeline.map_layout())?;
-    Ok(ResidentBoundInstall {
-        draw: Some(Arc::new(InstalledOneXsDraw {
-            source: bound.source,
-            map: bound.binding,
-            pipeline,
-            #[cfg(test)]
-            drop_witness: None,
-        })),
-        root: Some(bound.candidate),
-    }
-    .reserve(retirements)?)
+    Ok(prepare_resident_bound(map, pipeline)?.reserve(retirements)?)
 }
 
-#[allow(dead_code)]
-fn prepare_resident_install_with_permit<P>(
+fn prepare_resident_bound<P>(
     map: map_patch_gpu::GpuPackedMapFrame<pis_frontend_gpu::GpuFinalOperands<P>>,
     pipeline: Arc<DirectType2Pipeline>,
-    permit: DrawPermit,
-) -> Fallible<ResidentInstallCandidate>
+) -> Fallible<ResidentBoundInstall>
 where
     P: geometry_gpu::temporal_gpu::GpuPriorPublicLevelTwo + Send + Sync + 'static,
 {
@@ -2182,8 +2276,7 @@ where
             drop_witness: None,
         })),
         root: Some(bound.candidate),
-    }
-    .with_permit(permit))
+    })
 }
 
 #[allow(dead_code)]

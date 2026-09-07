@@ -19,6 +19,7 @@
 //! otherwise, [`Frames::timestamp`] is the value that changes and nothing
 //! above this module needs to know.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError, channel, sync_channel};
@@ -32,11 +33,14 @@ use super::{Accuracy, Cue, Fallible, Frames, Read, Reader, Size, Timing};
 /// Pairs the decode thread may have ready and waiting.
 const QUEUED: usize = 2;
 
+/// Decoded successors a sequential realtime consumer may prepare early.
+const DECODED_AHEAD: usize = 2;
+
 /// Frames each lane decodes past a surface before it is mapped
 /// ([`Reader::lookahead`]). Measured: 2.19x realtime at 0, 2.46x at 2, and
 /// 2.47x at 4, so 2 takes the whole win. With the two queued pairs, the
-/// pair on screen, the one peeked and the three the renderer retains, the
-/// engine holds 9 of the 20 surfaces in a decoder's pool.
+/// pair on screen, the two peeked and the three the renderer retains, the
+/// engine holds 10 of the 20 surfaces in a decoder's pool.
 const LOOKAHEAD: usize = 2;
 
 /// What playback values when presenting decoded frames.
@@ -404,7 +408,7 @@ impl Player {
     /// has been shown. The last frame stays on screen; there is nothing
     /// left to pace.
     pub fn is_ended(&self) -> bool {
-        self.ended && self.presenter.peeked.is_none()
+        self.ended && self.presenter.peeked.is_empty()
     }
 
     pub fn position(&self, now: Instant) -> Duration {
@@ -425,6 +429,18 @@ impl Player {
     /// work for that same delivery without copying or taking it away from the
     /// presenter.
     pub fn next_decoded(&self) -> Option<Arc<Frames>> {
+        self.decoded_ahead(0)
+    }
+
+    /// One of the two exact decoded successors waiting for presentation.
+    ///
+    /// Index 0 is [`Self::next_decoded`]; index 1 is the frame after it.
+    /// Larger indices are outside the bounded lookahead and return `None`.
+    /// Reading either entry has no effect on presentation or clock state.
+    pub fn decoded_ahead(&self, index: usize) -> Option<Arc<Frames>> {
+        if index >= DECODED_AHEAD {
+            return None;
+        }
         if self.presenter.policy != PresentationPolicy::SequentialRealtime
             || !self.is_playing()
             || self.is_seeking()
@@ -432,7 +448,21 @@ impl Player {
         {
             return None;
         }
-        self.presenter.peeked.as_ref().map(Arc::clone)
+        self.presenter.peeked.get(index).map(Arc::clone)
+    }
+
+    /// Whether sequential playback should pump again to fill this lookahead slot.
+    ///
+    /// End of input is distinct from a temporarily empty decoder queue: an
+    /// unfilled tail slot at EOF must not keep a renderer in a redraw loop.
+    pub fn needs_decoded_ahead(&self, index: usize) -> bool {
+        index < DECODED_AHEAD
+            && !self.ended
+            && self.presenter.policy == PresentationPolicy::SequentialRealtime
+            && self.is_playing()
+            && !self.is_seeking()
+            && self.replay_target.is_none()
+            && self.presenter.peeked.get(index).is_none()
     }
 
     /// A seek has been asked for and the frame it asked for is not on screen
@@ -661,8 +691,19 @@ impl Player {
             }
         };
         let shown = self.presenter.advance(now, owed, &mut next);
-        if shown.is_some() && prefetch_successor && self.presenter.peeked.is_none() {
-            self.presenter.peeked = next().map(Arc::new);
+        if prefetch_successor && self.presenter.current.is_some() {
+            while self.presenter.peeked.len() < DECODED_AHEAD {
+                let Some(frames) = next() else {
+                    break;
+                };
+                self.presenter.peeked.push_back(Arc::new(frames));
+            }
+        }
+        if owed && shown.is_some() && epochs.wait == Wait::Frame {
+            // A cached same-epoch successor does not pass through `next`, so
+            // acknowledge the forward-frame wait here. Position waits still
+            // end only when their newest tagged decoder delivery is received.
+            epochs.showed(epochs.shown);
         }
         if let (Some(target), Some(frames)) = (*replay_target, shown.as_ref()) {
             if frames.index < target {
@@ -675,7 +716,10 @@ impl Player {
             }
         }
         match self.failure.take() {
-            Some(e) => Err(e),
+            Some(e) => {
+                self.presenter.peeked.clear();
+                Err(e)
+            }
             None => Ok(shown),
         }
     }
@@ -807,8 +851,8 @@ struct Presenter {
     interval: Duration,
     policy: PresentationPolicy,
     current: Option<Arc<Frames>>,
-    /// Pulled from the queue, not due yet.
-    peeked: Option<Arc<Frames>>,
+    /// Pulled from the decoder queue, in exact presentation order and not due yet.
+    peeked: VecDeque<Arc<Frames>>,
     stats: Stats,
 }
 
@@ -823,7 +867,7 @@ impl Presenter {
             interval,
             policy,
             current: None,
-            peeked: None,
+            peeked: VecDeque::with_capacity(DECODED_AHEAD),
             stats: Stats::default(),
         }
     }
@@ -835,7 +879,7 @@ impl Presenter {
         let current = self.current.as_ref()?;
         let next = self
             .peeked
-            .as_ref()
+            .front()
             .map_or(current.timestamp + self.interval, |frames| frames.timestamp);
         self.clock.reaches(next)
     }
@@ -855,15 +899,19 @@ impl Presenter {
         }
         let mut shown = None;
 
-        while let Some(frames) = self.peeked.take().or_else(|| next().map(Arc::new)) {
+        while let Some(frames) = self.peeked.pop_front().or_else(|| next().map(Arc::new)) {
             // The landing is the new position, so the clock moves to it. What
             // follows it in the same pump is ordinary playback and is paced.
             if owed {
                 owed = false;
-                self.reseek(frames.timestamp);
+                // Public seek/replay-from-zero already discarded the old
+                // decode lineage. A same-epoch forward replay reaches here
+                // with its following decoded frame still valid, so anchoring
+                // this landing must not throw that successor away.
+                self.reanchor(frames.timestamp);
             }
             if !self.claim(now, &frames) {
-                self.peeked = Some(frames);
+                self.peeked.push_front(frames);
                 break;
             }
             // Replacing a frame this pump already took means its whole
@@ -906,8 +954,12 @@ impl Presenter {
     /// keyframe seek lands before what it was asked for, and the clock has to
     /// say where the picture really is rather than where it was aimed.
     fn reseek(&mut self, to: Duration) {
+        self.peeked.clear();
+        self.reanchor(to);
+    }
+
+    fn reanchor(&mut self, to: Duration) {
         self.current = None;
-        self.peeked = None;
         self.clock.seek(to);
     }
 
@@ -1716,7 +1768,7 @@ mod tests {
     }
 
     #[test]
-    fn sequential_realtime_exposes_and_promotes_the_exact_decoded_successor() {
+    fn sequential_realtime_exposes_and_promotes_two_exact_decoded_successors() {
         let mut bench = Bench::new();
         assert!(
             bench
@@ -1727,6 +1779,7 @@ mod tests {
         let start = Instant::now();
         bench.decoded(0, 0);
         bench.decoded(0, 1);
+        bench.decoded(0, 2);
 
         let first = bench.player.pump(start).unwrap().unwrap();
         assert_eq!(first.index, 0);
@@ -1739,6 +1792,14 @@ mod tests {
         assert_eq!(successor.index, 1);
         let successor_stamp = successor.stamp();
         assert_ne!(successor_stamp, frame(1).stamp());
+        let second = bench
+            .player
+            .decoded_ahead(1)
+            .expect("the second queued successor was not exposed");
+        assert_eq!(second.index, 2);
+        let second_stamp = second.stamp();
+        assert_ne!(second_stamp, frame(2).stamp());
+        assert!(bench.player.decoded_ahead(2).is_none());
         assert_eq!(bench.player.index(), Some(0));
         assert_eq!(bench.player.presenter.clock.reading, reading);
         assert_eq!(bench.player.stats(), stats);
@@ -1749,6 +1810,12 @@ mod tests {
         let promoted = bench.player.pump(start + NTSC).unwrap().unwrap();
         assert!(Arc::ptr_eq(&promoted, &successor));
         assert_eq!(promoted.stamp(), successor_stamp);
+        let shifted = bench
+            .player
+            .next_decoded()
+            .expect("the second successor did not shift to the front");
+        assert!(Arc::ptr_eq(&shifted, &second));
+        assert_eq!(shifted.stamp(), second_stamp);
         assert_eq!(bench.player.index(), Some(1));
         assert_eq!(bench.player.stats().presented, 2);
     }
@@ -1775,6 +1842,15 @@ mod tests {
         );
         assert_eq!(bench.player.index(), Some(0));
         assert_eq!(bench.player.stats().presented, 1);
+
+        bench.decoded(0, 2);
+        assert_eq!(bench.redraw(start + HZ_60), None);
+        assert_eq!(
+            bench.player.decoded_ahead(1).map(|frames| frames.index),
+            Some(2)
+        );
+        assert_eq!(bench.player.index(), Some(0));
+        assert_eq!(bench.player.stats().presented, 1);
     }
 
     #[test]
@@ -1791,7 +1867,8 @@ mod tests {
 
         assert_eq!(bench.redraw(now), Some(0));
         assert!(bench.player.next_decoded().is_none());
-        assert!(bench.player.presenter.peeked.is_none());
+        assert!(!bench.player.needs_decoded_ahead(1));
+        assert!(bench.player.presenter.peeked.is_empty());
         assert_eq!(bench.redraw(now + NTSC), None);
         assert_eq!(bench.player.index(), Some(0));
     }
@@ -1808,16 +1885,121 @@ mod tests {
         let now = Instant::now();
         bench.decoded(0, 0);
         bench.decoded(0, 1);
+        bench.decoded(0, 2);
         assert_eq!(bench.redraw(now), Some(0));
         assert_eq!(
             bench.player.next_decoded().map(|frames| frames.index),
             Some(1)
         );
+        assert_eq!(
+            bench.player.decoded_ahead(1).map(|frames| frames.index),
+            Some(2)
+        );
 
         bench.player.seek(Cue::Index(900), Accuracy::Exact);
-        assert!(bench.player.presenter.peeked.is_none());
+        assert!(bench.player.presenter.peeked.is_empty());
         assert!(bench.player.next_decoded().is_none());
         assert!(bench.player.is_seeking());
+    }
+
+    #[test]
+    fn replay_clears_both_sequential_realtime_successors() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let now = Instant::now();
+        bench.decoded(0, 0);
+        bench.decoded(0, 1);
+        bench.decoded(0, 2);
+        assert_eq!(bench.redraw(now), Some(0));
+        assert!(bench.player.decoded_ahead(1).is_some());
+
+        bench.player.replay_to(Cue::Index(3), true).unwrap();
+        assert!(bench.player.presenter.peeked.is_empty());
+        assert!(bench.player.next_decoded().is_none());
+        assert!(bench.player.decoded_ahead(1).is_none());
+        assert!(bench.player.is_seeking());
+        assert!(!bench.player.is_playing());
+    }
+
+    #[test]
+    fn sequential_realtime_prefetch_keeps_only_the_newest_seek_epoch() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let now = Instant::now();
+        bench.decoded(0, 0);
+        assert_eq!(bench.redraw(now), Some(0));
+
+        bench.player.seek(Cue::Index(900), Accuracy::Exact);
+        bench.decoded(0, 1);
+        bench.decoded(0, 2);
+        bench.decoded(1, 900);
+        bench.decoded(1, 901);
+        bench.decoded(1, 902);
+
+        assert_eq!(bench.redraw(now), Some(900));
+        assert!(bench.player.next_decoded().is_none());
+        assert!(bench.player.decoded_ahead(1).is_none());
+        assert_eq!(bench.redraw(now), None);
+        assert_eq!(
+            bench.player.next_decoded().map(|frames| frames.index),
+            Some(901)
+        );
+        assert_eq!(
+            bench.player.decoded_ahead(1).map(|frames| frames.index),
+            Some(902)
+        );
+    }
+
+    #[test]
+    fn sequential_forward_replay_retains_the_second_exact_successor_for_resume() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let now = Instant::now();
+        bench.decoded(0, 0);
+        bench.decoded(0, 1);
+        bench.decoded(0, 2);
+        assert_eq!(bench.redraw(now), Some(0));
+        let first = bench.player.next_decoded().unwrap();
+        let second = bench.player.decoded_ahead(1).unwrap();
+
+        bench.player.replay_to(Cue::Index(1), false).unwrap();
+        let promoted = bench.player.pump(now).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&promoted, &first));
+        assert_eq!(bench.player.index(), Some(1));
+        assert!(!bench.player.is_seeking());
+        assert!(!bench.player.is_playing());
+        assert!(bench.player.next_decoded().is_none());
+        assert!(
+            bench
+                .player
+                .presenter
+                .peeked
+                .front()
+                .is_some_and(|retained| Arc::ptr_eq(retained, &second))
+        );
+
+        bench.player.play();
+        let exposed = bench
+            .player
+            .next_decoded()
+            .expect("same-epoch successor was discarded by forward replay");
+        assert!(Arc::ptr_eq(&exposed, &second));
+        assert_eq!(exposed.index, 2);
     }
 
     #[test]
@@ -1834,7 +2016,7 @@ mod tests {
         bench.decoded(0, 1);
 
         assert_eq!(bench.redraw(start), Some(0));
-        assert!(bench.player.presenter.peeked.is_none());
+        assert!(bench.player.presenter.peeked.is_empty());
         assert!(bench.player.next_decoded().is_none());
         assert_eq!(bench.redraw(start), None);
         assert_eq!(bench.redraw(start + NTSC), Some(1));
@@ -1843,7 +2025,7 @@ mod tests {
     }
 
     #[test]
-    fn sequential_realtime_eof_waits_for_the_peeked_final_frame() {
+    fn sequential_realtime_eof_waits_for_both_peeked_final_frames() {
         let mut bench = Bench::new();
         assert!(
             bench
@@ -1854,6 +2036,7 @@ mod tests {
         let start = Instant::now();
         bench.decoded(0, 0);
         bench.decoded(0, 1);
+        bench.decoded(0, 2);
         bench.notes.send(Note::Ended(0)).unwrap();
 
         assert_eq!(bench.redraw(start), Some(0));
@@ -1862,7 +2045,15 @@ mod tests {
             bench.player.next_decoded().map(|frames| frames.index),
             Some(1)
         );
+        assert!(!bench.player.needs_decoded_ahead(1));
         assert_eq!(bench.redraw(start + NTSC), Some(1));
+        assert!(!bench.player.is_ended());
+        assert!(!bench.player.needs_decoded_ahead(1));
+        assert_eq!(
+            bench.player.next_decoded().map(|frames| frames.index),
+            Some(2)
+        );
+        assert_eq!(bench.redraw(start + NTSC * 2), Some(2));
         assert!(bench.player.is_ended());
     }
 
@@ -1887,6 +2078,34 @@ mod tests {
         assert_eq!(bench.player.stats().presented, 1);
         assert_eq!(bench.player.stats().dropped, 0);
         assert!(bench.player.next_decoded().is_none());
+    }
+
+    #[test]
+    fn sequential_realtime_second_prefetch_failure_discards_the_first_successor() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        bench.decoded(0, 0);
+        bench.decoded(0, 1);
+        bench
+            .notes
+            .send(Note::Failed(
+                "exact second prefetched decoder failure".into(),
+            ))
+            .unwrap();
+
+        let error = bench.player.pump(Instant::now()).unwrap_err();
+        assert_eq!(error.to_string(), "exact second prefetched decoder failure");
+        assert_eq!(bench.player.index(), Some(0));
+        assert_eq!(bench.player.stats().presented, 1);
+        assert_eq!(bench.player.stats().dropped, 0);
+        assert!(bench.player.next_decoded().is_none());
+        assert!(bench.player.decoded_ahead(1).is_none());
+        assert!(bench.player.presenter.peeked.is_empty());
     }
 
     #[test]
