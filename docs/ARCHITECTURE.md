@@ -250,10 +250,30 @@ On the test Radeon, their measured maxima are `0.00054196` and `1.79e-7`,
 respectively. The hardware maximum is at the synthetic map's discontinuous
 periodic join. Actual Scene comparisons retain their one-code-per-channel
 bound; none of these gates establishes whole-video or owner acceptance.
-Tight float4 buffers remain available
-for diagnostic comparisons; they do not supply the live fragment reads. This
-change is being qualified against the actual player: bypassing only the final
-color consumer restored X4 source cadence while leaving the producer active.
+The follow-up working-tree simplification publishes only those textures,
+removing two redundant 320,000-byte output buffers and their stores/bindings.
+The color producer needs eleven storage buffers instead of thirteen; the
+complete stitch path's fifteen-buffer requirement is unchanged. Explicit
+diagnostics copy the exact texture texels into temporary padded staging and
+strip row padding. No live staging, readback or wait is added. All 51 color,
+three consumer and two actual-Scene checks pass. Across the two saved sequences,
+all 31 X4 and 61 X2 frames' pixels, packed maps, alpha and ratios remain
+byte-identical to the preceding implementation. Capacity qualification of this
+simplification shows no material gain: the next native run reaches only
+29.175 source fps and 239.20 changing commits/s on X4, while X2 reaches
+29.950/261.12. It removes duplicated publication, not the measured cadence
+defect. The owner's packaged review build is unchanged.
+A bounded indexed-mesh trial preserved every triangle and all 460 saved frame
+artifacts, but did not produce a useful X4 gain: 29.475 source fps, 238.95 changing
+commits/s, commit p99/max 8.79/23.00 ms and still-growing lateness. X2 reached
+29.975/262.82, with p99/max 8.47/19.17 ms. Both strict pointer cohorts fail one
+source-less commit. The additional index-buffer code is rejected; the existing
+triangle draw is retained. Trial source and evidence remain in scratch.
+The retained texture-only implementation passes full gates (1,238 workspace
+tests, zero failures, 30 ignored) and 50 X4/54 ONE X2 native UI checks. The same
+backward-seek and real mouse-scrubber checks now run on both named fixtures;
+earlier harness results covered those two interactions only on X2. These are
+correctness and interaction gates, not proof of uniform presentation timing.
 
 ## Failures the pilot is told about (issue #124)
 

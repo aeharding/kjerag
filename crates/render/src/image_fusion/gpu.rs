@@ -17,9 +17,6 @@ const STATE_WORDS: usize = 1_320;
 
 /// One immutable renderer-ordinal publication of 200 by 100 ratio maps.
 pub struct Output {
-    /// Diagnostic byte-linear publication used by the CPU-reference tests.
-    pub ratios: [wgpu::Buffer; 2],
-    /// Same-f32 texture publication consumed directly by the renderer.
     pub textures: [wgpu::Texture; 2],
 }
 
@@ -38,7 +35,7 @@ pub struct Producer {
 
 impl Producer {
     pub fn new(device: &wgpu::Device) -> Result<Self, String> {
-        const STORAGE_BINDINGS: u32 = 13;
+        const STORAGE_BINDINGS: u32 = 11;
         const LARGEST_BINDING: u32 = (2 * MAP_NODES * 16) as u32;
         let limits = device.limits();
         if limits.max_storage_buffers_per_shader_stage < STORAGE_BINDINGS {
@@ -84,11 +81,9 @@ impl Producer {
                 storage(7, false),
                 storage(8, false),
                 storage(9, false),
-                storage(10, false),
-                storage(11, false),
-                storage(12, true),
-                storage_texture(13),
-                storage_texture(14),
+                storage(10, true),
+                storage_texture(11),
+                storage_texture(12),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -255,18 +250,6 @@ impl Producer {
                 ));
             }
         }
-        let output = std::array::from_fn(|lens| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(if lens == 0 {
-                    "image fusion left ratios"
-                } else {
-                    "image fusion right ratios"
-                }),
-                size: MAP_NODES * 16,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            })
-        });
         let textures = std::array::from_fn(|lens| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(if lens == 0 {
@@ -306,11 +289,9 @@ impl Producer {
                 entry(7, &self.cg),
                 entry(8, &self.ratios),
                 entry(9, &self.blurred),
-                entry(10, &output[0]),
-                entry(11, &output[1]),
-                entry(12, &self.fixed),
-                texture_entry(13, &texture_views[0]),
-                texture_entry(14, &texture_views[1]),
+                entry(10, &self.fixed),
+                texture_entry(11, &texture_views[0]),
+                texture_entry(12, &texture_views[1]),
             ],
         });
         // Skips republish retained ratios; global failures publish neutral
@@ -330,10 +311,7 @@ impl Producer {
             pass.set_bind_group(0, &bind, &[]);
             pass.dispatch_workgroups(groups, 1, 1);
         }
-        Ok(Output {
-            ratios: output,
-            textures,
-        })
+        Ok(Output { textures })
     }
 }
 

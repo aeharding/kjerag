@@ -21,11 +21,9 @@ const TOL = 0.00009999999747378752;
 @group(0) @binding(7) var<storage, read_write> work: array<f32>;
 @group(0) @binding(8) var<storage, read_write> ratios: array<vec4<f32>>;
 @group(0) @binding(9) var<storage, read_write> blurred: array<vec4<f32>>;
-@group(0) @binding(10) var<storage, read_write> out0: array<vec4<f32>>;
-@group(0) @binding(11) var<storage, read_write> out1: array<vec4<f32>>;
-@group(0) @binding(12) var<storage, read> fixed: array<u32>;
-@group(0) @binding(13) var texture_out0: texture_storage_2d<rgba32float, write>;
-@group(0) @binding(14) var texture_out1: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(10) var<storage, read> fixed: array<u32>;
+@group(0) @binding(11) var texture_out0: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(12) var texture_out1: texture_storage_2d<rgba32float, write>;
 
 const CHANGED = 19u;
 const SOLVE_ACTIVE = 20u;
@@ -658,10 +656,8 @@ fn remap(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let position = vec2<i32>(i32(id.x % W), i32(id.x / W));
     if lens == 0u {
-      out0[id.x] = value;
       textureStore(texture_out0, position, value);
     } else {
-      out1[id.x] = value;
       textureStore(texture_out1, position, value);
     }
   }

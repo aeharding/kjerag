@@ -742,11 +742,11 @@ with_media() {
 	# could turn a moving frame that happened to print the target into evidence.
 	if [ "$paused" = yes ]; then
 		holds_the_command_line_view
-		selected_one_x2_holds_a_backward_seek
-		selected_one_x2_scrubber_reaches_unseen_content
+		selected_camera_holds_a_backward_seek
+		selected_camera_scrubber_reaches_unseen_content
 	else
 		skip "the command-line view selects and holds its exact frame (pause failed)"
-		skip "the selected ONE X2 holds a backward seek (pause failed)"
+		skip "the selected camera holds a backward seek (pause failed)"
 	fi
 	nonshot_view_lines=$(grep -c '^view:' "$log")
 
@@ -1371,14 +1371,22 @@ wait_for_displayed_view() {
 # backward request lands on and holds the requested displayed picture. The
 # fresh-owner and newest-epoch guarantees are covered by Scene/Player tests;
 # a `view:` line alone cannot prove them, so this check does not claim that it can.
-ONE_X2_SEEK_MEDIA=/home/aeharding/Videos/Insta/VID_20251018_191318_00_002.insv
-ONE_X2_SEEK_TIME=0.100
+SELECTED_SEEK_X2_MEDIA=/home/aeharding/Videos/Insta/VID_20251018_191318_00_002.insv
+SELECTED_SEEK_X4_MEDIA=/home/aeharding/Videos/VID_20260410_185407_00_004.insv
+SELECTED_SEEK_TIME=0.100
+
+selected_seek_fixture() {
+	case $media in
+	"$SELECTED_SEEK_X2_MEDIA" | "$SELECTED_SEEK_X4_MEDIA") return 0 ;;
+	*) return 1 ;;
+	esac
+}
 
 # Regression for the owner's unusable scrubber: actual mouse motion with the
 # button held, not clipboard navigation. The preceding check leaves the
 # player paused near zero. This must reach an unseen late picture promptly.
-selected_one_x2_scrubber_reaches_unseen_content() {
-	[ "$media" = "$ONE_X2_SEEK_MEDIA" ] || return
+selected_camera_scrubber_reaches_unseen_content() {
+	selected_seek_fixture || return
 	local check="the real scrubber reaches unseen late content within ten seconds"
 	local started=$SECONDS stamp seconds artifact
 	seconds=$(sed -n 's/^media:.*, \([0-9.]*\) s$/\1/p' "$log" | head -1)
@@ -1410,9 +1418,9 @@ selected_one_x2_scrubber_reaches_unseen_content() {
 	fail "$check" "latest displayed time: ${stamp:-none}, requested about 76% of $seconds s" "log: $log"
 }
 
-selected_one_x2_holds_a_backward_seek() {
-	[ "$media" = "$ONE_X2_SEEK_MEDIA" ] || return
-	local check="the selected ONE X2 holds a backward seek at the displayed target"
+selected_camera_holds_a_backward_seek() {
+	selected_seek_fixture || return
+	local check="the selected camera holds a backward seek at the displayed target"
 	if [ "${#play_args[@]}" = 0 ]; then
 		skip "$check (pass the exact five-term view to establish the starting point)"
 		return
@@ -1422,15 +1430,15 @@ selected_one_x2_holds_a_backward_seek() {
 		return
 	fi
 
-	if ! awk -v current="$canonical_time" -v target="$ONE_X2_SEEK_TIME" \
+	if ! awk -v current="$canonical_time" -v target="$SELECTED_SEEK_TIME" \
 		'BEGIN { exit !(current > target) }'; then
 		fail "$check" \
-			"the supplied start was not beyond $ONE_X2_SEEK_TIME s: $expected_view" \
+			"the supplied start was not beyond $SELECTED_SEEK_TIME s: $expected_view" \
 			"a backward seek was not exercised"
 		return
 	fi
 	local backward_args expected artifact
-	backward_args="time=$ONE_X2_SEEK_TIME yaw=$canonical_yaw pitch=$canonical_pitch fov=$canonical_fov $lock_arg"
+	backward_args="time=$SELECTED_SEEK_TIME yaw=$canonical_yaw pitch=$canonical_pitch fov=$canonical_fov $lock_arg"
 	expected="$media $backward_args"
 
 	if ! env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
@@ -1439,7 +1447,7 @@ selected_one_x2_holds_a_backward_seek() {
 		return
 	fi
 	goto_lines=$(grep -c '^goto:' "$log")
-	if ! press_until more_goto_lines one-x2-seek -M ctrl -k v -m ctrl; then
+	if ! press_until more_goto_lines selected-camera-seek -M ctrl -k v -m ctrl; then
 		alive || lost "$check"
 		fail "$check" "no goto line after $PRESSES presses of ctrl+v" "log: $log"
 		return
@@ -1451,7 +1459,7 @@ selected_one_x2_holds_a_backward_seek() {
 		return
 	fi
 	sleep "$TOAST_GONE"
-	if ! still_picture one-x2-backward-held; then
+	if ! still_picture selected-camera-backward-held; then
 		fail "$check" "the requested display was not held paused" "log: $log"
 		return
 	fi
@@ -1461,7 +1469,7 @@ selected_one_x2_holds_a_backward_seek() {
 		return
 	fi
 	sleep "$TOAST_GONE"
-	artifact=$(grab one-x2-backward) || {
+	artifact=$(grab selected-camera-backward) || {
 		fail "$check" "grim did not capture the displayed target" "log: $log"
 		return
 	}

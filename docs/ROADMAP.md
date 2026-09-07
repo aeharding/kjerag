@@ -14,6 +14,15 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Latest qualified follow-up, 2026-09-07:** live GPU photometric matching now
+has one immutable texture publication instead of duplicate buffers. Full gates
+pass 1,238 tests and native UI passes 50 X4/54 ONE X2 checks, now including the
+real scrubber and backward seeks on both fixtures. Review sequences remain
+byte-identical. Micro-hitches and X4's saturated-playback deficit remain open;
+the indexed-mesh trial was removed because it did not give a useful X4 gain.
+The owner-facing color Flatpak stays frozen at `6207b377`, with no install,
+merge or release. Owner visual acceptance of the color increment is pending.
+
 **Chromatic implementation started, 2026-09-07:** the smoothness review
 package stays frozen. One bounded Studio capture now supplies both 200x100
 RGB ratio uploads and their named fragment-slot metadata. Optional Metal
@@ -22,7 +31,7 @@ identity nor a new usable video oracle is claimed. The previously isolated
 ON/OFF video pair remains the visual reference. The sanitized capture
 contract is `docs/research/studio-image-fusion-maps-602.json`.
 
-**Latest working-branch increment:** the GPU photometric producer and live
+**Color integration checkpoint:** the GPU photometric producer and live
 capture integration are implemented. Each valid source observation samples
 its own final packed map, computes correction on the GPU and carries immutable
 ratios into its own draw. View redraws reuse them; seek restarts color history.
@@ -35,7 +44,8 @@ the CPU reference and final mesh-rendered RGBA within one code per channel.
 The initial pixel test compared the diagnostic fullscreen path with the live
 mesh path and failed; using the same mesh corrected the test without widening
 its tolerance. Full integrated gates and the two short rendered sequences now
-pass; new Flatpak and owner qualification remain pending. The integer content
+pass; the new Flatpak is qualified below, while owner acceptance remains
+pending. The integer content
 gate's binary64-edge difference and GPU reduction order are disclosed in the
 architecture and reference contract. The frozen smoothness test package and
 installed application are unchanged. Subsequent paragraphs record earlier
@@ -123,7 +133,9 @@ The restored implementation passes all-target Clippy and static gates,
 1,238 workspace tests with zero failures and 30 ignored, two device-policy
 tests and both opt-in real-Radeon window-readiness tests. Source hashes remain
 unchanged across those gates. The rebuilt native UI passes all 48 X4 and 54 ONE
-X2 checks, including the reported views, real scrubber and backward seeks. The
+X2 checks, including both reported views and ONE X2 mouse-scrubber and backward
+seeks. Those two seek checks were restricted to the X2 fixture; the later
+texture-only follow-up extends them unchanged to X4. The
 actual resident Scene captures 31 consecutive X4 frames and 61 consecutive X2
 frames with their exact packed maps, alpha and ratio pairs. Root inspected
 sampled pixels and computed seam overlays and sent both videos and overlays to
@@ -139,11 +151,63 @@ retains six source-less startup commits, so its strict result also fails.
 Its closed steady-source subset has dwell p95/p99/max 46.37/50.99/62.85 ms,
 not uniformly spaced source changes. These counters are
 not proof that micro-hitches are resolved or that the uncapped target passes.
-The current native executable is archived as `ui-03/kjerag`, SHA-256
+That baseline native executable is archived as `ui-03/kjerag`, SHA-256
 `e1b8a4292243464aad2130fe2e8a3a7489e8f091ee651fb99eddb4a5f7387e92`.
-There is no new Flatpak acceptance.
+An uninstalled Flatpak from clean archived `6207b377` now passes all 38 X4
+and 44 ONE X2 sandbox UI checks. The real mouse-scrubber and backward-seek
+checks in that harness run are ONE X2-only, not X4 coverage. Root inspected
+both package captures; runtime
+hash, archived source, unchanged sandbox permissions and installed-app checks
+pass. The sandbox harness has no audio device and skips import-failure injection;
+its shader-twin helper remains native. Actual-COSMIC package runs on both clips
+hold 30 source fps after startup without drops, starvation or audio underruns.
+Their complete traces both fail six source-less startup commits. Closed steady
+source-dwell p95/p99/max are 46.75/50.22/64.26 ms for X4 and
+47.27/52.07/67.06 ms for X2, so timing tails remain open. No strict smoothness,
+240-capacity, Studio-video or owner acceptance is claimed. X4's running audio
+stream was independently observed on the null sink; the X2 sink inspection
+arrived after exit. Source CI `34128706598` passes. The package executable SHA is
+`77c7b56856edf526949cac0133ef211395e52e5ac2e681af306d0fb4c5b13166`.
+The owner has `scratch/review-color-20260907/run.sh x4` (`x2` for the riser).
+It substitutes the package for one run without installing. The frozen smoothness
+package and installed stable remain unchanged; owner review is still required.
 The frozen smoothness package remains unchanged. Evidence:
 `scratch/fusion-live-20260907/`.
+
+The retained follow-up removes duplicate photometric output
+buffers: the draw and explicit diagnostics now share the same immutable f32
+textures. This removes two 320,000-byte allocations and duplicate stores per
+source observation without changing the remap values, shader consumer or
+temporal law. All 51 color, three consumer and two real-Scene comparisons pass.
+The 31-frame X4 and 61-frame X2 sequences are byte-identical to the preceding
+implementation across every PPM, packed map, alpha and both ratio maps. Native
+capacity shows no useful speedup: X4 reaches 29.175 source fps and 239.20
+changing commits/s, X2 29.950/261.12. X4 still accumulates delay. Commit
+p99/max are 8.78/18.07 ms and 8.69/20.80 ms, respectively. X4's strict pointer
+cohort fails one source-less commit; X2's passes. Both whole-run traces retain
+source-less commits. This is duplicated-publication cleanup, not a performance
+fix. Full gates stopped at a test-only `needless_range_loop` lint, subsequently
+corrected; fresh complete gates and native UI now pass as recorded below. The packaged
+`6207b377` review build stays frozen.
+
+A bounded indexed-mesh trial preserves all 460 saved frame artifacts and passes
+twelve direct-consumer, 51 color and two real-Scene tests. Its complete gates
+also pass 1,239 workspace tests, zero failures and 30 ignored. Nevertheless,
+X4 reaches only 29.475 source fps and 238.95 changing commits/s, with
+8.79/23.00 ms commit p99/max and growing lateness. X2 reaches 29.975/262.82,
+with 8.47/19.17 ms p99/max. Both strict pointer cohorts fail one source-less
+commit. The additional index-buffer code is rejected for lack of a useful X4
+gain; the original triangle draw is retained. The resulting texture-only
+implementation passes all-target Clippy, static checks, 1,238 workspace tests
+with zero failures and 30 ignored, both device-policy tests and both Radeon
+preflights. Native UI passes 50 X4 and 54 X2 checks, now exercising the same
+backward-seek and real mouse-scrubber tests on both named fixtures. Both reach
+the late scrubber destination within the unchanged ten-second limit and hold
+the exact backward target. Root inspected and sent both reported-view captures.
+The archived `ui-05-texture-only/kjerag` executable is byte-identical to the
+capacity11 candidate, SHA-256
+`f2aa8b92f032105e55dcf4cb035c35ee117251f5a1fc61a3f8d2c201072a668e`.
+These are correctness and interaction results, not a new performance pass.
 
 An explicit captured-map replay consumer and a separate readable
 Windows selected-X4 inner MGP reference are implemented. The latter

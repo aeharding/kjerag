@@ -811,22 +811,12 @@ impl InstalledGpuMapBinding {
         match &self.fusion {
             None => Ok(map),
             Some(fusion) => {
-                let read = |buffer| -> Fallible<crate::image_fusion::RatioMap> {
-                    let words = readback_u32(
-                        self.context.device(),
-                        self.context.queue(),
-                        buffer,
-                        PACKED_BYTES as u64,
-                    )?;
-                    let values = words
-                        .chunks_exact(4)
-                        .map(|word| std::array::from_fn(|c| f32::from_bits(word[c])))
-                        .collect();
-                    Ok(crate::image_fusion::RatioMap::new(values)?)
+                let read = |texture| {
+                    readback_fusion_texture(self.context.device(), self.context.queue(), texture)
                 };
                 Ok(map.with_fusion(crate::image_fusion::RatioPair {
-                    left: read(&fusion.output.ratios[0])?,
-                    right: read(&fusion.output.ratios[1])?,
+                    left: read(&fusion.output.textures[0])?,
+                    right: read(&fusion.output.textures[1])?,
                 }))
             }
         }
@@ -1021,6 +1011,65 @@ fn readback_packed(
     drop(bytes);
     readback.unmap();
     Ok(PackedMap::new(nodes).expect("fixed GPU output has the type-2 map shape"))
+}
+
+/// Explicit diagnostic copy of the same immutable f32 texture the draw samples.
+/// Live playback neither allocates this staging buffer nor waits for its copy.
+fn readback_fusion_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    source: &wgpu::Texture,
+) -> Fallible<crate::image_fusion::RatioMap> {
+    const ROW_BYTES: u32 = (crate::studio_type2::MAP_WIDTH * size_of::<[f32; 4]>()) as u32;
+    const PADDED_ROW_BYTES: u32 =
+        ROW_BYTES.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    const HEIGHT: u32 = crate::studio_type2::MAP_HEIGHT as u32;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("image fusion diagnostic texture readback"),
+        size: u64::from(PADDED_ROW_BYTES) * u64::from(HEIGHT),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("image fusion diagnostic texture readback"),
+    });
+    encoder.copy_texture_to_buffer(
+        source.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(PADDED_ROW_BYTES),
+                rows_per_image: Some(HEIGHT),
+            },
+        },
+        source.size(),
+    );
+    let submission = queue.submit([encoder.finish()]);
+    let slice = readback.slice(..);
+    let (mapped, answer) = mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = mapped.send(result);
+    });
+    device.poll(wgpu::PollType::Wait {
+        submission_index: Some(submission),
+        timeout: None,
+    })?;
+    answer.recv()??;
+    let bytes = slice.get_mapped_range();
+    let values = bytes
+        .chunks_exact(PADDED_ROW_BYTES as usize)
+        .flat_map(|row| row[..ROW_BYTES as usize].chunks_exact(size_of::<[f32; 4]>()))
+        .map(|node| {
+            std::array::from_fn(|channel| {
+                let start = channel * size_of::<f32>();
+                f32::from_ne_bytes(node[start..start + 4].try_into().unwrap())
+            })
+        })
+        .collect();
+    drop(bytes);
+    readback.unmap();
+    Ok(crate::image_fusion::RatioMap::new(values)?)
 }
 
 fn readback_u32(

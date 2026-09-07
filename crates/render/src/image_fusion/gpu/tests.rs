@@ -3,7 +3,6 @@ use std::{path::PathBuf, sync::mpsc};
 use wgpu::util::DeviceExt;
 
 const RATIO_TOLERANCE: f32 = 1.0 / 510.0;
-const RATIO_BYTES: u64 = MAP_NODES * 16;
 const TEXTURE_ROW_BYTES: u32 = 3_328;
 const TEXTURE_BYTES: u64 = TEXTURE_ROW_BYTES as u64 * 100;
 const PROFILE_ENV: &str = "KJERAG_FUSION_PROFILE";
@@ -499,7 +498,7 @@ fn observe(
     });
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("fusion test readback"),
-        size: 2 * RATIO_BYTES + 2 * TEXTURE_BYTES,
+        size: 2 * TEXTURE_BYTES,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -516,19 +515,12 @@ fn observe(
         )
         .unwrap();
     for lens in 0..2 {
-        encoder.copy_buffer_to_buffer(
-            &output.ratios[lens],
-            0,
-            &staging,
-            lens as u64 * RATIO_BYTES,
-            RATIO_BYTES,
-        );
         encoder.copy_texture_to_buffer(
             output.textures[lens].as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &staging,
                 layout: wgpu::TexelCopyBufferLayout {
-                    offset: 2 * RATIO_BYTES + lens as u64 * TEXTURE_BYTES,
+                    offset: lens as u64 * TEXTURE_BYTES,
                     bytes_per_row: Some(TEXTURE_ROW_BYTES),
                     rows_per_image: Some(100),
                 },
@@ -550,38 +542,23 @@ fn observe(
         .unwrap();
     recv.recv().unwrap().unwrap();
     let mapped = slice.get_mapped_range();
-    for lens in 0..2 {
+    let mut output: [Vec<[f32; 4]>; 2] =
+        std::array::from_fn(|_| Vec::with_capacity(MAP_NODES as usize));
+    for (lens, values) in output.iter_mut().enumerate() {
         for row in 0..100u64 {
-            let buffer_at = lens as u64 * RATIO_BYTES + row * 200 * 16;
-            let texture_at =
-                2 * RATIO_BYTES + lens as u64 * TEXTURE_BYTES + row * u64::from(TEXTURE_ROW_BYTES);
-            let buffer_row = &mapped[buffer_at as usize..(buffer_at + 200 * 16) as usize];
+            let texture_at = lens as u64 * TEXTURE_BYTES + row * u64::from(TEXTURE_ROW_BYTES);
             let texture_row = &mapped[texture_at as usize..(texture_at + 200 * 16) as usize];
-            if buffer_row != texture_row {
-                let byte = buffer_row
-                    .iter()
-                    .zip(texture_row)
-                    .position(|(buffer, texture)| buffer != texture)
-                    .unwrap();
-                panic!(
-                    "image fusion texture differs from its buffer at lens {lens}, row {row}, byte {byte}: buffer={}, texture={}",
-                    buffer_row[byte], texture_row[byte]
-                );
-            }
+            values.extend(texture_row.chunks_exact(16).map(|pixel| {
+                std::array::from_fn(|channel| {
+                    let at = channel * 4;
+                    f32::from_ne_bytes(pixel[at..at + 4].try_into().unwrap())
+                })
+            }));
         }
     }
-    let floats: Vec<[f32; 4]> = mapped[..(2 * RATIO_BYTES) as usize]
-        .chunks_exact(16)
-        .map(|p| {
-            std::array::from_fn(|c| f32::from_ne_bytes(p[c * 4..c * 4 + 4].try_into().unwrap()))
-        })
-        .collect();
     drop(mapped);
     staging.unmap();
-    [
-        floats[..MAP_NODES as usize].to_vec(),
-        floats[MAP_NODES as usize..].to_vec(),
-    ]
+    output
 }
 
 fn compare(actual: &[Vec<[f32; 4]>; 2], expected: [&[[f32; 4]]; 2], tolerance: f32) {
