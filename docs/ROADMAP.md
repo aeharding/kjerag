@@ -14,6 +14,36 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Installed desktop-sized playback observed, 2026-09-06:** the unchanged
+`80bbad8a...` repair now has an actual-window observation at 2256x1504 rather
+than only the earlier 1280x720 harness size. Isolated Weston 13 reports a
+60.000 Hz output and a full-size Kjerag dmabuf buffer. Weston uses AMD radeonsi;
+the installed player is restricted to Radeon Vulkan and its live driver maps
+confirm it. From-zero X4 playback reports 29.8–30.2 fps after startup through
+58.49 s, with cumulative worst lateness 97.1 ms. X2 holds the same range
+through 63.54 s, worst 100.1 ms. Both report zero drops, starvation and audio
+underruns, with real audio routed to the verified null sink.
+
+Root inspected the full-size captured output. Screenshots/scene inspection
+can perturb adjacent intervals, and these runs intentionally end with SIGTERM.
+They are not clean-exit or interactive UI gates, physical A/V-sync proof,
+ordinary COSMIC desktop acceptance, or 240 fps capacity evidence. Failed nested
+Cage setup and an initial Flatpak proxy-socket failure are preserved separately;
+neither reached playback. No app, renderer, installed or native binary changed.
+The prior source-identical full gates remain the code verification; no new
+source suite was needed for these observations. Evidence:
+`scratch/desktop-load-20260906/`.
+
+The existing Image Fusion ON/OFF pair also received a bounded offline frame
+comparison, with no new Studio export. Exact captured source-frame-34538
+geometry, rather than an image-fitted rotation, favors output frame 0 over
+frames 1 and 2 in both arms. This is candidate agreement, not proof of the
+export consumer's source identity or a constant frame offset. The initial
+fitted-rotation comparison was circular, and the OFF encode shares ON geometry;
+neither is promoted to independent authentication. No correction coefficients,
+field, temporal rule or renderer implementation follows from this result.
+Full raw receipt, script and limits: `scratch/x4-fusion-association-20260906-01/`.
+
 **Exact-completion scheduling trials declined, 2026-09-06:** an instrument-only
 comparison now qualifies zero-GPU-timeout polling of the draw's exact returned
 submission index. An earlier completed index is distinguishable from later
