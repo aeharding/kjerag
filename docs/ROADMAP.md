@@ -14,6 +14,44 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Exact-completion scheduling trials declined, 2026-09-06:** an instrument-only
+comparison now qualifies zero-GPU-timeout polling of the draw's exact returned
+submission index. An earlier completed index is distinguishable from later
+pending queue work, and concurrent submission progresses. The same 2560x1440
+two-pair-per-camera comparison still has substantial redraw tails; conservative
+queue-prefix callbacks do not by themselves explain the remaining delays.
+Zero GPU timeout does not bound CPU lock, maintenance or wakeup time. Evidence:
+`scratch/exact-completion-20260906/`.
+
+Using that same exact-draw instrument on both arms, pacing every worker stage
+against its own predecessor improves X4 redraw p99 from 10.70/9.90 to
+5.67/5.84 ms, but delivers only 355/347 sources instead of 360 and raises
+arrival p99 to 198/451 ms. X2 retains 360 sources but loses throughput and
+worsens redraw/arrival tails. A second trial changes only the five existing
+L1 pacing checks from queue-prefix callbacks to exact-index polls, with no new
+pacing points. It retains 360 sources in every arm but worsens X4 redraw p99
+in both pairs, from 10.64/8.51 to 11.03/10.88 ms, with mixed X2 results.
+Neither policy is retained. Required-Radeon focused completion and actual
+cold/warm Scene-route tests passed for both trials. The first all-stage compile
+failed after a used provenance helper was mistakenly removed; it was restored
+unchanged before any measured run. No candidate real-image, native-window or
+full-workspace acceptance is claimed. Evidence:
+`scratch/exact-predecessor-worker-20260906/` and
+`scratch/exact-l1-completion-20260906/`.
+
+All trial runtime, test and temporary instrument changes are removed; archived
+patches and executables preserve the experiments. Native and normal capacity
+binaries match the prior verified checkpoint. The installed repair remains
+unchanged for the owner's ordinary-desktop retest. This checkpoint adds no
+runtime speedup and does not satisfy the sustained 4.17 ms target. Further
+blanket pacing or polling substitutions are not justified by these results.
+
+After removal, the restored required-Radeon workspace passes 1,165 tests with
+zero failures and 30 ignored, using both real camera inputs and quiet audio.
+Formatting, full-target clippy, name, Cargo-source and diff checks pass.
+No native-window rerun or new owner acceptance is implied by these restored
+source gates.
+
 **Current worker/view timing, 2026-09-06:** a temporary probe now covers the
 actual resident worker's thirteen warm submissions and the exact staged source
 consumed by each view draw. One 2560x1440 cohort per camera authenticates 360
