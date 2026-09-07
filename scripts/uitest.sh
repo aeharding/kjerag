@@ -686,7 +686,14 @@ with_media() {
 	# harness key changes the view. `seam=factory` was consumed above because
 	# factory calibration is the player's only production seam base.
 	if [ "${#play_args[@]}" != 0 ]; then
-		startup_goto=$(grep '^goto:' "$log" | head -1 | sed 's/^goto:[[:space:]]*//')
+		# Opening prints media before App::place runs. Wait for its own
+		# acknowledgement, still before any harness input changes the view.
+		startup_goto=
+		if await '^goto:' "$READY"; then
+			startup_goto=$(sed -n '/^goto:/{s/^goto:[[:space:]]*//;p;q;}' "$log")
+		else
+			alive || lost "the command-line view reaches the real player"
+		fi
 		if [ "$startup_goto" = "$expected_view" ]; then
 			pass "the command-line view reaches the real player"
 		else

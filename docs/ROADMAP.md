@@ -43,6 +43,39 @@ outside that cohort. Commit p99 is 10.21 to 12.06 ms, not an all-frame
 smoothness fix. The candidate is held for investigation of the X2 failure.
 No owner review package, installed application or main branch has changed.
 
+**Package verification follow-up, 2026-09-07:** an additional, uninstalled
+Flatpak is built from exact source `ad1d9d62`; the earlier owner review builds
+remain frozen. Its first isolated UI run passes 44 ONE X2 checks and 39 of
+40 X4 checks. The X4 failure is a harness ordering race: opening prints
+`media:` before the command-line view's `goto:` acknowledgement. The completed
+log contains the exact requested view, and the separate real-frame assertion
+passes. The harness now waits boundedly for the first acknowledgement, still
+rejecting a wrong first view. Five no-GPU regression scenarios exercise the
+actual harness decision, including delayed output, timeout and process death;
+CI runs them before installing dependencies. This changes no player code.
+The same unmodified package then passes all 40 X4 and 44 ONE X2 UI checks;
+both exact reported-view captures repeat byte-identically across package runs.
+Root viewed and sent both captures. The sandbox skips sound-device and injected
+import-failure checks, and the shader/Rust-twin helper is native; the native
+suite's corresponding coverage is recorded above.
+Fresh full gates after the harness correction again pass 1,240 workspace
+tests, zero failures and 30 ignored, both device-policy checks, all three
+real-GPU renderer preflight checks, and all five startup regression cases.
+
+Later actual-desktop tests fall to exactly one redraw per second in both this
+package and the unchanged earlier Flatpak/native controls. A desktop capture
+shows the test player completely covered by another window. Worker execution
+and GPU completion remain prompt while renderer collection waits for redraws;
+audio callbacks continue but starve behind bounded video decoding. These
+covered-window runs do not qualify visible playback and are not evidence of a
+new-package-only regression. A targeted activation request did not establish
+sustained visibility or recovery; the follow-up capture still shows the player
+covered. The owner confirmed that the desktop is in use, so automated work now
+stays isolated. A visible-window retest remains pending. This is not a fix for
+the separate known COSMIC pause/hidden-controls issue #149, and no desktop
+settings have been changed. The additional package is available for experimental
+owner review, not a completed two-camera smoothness or capacity fix.
+
 **Latest qualified follow-up, 2026-09-07:** live GPU photometric matching now
 has one immutable texture publication instead of duplicate buffers. Full gates
 pass 1,238 tests and native UI passes 50 X4/54 ONE X2 checks, now including the
