@@ -14,6 +14,40 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Chromatic implementation started, 2026-09-07:** the smoothness review
+package stays frozen. One bounded Studio capture now supplies both 200x100
+RGB ratio uploads and their named fragment-slot metadata. Optional Metal
+readback failed and the attempted export did not finish; neither GPU-content
+identity nor a new usable video oracle is claimed. The previously isolated
+ON/OFF video pair remains the visual reference. The sanitized capture
+contract is `docs/research/studio-image-fusion-maps-602.json`.
+
+An explicit captured-map replay consumer and a separate readable
+Windows selected-X4 inner MGP reference are implemented. The latter
+reuses the existing normal-equation/CG primitives but replaces the legacy
+floating unaligned evidence with the recovered BGR-byte support, admission,
+retained metric, live iteration budget and same-ordinal byte correction.
+It does not yet implement source sampling, the ratio-map spatial stages,
+the outer content gate, or a GPU-resident automatic producer. Reused sparse
+traversal/reduction order is not claimed bit-identical. Mac producer and
+other-camera equivalence are unverified. CPU reference and actual GPU
+consumer tests pass, as do the required-Radeon workspace tests, all-target
+Clippy and static gates. Both reported views render byte-identical saved-map
+diagnostic PNGs with correction disabled, before and after this change.
+Captured ratios also run through the real decoded X4 source and fragment
+consumer. That replay uses the native map chart, not the owner's stabilized
+view; source conversion and uncaptured fisheye alpha remain replay limits.
+It is not a Studio-output parity comparison, an enabled automatic playback
+feature, or a replacement for the frozen smoothness test package.
+
+The next prerequisite is source color conversion: the shared direct consumer
+still hardcodes the ONE X2 BT.601 matrix, whereas both X4 container streams
+and the captured Studio X4 uniforms specify BT.709. The ONE X2 container
+specifies SMPTE 170M (BT.601). Carrying this independent file metadata to the
+source sampler avoids camera-specific guesses and gives the later estimator
+and renderer the same RGB interpretation. The inner MGP BGR/YCC transform is
+a separate algorithm and is not changed by the source color-space metadata.
+
 **Owner test: seam accepted visually, micro-hitches next, 2026-09-07:** the
 owner says the frozen test build's seam looks good, but playback feels uneven
 despite its 30 fps counter. They request smoothness first, then photometric

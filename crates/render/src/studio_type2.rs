@@ -85,6 +85,7 @@ pub struct OneXsMapFrame {
     packed: PackedMap,
     alpha: AlphaMap,
     pis_backend: PisBackend,
+    fusion: Option<crate::image_fusion::RatioPair>,
 }
 
 /// Sparse-solver backend that produced one committed production map.
@@ -115,6 +116,7 @@ impl OneXsMapFrame {
             packed,
             alpha,
             pis_backend,
+            fusion: None,
         }
     }
 
@@ -134,8 +136,22 @@ impl OneXsMapFrame {
         self.pis_backend
     }
 
+    /// Attach explicit renderer-ordinal photometric maps to this same source.
+    /// As with the geometric constructor, association is not authentication.
+    /// This is a replay boundary; live playback has no captured-map selector.
+    pub fn with_fusion(mut self, fusion: crate::image_fusion::RatioPair) -> Self {
+        self.fusion = Some(fusion);
+        self
+    }
+
+    pub fn fusion(&self) -> Option<&crate::image_fusion::RatioPair> {
+        self.fusion.as_ref()
+    }
+
     /// Rasterize the READ type-2 sphere for the exact picture a pipeline has
     /// prepared and the requested origin-zero target size.
+    /// This returns geometric coordinates and alpha only; photometric ratios
+    /// are consumed by the direct draw, not by this geometry/trace raster.
     ///
     /// This is the first readable implementation, intentionally kept behind
     /// an inactive typed boundary so a later GPU implementation can be checked

@@ -258,6 +258,7 @@ pub(crate) struct DirectType2Pipeline {
     picture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     map_layout: wgpu::BindGroupLayout,
+    fusion_layout: Option<wgpu::BindGroupLayout>,
 }
 
 impl DirectType2Pipeline {
@@ -266,17 +267,43 @@ impl DirectType2Pipeline {
         picture_layout: &wgpu::BindGroupLayout,
         format: wgpu::TextureFormat,
     ) -> Self {
+        Self::with_fusion(device, picture_layout, format, false)
+    }
+
+    fn with_fusion(
+        device: &wgpu::Device,
+        picture_layout: &wgpu::BindGroupLayout,
+        format: wgpu::TextureFormat,
+        fusion: bool,
+    ) -> Self {
         let map_layout = layout(
             device,
             wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
         );
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ONE X2 direct type-2 map"),
-            source: wgpu::ShaderSource::Wgsl(draw_wgsl().into()),
+            source: wgpu::ShaderSource::Wgsl(draw_wgsl_with_fusion(fusion).into()),
         });
+        let fusion_layout = fusion.then(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("per-lens image fusion ratios"),
+                entries: &std::array::from_fn::<_, 2, _>(|binding| wgpu::BindGroupLayoutEntry {
+                    binding: binding as u32,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(PACKED_BYTES as u64),
+                    },
+                    count: None,
+                }),
+            })
+        });
+        let mut layouts = vec![picture_layout, &map_layout];
+        layouts.extend(fusion_layout.as_ref());
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ONE X2 direct type-2 map"),
-            bind_group_layouts: &[picture_layout, &map_layout],
+            bind_group_layouts: &layouts,
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -340,6 +367,7 @@ impl DirectType2Pipeline {
                 ..Default::default()
             }),
             map_layout,
+            fusion_layout,
         }
     }
 
@@ -436,6 +464,35 @@ struct DirectType2CpuBinding {
     packed: wgpu::Buffer,
     alpha: wgpu::Buffer,
     bound_frame: Option<FrameStamp>,
+    fusion: Option<FusionBinding>,
+}
+
+/// Explicit replay resources. The bind group drops before its buffers.
+struct FusionBinding {
+    read: wgpu::BindGroup,
+    ratios: [wgpu::Buffer; 2],
+}
+
+impl FusionBinding {
+    fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> Self {
+        let ratios = std::array::from_fn(|_| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("image fusion ratio map"),
+                size: PACKED_BYTES as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+        let read = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("frame-bound image fusion ratio pair"),
+            layout,
+            entries: &std::array::from_fn::<_, 2, _>(|binding| wgpu::BindGroupEntry {
+                binding: binding as u32,
+                resource: ratios[binding].as_entire_binding(),
+            }),
+        });
+        Self { read, ratios }
+    }
 }
 
 impl DirectType2CpuBinding {
@@ -471,12 +528,24 @@ impl DirectType2CpuBinding {
             packed,
             alpha,
             bound_frame: None,
+            fusion: pipeline
+                .fusion_layout
+                .as_ref()
+                .map(|layout| FusionBinding::new(device, layout)),
         }
     }
 
     fn upload(&mut self, queue: &wgpu::Queue, map: &OneXsMapFrame) {
         queue.write_buffer(&self.packed, 0, map.packed().bytes());
         queue.write_buffer(&self.alpha, 0, map.alpha().bytes());
+        match (&self.fusion, map.fusion()) {
+            (Some(binding), Some(pair)) => {
+                queue.write_buffer(&binding.ratios[0], 0, pair.left.bytes());
+                queue.write_buffer(&binding.ratios[1], 0, pair.right.bytes());
+            }
+            (None, None) => {}
+            _ => panic!("direct map pipeline and photometric map presence differ"),
+        }
         self.bound_frame = Some(map.frame().clone());
     }
 }
@@ -491,8 +560,14 @@ impl DirectMapDraw {
         device: &wgpu::Device,
         picture_layout: &wgpu::BindGroupLayout,
         format: wgpu::TextureFormat,
+        fusion: bool,
     ) -> Self {
-        let pipeline = Arc::new(DirectType2Pipeline::new(device, picture_layout, format));
+        let pipeline = Arc::new(DirectType2Pipeline::with_fusion(
+            device,
+            picture_layout,
+            format,
+            fusion,
+        ));
         let binding = DirectType2CpuBinding::new(device, &pipeline);
         Self { pipeline, binding }
     }
@@ -505,15 +580,14 @@ impl DirectMapDraw {
         self.binding.bound_frame.as_ref()
     }
 
-    pub(crate) fn pipeline(&self) -> &wgpu::RenderPipeline {
-        &self.pipeline.pipeline
-    }
-
-    pub(crate) fn read(&self) -> &wgpu::BindGroup {
-        &self.binding.read
+    pub(crate) fn has_fusion(&self) -> bool {
+        self.binding.fusion.is_some()
     }
 
     pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, picture: &wgpu::BindGroup) {
+        if let Some(fusion) = &self.binding.fusion {
+            pass.set_bind_group(2, &fusion.read, &[]);
+        }
         self.pipeline.draw(pass, picture, &self.binding.read);
     }
 }
@@ -538,8 +612,24 @@ fn layout(device: &wgpu::Device, visibility: wgpu::ShaderStages) -> wgpu::BindGr
     })
 }
 
+#[cfg(test)]
 pub(crate) fn draw_wgsl() -> String {
-    format!("{}\n{}\n{DRAW}", projection::wgsl(), map_wgsl())
+    draw_wgsl_with_fusion(false)
+}
+
+fn draw_wgsl_with_fusion(fusion: bool) -> String {
+    let correction = if fusion {
+        crate::image_fusion::WGSL
+    } else {
+        // An actual bypass, so disabled mode does not round or clamp RGB and
+        // introduces no resource binding or texture read.
+        "fn type2_correct(color: vec3<f32>, uv: vec2<f32>, lens: u32) -> vec3<f32> { return color; }"
+    };
+    format!(
+        "{}\n{}\n{correction}\n{DRAW}",
+        projection::wgsl(),
+        map_wgsl()
+    )
 }
 
 pub(crate) fn map_wgsl() -> &'static str {
@@ -561,6 +651,7 @@ struct Type2Sample {
   packed: vec4<f32>,
   alpha: f32,
   covered: f32,
+  fusion_uv: vec2<f32>,
 };
 
 fn type2_map_index(x: i32, y: i32) -> u32 {
@@ -607,6 +698,11 @@ fn type2_varying(row: i32, col: i32) -> vec2<f32> {
     (f32(col) / f32(TYPE2_SLICES) + 0.5) + 0.5 / f32(TYPE2_MAP_W),
     ((f32(row) / f32(TYPE2_STACKS) * 99.0) + 0.5) / f32(TYPE2_MAP_H),
   );
+}
+
+fn type2_fusion_varying(row: i32, col: i32) -> vec2<f32> {
+  return vec2<f32>(f32(col) / f32(TYPE2_SLICES) + 0.5,
+    f32(row) / f32(TYPE2_STACKS));
 }
 
 // Watertight dominant-axis ray/triangle intersection against a ray from the
@@ -660,19 +756,26 @@ fn type2_cell(ray: vec3<f32>, row: i32, col_unwrapped: i32) -> Type2Sample {
   let uv01 = type2_varying(row, col + 1);
   let uv10 = type2_varying(row + 1, col);
   let uv11 = type2_varying(row + 1, col + 1);
+  let fusion00 = type2_fusion_varying(row, col);
+  let fusion01 = type2_fusion_varying(row, col + 1);
+  let fusion10 = type2_fusion_varying(row + 1, col);
+  let fusion11 = type2_fusion_varying(row + 1, col + 1);
 
   var weights = type2_triangle(ray, p00, p01, p10);
   var uv = weights.x * uv00 + weights.y * uv01 + weights.z * uv10;
+  var fusion_uv = weights.x * fusion00 + weights.y * fusion01 + weights.z * fusion10;
   var packed = weights.x * type2_sample4(uv00) + weights.y * type2_sample4(uv01) + weights.z * type2_sample4(uv10);
   if weights.w == 0.0 {
     weights = type2_triangle(ray, p01, p11, p10);
     uv = weights.x * uv01 + weights.y * uv11 + weights.z * uv10;
+    fusion_uv = weights.x * fusion01 + weights.y * fusion11 + weights.z * fusion10;
     packed = weights.x * type2_sample4(uv01) + weights.y * type2_sample4(uv11) + weights.z * type2_sample4(uv10);
   }
   if weights.w > 0.0 {
     out.packed = packed;
     out.alpha = type2_sample1(uv);
     out.covered = 1.0;
+    out.fusion_uv = fusion_uv;
   }
   return out;
 }
@@ -790,12 +893,12 @@ fn type2_ycbcr(uv: vec2<f32>) -> vec3<f32> {
 fn type2_color(map: Type2Sample) -> vec4<f32> {
   var rgb: vec3<f32>;
   if map.alpha == 0.0 {
-    rgb = type2_ycbcr(map.packed.zw);
+    rgb = type2_correct(type2_ycbcr(map.packed.zw), map.fusion_uv, 1u);
   } else if map.alpha == 1.0 {
-    rgb = type2_ycbcr(map.packed.xy);
+    rgb = type2_correct(type2_ycbcr(map.packed.xy), map.fusion_uv, 0u);
   } else {
-    let b = type2_ycbcr(map.packed.zw);
-    let a = type2_ycbcr(map.packed.xy);
+    let b = type2_correct(type2_ycbcr(map.packed.zw), map.fusion_uv, 1u);
+    let a = type2_correct(type2_ycbcr(map.packed.xy), map.fusion_uv, 0u);
     rgb = mix(b, a, map.alpha);
   }
   let linear = select(
@@ -819,6 +922,7 @@ struct Type2MeshOut {
   @builtin(position) position: vec4<f32>,
   @location(0) packed: vec4<f32>,
   @location(1) map_uv: vec2<f32>,
+  @location(2) fusion_uv: vec2<f32>,
 };
 
 // The same native triangles and vertex UV law as type2_cell. On a flat
@@ -840,18 +944,22 @@ fn mesh_vs(@builtin(vertex_index) index: u32) -> Type2MeshOut {
     -view.y * reframe.screen.aspect / reframe.screen.half_extent,
     view.z - 0.0001, view.z);
   out.map_uv = type2_varying(at.x, at.y);
+  out.fusion_uv = type2_fusion_varying(at.x, at.y);
   out.packed = type2_sample4(out.map_uv);
   return out;
 }
 
 @fragment
 fn mesh_fs(in: Type2MeshOut) -> @location(0) vec4<f32> {
-  return type2_color(Type2Sample(in.packed, type2_sample1(in.map_uv), 1.0));
+  return type2_color(Type2Sample(in.packed, type2_sample1(in.map_uv), 1.0, in.fusion_uv));
 }
 "#;
 
 #[cfg(test)]
 mod sampling_tests;
+
+#[cfg(test)]
+mod fusion_tests;
 
 #[cfg(test)]
 mod tests {

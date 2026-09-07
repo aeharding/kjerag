@@ -1,0 +1,61 @@
+{
+  "schema": "kjerag.studio-image-fusion-map-capture.v1",
+  "date": "2026-09-07",
+  "studio": "6.0.2",
+  "camera": "Insta360 X4 Air",
+  "private_evidence": "scratch/x4-fusion-maps-20260907-01/",
+  "visual_oracle": "docs/research/studio-image-fusion-oracle-602.json",
+  "worker_arm64_sha256": "0a34f593198a0a7a29239ccded91231af3d7bc94e04213c67a2d44a04076a452",
+  "frozen_capture_tool_sha256": "7ef0d0efd3babcfa8b28069c4426bd0bf2cf81b34819b01eba61ac10d5baedc2",
+  "target": {
+    "original_pts_ms": 1152417.9333333333,
+    "matched_by_existing_tool": true,
+    "renderer": "DynamicStitchDoubleFisheyeStitchObject",
+    "image_fusion": true,
+    "optical_flow": false,
+    "ai_stitching": true
+  },
+  "uploads": [
+    {
+      "ordinal": "left",
+      "file": "00053_type11_upload_fusion_left.bin",
+      "sha256": "d83c7f84b0de2e3fb3cf50bad9f31068d82ea3043e8cd69db5c8250accd8a959",
+      "bytes": 320000,
+      "worker_offset": "0x4aae58",
+      "register_contract": "x2=data,x3=bytes",
+      "fragment_slot": 0
+    },
+    {
+      "ordinal": "right",
+      "file": "00054_type11_upload_fusion_right.bin",
+      "sha256": "a56ec059c8036fb4daaa1a027c508cb6fbd194155baa4f8fe46e785e26036e05",
+      "bytes": 320000,
+      "worker_offset": "0x4ab1d4",
+      "register_contract": "x2=data,x3=bytes",
+      "fragment_slot": 1
+    }
+  ],
+  "selected_binding_shape": {
+    "width": 200,
+    "height": 100,
+    "metal_pixel_format": 125,
+    "storage_mode": 1,
+    "mip_levels": 1
+  },
+  "consumer": {
+    "worker_universal_sha256": "d932cc01207da4dee1ba95375ac996abe7a7979d39aeb290c282c69f57990878",
+    "embedded_shader_lines": "strings -a | nl -ba: 565386-565465 and 566891-566950 onward",
+    "ratio_coordinate": "original map_plane_uv output, before packed-map half-texel and height centering",
+    "operation": "clamp((camera_color + 1) * own_ordinal_rgb_ratio - 1, 0, 1), per lens before alpha blending",
+    "fourth_component": "not consumed; both captured payloads contain zero in this lane"
+  },
+  "limits": [
+    "Upload bytes and named selected Metal bindings are captured as separate boundaries. Optional Metal readback returned no bytes, so GPU texture-content identity is not established.",
+    "The frozen tool hardcodes ONE X2 in its session key. That label is wrong; runtime source and selected renderer provide the X4 evidence.",
+    "Declared output ordinal zero is not independent final-source/output-frame authentication.",
+    "The attempted video export remained a 44-byte incomplete artifact. It is not a new usable video oracle.",
+    "The initially reported absence of fusion uploads was corrected after reading the completed manifest and sidecars.",
+    "This captures maps and a consumer contract, not the Mac producer's complete algorithm or temporal equivalence to the recovered Windows X4 MGP reference.",
+    "No raw source footage or map payload is committed. Playback does not load these private captured coefficients."
+  ]
+}

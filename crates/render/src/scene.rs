@@ -4043,7 +4043,8 @@ impl ScenePipeline {
                     .direct_one_xs_map
                     .as_ref()
                     .expect("direct ONE X2 draw must own exact map resources");
-                (draw.pipeline(), draw.read())
+                draw.draw(pass, &self.bind_group);
+                return;
             }
             FlowDraw::MapOracle => {
                 let oracle = self
@@ -4273,9 +4274,16 @@ impl ScenePipeline {
             .as_ref()
             .expect("frame requirement established a prepared picture");
         MapBindError::require_direct_target(prepared, target, self.format)?;
-        let draw = self
+        if self
             .direct_one_xs_map
-            .get_or_insert_with(|| DirectMapDraw::new(device, &self.layout, self.format));
+            .as_ref()
+            .is_some_and(|draw| draw.has_fusion() != map.fusion().is_some())
+        {
+            self.direct_one_xs_map = None;
+        }
+        let draw = self.direct_one_xs_map.get_or_insert_with(|| {
+            DirectMapDraw::new(device, &self.layout, self.format, map.fusion().is_some())
+        });
         draw.upload(queue, map);
         debug_assert_eq!(draw.bound_frame(), Some(map.frame()));
         let view = target.create_view(&Default::default());

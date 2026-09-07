@@ -159,6 +159,25 @@ source-sampling/fusion boundary. The shared resident path does not yet apply
 it; the old projection path's unaligned color estimator is not silently reused
 as a parity implementation.
 
+The explicit saved-map diagnostic can attach an `image_fusion::RatioPair` to
+its `OneXsMapFrame`. A separate shader variant samples these two 200x100 RGB
+ratio maps in the original spherical chart, before the packed-UV/alpha
+centering transform, and corrects each lens before blending. Missing maps use
+an actual arithmetic bypass with no extra binding, not a constant-one map
+whose rounding or RGB clamp could change the neutral picture. The diagnostic
+recreates its private binding when correction presence changes. Ordinary
+resident playback does not select this variant or load captured coefficients.
+
+`image_fusion::solve` is a readable Windows selected-X4 inner MGP reference,
+not the production estimator. It takes already-aligned BGR8 working images;
+it does not own decode, source geometry or scheduling. Its metric-reset flag
+and warm-solution population are separate: an empty observation after reset
+can run the first 100-step solve using retained spatial admission, without
+consuming the next valid observation's direct metric seed. Outer sampling,
+chart remapping and the eventual GPU producer remain separate unimplemented
+boundaries; existing sparse arithmetic is not claimed numerically identical
+to Studio.
+
 ## Failures the pilot is told about (issue #124)
 
 There is one way a failure reaches the pilot and it is the alert, and that is

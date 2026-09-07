@@ -20,6 +20,7 @@ pub mod dmabuf;
 mod draw_retirement;
 pub mod flow;
 mod framing;
+pub mod image_fusion;
 pub mod map_oracle;
 mod one_xs_luma;
 mod projection;

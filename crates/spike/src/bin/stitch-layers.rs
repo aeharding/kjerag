@@ -9,6 +9,9 @@
 //!
 //! Usage: stitch-layers INPUT FRAME YAW PITCH FOV SAVED_MAP_DIRECTORY OUTPUT_DIRECTORY
 //! All views are locked, 1280x720; angles are degrees. Output must not exist.
+//! Optional trailing LEFT_FUSION RIGHT_FUSION paths replay explicit 200x100
+//! float4 ratio maps. They must name this same source and renderer chart;
+//! loading them does not authenticate that association or run an estimator.
 
 use std::fs;
 use std::path::Path;
@@ -16,6 +19,7 @@ use std::path::Path;
 use kjerag_media::{Cue, Fallible};
 use kjerag_meta::{CalibrationSet, Filter};
 use kjerag_render::flow::one_xs::ParentMapBuilder;
+use kjerag_render::image_fusion::{RatioMap, RatioPair};
 use kjerag_render::studio_type2::{AlphaMap, MAP_NODES, PackedMap};
 use kjerag_render::{Camera, Horizon, OneXsMapFrame, PisBackend, Scene, ScenePipeline, Size};
 use kjerag_spike::{Gpu, Offscreen, seam_trace::trace_alpha};
@@ -29,9 +33,9 @@ const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 fn main() -> Fallible<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() != 7 {
+    if args.len() != 7 && args.len() != 9 {
         return Err(
-            "usage: stitch-layers INPUT FRAME YAW PITCH FOV SAVED_MAP_DIRECTORY OUTPUT_DIRECTORY"
+            "usage: stitch-layers INPUT FRAME YAW PITCH FOV SAVED_MAP_DIRECTORY OUTPUT_DIRECTORY [LEFT_FUSION RIGHT_FUSION]"
                 .into(),
         );
     }
@@ -67,6 +71,22 @@ fn main() -> Fallible<()> {
         &saved.join(format!("{prefix}.alpha-f32le.bin")),
         MAP_NODES,
     )?)?;
+    let fusion = if args.len() == 9 {
+        let read_ratio = |path: &str| -> Fallible<RatioMap> {
+            Ok(RatioMap::new(
+                read_floats(Path::new(path), MAP_NODES * 4)?
+                    .chunks_exact(4)
+                    .map(|v| v.try_into().unwrap())
+                    .collect(),
+            )?)
+        };
+        Some(RatioPair {
+            left: read_ratio(&args[7])?,
+            right: read_ratio(&args[8])?,
+        })
+    } else {
+        None
+    };
     let calibration = CalibrationSet::from_capture(input)?;
     let orientation = calibration.orientation(Filter::default());
     let gpu = Gpu::open()?;
@@ -139,6 +159,20 @@ fn main() -> Fallible<()> {
                     &trace_alpha(&pixels, dense.dense())?,
                     &out.join(format!("{name}-trace.png")),
                 )?;
+            }
+            if name == "final"
+                && let Some(fusion) = &fusion
+            {
+                let map = map.with_fusion(fusion.clone());
+                target.render_map(&gpu.device, &gpu.queue, &mut pipeline, &map)?;
+                let pixels = target.read(&gpu.device, &gpu.queue)?;
+                target.write_png(&pixels, &out.join(format!("{name}{suffix}-fusion.png")))?;
+                if suffix.is_empty() {
+                    target.write_png(
+                        &trace_alpha(&pixels, dense.dense())?,
+                        &out.join("final-fusion-trace.png"),
+                    )?;
+                }
             }
         }
     }
