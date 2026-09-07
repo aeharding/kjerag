@@ -12,6 +12,9 @@
 //! Optional trailing LEFT_FUSION RIGHT_FUSION paths replay explicit 200x100
 //! float4 ratio maps. They must name this same source and renderer chart;
 //! loading them does not authenticate that association or run an estimator.
+//! Instead, trailing `estimate-fusion` runs the explicit Windows selected-X4
+//! CPU reference on this decoded source through this saved Kjerag map. This
+//! is a diagnostic, not Studio source-sampler or other-camera equivalence.
 
 use std::fs;
 use std::path::Path;
@@ -33,9 +36,10 @@ const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 fn main() -> Fallible<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() != 7 && args.len() != 9 {
+    let estimate = args.len() == 8 && args[7] == "estimate-fusion";
+    if args.len() != 7 && args.len() != 9 && !estimate {
         return Err(
-            "usage: stitch-layers INPUT FRAME YAW PITCH FOV SAVED_MAP_DIRECTORY OUTPUT_DIRECTORY [LEFT_FUSION RIGHT_FUSION]"
+            "usage: stitch-layers INPUT FRAME YAW PITCH FOV SAVED_MAP_DIRECTORY OUTPUT_DIRECTORY [LEFT_FUSION RIGHT_FUSION | estimate-fusion]"
                 .into(),
         );
     }
@@ -71,7 +75,7 @@ fn main() -> Fallible<()> {
         &saved.join(format!("{prefix}.alpha-f32le.bin")),
         MAP_NODES,
     )?)?;
-    let fusion = if args.len() == 9 {
+    let mut fusion = if args.len() == 9 {
         let read_ratio = |path: &str| -> Fallible<RatioMap> {
             Ok(RatioMap::new(
                 read_floats(Path::new(path), MAP_NODES * 4)?
@@ -138,6 +142,38 @@ fn main() -> Fallible<()> {
         alpha.clone(),
         PisBackend::Gpu,
     );
+    if estimate {
+        let pending = pipeline
+            .prepare_one_xs_fusion_inputs(
+                &scene.primitive(camera),
+                SIZE.width as f32 / SIZE.height as f32,
+                &final_map,
+            )?
+            .ok_or("fusion input preparation produced no frame")?;
+        if pending.frame() != prepared.frame() {
+            return Err("fusion input preparation changed the decoded frame".into());
+        }
+        let samples = pending.read()?;
+        let mut reference = kjerag_render::image_fusion::spatial::Reference::new();
+        let output = reference.observe(samples.images(), samples.invalid())?;
+        for (name, bgr) in ["left", "right"].into_iter().zip(samples.images()) {
+            fs::write(out.join(format!("fusion-input-{name}.bgr8")), bgr)?;
+            write_bgr_png(bgr, &out.join(format!("fusion-input-{name}.png")))?;
+        }
+        fs::write(out.join("fusion-invalid.bin"), samples.invalid())?;
+        for (name, map) in [
+            ("left", &output.ratios.left),
+            ("right", &output.ratios.right),
+        ] {
+            fs::write(out.join(format!("fusion-{name}.float4")), map.bytes())?;
+        }
+        println!(
+            "fusion reference: frame {:?}, {:?}; saved Kjerag map association is caller-supplied, not a Studio oracle",
+            samples.frame(),
+            output.diagnostics
+        );
+        fusion = Some(output.ratios);
+    }
     let dense = final_map.rasterize(&prepared, SIZE)?;
     for (name, geometry) in [("parent", parent), ("final", packed)] {
         for (suffix, weights) in [
@@ -180,6 +216,22 @@ fn main() -> Fallible<()> {
         "wrote {}: generic, parent/final blend and lens-only arms; red is the computed alpha=0.5 trace",
         out.display()
     );
+    Ok(())
+}
+
+fn write_bgr_png(bgr: &[u8], path: &Path) -> Fallible<()> {
+    let rgb: Vec<u8> = bgr
+        .chunks_exact(3)
+        .flat_map(|p| [p[2], p[1], p[0]])
+        .collect();
+    let mut encoder = png::Encoder::new(
+        std::io::BufWriter::new(fs::File::create_new(path)?),
+        200,
+        100,
+    );
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.write_header()?.write_image_data(&rgb)?;
     Ok(())
 }
 

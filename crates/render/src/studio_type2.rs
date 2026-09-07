@@ -220,6 +220,10 @@ impl PreparedPicture {
     pub(crate) fn aspect(&self) -> f32 {
         self.aspect
     }
+
+    pub(crate) const fn reframe(&self) -> Reframe {
+        self.reframe
+    }
 }
 
 #[derive(Clone, Debug)]

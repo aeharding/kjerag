@@ -50,6 +50,7 @@ pub use band::{
 pub use camera::{Camera, Nudge, Viewpoint};
 pub use capture::{Request, Shot, Then};
 pub use framing::Framing;
+pub use image_fusion::{FusionInputs, PendingOneXsFusionInputs};
 pub use kjerag_media::{Accuracy, Cue, Fallible, FrameStamp, MissingDecoder, Size, Stats};
 /// Which files one capture is made of (issue #123), under a name that does
 /// not collide with this crate's own `capture`, which is the screenshot one.

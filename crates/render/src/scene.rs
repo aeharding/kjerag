@@ -61,6 +61,8 @@ use super::flow::one_xs_belt_gpu::{
     ResidentPrepare, ResidentRetry, ResidentSceneFacade, ResidentScreenshotPrepare, ResidentSubmit,
 };
 use super::flow::{Cadence, Estimate};
+use super::image_fusion::PendingOneXsFusionInputs;
+use super::image_fusion::sample::FusionInputPipeline;
 use super::one_xs_luma::{self, LumaReadbackPipeline, PendingOneXsLuma};
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling, SeamAnchor};
 use super::sampling::{self, Sampling};
@@ -402,6 +404,9 @@ struct Show {
     /// Sequential selected ONE X2 state for ordinary live playback only. Its
     /// camera profile is also the factory input for a fresh restart lineage.
     one_xs: Option<ResidentCaptureFacade>,
+    /// Immutable camera input survives in stepped diagnostics without enabling
+    /// a live stitch transaction there.
+    one_xs_profile: Option<Arc<ResidentCameraProfile>>,
     /// A requested target remains a seek until its exact map, not merely its
     /// decoded surfaces, has completed the capture transaction.
     replay: RefCell<Option<OneXsReplay>>,
@@ -2090,6 +2095,10 @@ impl Show {
         let one_xs = matches!(&source, Source::Live(_))
             .then(|| calibrated.one_xs.clone())
             .flatten();
+        let one_xs_profile = calibrated
+            .one_xs
+            .as_ref()
+            .map(|owner| owner.camera_profile());
         Self {
             files,
             frame,
@@ -2099,6 +2108,7 @@ impl Show {
             camera: calibrated.camera,
             held: calibrated.held,
             one_xs,
+            one_xs_profile,
             replay: RefCell::new(None),
             playing: RefCell::new(Playing { frames, source }),
         }
@@ -2147,6 +2157,7 @@ impl Show {
             frames,
             one_xs: None,
             resident_one_xs: self.one_xs.clone(),
+            one_xs_profile: self.one_xs_profile.clone(),
         }
     }
 
@@ -2524,6 +2535,7 @@ struct View {
     /// and for stepped diagnostic scenes.
     one_xs: Option<Arc<OneXsCapture>>,
     resident_one_xs: Option<ResidentCaptureFacade>,
+    one_xs_profile: Option<Arc<ResidentCameraProfile>>,
 }
 
 #[cfg(test)]
@@ -2608,6 +2620,9 @@ pub struct ScenePipeline {
     /// Lazy access to the exact bound R8 source pair, used by selected
     /// diagnostics. Production selected playback does not construct it.
     one_xs_luma: Option<Box<LumaReadbackPipeline>>,
+    /// Lazy, detached source-chart sampler for explicit fusion diagnostics.
+    /// Selected playback never constructs or submits it.
+    one_xs_fusion_inputs: Option<Box<FusionInputPipeline>>,
     /// Lazily built production/direct type-2 consumer. Its pipeline and
     /// exact-size buffers are reused; only the two map payloads and their
     /// CPU-side frame association change between frames and diagnostics.
@@ -2776,6 +2791,21 @@ fn legacy_flow_draw(requested: bool, environment: bool, selected_one_xs: bool) -
 struct Live {
     frames: Arc<Frames>,
     planes: Vec<Planes>,
+}
+
+fn validate_fusion_input_binding(
+    prepared: &FrameStamp,
+    map: &FrameStamp,
+    frames: &Arc<Frames>,
+    live: &Arc<Frames>,
+) -> Fallible<()> {
+    if prepared != map || frames.stamp() != *map {
+        return Err("ONE X2 fusion input map differs from the prepared source frame".into());
+    }
+    if !Arc::ptr_eq(live, frames) {
+        return Err("ONE X2 fusion input source differs from the picture bindings".into());
+    }
+    Ok(())
 }
 
 /// The compute half of the seam: the pipeline that measures the overlap band,
@@ -2970,6 +3000,7 @@ impl ScenePipeline {
             map_oracle: None,
             prepared_picture: None,
             one_xs_luma: None,
+            one_xs_fusion_inputs: None,
             direct_one_xs_map: None,
             layout,
             sampler,
@@ -3494,6 +3525,80 @@ impl ScenePipeline {
             return Ok(None);
         };
         Ok(Some(self.submit_one_xs_luma(frames)?))
+    }
+
+    /// Prepare and submit the two source charts sampled by one externally
+    /// associated type-2 map. This detached diagnostic does not authenticate
+    /// the map producer and is never enabled by resident playback.
+    pub fn prepare_one_xs_fusion_inputs(
+        &mut self,
+        primitive: &ScenePrimitive,
+        aspect: f32,
+        map: &OneXsMapFrame,
+    ) -> Fallible<Option<PendingOneXsFusionInputs>> {
+        let gpu = self.one_xs_gpu.clone();
+        let device = gpu.device();
+        let queue = gpu.queue();
+        let Some(frames) = self.prepare_inner(primitive, device, queue, aspect, true) else {
+            return Ok(None);
+        };
+        let prepared = self
+            .prepared_picture
+            .as_ref()
+            .ok_or("ONE X2 fusion input sampler has no prepared picture")?;
+        // Only source size/color conversion is read from this Reframe. The
+        // sampler constructs its own working-chart rays and uses the supplied
+        // packed map; ordinary camera projection and seam shift are not inputs.
+        // The retained resident profile below admits both shared camera families.
+        let shown = primitive.shown.get();
+        let source_view = primitive
+            .view
+            .as_ref()
+            .filter(|view| Arc::ptr_eq(&view.frames, &frames))
+            .or_else(|| {
+                shown
+                    .as_ref()
+                    .filter(|view| Arc::ptr_eq(&view.frames, &frames))
+            })
+            .ok_or("ONE X2 fusion input sampler lost its exact source view")?;
+        let profile = source_view
+            .one_xs_profile
+            .as_ref()
+            .ok_or("ONE X2 fusion input sampler has no shared camera profile")?
+            .clone();
+        if self
+            .resident_one_xs
+            .as_ref()
+            .is_some_and(|(capture, _)| !Arc::ptr_eq(&capture.camera_profile(), &profile))
+        {
+            return Err(
+                "ONE X2 fusion input sampler source differs from the renderer attachment".into(),
+            );
+        }
+        let planes = {
+            let live = self
+                .live
+                .front()
+                .ok_or("ONE X2 fusion input sampler has no bound lens pair")?;
+            validate_fusion_input_binding(prepared.frame(), map.frame(), &frames, &live.frames)?;
+            one_xs_luma::validate_source_pair(&live.planes, &frames, "fusion input sampler")?;
+            [&live.planes[0], &live.planes[1]]
+        };
+        let reframe = prepared.reframe();
+        let pipeline = self
+            .one_xs_fusion_inputs
+            .get_or_insert_with(|| Box::new(FusionInputPipeline::new(device, &self.layout)));
+        Ok(Some(pipeline.submit(
+            device,
+            queue,
+            &self.layout,
+            &self.sampler,
+            planes,
+            frames,
+            reframe,
+            map,
+            profile,
+        )))
     }
 
     /// Submit source extraction for the exact pair already bound by this
@@ -6059,6 +6164,29 @@ mod tests {
     };
     use crate::flow::one_xs::{COLS, LensPair, ROWS};
     use crate::projection::tests::{ONE_XS_FRAME, one_xs_lenses};
+
+    #[test]
+    fn fusion_input_binding_rejects_a_foreign_delivery_or_source_owner() {
+        let stamp = FrameStamp::for_test(12, Duration::from_secs(1), None);
+        let foreign = FrameStamp::for_test(12, Duration::from_secs(1), None);
+        let frames = Arc::new(Frames::empty_for_test(stamp.clone(), ONE_XS_FRAME));
+        let copied_stamp = Arc::new(Frames::empty_for_test(stamp.clone(), ONE_XS_FRAME));
+        assert!(validate_fusion_input_binding(&stamp, &stamp, &frames, &frames).is_ok());
+        for (prepared, map) in [(&stamp, &foreign), (&foreign, &stamp), (&foreign, &foreign)] {
+            assert_eq!(
+                validate_fusion_input_binding(prepared, map, &frames, &frames)
+                    .unwrap_err()
+                    .to_string(),
+                "ONE X2 fusion input map differs from the prepared source frame"
+            );
+        }
+        assert_eq!(
+            validate_fusion_input_binding(&stamp, &stamp, &frames, &copied_stamp)
+                .unwrap_err()
+                .to_string(),
+            "ONE X2 fusion input source differs from the picture bindings"
+        );
+    }
 
     #[test]
     fn selected_post_qualification_scene_path_has_no_legacy_cpu_boundary() {

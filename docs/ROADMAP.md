@@ -84,6 +84,29 @@ checks pass. Native and frozen review executables remain byte-identical to
 their pre-increment versions. No new UI or video-parity result is claimed for
 this unused reference module.
 
+An explicit GPU source diagnostic now reaches the existing spatial reference
+and fragment correction on both actual reported frames via `stitch-layers`
+trailing `estimate-fusion`. It retains exact decoded-source/map stamps and
+bindings, uses the same source matrix/filter as drawing, and retains camera
+profiles for stepped input without starting a live stitch transaction. Root
+viewed both input pairs, corrected views and computed seam overlays. Colors
+change modestly; this does not establish improved whole-video output or Studio
+parity. Disabled final PNGs are byte-identical to the preceding source-color
+diagnostic. Full required-Radeon gates pass 1,217/0 failed/30 ignored, including
+the actual GPU shader with a half-turn negative control and source-owner/stamp
+rejection. The frozen Flatpak review package remains unchanged. A direct
+native binding review identified a remaining prerequisite: Studio gates full
+800x16 source bands and area-resizes them into working rows 48..51, whereas
+this first diagnostic takes full-chart point samples. That source reduction,
+the exact source-band rays, content admission and automatic GPU production
+remain separate work; the point sampler is not enabled in playback.
+The rebuilt native player's unchanged UI harness passes 48 X4 and 54 ONE X2
+checks, zero failures, including exact reported views, backward seek, real
+scrubber and two-file loading. Both full reported-view screenshots are
+byte-identical to the preceding source-color native build and were viewed.
+This is a regression check, not an additional smoothness or chromatic-video
+acceptance result. Evidence is ignored `scratch/fusion-sampling-20260907/`.
+
 **Owner test: seam accepted visually, micro-hitches next, 2026-09-07:** the
 owner says the frozen test build's seam looks good, but playback feels uneven
 despite its 30 fps counter. They request smoothness first, then photometric

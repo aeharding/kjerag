@@ -9,6 +9,35 @@ aligned pair of 200x100 BGR8 images in the working chart, plus the inner
 helper's extended 212x4 validity bytes. Source sampling and the outer content
 gate remain separate obligations.
 
+## Source boundary clarified by direct binding review
+
+The selected outer caller produces persistent **800x16** BGR sources at
+`+0x2e0/+0x340`, then invokes content predicate `0x183beaf10` before resize.
+The predicate reads each source's full 16-row height, but derives strip width
+from destination width 200 divided by three. Its three X ranges are `[0,66)`,
+`[66,132)` and `[132,198)`; columns 198..799 do not affect admission. The
+18 per-channel mean differences are binary64 and trigger on strict absolute
+difference greater than 3.0. Empty retained means also trigger. Every trigger
+copies all current mean vectors into the retained baseline before MGP; a
+non-trigger keeps both the baseline and cached ratio maps.
+
+On admission, `0x183bf4650..0x183bf4778` resizes each full source with
+interpolation value 3 into `Rect(0,48,200,4)` of separate retained 200x100
+working images at `+0x3a0/+0x400`. This is not a later mutation of the source
+header into a 200x4 Mat. Older notes asserting that degeneration are wrong.
+The recovered reduction is 4:1 in both dimensions. OpenCV's integer-area
+implementation averages the aligned source blocks before converting back to
+bytes ([OpenCV resize source](https://raw.githubusercontent.com/opencv/opencv/4.x/modules/imgproc/src/resize.cpp));
+this does not identify Studio's exact optimized dispatch or source ray law.
+
+The new detached Kjerag sampler uses the actual packed-map/source-color shader
+to make full-chart point samples. `stitch-layers ... estimate-fusion` can run
+the spatial reference on those samples and render its result, but that input
+does **not** replace the native 800x16 source production/reduction boundary.
+The exact source-band rays and automatic update owner remain unfinished.
+Raw binding evidence is in ignored `photometric-static/review-content-gate-*`
+and `review-selected-getter-*` files. No new runtime capture was needed.
+
 ## Verified sequence
 
 The selected method is `0x183c01450`. Its MGP helper returns constructor

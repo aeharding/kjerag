@@ -48,6 +48,15 @@ pub(crate) struct ResidentCameraProfile {
     calibration: CalibrationSet,
 }
 
+impl std::fmt::Debug for ResidentCameraProfile {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output
+            .debug_struct("ResidentCameraProfile")
+            .field("source_size", &self.source_size)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ResidentCameraProfile {
     pub(crate) fn from_calibration(calibration: &CalibrationSet) -> Fallible<Option<Self>> {
         let Some(camera) = StitchCamera::from_calibration(calibration) else {
@@ -82,6 +91,10 @@ impl ResidentCameraProfile {
     #[cfg(test)]
     fn calibration(&self) -> &CalibrationSet {
         &self.calibration
+    }
+
+    pub(crate) fn source_is_covered(&self, lens: Lens, uv: [f32; 2]) -> bool {
+        self.support.contains(lens, uv)
     }
 }
 
@@ -923,6 +936,10 @@ impl ResidentCaptureFacade {
 
     pub(crate) fn same_capture(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    pub(crate) fn camera_profile(&self) -> Arc<ResidentCameraProfile> {
+        Arc::clone(&self.inner.profile)
     }
 
     #[cfg(test)]

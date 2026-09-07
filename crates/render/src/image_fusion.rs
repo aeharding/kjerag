@@ -10,8 +10,11 @@
 //! source/output video parity. Ordinary playback remains unchanged.
 
 mod coordinates;
+pub(crate) mod sample;
 pub mod solve;
 pub mod spatial;
+
+pub use sample::{FusionInputs, PendingOneXsFusionInputs};
 
 use crate::studio_type2::{MAP_HEIGHT, MAP_NODES, MAP_WIDTH, PACKED_BYTES};
 

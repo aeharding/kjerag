@@ -189,8 +189,18 @@ replication, periodic 200-to-212 extension, center crop, same-ordinal ratios,
 ROI-local box filtering and original-chart remap. Its full ratio arrays start
 at one and retain the previous filtered left boundary row 40. The corrected
 binding/constant contract is `docs/research/studio-image-fusion-spatial.md`.
-Source sampling, the outer content gate and the eventual GPU producer remain
-separate unimplemented boundaries. Existing sparse arithmetic, box reductions
+The detached `prepare_one_xs_fusion_inputs` API now samples two 200x100
+working charts through the actual `type2_mesh` and `type2_ycbcr` functions.
+It retains private bindings, the exact decoded source owner and the immutable
+camera profile through a consuming readback. Stepped scenes retain that profile
+without enabling a live transaction. Conditioned source coverage uses lens-local
+UVs, not packed-atlas coordinates or invented map sentinels. The diagnostic's
+RGB-to-byte conversion clamps and rounds ties-to-even. It is not Studio's
+source producer: the selected native boundary first makes 800x16 BGR bands and
+area-resizes them into rows 48..51 after content admission. The diagnostic's
+full-chart point samples cannot stand in for that reduction. Source-band
+production, the outer content gate and the eventual GPU producer remain
+separate unfinished boundaries. Existing sparse arithmetic, box reductions
 and trigonometric implementations are not claimed numerically identical to
 Studio. Neither reference is selected by ordinary playback.
 

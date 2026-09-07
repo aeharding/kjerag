@@ -612,7 +612,6 @@ fn layout(device: &wgpu::Device, visibility: wgpu::ShaderStages) -> wgpu::BindGr
     })
 }
 
-#[cfg(test)]
 pub(crate) fn draw_wgsl() -> String {
     draw_wgsl_with_fusion(false)
 }
