@@ -3234,8 +3234,9 @@ mod tests {
 
     #[test]
     fn foreign_l2_and_l1_contexts_retire_carrier_before_post_release() {
-        let (context, foreign, adapter) = gpu_context_pair()
-            .expect("two Vulkan devices required for resident drop-order qualification");
+        let Some((context, foreign, adapter)) = gpu_context_pair() else {
+            return;
+        };
         let bridge = GpuL2PostPisBridge::new(context.clone()).unwrap();
         let foreign_bridge = GpuL2PostPisBridge::new(foreign.clone()).unwrap();
 
@@ -3453,7 +3454,9 @@ mod tests {
 
     #[test]
     fn constructor_qualifies_production_shader_cold_and_warm_bit_exact() {
-        let (context, name) = gpu().expect("Vulkan GPU required for L2 bridge qualification");
+        let Some((context, name)) = gpu() else {
+            return;
+        };
         eprintln!("ONE X2 L2 bridge qualification adapter: {name}");
         let limits = context.device().limits();
         eprintln!(
@@ -3481,7 +3484,9 @@ mod tests {
 
     #[test]
     fn sealed_terminal_advances_the_one_lease_through_l2() {
-        let (context, adapter) = gpu().expect("Vulkan GPU required for resident L2 chain");
+        let Some((context, adapter)) = gpu() else {
+            return;
+        };
         let front = GpuPisFrontEnd::new(context.clone()).unwrap();
         let pis = GpuPisPipeline::new(context.clone()).unwrap();
         let bridge = GpuL2PostPisBridge::new(context.clone()).unwrap();
@@ -3546,7 +3551,9 @@ mod tests {
 
     #[test]
     fn resident_seed_injection_matches_actual_l1_cpu_terminal_bits() {
-        let (context, adapter) = gpu().expect("Vulkan GPU required for resident L1 terminal twin");
+        let Some((context, adapter)) = gpu() else {
+            return;
+        };
         let front = GpuPisFrontEnd::new(context.clone()).unwrap();
         let pis = GpuPisPipeline::new(context.clone()).unwrap();
         let bridge = GpuL2PostPisBridge::new(context.clone()).unwrap();
@@ -3669,7 +3676,9 @@ mod tests {
 
     #[test]
     fn resident_warm_hint_centres_reach_actual_l1_terminal_bits() {
-        let (context, adapter) = gpu().expect("Vulkan GPU required for resident L1 hint twin");
+        let Some((context, adapter)) = gpu() else {
+            return;
+        };
         let front = GpuPisFrontEnd::new(context.clone()).unwrap();
         let pis = GpuPisPipeline::new(context.clone()).unwrap();
         let bridge = GpuL2PostPisBridge::new(context.clone()).unwrap();
@@ -3965,7 +3974,9 @@ mod tests {
 
     #[test]
     fn nonfinite_retained_times_zero_is_gated_only_when_it_reaches_a_center() {
-        let (context, _) = gpu().expect("Vulkan GPU required for L2 bridge finite gate");
+        let Some((context, _)) = gpu() else {
+            return;
+        };
         let bridge = GpuL2PostPisBridge::new(context).unwrap();
 
         let mut safe = fixture().unwrap();
@@ -4088,7 +4099,9 @@ mod tests {
 
     #[test]
     fn focused_arithmetic_mutations_are_rejected() {
-        let (context, _) = gpu().expect("Vulkan GPU required for L2 bridge mutation gate");
+        let Some((context, _)) = gpu() else {
+            return;
+        };
         GpuL2PostPisBridge::new_qualified_all(
             context.clone(),
             SHADER,
@@ -4203,20 +4216,12 @@ mod tests {
             }
         }
     }
-    fn gpu() -> Result<(OneXsGpuContext, String), String> {
+    fn gpu() -> Option<(OneXsGpuContext, String)> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..Default::default()
         });
-        let require_radv = std::env::var_os("KJERAG_REQUIRE_RADV").is_some();
-        let adapter = block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN))
-            .into_iter()
-            .find(|adapter| !require_radv || adapter.get_info().driver.eq_ignore_ascii_case("radv"))
-            .ok_or(if require_radv {
-                "no RADV Vulkan adapter"
-            } else {
-                "no Vulkan adapter"
-            })?;
+        let adapter = optional_vulkan_adapter(&instance)?;
         let info = adapter.get_info();
         let name = format!("{} / {} / {}", info.name, info.driver, info.driver_info);
         let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -4225,24 +4230,16 @@ mod tests {
             required_limits: adapter.limits(),
             ..Default::default()
         }))
-        .map_err(|e| e.to_string())?;
-        Ok((OneXsGpuContext::new(&device, &queue), name))
+        .expect("Vulkan adapter failed to create an L2 qualification device");
+        Some((OneXsGpuContext::new(&device, &queue), name))
     }
 
-    fn gpu_context_pair() -> Result<(OneXsGpuContext, OneXsGpuContext, String), String> {
+    fn gpu_context_pair() -> Option<(OneXsGpuContext, OneXsGpuContext, String)> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..Default::default()
         });
-        let require_radv = std::env::var_os("KJERAG_REQUIRE_RADV").is_some();
-        let adapter = block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN))
-            .into_iter()
-            .find(|adapter| !require_radv || adapter.get_info().driver.eq_ignore_ascii_case("radv"))
-            .ok_or(if require_radv {
-                "no RADV Vulkan adapter"
-            } else {
-                "no Vulkan adapter"
-            })?;
+        let adapter = optional_vulkan_adapter(&instance)?;
         let info = adapter.get_info();
         let name = format!("{} ({})", info.name, info.driver);
         let request = || {
@@ -4252,14 +4249,38 @@ mod tests {
                 required_limits: adapter.limits(),
                 ..Default::default()
             }))
-            .map_err(|error| error.to_string())
+            .expect("Vulkan adapter failed to create an L2 provenance device")
         };
-        let (device, queue) = request()?;
-        let (foreign_device, foreign_queue) = request()?;
-        Ok((
+        let (device, queue) = request();
+        let (foreign_device, foreign_queue) = request();
+        Some((
             OneXsGpuContext::new(&device, &queue),
             OneXsGpuContext::new(&foreign_device, &foreign_queue),
             name,
         ))
+    }
+
+    fn optional_vulkan_adapter(instance: &wgpu::Instance) -> Option<wgpu::Adapter> {
+        let require_gpu = std::env::var_os("KJERAG_REQUIRE_GPU").is_some();
+        let require_radv = std::env::var_os("KJERAG_REQUIRE_RADV").is_some();
+        let adapter = block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN))
+            .into_iter()
+            .find(|adapter| {
+                !require_radv || adapter.get_info().driver.eq_ignore_ascii_case("radv")
+            });
+        let Some(adapter) = adapter else {
+            let requirement = if require_radv {
+                "RADV Vulkan adapter"
+            } else {
+                "Vulkan adapter"
+            };
+            assert!(
+                !require_gpu && !require_radv,
+                "required {requirement} is unavailable"
+            );
+            eprintln!("skipping L2 GPU test: no {requirement}");
+            return None;
+        };
+        Some(adapter)
     }
 }

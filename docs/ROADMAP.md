@@ -20,7 +20,26 @@ fails on the new `chunks_exact_to_as_chunks` lint in existing metadata parsers.
 The workflow now pins compiler, formatter and Clippy to the qualified 1.97.1
 toolchain for both architectures and the dependency-free metadata check.
 This makes verification reproducible without changing parser or player code;
-it is not a claim that newer Clippy passes. CI confirmation is pending.
+it is not a claim that newer Clippy passes. CI run 34082652007 confirms both
+architectures pass Clippy on that pin, then exposes seven L2 GPU tests that
+unconditionally require an adapter on GPU-less runners. Their test-local setup
+now skips only absent adapters when neither `KJERAG_REQUIRE_GPU` nor
+`KJERAG_REQUIRE_RADV` is set. Device creation and shader/arithmetic failures
+remain fatal. All seven skip explicitly without a GPU and fail as required
+under either strict flag alone. On the real Radeon all eleven L2-module tests
+execute and pass. Full strict-Radeon workspace with both clips passes1171
+tests, zero failures,30 ignored; full-target Clippy and static gates pass.
+The native executable hash is unchanged. Evidence and test limits:
+`scratch/gpu-ci-policy-20260907/`. No playback code changes in this repair;
+the next pushed CI run must still confirm both architectures.
+
+**Uninstalled candidate bundle, 2026-09-07:** clean archived source 95850005
+builds and exports the native-readiness candidate into
+`scratch/flatpak-candidate-95850005/kjerag-candidate.flatpak`. Candidate metadata
+matches the installed app, and its version command runs in the Flatpak runtime.
+These are packaging smoke checks, not playback or installed-transaction gates.
+Installed stable remains 80bbad8a; owner tradeoff approval and branch testing
+remain outstanding. No install, main change or release follows from this build.
 
 **Timed draw-backpressure retry retained for qualification, 2026-09-06:**
 the next candidate replaces immediate retry spinning specifically when both
