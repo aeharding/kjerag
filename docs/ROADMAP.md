@@ -14,6 +14,14 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**CI toolchain drift, 2026-09-07:** the pushed native-readiness candidate
+passes local Rust 1.97.1 gates, but CI's moving stable installs 1.98.1 and
+fails on the new `chunks_exact_to_as_chunks` lint in existing metadata parsers.
+The workflow now pins compiler, formatter and Clippy to the qualified 1.97.1
+toolchain for both architectures and the dependency-free metadata check.
+This makes verification reproducible without changing parser or player code;
+it is not a claim that newer Clippy passes. CI confirmation is pending.
+
 **Timed draw-backpressure retry retained for qualification, 2026-09-06:**
 the next candidate replaces immediate retry spinning specifically when both
 draw-retirement slots are full with a 1 ms Scene deadline. The renderer sends

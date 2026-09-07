@@ -1,5 +1,13 @@
 # Cutting a release
 
+CI's compiler, formatter and Clippy are pinned together to Rust 1.97.1 in
+`.github/workflows/ci.yml`, matching the qualified native and 25.08 SDK builds.
+This is the verification toolchain, not a change to the package's minimum
+Rust version. Update the pin deliberately and run the same gates locally:
+moving `stable` introduced a new denied lint in existing parser code on
+2026-09-07 while the qualified 1.97.1 build still passed. That observation
+does not qualify newer Clippy versions or change the playback executable.
+
 Once per machine:
 
 ```sh
