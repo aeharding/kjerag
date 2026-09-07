@@ -30,6 +30,19 @@ success on one camera must not be reported as success on all supported files.
 The coordinator owns prioritization and verification. Owner-visible tradeoffs
 and branch acceptance remain the owner's decisions before merge.
 
+### Seam-preserving performance work, owner clarification 2026-09-07
+
+The owner rejected staggering the two lens directions' full refreshes if it
+affects the seam: "if its going to affect the seam then we need to figure out
+a better way", and added "also consider rearchitecutre". The staggered-cadence
+prototype was removed before any build or playback. Pursue execution and
+architecture changes that preserve the existing seam result and source-frame
+refresh cadence; do not silently trade temporal stitching behavior for speed.
+This does not reinstate the superseded requirement for exact Studio internals.
+The owner also clarified that keeping the installed Flatpak untouched is not
+a requirement. Deliver qualified branch builds through the installed app;
+this does not waive sandbox verification or owner acceptance before merge.
+
 The owner additionally requires "chromatic calibration w parity to Studio's"
 when appropriate. Studio's term means photometric matching of the two lenses'
 color and brightness, represented in its project as `image_fusion`; it does

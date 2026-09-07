@@ -14,6 +14,39 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Installed test build and seam-preserving redesign, 2026-09-07:** the owner
+clarified that preserving the old installed Flatpak is not a requirement,
+rejected staggering the two directions' refresh cadence if it affects the
+seam, and requested considering rearchitecture. The unbuilt stagger prototype
+was removed completely. A sliding two-chunk queue-window alternative remains
+an unrun scratch patch, not selected runtime code: it could shorten worker
+waits but also put more compute ahead of an interactive draw.
+
+Exact qualified source `b2c133e5` is now built with the Flatpak SDK and installed
+as `fdc22560f244cd0810fc052fcbd0ed40f9e9874560f6bdf04007166fad377c79`.
+Installed executable SHA-256 is
+`fe14f473e25f03190024fc54df7b2a58ae13edc8b54d22c066a79fd1a76692c9`.
+The actual installed bundle passes 40 X4 and 44 ONE X2 UI checks with no
+failures, including the reported views, backward seeking and late scrubber
+landings. Both use dmabuf import. Normal audio is not qualified by these
+isolated Flatpak sessions: they lack the Pulse socket and sound controls skip,
+as documented by the harness. Sandbox preload checks also skip. Scripted
+pause/seek report intervals are not a sustained-performance or hitch test.
+Root viewed both installed exact-view captures; their full-window bytes differ
+from the native captures, so no cross-runtime byte-identity claim is made.
+Source, package, installed executable and harness hashes are recorded in
+`scratch/flatpak-delivery-b2c133e5/`. No release, merge or owner acceptance.
+
+The next architectural candidate is a bounded FIFO of three completed future
+source/map pairs with one additional source in flight. Decode/stitch pre-roll
+must run while the presentation and audio clocks remain held, then start both
+once the ready queue is primed. Publish only the exact due FIFO head; preserve
+source order, calculations, refresh cadence and fresh seek history. This aims
+to absorb isolated work spikes without adding more GPU work ahead of draws;
+it does not increase mean compute capacity. Startup/seek-resume latency and
+memory use must be measured and surfaced before owner testing. The design is
+not implemented or a smoothness result at this checkpoint.
+
 **Autonomous source processing under qualification, 2026-09-07:** the owner
 challenged the prolonged micro-hitch investigation and the pipeline's design
 for smoothness. Further small scheduling sweeps are paused. The current branch
