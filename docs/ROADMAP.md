@@ -14,6 +14,62 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Carried-correction visual experiment, 2026-09-08:** following the owner's
+question about reusing stitching while new video advances, a test-only
+experiment now renders source N with its fresh parent/preimage/base geometry
+and the preceding completed source's chart-relative public flow. It does not
+reuse the preceding absolute packed UV map, change the selected player, or
+skip any source's full solver transaction. Separate arms retain current
+photometric ratios or carry the preceding ratios as well.
+
+All 31 X4 and 61 ONE X2 source frames render. Recomposition with same-frame
+flow is byte-exact to every GPU packed map; the diagnostic direct mesh's
+current-map rendering matches the actual Scene screenshot within one code per
+channel. All 460 original sequence images, maps, alpha and ratios remain
+byte-identical to the prior control. A synthetic test proves only the public
+flow ranges are substituted, with current geometry/statics and the current snapshot
+unchanged. Full workspace gates pass: 1,248 tests, zero failures, 30 ignored,
+formatting, all-target Clippy, name/source-list checks and existing GPU preflight.
+
+Root inspected all 61 X2 riser pairs as contact sheets, the existing computed
+alpha trace and enlarged high-difference frames. The riser remains connected
+in that inspection, but fast edges visibly move with carried correction, for
+example frames 6371 and 6396. This is not an exact-seam claim or accepted
+tradeoff. A two-second side-by-side was linked to the owner with an explicit
+question about a live test; no acceptance is inferred. Evidence, source patch,
+control hash guards and videos are in `scratch/fusion-live-20260907/carried-flow-01/`.
+The independent X4 inspection finds texture-shaped resampling differences but
+no visible new seam opening in this slow, distant 31-frame scene; root also
+viewed its central seam pairs. Current ratios are only an isolation arm here,
+not an already-available low-latency live input, because they depend on the
+current completed final map. No broader camera or motion conclusion is drawn.
+The experiment runs only after the current full solve has completed, so it
+proves hypothetical pixels, not live latency, deadline availability or safe
+shared-source ownership. Live preview would require fresh current geometry,
+bounded immutable correction snapshots and separate compute/draw lifetime
+proofs. Installed runtime remains the qualified `eaa304bc` controls correction.
+
+**Actual installed capacity, 2026-09-08:** two authenticated 40-second
+2256x1504, nominal-300-Hz pointer runs with live null-sink audio exceed 240
+conservative completed-changing updates/sec: 280.524 X4 and 293.924 X2.
+Source advancement remains approximately 29.97 fps overall; draw callback
+wall p99 is 9.604/9.312 ms, not a 4.17 ms tail-latency pass. X2 temporarily
+accumulates about 235 ms of source phase debt while view draws continue, then
+catches up. This is gradual debt over 56 source intervals, not one 235 ms
+freeze. The same source range in two native controls does not accumulate debt;
+the internal cause is not yet located. In ordinary 60 Hz idle playback, the
+installed X2 run does not repeat that episode. Installed X4 instead has a
+localized early episode about three seconds into playback, reaching 116 ms
+of phase debt and recovering; excluding it from a five-second steady cohort
+does not make it harmless. Raw evidence is `scratch/installed-capacity/`.
+The exact common steady native/installed idle cohorts are complete on both
+cameras with no source holds at least 47 ms; source-hold p99 is
+34.355/34.821 ms X4 and 34.479/34.742 ms X2. The native X4 arm does not have
+the early excursion at the same source range. `idle-01-RESULT.md` separates
+that episode from the later cohort and records trace/termination boundaries.
+Average capacity is now measured in the installed runtime, but intermittent
+source holds, frame-time tails and desktop/owner smoothness remain open.
+
 **Two-chunk scheduling trial rejected, 2026-09-07:** the installed controls
 correction below is now qualified on both cameras. A subsequent native trial
 kept the six L1 command buffers and their order but permitted two chunks

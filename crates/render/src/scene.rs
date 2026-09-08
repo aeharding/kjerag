@@ -8331,13 +8331,24 @@ mod tests {
         pipeline: &mut ScenePipeline,
         map: &OneXsMapFrame,
     ) -> Vec<u8> {
-        const SIDE: u32 = 64;
-        const BYTES: u64 = SIDE as u64 * SIDE as u64 * 4;
+        render_direct_map_pixels_sized(device, queue, pipeline, map, 64, 64)
+    }
+
+    fn render_direct_map_pixels_sized(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipeline: &mut ScenePipeline,
+        map: &OneXsMapFrame,
+        width: u32,
+        height: u32,
+    ) -> Vec<u8> {
+        assert_eq!(width * 4 % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT, 0);
+        MapBindError::require_frame(map.frame(), pipeline.prepared_picture.as_ref()).unwrap();
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("CPU-reference fusion consumer"),
             size: wgpu::Extent3d {
-                width: SIDE,
-                height: SIDE,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -8352,7 +8363,7 @@ mod tests {
         assert_eq!(draw.bound_frame(), Some(map.frame()));
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("CPU-reference fusion consumer readback"),
-            size: BYTES,
+            size: u64::from(width) * u64::from(height) * 4,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -8380,8 +8391,8 @@ mod tests {
                 buffer: &readback,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(SIDE * 4),
-                    rows_per_image: Some(SIDE),
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
                 },
             },
             texture.size(),
@@ -9027,6 +9038,18 @@ mod tests {
         scene.seek(target, Accuracy::Exact);
         let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
         let mut previous = None;
+        // Explicit offline visual experiment only. Full source processing and
+        // history remain unchanged; carried corrections never enter playback.
+        let carried_review = std::env::var_os("KJERAG_CARRIED_FLOW_REVIEW").is_some();
+        let mut previous_inputs = None;
+        let mut previous_ratios = None;
+        let mut diagnostic = carried_review
+            .then(|| ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm));
+        if carried_review {
+            for arm in ["direct-current", "carried-flow", "carried-flow-color"] {
+                std::fs::create_dir(output.join(arm)).unwrap();
+            }
+        }
         for index in start..start + count {
             let frame = wait_for_new_scene_frame(&scene, previous.as_ref());
             assert_eq!(frame.index(), index);
@@ -9053,6 +9076,82 @@ mod tests {
             assert_eq!(shot.index, index);
             let map = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
             assert_eq!(map.frame(), &frame);
+            if carried_review {
+                let diagnostic = diagnostic.as_mut().unwrap();
+                let capture = scene.show.as_ref().unwrap().one_xs.clone().unwrap();
+                let inputs = capture
+                    .diagnostic_cold_final_inputs(&frame)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(inputs.frame, frame);
+                let null = inputs.materialize_with_public_from(&inputs).unwrap();
+                assert_eq!(
+                    null.bytes(),
+                    map.packed().bytes(),
+                    "age-zero map null differs"
+                );
+                let prepared = diagnostic
+                    .prepare_one_xs_picture(&scene.primitive(camera), 16.0 / 9.0)
+                    .unwrap();
+                assert_eq!(prepared.frame(), &frame);
+                let full =
+                    render_direct_map_pixels_sized(&device, &queue, diagnostic, &map, 1280, 720);
+                assert_eq!(full.len(), shot.rgba.len());
+                for (byte, (&actual, &reference)) in full.iter().zip(&shot.rgba).enumerate() {
+                    assert!(
+                        actual.abs_diff(reference) <= 1,
+                        "direct/live mesh null differs at frame {index}, byte {byte}: {actual} vs {reference}"
+                    );
+                }
+                write_review_ppm(&output.join("direct-current"), index, &full);
+                // At the cold landing the experiment has no previous result:
+                // both carried arms explicitly use the current result (age 0).
+                let prior = previous_inputs.as_ref().unwrap_or(&inputs);
+                let carried = OneXsMapFrame::new(
+                    frame.clone(),
+                    inputs.materialize_with_public_from(prior).unwrap(),
+                    map.alpha().clone(),
+                    map.pis_backend(),
+                );
+                let current_ratios = map.fusion().unwrap().clone();
+                let carried_current_color = carried.clone().with_fusion(current_ratios.clone());
+                let carried_old_color = carried
+                    .with_fusion(previous_ratios.as_ref().unwrap_or(&current_ratios).clone());
+                for (arm, preview) in [
+                    ("carried-flow", carried_current_color),
+                    ("carried-flow-color", carried_old_color),
+                ] {
+                    let pixels = render_direct_map_pixels_sized(
+                        &device, &queue, diagnostic, &preview, 1280, 720,
+                    );
+                    write_review_ppm(&output.join(arm), index, &pixels);
+                    std::fs::write(
+                        output
+                            .join(arm)
+                            .join(format!("frame-{index:010}.packed-f32le.bin")),
+                        preview.packed().bytes(),
+                    )
+                    .unwrap();
+                }
+                eprintln!(
+                    "carried-review: source {index} correction {} age {}",
+                    prior.frame.index(),
+                    index - prior.frame.index()
+                );
+                previous_inputs = Some(inputs);
+                previous_ratios = Some(current_ratios);
+                assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&frame));
+                assert_eq!(
+                    scene
+                        .diagnostic_one_xs_displayed_map()
+                        .unwrap()
+                        .unwrap()
+                        .packed()
+                        .bytes(),
+                    map.packed().bytes(),
+                    "offline preview changed installed geometry"
+                );
+            }
             std::fs::write(
                 output.join(format!("frame-{index:010}.packed-f32le.bin")),
                 map.packed().bytes(),
@@ -9090,6 +9189,18 @@ mod tests {
             if index + 1 < start + count {
                 scene.step(Instant::now(), 1);
             }
+        }
+    }
+
+    fn write_review_ppm(output: &Path, index: u64, rgba: &[u8]) {
+        use std::io::Write;
+        assert_eq!(rgba.len(), 1280 * 720 * 4);
+        let mut file = std::io::BufWriter::new(
+            std::fs::File::create_new(output.join(format!("frame-{index:010}.ppm"))).unwrap(),
+        );
+        write!(file, "P6\n1280 720\n255\n").unwrap();
+        for pixel in rgba.chunks_exact(4) {
+            file.write_all(&pixel[..3]).unwrap();
         }
     }
 

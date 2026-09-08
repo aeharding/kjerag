@@ -753,6 +753,74 @@ pub(crate) struct DiagnosticFinalInputs {
     pub lens_b_base: Vec<u32>,
     pub lens_a_public: Vec<u32>,
     pub lens_b_public: Vec<u32>,
+    words: Vec<u32>,
+}
+
+#[cfg(test)]
+impl DiagnosticFinalInputs {
+    fn from_words(frame: FrameStamp, words: Vec<u32>) -> Fallible<Self> {
+        if words.len() != INPUT_WORDS {
+            return Err("ONE X2 diagnostic final inputs have the wrong word count".into());
+        }
+        let side = |side: usize| {
+            let start = side * SIDE_WORDS;
+            let preimage = words[start..start + PREIMAGE_WORDS].to_vec();
+            let base_start = start + PREIMAGE_WORDS;
+            let base = words[base_start..base_start + BASE_WORDS].to_vec();
+            let public_start = base_start + BASE_WORDS;
+            let public = words[public_start..public_start + FLOW_WORDS].to_vec();
+            (preimage, base, public)
+        };
+        let (lens_a_preimage, lens_a_base, lens_a_public) = side(0);
+        let (lens_b_preimage, lens_b_base, lens_b_public) = side(1);
+        Ok(Self {
+            frame,
+            lens_a_preimage,
+            lens_b_preimage,
+            lens_a_base,
+            lens_b_base,
+            lens_a_public,
+            lens_b_public,
+            words,
+        })
+    }
+
+    /// Materialize this frame's exact preimage, base and capture-static inputs
+    /// with another completed frame's public correction field.
+    ///
+    /// This is an offline diagnostic only. It neither submits GPU work nor
+    /// mutates either frame's resident temporal history.
+    pub(crate) fn materialize_with_public_from(&self, correction: &Self) -> Fallible<PackedMap> {
+        if self.words.len() != INPUT_WORDS {
+            return Err("ONE X2 diagnostic current final inputs have the wrong word count".into());
+        }
+        for (name, flow) in [
+            ("lens A", correction.lens_a_public.as_slice()),
+            ("lens B", correction.lens_b_public.as_slice()),
+        ] {
+            if flow.len() != FLOW_WORDS {
+                return Err(format!(
+                    "ONE X2 diagnostic {name} carried public flow has {} words, expected {FLOW_WORDS}",
+                    flow.len()
+                )
+                .into());
+            }
+        }
+
+        let mut words = self.words.clone();
+        let flow_offset = PREIMAGE_WORDS + BASE_WORDS;
+        for (side, flow) in [
+            correction.lens_a_public.as_slice(),
+            correction.lens_b_public.as_slice(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let start = side * SIDE_WORDS + flow_offset;
+            words[start..start + FLOW_WORDS].copy_from_slice(flow);
+        }
+        Ok(PackedMap::new(materialize_words(&words)?)?)
+    }
 }
 
 /// Type-erased only after the complete typed post owner has crossed the
@@ -830,26 +898,7 @@ impl InstalledGpuMapBinding {
             &self.input_readback,
             INPUT_BYTES,
         )?;
-        let side = |side: usize| {
-            let start = side * SIDE_WORDS;
-            let preimage = words[start..start + PREIMAGE_WORDS].to_vec();
-            let base_start = start + PREIMAGE_WORDS;
-            let base = words[base_start..base_start + BASE_WORDS].to_vec();
-            let public_start = base_start + BASE_WORDS;
-            let public = words[public_start..public_start + FLOW_WORDS].to_vec();
-            (preimage, base, public)
-        };
-        let (lens_a_preimage, lens_a_base, lens_a_public) = side(0);
-        let (lens_b_preimage, lens_b_base, lens_b_public) = side(1);
-        Ok(DiagnosticFinalInputs {
-            frame: self.frame.clone(),
-            lens_a_preimage,
-            lens_b_preimage,
-            lens_a_base,
-            lens_b_base,
-            lens_a_public,
-            lens_b_public,
-        })
+        DiagnosticFinalInputs::from_words(self.frame.clone(), words)
     }
 }
 
@@ -2247,6 +2296,83 @@ mod tests {
     use std::task::{Context, Poll, Wake, Waker};
 
     use super::*;
+
+    fn diagnostic_fixture(
+        fixture: &QualificationFixture,
+        frame: FrameStamp,
+    ) -> DiagnosticFinalInputs {
+        let inputs = fixture.cpu_inputs();
+        let mut words = Vec::with_capacity(INPUT_WORDS);
+        for side in [inputs.b_to_a, inputs.a_to_b] {
+            append_dynamic_side(&mut words, side);
+            append_static_side(&mut words, side.gate.values(), side.coordinate.values());
+        }
+        DiagnosticFinalInputs::from_words(frame, words).unwrap()
+    }
+
+    #[test]
+    fn carried_public_flow_keeps_every_current_non_flow_input() {
+        let fixture = QualificationFixture::new();
+        let current = diagnostic_fixture(
+            &fixture,
+            FrameStamp::for_test(10, std::time::Duration::ZERO, None),
+        );
+
+        let age_zero = current.materialize_with_public_from(&current).unwrap();
+        let expected_age_zero =
+            PackedMap::new(map_patch::materialize(fixture.cpu_inputs()).packed).unwrap();
+        assert_eq!(
+            age_zero, expected_age_zero,
+            "age-zero recomposition changed the map"
+        );
+
+        let before = current.words.clone();
+        let mut correction_words = current.words.clone();
+        let flow_offset = PREIMAGE_WORDS + BASE_WORDS;
+        for side in 0..2 {
+            let start = side * SIDE_WORDS;
+            correction_words[start] ^= 1;
+            correction_words[start + PREIMAGE_WORDS] ^= 1;
+            correction_words[start + DYNAMIC_SIDE_WORDS] = 0.0_f32.to_bits();
+            correction_words[start + DYNAMIC_SIDE_WORDS + GATE_WORDS] ^= 1;
+            let flow = start + flow_offset;
+            for (component, word) in correction_words[flow..flow + FLOW_WORDS]
+                .iter_mut()
+                .enumerate()
+            {
+                *word = if component.is_multiple_of(2) {
+                    0.25_f32.to_bits()
+                } else {
+                    (-0.125_f32).to_bits()
+                };
+            }
+        }
+        let correction = DiagnosticFinalInputs::from_words(
+            FrameStamp::for_test(9, std::time::Duration::ZERO, None),
+            correction_words,
+        )
+        .unwrap();
+
+        let carried = current.materialize_with_public_from(&correction).unwrap();
+        let mut expected_words = current.words.clone();
+        for (side, flow) in [
+            correction.lens_a_public.as_slice(),
+            correction.lens_b_public.as_slice(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let start = side * SIDE_WORDS + flow_offset;
+            expected_words[start..start + FLOW_WORDS].copy_from_slice(flow);
+        }
+        let expected_carried = PackedMap::new(materialize_words(&expected_words).unwrap()).unwrap();
+        assert_eq!(carried, expected_carried);
+        assert_ne!(carried, age_zero, "changed carried flow was inert");
+        assert_eq!(
+            current.words, before,
+            "recomposition mutated current inputs"
+        );
+    }
 
     #[test]
     fn qualification_fixture_covers_declared_cpu_branches_and_real_association() {
