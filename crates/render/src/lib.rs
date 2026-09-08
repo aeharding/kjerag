@@ -24,6 +24,7 @@ pub mod image_fusion;
 pub mod map_oracle;
 mod one_xs_luma;
 mod projection;
+mod ready_wake;
 /// How a magnified picture is sampled, and where the upgrade engages
 /// (issue #11). Public for the instrument that measures it, like
 /// [`Reframe`]'s own mirror of the map.

@@ -65,6 +65,7 @@ use super::image_fusion::PendingOneXsFusionInputs;
 use super::image_fusion::sample::FusionInputPipeline;
 use super::one_xs_luma::{self, LumaReadbackPipeline, PendingOneXsLuma};
 use super::projection::{self, Held, MAX_LENSES, Reframe, Rolling, SeamAnchor};
+use super::ready_wake::ReadyWake;
 use super::sampling::{self, Sampling};
 use super::seam::{Correction, SeamFit};
 use super::stall::{Stall, Stalled};
@@ -205,6 +206,10 @@ pub struct Scene {
     /// And what it last managed to draw of this file, for the same reason.
     shown: Shown,
     resident_refresh: Arc<AtomicBool>,
+    /// Preparation found only an admitted due source waiting on its worker.
+    /// The live shell subscription can wake us when that exact result commits.
+    resident_waiting: Arc<AtomicBool>,
+    ready_wake: ReadyWake,
     /// Set only when bounded draw-retirement admission refused preparation.
     /// The presentation tick uses it to yield instead of requesting an
     /// immediate compositor redraw loop.
@@ -1222,6 +1227,8 @@ impl Scene {
             stalled: Stalled::default(),
             shown: Shown::default(),
             resident_refresh: Arc::new(AtomicBool::new(false)),
+            resident_waiting: Arc::new(AtomicBool::new(false)),
+            ready_wake: ReadyWake::default(),
             draw_retirement_full: Arc::new(AtomicBool::new(false)),
             resident_submitted: Shown::default(),
             resident_previous_submitted: Shown::default(),
@@ -1558,11 +1565,27 @@ impl Scene {
     /// come back. Call it on every redraw: this is the presentation clock's
     /// only tick.
     pub fn pump(&self, now: Instant) -> Next {
-        defer_draw_retirement_retry(
-            now,
-            self.draw_retirement_full.load(AtomicOrdering::Acquire),
-            self.pump_inner(now),
-        )
+        let next = self.pump_inner(now);
+        let full = self.draw_retirement_full.load(AtomicOrdering::Acquire);
+        if next == Next::Refresh
+            && !full
+            && self.resident_waiting.load(AtomicOrdering::Acquire)
+            && let Some(show) = self.show.as_ref()
+            && let Some(capture) = show.one_xs.as_ref()
+            && let Some(frame) = show.playing.borrow().frames.as_ref()
+            // A failed registration retains the redraw so ordinary prepare
+            // can surface the underlying error. Never sleep on a failed owner.
+            && capture
+                .wait_for_frame(&frame.stamp(), &self.ready_wake)
+                .unwrap_or(false)
+        {
+            return Next::Never;
+        }
+        defer_draw_retirement_retry(now, full, next)
+    }
+
+    pub(crate) fn ready_wake(&self) -> ReadyWake {
+        self.ready_wake.clone()
     }
 
     fn pump_inner(&self, now: Instant) -> Next {
@@ -2084,6 +2107,8 @@ impl Scene {
             stalled: self.stalled.clone(),
             shown: self.shown.clone(),
             resident_refresh: Arc::clone(&self.resident_refresh),
+            resident_waiting: Arc::clone(&self.resident_waiting),
+            ready_wake: self.ready_wake.clone(),
             draw_retirement_full: Arc::clone(&self.draw_retirement_full),
             resident_submitted: self.resident_submitted.clone(),
             resident_previous_submitted: self.resident_previous_submitted.clone(),
@@ -2522,6 +2547,8 @@ pub struct ScenePrimitive {
     /// in, which it both writes and reads.
     shown: Shown,
     resident_refresh: Arc<AtomicBool>,
+    resident_waiting: Arc<AtomicBool>,
+    ready_wake: ReadyWake,
     draw_retirement_full: Arc<AtomicBool>,
     resident_submitted: Shown,
     resident_previous_submitted: Shown,
@@ -3137,6 +3164,9 @@ impl ScenePipeline {
             .resident_refresh
             .store(false, AtomicOrdering::Release);
         primitive
+            .resident_waiting
+            .store(false, AtomicOrdering::Release);
+        primitive
             .draw_retirement_full
             .store(false, AtomicOrdering::Release);
         let selected_one_xs = one_xs_playback_selected(
@@ -3305,6 +3335,7 @@ impl ScenePipeline {
             .as_ref()
             .and_then(|view| view.resident_one_xs.as_ref());
         let mut index = 0;
+        let mut retired_pending = false;
         while index < self.retired_one_xs.len() {
             let display_live = shown_capture
                 .is_some_and(|shown| shown.same_capture(&self.retired_one_xs[index].0));
@@ -3315,6 +3346,7 @@ impl ScenePipeline {
                 self.retired_one_xs.remove(index);
             } else {
                 if drain == ResidentDrain::Pending {
+                    retired_pending = true;
                     primitive
                         .resident_refresh
                         .store(true, AtomicOrdering::Release);
@@ -3528,6 +3560,20 @@ impl ScenePipeline {
 
         if let Some(request) = primitive.shutter.take() {
             self.shoot_resident(primitive, request, aspect);
+        }
+        // Admission above must happen before sleeping. A full worker channel,
+        // a publishable future, retired resources or full draw slots still
+        // need the existing retry. Only the exact due worker wait is replaced.
+        if self.redraw_after_prepare
+            && !retired_pending
+            && !primitive.draw_retirement_full.load(AtomicOrdering::Acquire)
+            && let (Some((capture, _)), Some(due)) = (self.resident_one_xs.as_ref(), due.as_ref())
+            && capture.wait_for_frame(due, &primitive.ready_wake)?
+        {
+            self.redraw_after_prepare = false;
+            primitive
+                .resident_waiting
+                .store(true, AtomicOrdering::Release);
         }
         Ok(())
     }
@@ -7856,6 +7902,17 @@ mod tests {
         queue: &wgpu::Queue,
         expected: &FrameStamp,
     ) -> ResidentCaptureFacade {
+        prepare_and_draw_resident_with_listener(scene, pipeline, device, queue, expected, None)
+    }
+
+    fn prepare_and_draw_resident_with_listener(
+        scene: &Scene,
+        pipeline: &mut ScenePipeline,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        expected: &FrameStamp,
+        mut listener: Option<&mut (crate::ready_wake::ReadyListener, usize)>,
+    ) -> ResidentCaptureFacade {
         let mut primitive = scene.primitive(Camera::default());
         let capture = primitive
             .view
@@ -7882,7 +7939,9 @@ mod tests {
             }
             if pipeline.is_presentable(&primitive) && !capture.acknowledged(expected).unwrap() {
                 assert!(
-                    pipeline.requests_redraw_after_prepare(&primitive),
+                    pipeline.requests_redraw_after_prepare(&primitive)
+                        || (listener.is_some()
+                            && scene.resident_waiting.load(AtomicOrdering::Acquire)),
                     "a presentable old picture lost the exact due source's completion wake"
                 );
             }
@@ -7891,6 +7950,17 @@ mod tests {
                 "resident frame {} did not install",
                 expected.index()
             );
+            if let Some((listener, sleeps)) = listener.as_deref_mut()
+                && scene.resident_waiting.load(AtomicOrdering::Acquire)
+                && scene.pump(Instant::now()) == Next::Never
+            {
+                assert!(!pipeline.requests_redraw_after_prepare(&primitive));
+                assert!(pipeline.schedules_retry(&primitive));
+                // No renderer visit or device poll while asleep: completion
+                // has to come from the real autonomous worker and wake path.
+                wait_for_stitch_notification(listener, deadline);
+                *sleeps += 1;
+            }
             std::thread::yield_now();
             primitive = scene.primitive(Camera::default());
         }
@@ -7907,6 +7977,24 @@ mod tests {
 
         draw_resident_test_pass(pipeline, device, queue);
         capture
+    }
+
+    fn wait_for_stitch_notification(
+        listener: &mut crate::ready_wake::ReadyListener,
+        deadline: Instant,
+    ) {
+        struct ThreadWake(std::thread::Thread);
+        impl std::task::Wake for ThreadWake {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+        let waker = std::task::Waker::from(Arc::new(ThreadWake(std::thread::current())));
+        let mut cx = std::task::Context::from_waker(&waker);
+        while listener.poll_ready(&mut cx).is_pending() {
+            assert!(Instant::now() < deadline, "due stitch lost its worker wake");
+            std::thread::park_timeout(Duration::from_millis(10));
+        }
     }
 
     fn draw_resident_test_pass(
@@ -9038,6 +9126,7 @@ mod tests {
         scene.seek(target, Accuracy::Exact);
         let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
         let mut previous = None;
+        let mut ready_listener = (scene.ready_wake.listen(), 0);
         // Explicit offline visual experiment only. Full source processing and
         // history remain unchanged; carried corrections never enter playback.
         let carried_review = std::env::var_os("KJERAG_CARRIED_FLOW_REVIEW").is_some();
@@ -9053,7 +9142,14 @@ mod tests {
         for index in start..start + count {
             let frame = wait_for_new_scene_frame(&scene, previous.as_ref());
             assert_eq!(frame.index(), index);
-            prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &frame);
+            prepare_and_draw_resident_with_listener(
+                &scene,
+                &mut pipeline,
+                &device,
+                &queue,
+                &frame,
+                Some(&mut ready_listener),
+            );
             scene.pump(Instant::now());
             let (send, receive) = std::sync::mpsc::channel();
             scene.capture(Request {
@@ -9190,6 +9286,11 @@ mod tests {
                 scene.step(Instant::now(), 1);
             }
         }
+        assert!(ready_listener.1 > 0, "review never exercised a worker wake");
+        eprintln!(
+            "ready-wake-review: {} waits without renderer polling",
+            ready_listener.1
+        );
     }
 
     fn write_review_ppm(output: &Path, index: u64, rgba: &[u8]) {

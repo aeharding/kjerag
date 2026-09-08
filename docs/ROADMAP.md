@@ -14,6 +14,48 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Due-result wake candidate, 2026-09-08:** branch playback replaces repeated
+redraw polling with one coalesced worker notification only while an exact due
+source is admitted and its actor can finish autonomously. Registration and
+temporal commit share a lock; future-ready publication, full draw retirement,
+backpressure and absent-listener diagnostics keep their existing retries.
+Input and controls remain independently drawable. This changes scheduling,
+not source cadence, seam arithmetic or correction age. Both real-camera
+sequences complete with the renderer asleep for all 31 X4 and 61 X2 source
+waits, and all 460 original output artifacts remain byte-identical to the
+control. The initial candidate native executable is `c2074e2f` in
+`scratch/fusion-live-20260907/ready-wake-02/`. Native UI qualification passes
+50 X4 and 54 ONE X2 checks, zero failures, with both reported-view captures
+byte-identical to the preceding controls-only build. Full workspace gates pass
+1,254 tests, zero failures, 30 ignored, including the lost-wake, exact-identity,
+failure and poisoned-owner wake regressions. Formatting, all-target Clippy,
+name/source-list checks, two device-limit and three GPU preflight tests pass.
+Four authenticated native measurements of that frozen `c2074e2f` executable
+complete at 2256x1504 with quiet audio. The 40-second nominal-300-Hz pointer
+cohorts pass strict accounting: conservative completed-changing capacity is
+273.125 X4 and 280.399 X2 updates/sec, with consecutive 29.975 source advances/sec
+on both. Draw completion wall p99 remains 8.712/8.100 ms. Ordinary 60 Hz idle
+cohorts have no holds at least 47 ms, but the X4 panning run's post-pointer tail
+has a recovered 50.322 ms source hold. These are not paired comparisons with
+the old control and do not establish a causal improvement. The detailed limits
+are in `ready-wake-02/PERFORMANCE.md`. This is not a demonstrated hitch fix or
+owner acceptance; installed qualification remains pending and the installed app
+still contains `eaa304bc`.
+
+After the initial candidate was frozen, two test-only assertions were added
+for a poisoned owner's failure wake and a same-index/different-epoch stamp.
+The final native rebuild is `6fc7943f`, separately retained as
+`ready-wake-02/final-kjerag`. The `c2074e2f` UI/capacity measurements above must
+not be silently relabeled as measurements of that rebuilt executable. The
+current source's SDK-built installed application will be qualified separately.
+
+The existing installed X4 lifecycle repeat does not reproduce the prior
+115 ms excursion. Its smaller repeated old-source draws occur before the next
+deadline, many aligned with status updates or pointer/window activity. It
+does not establish due-source polling as the earlier stall's cause. Exact
+identity, matched-cohort timing and driver-observation limits are recorded in
+`scratch/installed-capacity/x4-installed-idle-lifecycle-01/RESULT.md`.
+
 **Carried-correction visual experiment, 2026-09-08:** following the owner's
 question about reusing stitching while new video advances, a test-only
 experiment now renders source N with its fresh parent/preimage/base geometry

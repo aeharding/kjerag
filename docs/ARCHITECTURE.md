@@ -91,6 +91,20 @@ the two-slot capacity, source lease, shader arithmetic or presentation clock.
 The 1 ms interval is a measured Kjerag policy under qualification, not a Studio
 constant and not proof of 240 Hz physical presentation.
 
+When the only remaining work is an admitted due source's running stitch actor,
+Scene can now sleep until that actor commits the exact result. A single
+coalescing wake belongs to Scene; its shell subscription stays alive during
+paused seeks and final-frame landing. Registration shares the capture-state
+lock with temporal commit, and refuses to sleep if any publishable future
+already exists. Only an explicitly awaited due stamp wakes the shell, not
+speculative lookahead. The subscription message requests a normal redraw;
+the presentation clock remains in the widget's redraw event. Mouse and UI
+redraws remain independent. Missing listeners, admission backpressure, retired
+resource drains, ready futures and full draw slots retain their existing
+retries. No source is skipped and no older map is applied to newer video.
+The real-camera sequence tests exercise worker notification without renderer
+polling and compare the original images, maps, alpha and fusion ratios.
+
 `Size` and `Fallible` live in `media`: they are frame types, and `render`
 depends on `media` rather than the other way round. `render` re-exports both
 and adds the `Extent` trait, which is the `wgpu::Extent3d` half of `Size`

@@ -26,6 +26,7 @@ use crate::direct_type2::DirectType2Pipeline;
 use crate::direct_type2::ImportedOneXsPicture;
 use crate::draw_retirement::{DrawPermit, DrawRetirementError, IcedDrawRetirements};
 use crate::flow::one_xs_belt::{RetainedBaseMaps, SolverBelts, SourceImage, sample_source_belts};
+use crate::ready_wake::ReadyWake;
 use crate::stitch_camera::StitchCamera;
 use kjerag_media::{FrameStamp, Frames};
 use kjerag_meta::{CalibrationSet, OrientationTrack, Readout};
@@ -565,6 +566,10 @@ struct ResidentCaptureState {
     worker_active: Option<FrameStamp>,
     parked: Option<ResidentReadyMap>,
     worker_error: Option<String>,
+    /// One exact offered source whose worker completion may wake the window.
+    /// This is presentation interest only; it neither admits nor publishes a
+    /// source, and speculative completions never consume it.
+    due_waiter: Option<(FrameStamp, ReadyWake)>,
     retired: bool,
     #[cfg(test)]
     worker_started: Option<FrameStamp>,
@@ -588,12 +593,25 @@ impl ResidentCaptureState {
             worker_active: None,
             parked: None,
             worker_error: None,
+            due_waiter: None,
             retired: false,
             #[cfg(test)]
             worker_started: None,
             submitted: None,
             seek_restart,
         }
+    }
+}
+
+fn take_due_waiter(state: &mut ResidentCaptureState, completed: &FrameStamp) -> Option<ReadyWake> {
+    if state
+        .due_waiter
+        .as_ref()
+        .is_some_and(|(due, _)| due == completed)
+    {
+        state.due_waiter.take().map(|(_, wake)| wake)
+    } else {
+        None
     }
 }
 
@@ -1146,41 +1164,58 @@ impl ResidentCaptureFacadeInner {
         bound: ResidentBoundInstall,
         completed: &FrameStamp,
     ) -> Fallible<bool> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "ONE X2 resident transaction facade is poisoned")?;
-        if state.retired {
+        let wake = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "ONE X2 resident transaction facade is poisoned")?;
+            if state.retired {
+                state.worker_active = None;
+                state.worker_running = false;
+                return Ok(false);
+            }
+            if matches!(state.transaction, ResidentTransaction::Quarantined) {
+                return Err(state
+                    .worker_error
+                    .clone()
+                    .unwrap_or_else(|| "ONE X2 resident transaction facade is quarantined".into())
+                    .into());
+            }
+            if state.worker_active.as_ref() != Some(completed) {
+                return Err("ONE X2 worker completion differs from its active source".into());
+            }
+            // This is the established façade-then-root order. Holding the
+            // same lock used by `wait_for_frame` across the future commit makes
+            // registration lost-wake safe: a registrar either precedes this
+            // commit and is taken here, or follows it and observes the future.
+            bound.commit_future()?;
             state.worker_active = None;
-            state.worker_running = false;
-            return Ok(false);
+            take_due_waiter(&mut state, completed)
+        };
+        if let Some(wake) = wake {
+            wake.notify();
         }
-        if matches!(state.transaction, ResidentTransaction::Quarantined) {
-            return Err(state
-                .worker_error
-                .clone()
-                .unwrap_or_else(|| "ONE X2 resident transaction facade is quarantined".into())
-                .into());
-        }
-        if state.worker_active.as_ref() != Some(completed) {
-            return Err("ONE X2 worker completion differs from its active source".into());
-        }
-        // This is the established façade-then-root order. Binding and all GPU
-        // waiting happened before this short atomic temporal commit.
-        bound.commit_future()?;
-        state.worker_active = None;
         Ok(true)
     }
 
     fn fail_worker(&self, error: Box<dyn Error + Send + Sync>) {
         let message = error.to_string();
-        if let Ok(mut state) = self.state.lock() {
-            state.worker_running = false;
-            state.worker_active = None;
-            state.queued.clear();
-            state.parked.take();
-            state.worker_error = Some(message.clone());
-            state.transaction = ResidentTransaction::Quarantined;
+        let wake = match self.state.lock() {
+            Ok(mut state) => {
+                state.worker_running = false;
+                state.worker_active = None;
+                state.queued.clear();
+                state.parked.take();
+                state.worker_error = Some(message.clone());
+                state.transaction = ResidentTransaction::Quarantined;
+                state.due_waiter.take().map(|(_, wake)| wake)
+            }
+            // Wake the error funnel even if the worker poisoned its owner.
+            // Do not recover or release uncertain computational state here.
+            Err(error) => error.into_inner().due_waiter.take().map(|(_, wake)| wake),
+        };
+        if let Some(wake) = wake {
+            wake.notify();
         }
         eprintln!("{message}");
     }
@@ -1308,6 +1343,49 @@ impl ResidentCaptureFacade {
     /// renderer attachment. Readable indices alone never authorize reuse.
     pub(crate) fn acknowledged(&self, frame: &FrameStamp) -> Fallible<bool> {
         Ok(self.state()?.installed.as_ref() == Some(frame))
+    }
+
+    /// Register one exact due source for a worker-completion wake.
+    ///
+    /// A ready future, absent listener, unadmitted source or actor that cannot
+    /// progress keeps the caller's ordinary redraw retry. Registration and the
+    /// worker's future commit share the facade lock, so completion cannot fall
+    /// between the readiness check and storing the waiter.
+    pub(crate) fn wait_for_frame(&self, frame: &FrameStamp, wake: &ReadyWake) -> Fallible<bool> {
+        if !wake.listening() {
+            return Ok(false);
+        }
+        let mut state = self.state()?;
+        if state.retired {
+            return Ok(false);
+        }
+        if matches!(state.transaction, ResidentTransaction::Quarantined) {
+            return Err(state
+                .worker_error
+                .clone()
+                .unwrap_or_else(|| "ONE X2 resident transaction facade is quarantined".into())
+                .into());
+        }
+        let Some(session) = state.session.as_ref() else {
+            return Ok(false);
+        };
+        if session.capture.pipeline.root.has_future()? {
+            return Ok(false);
+        }
+        let exact_accepted = state.worker_active.as_ref() == Some(frame)
+            || state
+                .queued
+                .iter()
+                .any(|source| source.resident_frame() == *frame)
+            || state
+                .parked
+                .as_ref()
+                .is_some_and(|ready| ready.frame() == frame);
+        if !state.worker_running || !exact_accepted || !wake.listening() {
+            return Ok(false);
+        }
+        state.due_waiter = Some((frame.clone(), wake.clone()));
+        Ok(true)
     }
 
     pub(crate) fn accepted(&self, frame: &FrameStamp) -> Fallible<bool> {
@@ -1925,7 +2003,7 @@ impl ResidentSceneFacade {
 
     fn drain_replaced_inner(&self, externally_polled: bool) -> Fallible<ResidentDrain> {
         self.draw.staged().take();
-        let (session, fail_closed) = {
+        let (session, fail_closed, wake) = {
             let mut state = self.capture.state()?;
             state.retired = true;
             state.queued.clear();
@@ -1933,8 +2011,12 @@ impl ResidentSceneFacade {
             (
                 state.session.clone(),
                 matches!(state.transaction, ResidentTransaction::Quarantined),
+                state.due_waiter.take().map(|(_, wake)| wake),
             )
         };
+        if let Some(wake) = wake {
+            wake.notify();
+        }
         let Some(session) = session else {
             return Ok(if fail_closed {
                 ResidentDrain::FailClosedRetained
@@ -4903,6 +4985,146 @@ mod tests {
         assert!(state.installed.is_none());
         assert!(matches!(state.transaction, ResidentTransaction::Idle));
         assert!(!facade.same_capture(&restart));
+    }
+
+    #[test]
+    fn due_waiter_is_consumed_only_by_its_exact_completion() {
+        let due = FrameStamp::for_test(7, Duration::from_secs(7), None);
+        let other = FrameStamp::for_test(8, Duration::from_secs(8), None);
+        let reopened = FrameStamp::for_test(7, Duration::from_secs(7), None);
+        let wake = ReadyWake::default();
+        let mut listener = wake.listen();
+        let mut state = ResidentCaptureState::new(None, false);
+        state.due_waiter = Some((due.clone(), wake));
+
+        assert!(take_due_waiter(&mut state, &other).is_none());
+        assert!(take_due_waiter(&mut state, &reopened).is_none());
+        assert_eq!(
+            state.due_waiter.as_ref().map(|waiter| &waiter.0),
+            Some(&due)
+        );
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(listener.poll_ready(&mut cx).is_pending());
+
+        take_due_waiter(&mut state, &due).unwrap().notify();
+        assert!(state.due_waiter.is_none());
+        assert!(listener.poll_ready(&mut cx).is_ready());
+    }
+
+    #[test]
+    fn due_wait_registration_requires_exact_progress_and_a_live_listener() {
+        let (device, queue, _foreign_device, _foreign_queue, adapter) = match gpu_pair() {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "KJERAG_REQUIRE_GPU is set and there is no GPU to answer with: {why}"
+                );
+                eprintln!("skipping ONE X2 due-wait registration test: {why}");
+                return;
+            }
+        };
+        let facade = ResidentCaptureFacade::new(
+            resident_profile(session_calibration(20.0, 0.0)),
+            session_orientation(1.0),
+        );
+        let _attachment = facade
+            .attach_renderer(
+                OneXsGpuContext::new(&device, &queue),
+                wgpu::TextureFormat::Rgba8Unorm,
+            )
+            .unwrap_or_else(|error| panic!("resident facade failed on {adapter}: {error}"));
+        let due = FrameStamp::for_test(7, Duration::from_secs(7), None);
+        let other = FrameStamp::for_test(8, Duration::from_secs(8), None);
+        let wake = ReadyWake::default();
+        assert!(!facade.wait_for_frame(&due, &wake).unwrap());
+        let _listener = wake.listen();
+        assert!(!facade.wait_for_frame(&due, &wake).unwrap());
+
+        {
+            let mut state = facade.state().unwrap();
+            state.worker_running = true;
+            state.worker_active = Some(due.clone());
+        }
+        assert!(!facade.wait_for_frame(&other, &wake).unwrap());
+        assert!(facade.wait_for_frame(&due, &wake).unwrap());
+        assert_eq!(
+            facade
+                .state()
+                .unwrap()
+                .due_waiter
+                .as_ref()
+                .map(|waiter| &waiter.0),
+            Some(&due)
+        );
+
+        facade.state().unwrap().worker_running = false;
+        assert!(!facade.wait_for_frame(&due, &wake).unwrap());
+    }
+
+    #[test]
+    fn worker_failure_clears_and_notifies_a_due_waiter() {
+        let facade = ResidentCaptureFacade::new(
+            resident_profile(session_calibration(20.0, 0.0)),
+            session_orientation(1.0),
+        );
+        let due = FrameStamp::for_test(7, Duration::from_secs(7), None);
+        let wake = ReadyWake::default();
+        let mut listener = wake.listen();
+        facade.state().unwrap().due_waiter = Some((due, wake));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(listener.poll_ready(&mut cx).is_pending());
+
+        facade.inner.fail_worker("exact worker failure".into());
+
+        assert!(facade.state().unwrap().due_waiter.is_none());
+        assert!(listener.poll_ready(&mut cx).is_ready());
+    }
+
+    #[test]
+    fn poisoned_worker_failure_wakes_due_waiter_without_recovering_uncertain_state() {
+        let facade = ResidentCaptureFacade::new(
+            resident_profile(session_calibration(20.0, 0.0)),
+            session_orientation(1.0),
+        );
+        let due = FrameStamp::for_test(7, Duration::from_secs(7), None);
+        let wake = ReadyWake::default();
+        let mut listener = wake.listen();
+        {
+            let mut state = facade.state().unwrap();
+            state.worker_running = true;
+            state.worker_active = Some(due.clone());
+            state.due_waiter = Some((due.clone(), wake));
+        }
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(listener.poll_ready(&mut cx).is_pending());
+        let poisoned = Arc::clone(&facade.inner);
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _state = poisoned.state.lock().unwrap();
+            panic!("injected worker facade poison");
+        }));
+        assert!(unwind.is_err());
+        facade
+            .inner
+            .fail_worker("worker observed poisoned capture state".into());
+        assert!(listener.poll_ready(&mut cx).is_ready());
+        match facade.state() {
+            Err(error) => assert_eq!(
+                error.to_string(),
+                "ONE X2 resident transaction facade is poisoned"
+            ),
+            Ok(_) => panic!("worker failure recovered poisoned facade state"),
+        }
+        let state = facade
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(state.due_waiter.is_none());
+        assert!(state.worker_running);
+        assert_eq!(state.worker_active.as_ref(), Some(&due));
+        assert!(state.worker_error.is_none());
+        assert!(matches!(state.transaction, ResidentTransaction::Idle));
     }
 
     #[test]

@@ -14,6 +14,19 @@ use cosmic::iced::{Event, Point, Rectangle, mouse, window};
 
 use super::{Next, Scene, ScenePipeline, ScenePrimitive, Stall, Viewpoint};
 
+impl Scene {
+    /// Wake the shell only when a due stitch result it waited for completes.
+    /// The video clock still runs inside the redraw event, not this stream.
+    pub fn ready_subscription(&self) -> cosmic::iced::Subscription<()> {
+        cosmic::iced::Subscription::run_with(self.ready_wake(), |wake| {
+            cosmic::iced::futures::stream::unfold(wake.listen(), |mut listener| async move {
+                std::future::poll_fn(|cx| listener.poll_ready(cx)).await;
+                Some(((), listener))
+            })
+        })
+    }
+}
+
 /// Wheels report scroll in lines and touchpads report it in pixels, and iced
 /// passes both through as they came. A feel constant, not a measurement.
 const PIXELS_PER_LINE: f32 = 40.0;
