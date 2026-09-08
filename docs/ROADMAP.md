@@ -69,8 +69,14 @@ the two device-limit and three real-GPU presentation-readiness checks. The
 first full run exposed an EOF test assuming an immediate redraw even when the
 two draw slots are full; its corrected assertion requires the existing bounded
 1 ms retry and retains exact final-frame/EOF acknowledgement checks. Runtime
-code did not change for that test correction. The broader native UI suite is
-running for this combined candidate. Actual X4 sourced-presentation holds
+code did not change for that test correction. The broader native UI suite now
+passes all 50 X4 and 54 ONE X2 checks, including exact reported views, backward
+seeks and real scrubber landings. Both reported-view captures match the preceding
+FIFO native build byte for byte; root viewed and linked them. The runtime is
+recorded in branch commit `8c6921cf`; the final native UI executable SHA-256 is
+`0d0390696daec8eee7f13f58f70f21805984cf65f7544a51ad6d76842304066d`.
+Evidence is `scratch/fusion-live-20260907/ui-09-controls-wake/`.
+Actual X4 sourced-presentation holds
 around the three wakes fall from 286.80/256.30/255.65 ms to 41.73/43.68/46.15 ms;
 none of the corrected wake windows contains a presentation without a Scene
 draw. These are native commits, not physical scanout measurements.
@@ -100,8 +106,23 @@ cohort has essentially unchanged p95/p99 holds and two long holds versus one;
 the X4 pair is refused for a source-less presentation inside its common cohort.
 The controls-wake gap above falls on different sides of the two arms' steady
 selection boundary, so their maximum-hold figures are not a valid comparison.
-Startup latency/memory and active-view capacity remain
-pending. The installed Flatpak remains the qualified b2 worker build,
+Final-binary controls-wake repeats pass all three wakes per camera, with maximum
+pump gaps of 33.77/33.80/33.93 ms on X4 and 33.83/34.02/33.82 ms on X2.
+Same-harness 1280x720 memory snapshots against the b2 native control show
+104.24 MiB more driver-accounted memory on X4 and 118.02 MiB more on X2,
+deduplicating DRM client IDs before adding VRAM and GTT. These are one steady
+snapshot per arm, not peak GPU usage; process RSS is reported separately and
+must not be added to those potentially overlapping driver accounts. The time
+from the first target's publication to its first successor is 80.43 versus
+49.18 ms on X4 and 80.37 versus 48.32 ms on X2. This measures about 31–32 ms
+additional initial-picture hold in these runs, not total open latency or all
+seek/resume costs. The coordinator explicitly asked the owner to accept this
+test-build memory/startup tradeoff; no answer or acceptance is recorded yet.
+Raw runs and exact executable hashes are under `scratch/controls-wake/` and
+summarized in `controls-wake-01/README.md`. Active-view capacity and the FIFO's
+overall smoothness benefit remain unqualified. The combined `8c6921cf` package
+is being built from an exact git archive, without installing it or accepting
+the buffer tradeoff. The installed Flatpak remains the qualified b2 worker build,
 not this unqualified candidate. No main merge or new owner acceptance.
 
 **Autonomous source processing under qualification, 2026-09-07:** the owner
