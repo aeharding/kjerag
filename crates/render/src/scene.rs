@@ -8446,7 +8446,12 @@ mod tests {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let mut draw = DirectMapDraw::new(device, &pipeline.layout, pipeline.format, true);
+        let mut draw = DirectMapDraw::new(
+            device,
+            &pipeline.layout,
+            pipeline.format,
+            map.fusion().is_some(),
+        );
         draw.upload(queue, map);
         assert_eq!(draw.bound_frame(), Some(map.frame()));
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -9071,6 +9076,7 @@ mod tests {
                 pitch: -13.99f32.to_radians(),
                 fov: 57.95f32.to_radians(),
             },
+            ReviewDiagnostic::Existing,
         );
     }
 
@@ -9092,7 +9098,38 @@ mod tests {
                 pitch: 3.55f32.to_radians(),
                 fov: 63.63f32.to_radians(),
             },
+            ReviewDiagnostic::Existing,
         );
+    }
+
+    /// Candidate-ordinal photometric evidence only. Studio output frame zero
+    /// is not authenticated as this source, so these automatic-GPU ON and
+    /// neutral pictures do not establish Studio alignment or parity.
+    #[test]
+    fn calibrated_x4_air_photometric_review_sequence() {
+        let Some(output) = std::env::var_os("KJERAG_X4_PHOTOMETRIC_REVIEW_DIR").map(PathBuf::from)
+        else {
+            return;
+        };
+        let path = std::env::var_os("KJERAG_X4_TEST_MEDIA").expect("review needs real X4 footage");
+        post_seek_review_sequence(
+            Path::new(&path),
+            &output,
+            Duration::from_secs_f64(34538.0 * 1001.0 / 30000.0),
+            102,
+            Camera {
+                yaw: 132.05f32.to_radians(),
+                pitch: 3.55f32.to_radians(),
+                fov: 63.63f32.to_radians(),
+            },
+            ReviewDiagnostic::Photometric,
+        );
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ReviewDiagnostic {
+        Existing,
+        Photometric,
     }
 
     fn post_seek_review_sequence(
@@ -9101,6 +9138,7 @@ mod tests {
         target: Duration,
         count: u64,
         camera: Camera,
+        review: ReviewDiagnostic,
     ) {
         use std::io::Write;
         std::fs::create_dir(output).expect("review output must be a new directory");
@@ -9123,26 +9161,52 @@ mod tests {
             );
             start
         };
+        if review == ReviewDiagnostic::Photometric {
+            assert_eq!(
+                start, 34538,
+                "index-derived photometric review target did not select source 34538"
+            );
+        }
         scene.seek(target, Accuracy::Exact);
         let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
         let mut previous = None;
         let mut ready_listener = (scene.ready_wake.listen(), 0);
         // Explicit offline visual experiment only. Full source processing and
         // history remain unchanged; carried corrections never enter playback.
-        let carried_review = std::env::var_os("KJERAG_CARRIED_FLOW_REVIEW").is_some();
+        let carried_review = review == ReviewDiagnostic::Existing
+            && std::env::var_os("KJERAG_CARRIED_FLOW_REVIEW").is_some();
+        let photometric_review = review == ReviewDiagnostic::Photometric;
         let mut previous_inputs = None;
         let mut previous_ratios = None;
-        let mut diagnostic = carried_review
+        let mut diagnostic = (carried_review || photometric_review)
             .then(|| ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm));
         if carried_review {
             for arm in ["direct-current", "carried-flow", "carried-flow-color"] {
                 std::fs::create_dir(output.join(arm)).unwrap();
             }
         }
+        let mut source_log = if photometric_review {
+            // The ordinary Scene screenshot already lives at the output root.
+            for arm in ["photometric-on", "photometric-neutral"] {
+                std::fs::create_dir(output.join(arm)).unwrap();
+            }
+            let mut log = std::io::BufWriter::new(
+                std::fs::File::create_new(output.join("sources.tsv")).unwrap(),
+            );
+            writeln!(
+                log,
+                "source_index\tsource_seconds\tshot_index\tshot_seconds"
+            )
+            .unwrap();
+            Some(log)
+        } else {
+            None
+        };
+        let mut photometric_capture = None;
         for index in start..start + count {
             let frame = wait_for_new_scene_frame(&scene, previous.as_ref());
             assert_eq!(frame.index(), index);
-            prepare_and_draw_resident_with_listener(
+            let installed_capture = prepare_and_draw_resident_with_listener(
                 &scene,
                 &mut pipeline,
                 &device,
@@ -9150,6 +9214,16 @@ mod tests {
                 &frame,
                 Some(&mut ready_listener),
             );
+            if photometric_review {
+                if let Some(capture) = &photometric_capture {
+                    assert!(
+                        installed_capture.same_capture(capture),
+                        "photometric review replaced its retained live GPU producer"
+                    );
+                } else {
+                    photometric_capture = Some(installed_capture);
+                }
+            }
             scene.pump(Instant::now());
             let (send, receive) = std::sync::mpsc::channel();
             scene.capture(Request {
@@ -9172,6 +9246,58 @@ mod tests {
             assert_eq!(shot.index, index);
             let map = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
             assert_eq!(map.frame(), &frame);
+            if photometric_review {
+                assert_finite_fusion(&map);
+                let diagnostic = diagnostic.as_mut().unwrap();
+                let prepared = diagnostic
+                    .prepare_one_xs_picture(&scene.primitive(camera), 16.0 / 9.0)
+                    .expect("photometric diagnostic lost the displayed source");
+                assert_eq!(prepared.frame(), &frame);
+
+                let on =
+                    render_direct_map_pixels_sized(&device, &queue, diagnostic, &map, 1280, 720);
+                assert_eq!(on.len(), shot.rgba.len());
+                for (byte, (&actual, &reference)) in on.iter().zip(&shot.rgba).enumerate() {
+                    assert!(
+                        actual.abs_diff(reference) <= 1,
+                        "photometric ON/live Scene differs at source {index}, byte {byte}: {actual} vs {reference}"
+                    );
+                }
+
+                let neutral = OneXsMapFrame::new(
+                    frame.clone(),
+                    map.packed().clone(),
+                    map.alpha().clone(),
+                    map.pis_backend(),
+                );
+                assert_eq!(neutral.frame(), map.frame());
+                assert_eq!(neutral.packed().bytes(), map.packed().bytes());
+                assert_eq!(neutral.alpha().bytes(), map.alpha().bytes());
+                assert_eq!(neutral.pis_backend(), map.pis_backend());
+                assert!(neutral.fusion().is_none());
+                let neutral = render_direct_map_pixels_sized(
+                    &device, &queue, diagnostic, &neutral, 1280, 720,
+                );
+
+                write_review_ppm(&output.join("photometric-on"), index, &on);
+                write_review_ppm(&output.join("photometric-neutral"), index, &neutral);
+                writeln!(
+                    source_log.as_mut().unwrap(),
+                    "{}\t{:.9}\t{}\t{:.9}",
+                    frame.index(),
+                    frame.timestamp().as_secs_f64(),
+                    shot.index,
+                    shot.time.as_secs_f64(),
+                )
+                .unwrap();
+
+                let installed = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
+                assert_eq!(installed.frame(), map.frame());
+                assert_eq!(installed.packed().bytes(), map.packed().bytes());
+                assert_eq!(installed.alpha().bytes(), map.alpha().bytes());
+                assert_eq!(installed.pis_backend(), map.pis_backend());
+                assert_eq!(installed.fusion(), map.fusion());
+            }
             if carried_review {
                 let diagnostic = diagnostic.as_mut().unwrap();
                 let capture = scene.show.as_ref().unwrap().one_xs.clone().unwrap();
@@ -9277,6 +9403,7 @@ mod tests {
             for pixel in shot.rgba.chunks_exact(4) {
                 file.write_all(&pixel[..3]).unwrap();
             }
+            file.flush().unwrap();
             eprintln!(
                 "seek-review: frame {index} time {:.6}",
                 shot.time.as_secs_f64()
@@ -9285,6 +9412,9 @@ mod tests {
             if index + 1 < start + count {
                 scene.step(Instant::now(), 1);
             }
+        }
+        if let Some(log) = source_log.as_mut() {
+            log.flush().unwrap();
         }
         assert!(ready_listener.1 > 0, "review never exercised a worker wake");
         eprintln!(
@@ -9303,6 +9433,7 @@ mod tests {
         for pixel in rgba.chunks_exact(4) {
             file.write_all(&pixel[..3]).unwrap();
         }
+        file.flush().unwrap();
     }
 
     /// Opt-in real-media comparison of the earliest resident numeric stage.

@@ -14,6 +14,37 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Automatic-GPU color output comparison, 2026-09-08:** a test-only Scene
+sequence now captures sources 34538 through 34639 of the owner's X4 file,
+retaining one live GPU producer and its history across all 102 sources. Each
+ordinary screenshot is compared with a diagnostic draw of that exact displayed
+map and automatic ratio pair, within one 8-bit code per channel. A neutral
+diagnostic removes only the ratio binding, retaining identical source, packed
+geometry, alpha and PIS backend. The installed map and ratios are rechecked
+after each diagnostic. No captured Studio coefficients, host estimator, prefix
+warmup or new playback setting is used. Source indices/times and all images,
+maps and ratios are retained in `scratch/photometric-live-output-20260908-01/`.
+
+The existing sealed Studio ON/OFF exports are projected with the same previously
+recorded display view, without new fitting or export. Root viewed comparison
+panels at output candidates 0, 31 and 101 and neighboring difference fields.
+Both products show broad, oppositely signed color regions; their magnitude,
+shape and the underlying view registration are not identical. This is sampled
+visual agreement in the kind of correction, not authenticated source/output
+association, coefficient identity or Studio parity. The 102-frame presentation
+videos and signed-cell diagnostics are available for owner review. The wider
+dark-soil, sun-facing and hard-mode references remain open. The existing
+`colour mode=profile` still toggles legacy pooled tone, not this GPU fusion;
+running it unchanged would not qualify the current field-interior requirement.
+
+The new test executable is frozen at SHA-256 `d389d074f92a1a80a358f810950769ef0959e2de678c3263d4e3e81e100fe669`.
+The opt-in sequence passes all 102 source waits, and the original 31 X4/61 X2
+sequences retain all 460 baseline artifacts byte for byte. Full workspace gates
+pass 1,255 tests, zero failures, 30 ignored, plus formatting, all-target Clippy,
+name/source-list checks, two device-limit and three GPU preflight tests. Only
+test code changes; native and installed player binaries remain unchanged.
+The installed `31ea781d` test build and its performance limits below still apply.
+
 **Due-result wake candidate, 2026-09-08:** branch playback replaces repeated
 redraw polling with one coalesced worker notification only while an exact due
 source is admitted and its actor can finish autonomously. Registration and
