@@ -39,15 +39,53 @@ cohorts have no holds at least 47 ms, but the X4 panning run's post-pointer tail
 has a recovered 50.322 ms source hold. These are not paired comparisons with
 the old control and do not establish a causal improvement. The detailed limits
 are in `ready-wake-02/PERFORMANCE.md`. This is not a demonstrated hitch fix or
-owner acceptance; installed qualification remains pending and the installed app
-still contains `eaa304bc`.
+owner acceptance. Installed-runtime qualification of the exact committed source
+is recorded separately below.
 
 After the initial candidate was frozen, two test-only assertions were added
 for a poisoned owner's failure wake and a same-index/different-epoch stamp.
 The final native rebuild is `6fc7943f`, separately retained as
 `ready-wake-02/final-kjerag`. The `c2074e2f` UI/capacity measurements above must
 not be silently relabeled as measurements of that rebuilt executable. The
-current source's SDK-built installed application will be qualified separately.
+current source's SDK-built installed application is qualified separately.
+
+**Installed due-result wake build, 2026-09-08:** exact source `31ea781d` passes
+CI 34194254914 and is built, exported and installed as `dev.harding.Kjerag`.
+An independent audit matches all 449 archived files to that Git tree and
+confirms unchanged dependencies, runtime and sandbox permissions. Installed
+OSTree is `9a0623d57c6bf80be8e513831468f798fd1750e87b7ccc3c1c6d2faffa344eb7`;
+packaged and installed executable SHA-256 is
+`40cafdd105d4c2fec7e7ee7d623b7b25e604a8e68a3d4361c3f1b6e0521050e5`.
+The full installed UI suites complete with 40 X4 and 44 ONE X2 checks,
+zero failures. Before/after deployment and executable guards pass. Both
+reported-view PPMs are byte-identical to the preceding installed `eaa304bc`
+captures; root viewed and linked the new PNGs. The isolated UI sessions lack
+a sound device, so the volume check skips; preload failure injection also
+skips in the sandbox. The shader check uses the harness's native Rust twin,
+not a second sandbox executable. Evidence is
+`scratch/flatpak-delivery-31ea781d/`. The previous verified `eaa304bc` bundle
+is retained for rollback. No merge, release or owner acceptance.
+
+Four authenticated measurements of that actual installed executable finish
+with exit zero, live null-sink audio and positive exact-process Radeon graphics
+work. At 2256x1504, the 40-second nominal-300-Hz pointer cohorts pass strict
+source/draw/completion accounting: conservative completed-changing capacity
+is 292.449 X4 and 297.624 X2 updates/sec, with 1,199 consecutive source advances
+in each run (29.975/sec). Draw completion wall p99 remains 8.652/8.463 ms,
+maximum 17.997/17.272 ms. Neither pan nor ordinary 60 Hz idle repeats the
+previous X4 early source-hold episode or X2 phase-debt range; no observed
+source transition holds at least 47 ms. These are single runs, not paired
+comparisons or physical scanout, and do not establish a causal speedup or a
+general hitch fix. Whole traces retain source-less startup commits and a
+termination-cutoff callback; strict pointer and common idle cohorts verify
+their own boundaries. `scratch/flatpak-delivery-31ea781d/PERFORMANCE.md`
+records exact cohorts and limits. All six dedicated installed controls wakes
+also pass with authenticated before/running/after identities: maximum pump
+gaps 34.122/33.767/33.492 ms X4 and 33.729/33.495/33.780 ms X2
+(`run.uhQZ7pwQ`, `run.VfvzfLYz`). The candidate is retained for owner testing;
+4.17 ms draw tails, desktop smoothness and Studio-output color qualification
+remain open. No further export or broad reverse engineering is authorized by
+these results.
 
 The existing installed X4 lifecycle repeat does not reproduce the prior
 115 ms excursion. Its smaller repeated old-source draws occur before the next
@@ -89,7 +127,8 @@ The experiment runs only after the current full solve has completed, so it
 proves hypothetical pixels, not live latency, deadline availability or safe
 shared-source ownership. Live preview would require fresh current geometry,
 bounded immutable correction snapshots and separate compute/draw lifetime
-proofs. Installed runtime remains the qualified `eaa304bc` controls correction.
+proofs. This experiment did not change the installed `eaa304bc` controls
+correction; the later `31ea781d` delivery above also retains same-frame maps.
 
 **Actual installed capacity, 2026-09-08:** two authenticated 40-second
 2256x1504, nominal-300-Hz pointer runs with live null-sink audio exceed 240
