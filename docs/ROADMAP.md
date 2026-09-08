@@ -35,13 +35,39 @@ overall smoothness benefit, and its owner tradeoff question is withdrawn from
 this delivery. This is not a claim that the FIFO caused the capacity failure
 or that the smaller reserve resolves it. The full performance goal remains open;
 the intent is to deliver the concrete controls correction without bundling the
-unproven reserve. Exact-source build/native/UI/package checks for this split
-are still required. The independent same-epoch forward-step EOF correction
-is retained. The split passes full workspace gates: 1,247 tests, zero failures,
+unproven reserve. The independent same-epoch forward-step EOF correction is
+retained. The split passes full workspace gates: 1,247 tests, zero failures,
 30 ignored, formatting, all-target Clippy, name/source-list checks, both
 device-limit tests and three real-GPU preflight tests. Its rebuilt native
-executable is `6927f39e4bc9a58d447d1bef837b66a036477e1ea18a729ea7a8234528906d19`;
-the full two-camera UI suite is running. No merge, release or new installation.
+executable is `6927f39e4bc9a58d447d1bef837b66a036477e1ea18a729ea7a8234528906d19`.
+The full native UI suite passes 50 X4 and 54 ONE X2 checks with zero failures.
+Both reported-view captures match the b2 native UI captures byte for byte;
+root viewed and linked both. Runtime commit `eaa304bc` is pushed and CI
+34185000786 passes. The exact split binary also passes all three dedicated
+wakes per camera: maximum pump gaps 33.70/33.61/33.46 ms X4 and
+33.52/33.81/33.51 ms X2. The larger FIFO is therefore not needed to remove
+the reproduced controls-wake pause.
+
+The exact-source Flatpak build, export and install complete with exit zero.
+The installed app is the selected `eaa304bc` split at OSTree
+`efeb42af77deb598c8fedc9be247ce3c4c7d9f1301021f092fbd14c244f23756`;
+its packaged, installed and running executable SHA-256 is
+`10ffb2886adc89bda16d1823fba390250bd1c3490da2b3efb5d745b528478e18`.
+The Flatpak artifact SHA-256 is
+`ac77dbd5e5a31c07c70af98b5d22de75e78b476ee90457457af946c3ee779910`.
+All three installed controls wakes pass on each camera: X4 maximum pump gaps
+33.622151/33.571097/33.615027 ms and ONE X2
+33.567535/33.903542/33.784812 ms. Both runs authenticate the same OSTree and
+the same executable before, during and after playback. The installed UI suite
+completes with 40 X4 and 44 ONE X2 checks, zero failures, and passing before and
+after executable hash guards. Root viewed and linked both reported-view PNGs;
+both PPMs match the preceding installed b2 captures byte for byte. The isolated UI
+sessions have no sound device, so their volume check skips, and sandbox preload
+injection also skips. Their shader comparison uses the harness's native Rust
+twin helper, not a second in-sandbox executable. The separate installed
+controls-wake runs above do have the null-sink audio path live; they are a
+bounded wake result, not a general audio qualification. No merge, release or
+owner acceptance.
 
 The archived combined package has executable SHA-256
 `04c836b981a4a973e69d9cedea3e91dfc23b6cda6fbaca8d6cc001b782df86d7`
