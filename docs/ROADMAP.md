@@ -14,6 +14,47 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Two-chunk scheduling trial rejected, 2026-09-07:** the installed controls
+correction below is now qualified on both cameras. A subsequent native trial
+kept the six L1 command buffers and their order but permitted two chunks
+without completed-prefix credit instead of waiting between every chunk.
+It passed 35 lease/facade tests, both real-camera cold/warm checks, both
+autonomy and prefetched-seek checks, and all 460 image/map/alpha/color artifacts
+remained byte-identical across the 31-frame X4 and 61-frame X2 sequences.
+
+Two control/candidate comparisons in opposite orders then used 40-second
+pointer pans at 2256x1504, nominal 300 Hz, with real source playback and verified
+null-sink audio. All eight pointer cohorts pass strict source/draw/completion
+accounting. Conservative completed-changing rates and draw callback wall p99,
+control to candidate:
+
+| Camera / pair | Changing updates/sec | Draw p99, ms |
+| --- | ---: | ---: |
+| X4 / 1 | 272.624 to 268.949 | 8.276 to 9.286 |
+| X4 / 2 | 270.974 to 268.249 | 8.864 to 9.069 |
+| X2 / 1 | 282.474 to 280.925 | 8.049 to 8.587 |
+| X2 / 2 | 282.449 to 281.974 | 7.598 to 8.172 |
+
+The lower rate and worse draw tail repeat on both cameras in both orders.
+Matched source-hold p99 changes by less than 0.32 ms, with no holds at least
+47 ms in any matched cohort. Source order stays consecutive, video keeps its
+recorded cadence, and reported lateness stays bounded with no audio underruns
+or drops. Temperature direction reverses by order; it does not justify
+accepting the repeated regression. The trial is removed from selected Rust,
+and `target/release/kjerag` is restored to the frozen `6927f39e` native binary.
+The installed `eaa304bc` Flatpak is unchanged by this experiment.
+
+The four unchanged native control runs therefore exceed 240 average changing
+updates/sec alongside full source playback. This is useful bounded capacity
+evidence, not a guarantee of 4.17 ms frame times, physical scanout, or the same
+capacity in the Flatpak runtime. Whole traces retain source-less startup
+commits and cutoff callbacks at termination; the strict pointer and matched
+source cohorts explicitly verify their own boundaries. Evidence and the
+rejected source patch are retained in `scratch/fusion-live-20260907/worker-credit-window-01/`
+and sibling `*-capacity-credit-window-*-0[12]` directories. No merge or owner
+acceptance. Further work should verify sustained installed-app smoothness and
+reduce real execution cost, not repeat this queue-window sweep.
+
 **Delivery split after capacity failure, 2026-09-07:** the combined `8c6921cf`
 package is built but will not replace the installed app. Its final native
 binary's 40-second 2256x1504, nominal-300-Hz ONE X2 panning run passes the
