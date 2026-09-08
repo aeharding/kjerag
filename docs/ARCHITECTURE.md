@@ -197,6 +197,17 @@ source-sampling/fusion boundary. This automatic branch implementation is under
 qualification, not owner-accepted Studio parity. The old projection path's
 unaligned color estimator is not reused as a parity implementation.
 
+`field_interior` is a shared CPU diagnostic, not an estimator or playback step.
+It contains the existing dark-field coherence arithmetic previously private to
+the `colour` instrument. That instrument retains its legacy picture-generation
+path, while Scene's opt-in GPU review supplies the exact displayed ON/neutral
+pixels and their prepared Reframe directly. Both call one arithmetic core.
+The review retains all admitted azimuth bins and runs the original zero and
+0.5/2-code ripple controls. Insufficient coverage is reported explicitly; no
+new image-quality threshold is selected. Its fixed body-chart interpretation
+must be checked against the capture's alpha before treating it as off-seam
+coverage. It does not qualify arbitrary two-dimensional fields by itself.
+
 The explicit saved-map diagnostic can attach an `image_fusion::RatioPair` to
 its `OneXsMapFrame`. A separate shader variant samples these two 200x100 RGB
 ratio maps in the original spherical chart, before the packed-UV/alpha

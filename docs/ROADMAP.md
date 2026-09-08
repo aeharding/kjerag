@@ -14,6 +14,36 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Current-GPU field-interior readings, 2026-09-08:** the registered dark-ground
+coherence check now consumes the exact GPU ON/neutral pairs and the prepared
+Reframe before Scene advances. Its existing arithmetic is shared with `colour`
+in a diagnostic-only render module; no legacy estimator, rebuilt view geometry,
+new smoothing or acceptance threshold is introduced. A source-level extraction
+audit preserves operation order and constants; it is not an executed bitwise
+comparison with the old function. Every retained bin, summary and original
+null/0.5/2-code control is recorded for all 124 hard-view sources.
+
+All views have sufficient coverage under the existing rule. Automatic roughness
+ranges are 0.815..1.734% May dark soil, 0.048..1.013% April sun 1,
+0.298..1.843% April sun 2, and 0.541..2.253% August glare. Nulls are exactly zero.
+The 0.5-code plant ranges from 1.911..2.017% on May to only 0.013..0.061% on
+the narrower April sun-1 view, so sensitivity differs substantially by view.
+These are measured concerns, not a quality pass or proof of visible streaks.
+May's largest reported neighbour jump is 10.649% at source 18916; its largest
+roughness is at 18933. Root inspected those images as well as first/middle/last,
+with equally amplified dark-ground pictures and the existing signed-cell view.
+The correction appears broadly structured in those samples; metric localization
+and owner judgment remain necessary before accepting it.
+
+All 876 previous hard-view artifacts remain byte-identical. Three synthetic
+diagnostic tests and the 124-source live review pass; full workspace gates pass
+1,259 tests, zero failures, 30 ignored, formatting, all-target Clippy and
+name/source-list checks. The frozen test executable is
+`99993fce4271d38fedf0106481f37ebca50842b461399a5e36e0efaca1aebe97`.
+Evidence is `scratch/photometric-interior-20260908-01/`. Playback calculations,
+source cadence and the installed `31ea781d` build remain unchanged. No merge,
+new Studio export, parity verdict or owner acceptance.
+
 **Registered hard-view color coverage, 2026-09-08:** the current GPU producer
 now has 31-source ON/neutral sequences at each of the four registered dark-soil,
 sun-facing and glare-heavy owner views. All 124 sources retain one capture per

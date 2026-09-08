@@ -18,6 +18,8 @@ mod direct_type2;
 pub mod dmabuf;
 #[allow(dead_code)]
 mod draw_retirement;
+/// Diagnostic-only coherence reading over an already-rendered correction.
+pub mod field_interior;
 pub mod flow;
 mod framing;
 pub mod image_fusion;

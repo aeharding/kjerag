@@ -369,10 +369,16 @@ caveat in the Motion section, which is the same trap at a smaller size.
   seam. Stage 8's per-direction offset over wide support painted each direction's own noise along that
   direction's sweep. **Every acceptance statistic in this campaign straddles the seam and could not see
   it.** Any photometric work must now also pass the FIELD-INTERIOR COHERENCE metric
-  (`--bin colour`, the interior block): the applied correction sampled 4-60 deg OFF the seam on dark
+  (`--bin colour`, the interior block): the applied correction sampled 7-60 deg OFF the seam on dark
   content, binned by azimuth, reported as the rms of what a five-term harmonic cannot describe.
   Rejected build reads ROUGH 1.01%; nulls 0.000%; planted 0.5 and 2.0 code ripples read 2.07% and 8.27%.
   A correction that is smooth round the ring reads zero however large it is.
+  The current 7-degree inner boundary is the implemented rule documented in
+  seam-blending.md section 20; the old 4-degree wording above was stale.
+  Since 2026-09-08 the unchanged arithmetic lives in `kjerag_render::field_interior`,
+  shared by `colour` and the exact live-GPU ON/neutral Scene review. The older
+  numeric examples retain their original experiment scope, not a newly chosen
+  threshold for a different view or output path.
 
 ## Photometric: a green cast on the sun-facing lens (owner 2026-08-02, OPEN - stage 10 gate)
 - 2026-08-02 `VID_20260410_185407_00_004.insv time=594.027 yaw=-89.89 pitch=-62.95 fov=41.19 lock=1`

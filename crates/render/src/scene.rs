@@ -9389,6 +9389,7 @@ mod tests {
                     &device, &queue, diagnostic, &neutral, 1280, 720,
                 );
 
+                write_review_interior(output, index, &neutral, &on, &prepared.reframe());
                 write_review_ppm(&output.join("photometric-on"), index, &on);
                 write_review_ppm(&output.join("photometric-neutral"), index, &neutral);
                 writeln!(
@@ -9531,6 +9532,97 @@ mod tests {
             "ready-wake-review: {} waits without renderer polling",
             ready_listener.1
         );
+    }
+
+    /// The registered field-interior check, using the exact ON/neutral pixels
+    /// and the same prepared view, before any source or view can advance.
+    /// This records coverage and controls, not an invented quality threshold.
+    fn write_review_interior(
+        output: &Path,
+        index: u64,
+        neutral: &[u8],
+        on: &[u8],
+        reframe: &Reframe,
+    ) {
+        use std::io::Write;
+
+        let size = Size::new(1280, 720);
+        let readings = [
+            ("automatic", on, 0.0),
+            ("null", neutral, 0.0),
+            ("ripple_0.5", neutral, 0.5),
+            ("ripple_2.0", neutral, 2.0),
+        ]
+        .map(|(arm, after, ripple)| {
+            (
+                arm,
+                crate::field_interior::measure(neutral, after, reframe, size, ripple),
+            )
+        });
+        for (_, reading) in &readings {
+            assert_eq!(reading.bins.len(), readings[0].1.bins.len());
+            assert_eq!(reading.summary.is_some(), readings[0].1.summary.is_some());
+            if let Some(read) = reading.summary {
+                assert!(
+                    [read.applied, read.smooth, read.rough, read.step]
+                        .into_iter()
+                        .all(f64::is_finite),
+                    "field-interior result is not finite at source {index}"
+                );
+            }
+        }
+        if let Some(null) = readings[1].1.summary {
+            assert_eq!([null.applied, null.smooth, null.rough, null.step], [0.0; 4]);
+            let small = readings[2].1.summary.unwrap();
+            let large = readings[3].1.summary.unwrap();
+            assert!(small.rough > 0.0 && large.rough > small.rough);
+        }
+
+        let mut summary = std::io::BufWriter::new(
+            std::fs::File::create_new(output.join(format!("frame-{index:010}.interior.tsv")))
+                .unwrap(),
+        );
+        let mut bins = std::io::BufWriter::new(
+            std::fs::File::create_new(output.join(format!("frame-{index:010}.interior-bins.tsv")))
+                .unwrap(),
+        );
+        writeln!(
+            summary,
+            "arm\tapplied_codes\tsmooth_weber\trough_weber\tmax_neighbor_weber\tbin_count\tstatus"
+        )
+        .unwrap();
+        writeln!(
+            bins,
+            "arm\tbin\tpixels\tphi_rad\tapplied_codes\tneutral_luma"
+        )
+        .unwrap();
+        for (arm, reading) in readings {
+            if let Some(read) = reading.summary {
+                writeln!(
+                    summary,
+                    "{arm}\t{:.17e}\t{:.17e}\t{:.17e}\t{:.17e}\t{}\tmeasured",
+                    read.applied, read.smooth, read.rough, read.step, read.bins,
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    summary,
+                    "{arm}\tNA\tNA\tNA\tNA\t{}\tinsufficient_coverage",
+                    reading.bins.len(),
+                )
+                .unwrap();
+            }
+            for bin in reading.bins {
+                writeln!(
+                    bins,
+                    "{arm}\t{}\t{}\t{:.17e}\t{:.17e}\t{:.17e}",
+                    bin.index, bin.pixels, bin.phi, bin.codes, bin.level,
+                )
+                .unwrap();
+            }
+        }
+        summary.flush().unwrap();
+        bins.flush().unwrap();
     }
 
     fn write_review_ppm(output: &Path, index: u64, rgba: &[u8]) {
