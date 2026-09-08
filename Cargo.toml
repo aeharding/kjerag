@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["vendor/iced_wgpu"]
+exclude = ["vendor/iced_core", "vendor/iced_wgpu"]
 # Plain `cargo run` starts the app, as it did before the split. Everything
 # else is reached with `-p`, and the gates use `--workspace` so no member is
 # skipped (AGENTS.md).
@@ -127,3 +127,6 @@ wgpu = { git = "https://github.com/aeharding/wgpu", rev = "fb66f36c5cf1135c11523
 # differs from the pinned renderer. See vendor/iced_wgpu/KJERAG.md.
 [patch."https://github.com/pop-os/libcosmic"]
 iced_wgpu = { path = "vendor/iced_wgpu" }
+# Keep named content in the tree when the COSMIC header is inserted/removed.
+# Otherwise the Scene disappears for a rebuild, losing its media deadline.
+iced_core = { path = "vendor/iced_core" }

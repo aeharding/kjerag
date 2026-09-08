@@ -2,10 +2,12 @@
 //!
 //! A capture is constructed once. Seeking or reopening constructs another
 //! capture; there is deliberately no reset operation. The mutex owns the one
-//! monotonic generation, exact pending seal, committed successor, one future
-//! draw and the ready capability. GPU work happens only after a linear
-//! reservation has taken an immutable snapshot of the committed successor.
+//! monotonic generation, exact pending seal, committed successor, a bounded
+//! completed-future FIFO and the ready capability. GPU work happens only after
+//! a linear reservation has taken an immutable snapshot of the committed
+//! successor.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::Fallible;
@@ -20,6 +22,8 @@ use super::pis_frontend_gpu::{
 use super::{InstalledOneXsDraw, InstalledOneXsPass, InstalledOneXsReady, ResidentSourceIdentity};
 use crate::draw_retirement::{DrawRetirementError, IcedDrawRetirements};
 use crate::flow::one_xs::pis::Level;
+
+const COMPLETED_FUTURE_CAPACITY: usize = kjerag_media::STITCH_LOOKAHEAD - 1;
 
 /// Storage installed only after a whole resident frame succeeds.
 ///
@@ -463,7 +467,7 @@ struct RootState {
     generation: u64,
     pending: Option<PendingSeal>,
     committed: Option<Arc<ResidentSuccessor>>,
-    future: Option<Arc<InstalledOneXsDraw>>,
+    futures: VecDeque<Arc<InstalledOneXsDraw>>,
     ready: Option<Arc<InstalledOneXsDraw>>,
     quarantined: bool,
     quarantined_successors: Vec<Arc<ResidentSuccessor>>,
@@ -518,7 +522,7 @@ impl GpuResidentCapture {
                     generation: 0,
                     pending: None,
                     committed: None,
-                    future: None,
+                    futures: VecDeque::with_capacity(COMPLETED_FUTURE_CAPACITY),
                     ready: None,
                     quarantined: false,
                     quarantined_successors: Vec::new(),
@@ -594,7 +598,31 @@ impl GpuResidentCapture {
         if state.quarantined {
             return Err("ONE X2 resident capture root is quarantined".into());
         }
-        Ok(state.future.is_some())
+        Ok(!state.futures.is_empty())
+    }
+
+    pub(super) fn future_full(&self) -> Fallible<bool> {
+        let state = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| "ONE X2 resident capture root is poisoned and quarantined")?;
+        if state.quarantined {
+            return Err("ONE X2 resident capture root is quarantined".into());
+        }
+        Ok(state.futures.len() >= COMPLETED_FUTURE_CAPACITY)
+    }
+
+    pub(super) fn future_depth(&self) -> Fallible<usize> {
+        let state = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| "ONE X2 resident capture root is poisoned and quarantined")?;
+        if state.quarantined {
+            return Err("ONE X2 resident capture root is quarantined".into());
+        }
+        Ok(state.futures.len())
     }
 
     pub(super) fn future_stamp(&self) -> Fallible<Option<FrameStamp>> {
@@ -606,11 +634,23 @@ impl GpuResidentCapture {
         if state.quarantined {
             return Err("ONE X2 resident capture root is quarantined".into());
         }
-        Ok(state.future.as_ref().map(|draw| draw.frame()))
+        Ok(state.futures.front().map(|draw| draw.frame()))
     }
 
-    /// Publish the one completed future only for its exact delivered frame.
-    /// A mismatch leaves both the displayed draw and future untouched.
+    pub(super) fn contains_future(&self, frame: &FrameStamp) -> Fallible<bool> {
+        let state = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| "ONE X2 resident capture root is poisoned and quarantined")?;
+        if state.quarantined {
+            return Err("ONE X2 resident capture root is quarantined".into());
+        }
+        Ok(state.futures.iter().any(|draw| draw.frame() == *frame))
+    }
+
+    /// Publish only the oldest completed future for its exact delivered frame.
+    /// A mismatch leaves both the displayed draw and FIFO untouched.
     pub(super) fn publish_future(&self, due: &FrameStamp) -> Fallible<bool> {
         let mut state = self
             .shared
@@ -621,13 +661,13 @@ impl GpuResidentCapture {
             return Err("ONE X2 resident capture root is quarantined".into());
         }
         let matches = state
-            .future
-            .as_ref()
+            .futures
+            .front()
             .is_some_and(|draw| draw.frame() == *due);
         if !matches {
             return Ok(false);
         }
-        state.ready = state.future.take();
+        state.ready = state.futures.pop_front();
         Ok(true)
     }
 
@@ -651,8 +691,8 @@ impl GpuResidentCapture {
         }))
     }
 
-    /// Snapshot the completed unpublished draw and reserve its one retirement
-    /// slot before the facade prepares a binding or publishes the future.
+    /// Snapshot the oldest completed unpublished draw and reserve its one
+    /// retirement slot before the facade prepares a binding or publishes it.
     pub(super) fn future_for_draw(
         &self,
         retirements: &IcedDrawRetirements<InstalledOneXsPass>,
@@ -666,7 +706,7 @@ impl GpuResidentCapture {
         if state.quarantined {
             return Err(DrawRetirementError::Quarantined);
         }
-        Ok(state.future.as_ref().map(|draw| InstalledOneXsReady {
+        Ok(state.futures.front().map(|draw| InstalledOneXsReady {
             draw: Arc::clone(draw),
             permit,
             pass: None,
@@ -924,9 +964,9 @@ impl GpuResidentCandidate {
 
     /// Commit one whole completed successor without publishing it for draw.
     ///
-    /// The future owns the exact source/map associated with this successor.
+    /// The FIFO entry owns the exact source/map associated with this successor.
     /// The previously published draw remains available until an exact due
-    /// delivery moves this future into the ready slot.
+    /// delivery moves the oldest entry into the ready slot.
     pub(super) fn commit_future(&mut self, draw: &Arc<InstalledOneXsDraw>) -> Fallible<()> {
         let reservation = self
             .reservation
@@ -943,12 +983,16 @@ impl GpuResidentCandidate {
         };
         let exact_seal = state.pending.as_ref() == Some(&reservation.seal);
         let exact_prior = same_successor(state.committed.as_ref(), reservation.prior.as_ref());
-        if !exact_seal || !exact_prior || state.future.is_some() || state.quarantined {
+        if !exact_seal
+            || !exact_prior
+            || state.futures.len() >= COMPLETED_FUTURE_CAPACITY
+            || state.quarantined
+        {
             state.quarantined = true;
             state
                 .quarantined_successors
                 .push(Arc::clone(&self.successor));
-            return Err("ONE X2 resident future commit does not match its seal and prior allocation, or the future slot is occupied; candidate quarantined".into());
+            return Err("ONE X2 resident future commit does not match its seal and prior allocation, or the completed-frame queue is full; candidate quarantined".into());
         }
         let root_identity = reservation.identity();
         let identity = state
@@ -959,7 +1003,7 @@ impl GpuResidentCandidate {
         let (context, session) = identity?;
         draw.ensure_install_identity(context, session, &root_identity, &reservation.seal.flight)?;
         state.committed = Some(Arc::clone(&self.successor));
-        state.future = Some(Arc::clone(draw));
+        state.futures.push_back(Arc::clone(draw));
         state.pending = None;
         reservation.active = false;
         self.disarmed = true;
@@ -1068,11 +1112,15 @@ mod tests {
 
     #[test]
     fn empty_future_cannot_replace_the_ready_slot() {
+        assert_eq!(COMPLETED_FUTURE_CAPACITY, 3);
         let capture = GpuResidentCapture::new();
         let due = frame(1);
 
         assert!(!capture.has_future().unwrap());
+        assert_eq!(capture.future_depth().unwrap(), 0);
+        assert!(!capture.future_full().unwrap());
         assert_eq!(capture.future_stamp().unwrap(), None);
+        assert!(!capture.contains_future(&due).unwrap());
         assert!(!capture.publish_future(&due).unwrap());
         assert!(!capture.snapshot().ready);
     }

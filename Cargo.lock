@@ -2217,7 +2217,6 @@ dependencies = [
 [[package]]
 name = "iced_core"
 version = "0.14.0"
-source = "git+https://github.com/pop-os/libcosmic?rev=dc1cf9f00cbe2902a52166492654bb9fee8a73d1#dc1cf9f00cbe2902a52166492654bb9fee8a73d1"
 dependencies = [
  "bitflags 2.13.1",
  "build_helpers",

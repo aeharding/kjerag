@@ -96,6 +96,20 @@ depends on `media` rather than the other way round. `render` re-exports both
 and adds the `Extent` trait, which is the `wgpu::Extent3d` half of `Size`
 that cannot live in a crate with no wgpu.
 
+The pinned iced core also has a local named-child reconciliation correction.
+When COSMIC restores its header, its named header is inserted before its named
+content container. The original algorithm diffed the retained content in its
+old slot, then overwrote that slot with the new header without appending the
+content. The next redraw had no Scene widget and therefore no media deadline
+request; a controls Tick rebuilt it roughly 250 ms later. The patch reconstructs
+child state in new widget order, retaining named survivors across insertions
+and removals. It changes no shell layout, frame clock, stitch calculation or
+GPU queue policy. `vendor/iced_core/KJERAG.md` records its exact provenance and
+removal condition. The app has a direct regression for the actual dependency
+operation; `scripts/uitest-controls-wake.sh` exercises repeated real pointer
+wakes in a private native compositor. Its 100 ms pump-gap rejection is a
+specific quarter-second-pause regression guard, not the 4.17 ms capacity gate.
+
 The resident ONE X2 draw path has a separate, private source-import
 owner in `direct_type2`. Its only production constructor consumes the exact
 `Arc<Frames>`, requires two lenses and imports both descriptors directly into
@@ -511,7 +525,9 @@ The player changes to `PresentationPolicy::SequentialRealtime` and one
 capture-owned resident facade starts at frame zero. Selected startup uses the
 same exact-landing hold as seeking: Scene retains autoplay intent, but the
 source/audio clock stays paused until frame zero's resident map is installed
-and acknowledged. A pause during startup cancels that autoplay intent. Generic
+and acknowledged, then until its completed successor reserve is primed. The
+first picture is visible during this pre-roll. A pause cancels play intent and
+new admission immediately; already accepted work may finish. Generic
 projection opens still start immediately. This prevents cold GPU setup from
 charging time against a picture that has not been prepared yet; it does not
 solve sustained processing slower than the source cadence.
@@ -526,27 +542,41 @@ UI preparation never waits for the worker or consumes an unfinished map.
 
 The source/audio clock does not reanchor on each source frame. The original
 slow-clock `EveryFrame` policy remains available to diagnostics. During ordinary
-play, `Player` keeps the current due frame and exposes at most two already-decoded
-successors without presenting either or moving the clock. The capture root
-holds one completed unpublished source/map pair separately from its displayed
-pair. One renderer preparation can admit both decoded successors. The worker
+play, `Player` keeps the current due frame and exposes at most four already-decoded
+successors without presenting them or moving the clock. The shared
+`STITCH_LOOKAHEAD` constant bounds both decode admission and accepted resident
+work. The capture root holds a FIFO of up to three completed unpublished
+source/map pairs separately from its displayed pair. One renderer preparation
+can admit the bounded decoded successors. The worker
 advances the computational temporal prior and starts the next admitted source
 without another renderer visit. The total accepted but unpublished population
-is bounded at two, including queued input, active computation, the committed
-future and any parked completed result. If the second result finishes while
-the future slot is occupied, the worker parks it and ends that service job.
-Publication frees the slot and schedules service again; there is no waiting
-thread or polling loop for a full future slot. This absorbs uneven per-source
-work without changing numerical cadence, skipping causal input or adding a
-third buffered source.
+is bounded at four, including queued input, active computation, committed FIFO
+entries and any parked completed result. If the fourth result finishes while
+the three-entry FIFO is full, the worker parks it and ends that service job.
+Publication frees a slot and schedules service again; there is no waiting
+thread or polling loop for a full FIFO. The newest computational prior remains
+separate from the oldest future awaiting publication. This candidate is intended
+to absorb isolated work spikes, not sustained overload or insufficient average
+throughput. Seam arithmetic, source order and full-refresh cadence are unchanged.
+
+After startup, seek or resume, selected Scene holds the presentation clock and
+audio Beat while `Player::set_preroll` admits decoded successors. Pre-roll does
+not call presentation advance or count displayed frames. The requested target
+becomes visible and ceases to be a pending seek as soon as its exact map lands;
+play intent remains separate until three successors are complete. Only an
+actual decoder EOF permits a shorter reserve, including zero at the last frame.
+A seek discards the old reserve and primes the new lineage; paused seeks and
+frame stepping do not prime. Generic playback and EveryFrame diagnostics keep
+their existing policies. The extra startup/resume latency and bounded source/map
+memory must be measured before owner acceptance of this architectural candidate.
 
 Completion cannot publish a picture. Preparation reserves an ordinary draw
 permit and binds the exact future before moving it to the displayed slot,
 only when Player's current delivery supplies the same opaque `FrameStamp`.
 Screenshots and redraws continue sampling the displayed pair, never the newer
 computational prior. Player does not promote another frame until its current
-one is acknowledged. Two decoded successors, one unpublished completed result,
-one active transaction and two render-retirement slots are independent bounds;
+one is acknowledged. Four decoded successors, three unpublished completed results,
+one additional active or parked transaction and two render-retirement slots are bounded;
 none treats computation as display or permits an unbounded queue.
 
 Idle playback schedules its next redraw at Player's exact media deadline,
@@ -566,15 +596,15 @@ preparation headroom while an idle window sleeps until its next deadline.
 Source readiness and ordinary playback still require qualification alongside
 active-view capacity; the architectural split alone is not proof of smoothness.
 
-The capture-owned session and Scene's two exact admitted views survive a
+The capture-owned session and its exact source owners survive a
 renderer-pipeline recreation on the same device and queue. Pausing hides decoded
 lookahead from preparation but does not discard a job or completed future result;
 resuming returns publication authority to Player's due delivery. Seeking and
 stepping still require installation, create a new causal root where required and
 drain the replaced facade without reusing uncertain source surfaces. At EOF the
 clock stops, but redraws continue until the last offered transaction installs.
-An adjacent forward replay re-anchors its landing without discarding the second
-already-decoded successor; a real seek clears both decoded slots. Pending work
+An adjacent forward replay re-anchors its landing without discarding the remaining
+already-decoded successors; a real seek clears all decoded slots. Pending work
 and full render-retirement admission always leave the prior exact
 shown result drawable; there is no legacy recovery route.
 

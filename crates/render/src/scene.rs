@@ -36,7 +36,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use kjerag_media::{Accuracy, Cue, FrameStamp, Frames, Player, PresentationPolicy, Reader, Stats};
+use kjerag_media::{
+    Accuracy, Cue, FrameStamp, Frames, Player, PresentationPolicy, Reader, STITCH_LOOKAHEAD, Stats,
+};
 use kjerag_meta::{
     CalibrationSet, ExposureTrack, Filter, Format, Lens, OrientationTrack, Quat, Readout,
 };
@@ -423,6 +425,9 @@ struct Show {
     /// A requested target remains a seek until its exact map, not merely its
     /// decoded surfaces, has completed the capture transaction.
     replay: RefCell<Option<OneXsReplay>>,
+    /// Play intent while the first picture is already visible but its bounded
+    /// successor reserve is filling. The media clock and sound stay paused.
+    preroll: Cell<bool>,
     /// The clock and the frame it is showing. See the module docs for why
     /// this is a cell.
     playing: RefCell<Playing>,
@@ -468,8 +473,8 @@ impl OneXsReplay {
 }
 
 /// Keep autoplay intent while the first source acquires its stitched map.
-/// The ordinary exact-landing acknowledgement then starts the clock and sound,
-/// so cold GPU setup cannot create video debt before the first picture exists.
+/// Exact landing first exposes the picture, then fills the successor reserve
+/// before starting the clock and sound. Cold setup cannot create video debt.
 fn startup_replay(selected: bool) -> Option<OneXsReplay> {
     selected.then_some(OneXsReplay {
         accuracy: Accuracy::Exact,
@@ -477,6 +482,15 @@ fn startup_replay(selected: bool) -> Option<OneXsReplay> {
         position: Duration::ZERO,
         playing: true,
     })
+}
+
+fn preroll_ready(completed: usize, decoded: usize, exhausted: bool) -> bool {
+    completed
+        >= if exhausted {
+            decoded.min(STITCH_LOOKAHEAD - 1)
+        } else {
+            STITCH_LOOKAHEAD - 1
+        }
 }
 
 #[allow(dead_code, reason = "frozen CPU transaction oracle")]
@@ -1586,6 +1600,7 @@ impl Scene {
                 player.pause(now);
             }
             retire_replay(&show.replay);
+            show.preroll.set(false);
             return Next::Stopped(self.finish_observed_terminal_stop(stall));
         }
         let resident_refresh = self.resident_refresh.load(AtomicOrdering::Acquire);
@@ -1610,6 +1625,7 @@ impl Scene {
                         // with its raw error and never ask the player for a frame
                         // that the sequential owner can no longer consume.
                         retire_replay(&show.replay);
+                        show.preroll.set(false);
                         self.stalled.fail_now(&error);
                         player.pause(now);
                         self.fail_terminal_shutter_without_display();
@@ -1628,12 +1644,43 @@ impl Scene {
         {
             // Decoder landing is not completion. Retire the exposed seek only
             // after the exact target source has its exact capture-owned map.
-            if show
-                .replay
-                .borrow_mut()
-                .take()
-                .is_some_and(|replay| replay.playing)
+            show.preroll.set(
+                show.replay
+                    .borrow_mut()
+                    .take()
+                    .is_some_and(|replay| replay.playing),
+            );
+        }
+        // Preparing a reserve is not playback: decoded successors may be
+        // offered to the worker, but neither source promotion nor sound runs.
+        // A seek/replay intermediate can never enable this admission path.
+        let priming =
+            show.preroll.get() && show.replay.borrow().is_none() && current_ready == Some(true);
+        player.set_preroll(priming);
+        if priming {
+            let completed = match show
+                .one_xs
+                .as_ref()
+                .expect("selected preroll")
+                .completed_ahead()
             {
+                Ok(completed) => completed,
+                Err(error) => {
+                    show.preroll.set(false);
+                    player.pause(now);
+                    self.stalled.fail_now(error);
+                    self.fail_terminal_shutter_without_display();
+                    return self.stalled.take().map_or(Next::Never, Next::Stopped);
+                }
+            };
+            let decoded = (0..STITCH_LOOKAHEAD)
+                .take_while(|&ahead| player.decoded_ahead(ahead).is_some())
+                .count();
+            // Only a real decoder EOF reduces the reserve requirement. Short
+            // clips and a seek to the last frame must not wait for nonexistent
+            // successors; container frame-count estimates are not evidence.
+            if preroll_ready(completed, decoded, player.decode_exhausted()) {
+                show.preroll.set(false);
                 player.play();
             }
         }
@@ -1656,6 +1703,7 @@ impl Scene {
             Err(e) => {
                 player.pause(now);
                 retire_replay(&show.replay);
+                show.preroll.set(false);
                 self.stalled.fail_now(&e);
                 // This redraw may not reach preparation after publishing the
                 // stop. With no completed display there is nothing for that
@@ -1671,6 +1719,7 @@ impl Scene {
             // With no frame there can be no later map acknowledgement to end
             // the startup hold. Keep a real pending final frame's hold intact.
             retire_empty_eof(frames.is_some(), &show.replay);
+            show.preroll.set(false);
             player.pause(now);
             return if current_ready == Some(false)
                 || resident_refresh
@@ -1686,7 +1735,7 @@ impl Scene {
             // due source is not ready, the prepared primitive requests the
             // callback-paced follow-up itself. Speculative successors do not
             // keep an otherwise idle window redrawing between video deadlines.
-            resident_refresh || show.replay.borrow().is_some(),
+            resident_refresh || show.replay.borrow().is_some() || show.preroll.get(),
             player.is_playing(),
             player.is_seeking(),
             player.next_due(),
@@ -1702,11 +1751,17 @@ impl Scene {
     }
 
     pub fn play(&mut self) {
-        if let Some(show) = &self.show
-            && let Some(replay) = show.replay.borrow_mut().as_mut()
-        {
-            replay.playing = true;
-            return;
+        if let Some(show) = &self.show {
+            if let Some(replay) = show.replay.borrow_mut().as_mut() {
+                replay.playing = true;
+                return;
+            }
+            if show.one_xs.is_some() {
+                if !self.player(Player::is_playing).unwrap_or(false) {
+                    show.preroll.set(true);
+                }
+                return;
+            }
         }
         if let Some(player) = self.player_mut() {
             player.play();
@@ -1714,11 +1769,11 @@ impl Scene {
     }
 
     pub fn pause(&mut self, now: Instant) {
-        if let Some(show) = &self.show
-            && let Some(replay) = show.replay.borrow_mut().as_mut()
-        {
-            replay.playing = false;
-            return;
+        if let Some(show) = &self.show {
+            show.preroll.set(false);
+            if let Some(replay) = show.replay.borrow_mut().as_mut() {
+                replay.playing = false;
+            }
         }
         if let Some(player) = self.player_mut() {
             player.pause(now);
@@ -1789,7 +1844,8 @@ impl Scene {
         if let Some(replay) = self.show.as_ref().and_then(|show| *show.replay.borrow()) {
             return replay.playing;
         }
-        self.player(Player::is_playing).unwrap_or(false)
+        self.show.as_ref().is_some_and(|show| show.preroll.get())
+            || self.player(Player::is_playing).unwrap_or(false)
     }
 
     pub fn position(&self, now: Instant) -> Duration {
@@ -2069,8 +2125,11 @@ impl Scene {
         ScenePrimitive {
             camera,
             view: self.show.as_ref().and_then(|show| show.view(held)),
-            resident_next: self.show.as_ref().and_then(|show| show.next_view(held, 0)),
-            resident_next_after: self.show.as_ref().and_then(|show| show.next_view(held, 1)),
+            resident_ahead: std::array::from_fn(|ahead| {
+                self.show
+                    .as_ref()
+                    .and_then(|show| show.next_view(held, ahead))
+            }),
             resident_capture: self.show.as_ref().and_then(|show| show.one_xs.clone()),
             resident_target: self.show.as_ref().and_then(|show| {
                 show.replay
@@ -2120,6 +2179,7 @@ impl Show {
             one_xs,
             one_xs_profile,
             replay: RefCell::new(None),
+            preroll: Cell::new(false),
             playing: RefCell::new(Playing { frames, source }),
         }
     }
@@ -2193,11 +2253,12 @@ impl Show {
         {
             return Ok(true);
         }
-        let playing = self
-            .replay
-            .borrow()
-            .map_or_else(|| player.is_playing(), |seek| seek.playing);
+        let playing = self.replay.borrow().map_or_else(
+            || self.preroll.get() || player.is_playing(),
+            |seek| seek.playing,
+        );
         self.one_xs = Some(capture.restarted()?);
+        self.preroll.set(false);
         *frames = None;
         self.replay.replace(Some(OneXsReplay {
             accuracy,
@@ -2231,10 +2292,10 @@ impl Show {
         {
             return Ok(true);
         }
-        let playing = self
-            .replay
-            .borrow()
-            .map_or_else(|| player.is_playing(), |replay| replay.playing);
+        let playing = self.replay.borrow().map_or_else(
+            || self.preroll.get() || player.is_playing(),
+            |replay| replay.playing,
+        );
         let offered = frames.as_ref().map(|frames| frames.stamp());
         let installed = capture.installed_stamp()?;
         let proposed = one_xs_replay_start(
@@ -2270,6 +2331,7 @@ impl Show {
             // `Shown` and may be restored until new frame zero completes.
             *frames = None;
         }
+        self.preroll.set(false);
         self.replay.replace(Some(OneXsReplay {
             accuracy: Accuracy::Exact,
             target,
@@ -2291,6 +2353,7 @@ impl Show {
         let Source::Live(player) = source else {
             return Ok(false);
         };
+        self.preroll.set(false);
         player.pause(now);
         let completed_landing = if let Some(frame) = frames.as_ref() {
             capture.acknowledged(&frame.stamp())?
@@ -2495,10 +2558,8 @@ struct Calibrated {
 pub struct ScenePrimitive {
     camera: Camera,
     view: Option<View>,
-    /// Decoded but not yet due. This may be prepared, never published early.
-    resident_next: Option<View>,
-    /// The decoded frame after `resident_next`, bounded by Player's lookahead.
-    resident_next_after: Option<View>,
+    /// Decoded but not yet due. These may be prepared, never published early.
+    resident_ahead: [Option<View>; STITCH_LOOKAHEAD],
     /// Current live lineage even while replay has cleared its offered frame.
     resident_capture: Option<ResidentCaptureFacade>,
     /// Replay input is not a new displayed position until this target lands.
@@ -3281,8 +3342,7 @@ impl ScenePipeline {
             .as_ref()
             .filter(|view| view.resident_one_xs.is_some());
         let due = offered.map(|view| view.frames.stamp());
-        let next = primitive.resident_next.as_ref();
-        let next_after = primitive.resident_next_after.as_ref();
+        let ahead = primitive.resident_ahead.each_ref().map(Option::as_ref);
         if let Some(capture) = primitive.resident_capture.as_ref() {
             let changed = self
                 .resident_one_xs
@@ -3332,15 +3392,12 @@ impl ScenePipeline {
                     let view = resident_frame_view(
                         stamp,
                         capture,
-                        [
-                            offered,
-                            next,
-                            next_after,
+                        [offered].into_iter().chain(ahead).chain([
                             submitted.as_ref(),
                             previous_submitted.as_ref(),
                             shown.as_ref(),
                             self.resident_completed_view.as_ref(),
-                        ],
+                        ]),
                     )
                     .ok_or("ONE X2 resident ready has no exact capture view")?;
                     Ok(self.resident_reframe(primitive, view, aspect))
@@ -3349,7 +3406,7 @@ impl ScenePipeline {
             if std::env::var_os("KJERAG_NATIVE_LIFECYCLE_PROBE").is_some() {
                 eprintln!(
                     "native-prepare: {prepared:?}, due={due:?}, next={:?}, camera={:?}",
-                    next.map(|view| view.frames.stamp()),
+                    ahead[0].map(|view| view.frames.stamp()),
                     primitive.camera
                 );
             }
@@ -3392,15 +3449,12 @@ impl ScenePipeline {
                     let view = resident_frame_view(
                         &installed,
                         capture,
-                        [
-                            offered,
-                            next,
-                            next_after,
+                        [offered].into_iter().chain(ahead).chain([
                             submitted.as_ref(),
                             previous_submitted.as_ref(),
                             shown.as_ref(),
                             self.resident_completed_view.as_ref(),
-                        ],
+                        ]),
                     )
                     .cloned()
                     .ok_or("ONE X2 staged frame has no exact capture view")?;
@@ -3436,7 +3490,7 @@ impl ScenePipeline {
         }
 
         // Only the due stamp above can authorize publication. Computation may
-        // continue through the two already-decoded successors while the exact
+        // continue through the bounded decoded successors while the exact
         // due picture remains on screen. The earliest unaccepted view wins, so
         // an unfinished due frame always precedes speculative lookahead.
         if !primitive.stalled.stopped()
@@ -3455,15 +3509,16 @@ impl ScenePipeline {
                     .expect("selected view has capture"),
             )
         {
-            // Admit both already-decoded successors in one renderer visit.
+            // Admit the bounded decoded successors in one renderer visit.
             // Their bounded capture worker can then finish one source and
             // start the next without another window redraw. Admission still
             // selects consecutive stamps and cannot authorize publication.
-            for _ in 0..2 {
+            for _ in 0..STITCH_LOOKAHEAD {
                 let accepted = capture.accepted_stamp()?;
-                let Some(view) =
-                    resident_submission_view(accepted.as_ref(), [Some(due_view), next, next_after])
-                else {
+                let Some(view) = resident_submission_view(
+                    accepted.as_ref(),
+                    [Some(due_view)].into_iter().chain(ahead),
+                ) else {
                     break;
                 };
                 match attachment.submit_frame(&self.one_xs_gpu, self.format, view.frames.clone())? {
@@ -6319,7 +6374,8 @@ mod tests {
         assert!(imported < queued && queued < kicked);
         assert!(submit[..queued].contains("Err(error) => return start.failed_import(error)"));
         assert!(submit[queued..].contains("state.submitted = Some(stamp.clone())"));
-        assert!(submit.contains("accepted_unpublished >= 2"));
+        assert!(submit.contains("accepted_unpublished >= kjerag_media::STITCH_LOOKAHEAD"));
+        assert!(submit.contains("root.future_depth()?"));
 
         let worker = include_str!("flow/one_xs/resident_worker.rs");
         let service = worker
@@ -7037,6 +7093,34 @@ mod tests {
                 && replay.position == Duration::ZERO
                 && replay.playing
         }));
+    }
+
+    #[test]
+    fn preroll_requires_three_completed_successors_until_real_eof() {
+        assert_eq!(STITCH_LOOKAHEAD, 4);
+        for completed in 0..STITCH_LOOKAHEAD - 1 {
+            assert!(!preroll_ready(completed, STITCH_LOOKAHEAD, false));
+        }
+        assert!(preroll_ready(STITCH_LOOKAHEAD - 1, STITCH_LOOKAHEAD, false));
+        assert!(preroll_ready(STITCH_LOOKAHEAD, STITCH_LOOKAHEAD, false));
+    }
+
+    #[test]
+    fn preroll_at_real_eof_requires_only_the_decoded_tail() {
+        for decoded in 0..STITCH_LOOKAHEAD {
+            for completed in 0..=decoded {
+                assert_eq!(
+                    preroll_ready(completed, decoded, true),
+                    completed >= decoded,
+                    "decoded={decoded}, completed={completed}"
+                );
+            }
+        }
+        assert!(preroll_ready(STITCH_LOOKAHEAD, STITCH_LOOKAHEAD, true));
+        assert!(
+            !preroll_ready(0, 0, false),
+            "a temporary decoder gap is not EOF"
+        );
     }
 
     #[test]
@@ -8049,12 +8133,24 @@ mod tests {
     }
 
     #[test]
-    fn selected_open_holds_autoplay_clock_until_frame_zero_map_is_installed() {
+    fn selected_open_holds_autoplay_clock_through_successor_preroll() {
         let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").map(PathBuf::from) else {
             return;
         };
+        assert_selected_open_holds_clock_through_successor_preroll(&path);
+    }
+
+    #[test]
+    fn selected_x4_open_holds_autoplay_clock_through_successor_preroll() {
+        let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA").map(PathBuf::from) else {
+            return;
+        };
+        assert_selected_open_holds_clock_through_successor_preroll(&path);
+    }
+
+    fn assert_selected_open_holds_clock_through_successor_preroll(path: &Path) {
         let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
-        let scene = Scene::open(&path).unwrap();
+        let scene = Scene::open(path).unwrap();
         scene.set_muted(true);
         assert!(scene.is_playing(), "selected open lost autoplay intent");
 
@@ -8089,8 +8185,15 @@ mod tests {
 
         assert!(!matches!(scene.pump(Instant::now()), Next::Stopped(_)));
         assert!(scene.show.as_ref().unwrap().replay.borrow().is_none());
-        assert!(scene.player(Player::is_playing).unwrap());
+        assert!(scene.show.as_ref().unwrap().preroll.get());
+        assert!(!scene.player(Player::is_playing).unwrap());
+        assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&frame));
+
+        assert!(finish_selected_preroll(&scene, &mut pipeline, &device, &queue, &frame).is_none());
         assert!(scene.is_playing());
+        assert!(scene.player(Player::is_playing).unwrap());
+        assert!(!scene.show.as_ref().unwrap().preroll.get());
+        assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&frame));
     }
 
     #[test]
@@ -8126,6 +8229,126 @@ mod tests {
     }
 
     #[test]
+    fn selected_seek_preroll_pause_resume_and_eof_are_bounded() {
+        let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").map(PathBuf::from) else {
+            return;
+        };
+        assert_seek_preroll_pause_resume_and_eof(&path);
+    }
+
+    #[test]
+    fn selected_x4_seek_preroll_pause_resume_and_eof_are_bounded() {
+        let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA").map(PathBuf::from) else {
+            return;
+        };
+        assert_seek_preroll_pause_resume_and_eof(&path);
+    }
+
+    fn assert_seek_preroll_pause_resume_and_eof(path: &Path) {
+        let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
+        let mut scene = Scene::open(path).unwrap();
+        scene.set_muted(true);
+        scene.pause(Instant::now());
+        let first = wait_for_new_scene_frame(&scene, None);
+        let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &first);
+        scene.pump(Instant::now());
+
+        let (last, target, target_time) = scene
+            .player(|player| {
+                let last = player.timing().frames - 1;
+                let target = 30.min(last.saturating_sub(2));
+                (last, target, player.timing().time_of(target))
+            })
+            .unwrap();
+        scene.seek(target_time, Accuracy::Exact);
+        scene.play();
+        let landing = wait_for_new_scene_frame(&scene, None);
+        assert_eq!(landing.index(), target);
+        prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &landing);
+        scene.pump(Instant::now());
+        assert!(scene.show.as_ref().unwrap().preroll.get());
+        assert!(!scene.player(Player::is_playing).unwrap());
+        assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&landing));
+        let held = scene.position(Instant::now());
+        assert_eq!(
+            scene.position(Instant::now() + Duration::from_secs(60)),
+            held
+        );
+
+        scene.pause(Instant::now());
+        assert!(!scene.show.as_ref().unwrap().preroll.get());
+        assert!(!scene.player(Player::is_playing).unwrap());
+        assert!(
+            scene
+                .primitive(Camera::default())
+                .resident_ahead
+                .iter()
+                .all(Option::is_none)
+        );
+        scene.play();
+        assert!(
+            finish_selected_preroll(&scene, &mut pipeline, &device, &queue, &landing).is_none()
+        );
+        scene.pause(Instant::now());
+
+        let penultimate_time = scene
+            .player(|player| player.timing().time_of(last - 1))
+            .unwrap();
+        scene.seek(penultimate_time, Accuracy::Exact);
+        scene.play();
+        let penultimate = wait_for_new_scene_frame(&scene, None);
+        assert_eq!(penultimate.index(), last - 1);
+        prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &penultimate);
+        let final_frame =
+            match finish_selected_preroll(&scene, &mut pipeline, &device, &queue, &penultimate) {
+                Some((next, frame)) => {
+                    assert_eq!(next, Next::Refresh, "EOF lost the final map wakeup");
+                    frame
+                }
+                None => wait_for_new_scene_frame(&scene, Some(&penultimate)),
+            };
+        assert_eq!(final_frame.index(), last);
+        prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &final_frame);
+        assert!(!matches!(scene.pump(Instant::now()), Next::Stopped(_)));
+        assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&final_frame));
+
+        let last_time = scene
+            .player(|player| player.timing().time_of(last))
+            .unwrap();
+        scene.seek(last_time, Accuracy::Exact);
+        scene.play();
+        let last_landing = wait_for_new_scene_frame(&scene, None);
+        assert_eq!(last_landing.index(), last);
+        prepare_and_draw_exact_resident_frame(
+            &scene,
+            &mut pipeline,
+            &device,
+            &queue,
+            &last_landing,
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let next = scene.pump(Instant::now());
+            assert!(!matches!(next, Next::Stopped(_)));
+            pipeline.prepare(&scene.primitive(Camera::default()), &device, &queue, 1.0);
+            if scene.show.as_ref().unwrap().replay.borrow().is_none()
+                && !scene.show.as_ref().unwrap().preroll.get()
+                && scene.player(Player::is_ended) == Some(true)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "last-frame preroll did not settle at EOF"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&last_landing));
+        assert!(!scene.player(Player::is_playing).unwrap());
+    }
+
+    #[test]
     fn selected_scene_submits_actual_cold_and_warm_l1_work_on_its_worker() {
         let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA").map(PathBuf::from) else {
             return;
@@ -8146,7 +8369,13 @@ mod tests {
         let mut scene = Scene::open(path).unwrap();
         scene.set_muted(true);
         scene.pause(Instant::now());
-        assert!(scene.primitive(Camera::default()).resident_next.is_none());
+        assert!(
+            scene
+                .primitive(Camera::default())
+                .resident_ahead
+                .iter()
+                .all(Option::is_none)
+        );
 
         let first = wait_for_new_scene_frame(&scene, None);
         let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
@@ -8201,7 +8430,13 @@ mod tests {
         );
         let second = wait_for_new_scene_frame(&scene, Some(&first));
         assert_eq!(second.index(), first.index() + 1);
-        assert!(scene.primitive(Camera::default()).resident_next.is_none());
+        assert!(
+            scene
+                .primitive(Camera::default())
+                .resident_ahead
+                .iter()
+                .all(Option::is_none)
+        );
         let continued =
             prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &second);
         assert!(continued.same_capture(&capture));
@@ -8455,20 +8690,25 @@ mod tests {
         pipeline.prepare(&scene.primitive(Camera::default()), &device, &queue, 1.0);
         assert!(!scene.resident_refresh.load(AtomicOrdering::Acquire));
         scene.play();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let final_frame = loop {
-            let next = scene.pump(Instant::now());
-            if let Some(frame) = scene.frame_stamp()
-                && frame.index() == last
-            {
-                assert_eq!(scene.player(Player::is_ended), Some(true));
-                assert_eq!(next, Next::Refresh, "EOF lost the final map wakeup");
-                break frame;
+        let (preroll_next, final_frame) =
+            finish_selected_preroll(&scene, &mut pipeline, &device, &queue, &previous)
+                .expect("penultimate-frame preroll did not offer the known EOF tail");
+        match preroll_next {
+            Next::Refresh => {}
+            Next::At(due) => {
+                // Pre-roll can fill the two draw slots before their callbacks
+                // retire under concurrent GPU load. That has an explicit 1 ms
+                // retry, not a lost EOF wake or a new media-frame deadline.
+                assert!(scene.draw_retirement_full.load(AtomicOrdering::Acquire));
+                assert!(
+                    due <= Instant::now() + DRAW_RETIREMENT_RETRY,
+                    "EOF delayed the final map beyond its draw-retirement retry"
+                );
             }
-            assert!(!matches!(next, Next::Stopped(_)));
-            assert!(Instant::now() < deadline);
-            std::thread::yield_now();
-        };
+            _ => panic!("EOF lost the final map wakeup: {preroll_next:?}"),
+        }
+        assert_eq!(final_frame.index(), last);
+        assert_eq!(scene.player(Player::is_ended), Some(true));
         assert!(!capture.acknowledged(&final_frame).unwrap());
         prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &final_frame);
         assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&final_frame));
@@ -8526,15 +8766,16 @@ mod tests {
         }
         assert!(!capture.acknowledged(&first).unwrap());
         prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &first);
-        scene.play();
+        assert!(!matches!(scene.pump(Instant::now()), Next::Stopped(_)));
+        assert!(scene.show.as_ref().unwrap().replay.borrow().is_none());
+        scene.step(Instant::now(), 1);
         let second = wait_for_new_scene_frame(&scene, Some(&first));
         let before_due = Instant::now();
         // Establish the display with only this source offered to preparation.
         // The decoder may already have successors; expose them together below
         // so their first admission is a deterministic single renderer visit.
         let mut second_only = scene.primitive(Camera::default());
-        second_only.resident_next = None;
-        second_only.resident_next_after = None;
+        second_only.resident_ahead.fill(None);
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             pipeline.prepare(&second_only, &device, &queue, 1.0);
@@ -8545,49 +8786,52 @@ mod tests {
             std::thread::yield_now();
         }
         draw_resident_test_pass(&pipeline, &device, &queue);
+        scene.play();
 
-        // Fill decoded lookahead without renderer preparation. Neither future
-        // has been admitted yet, so one prepare must enqueue BOTH of them.
+        // Fill decoded lookahead without renderer preparation. None of the
+        // four futures has been admitted, so one prepare must accept all four.
         let deadline = Instant::now() + Duration::from_secs(10);
-        let (primitive, future, second_future) = loop {
+        let (primitive, futures) = loop {
             assert!(!matches!(scene.pump(before_due), Next::Stopped(_)));
             let primitive = scene.primitive(Camera::default());
             let futures = primitive
-                .resident_next
-                .as_ref()
-                .zip(primitive.resident_next_after.as_ref())
-                .map(|(next, after)| (next.frames.stamp(), after.frames.stamp()));
+                .resident_ahead
+                .iter()
+                .map(|view| view.as_ref().map(|view| view.frames.stamp()))
+                .collect::<Option<Vec<_>>>();
             assert_eq!(scene.frame_stamp().as_ref(), Some(&second));
             assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&second));
-            if let Some((future, second_future)) = futures {
-                break (primitive, future, second_future);
+            if let Some(futures) = futures {
+                break (primitive, futures);
             }
             assert!(Instant::now() < deadline);
             std::thread::yield_now();
         };
-        assert_eq!(future.index(), second.index() + 1);
-        assert_eq!(second_future.index(), future.index() + 1);
+        assert_eq!(futures.len(), STITCH_LOOKAHEAD);
+        for (ahead, future) in futures.iter().enumerate() {
+            assert_eq!(future.index(), second.index() + ahead as u64 + 1);
+        }
         assert_eq!(capture.accepted_stamp().unwrap().as_ref(), Some(&second));
-        assert!(!capture.accepted(&future).unwrap());
-        assert!(!capture.accepted(&second_future).unwrap());
+        for future in &futures {
+            assert!(!capture.accepted(future).unwrap());
+        }
         pipeline.prepare(&primitive, &device, &queue, 1.0);
-        assert_eq!(
-            capture.accepted_stamp().unwrap().as_ref(),
-            Some(&second_future)
-        );
+        assert_eq!(capture.accepted_stamp().unwrap().as_ref(), futures.last());
         scene.pause(before_due);
 
         // No pump, prepare, draw, device poll or readback is allowed in this
-        // interval. The worker must commit the first future and begin the
-        // second against that prior on its own, while the old picture stays
-        // the only acknowledged display. Inspect CPU-owned stamps only.
+        // interval. The worker must leave three completed futures in FIFO
+        // order and begin the fourth against that prior on its own, while the
+        // old picture stays the only acknowledged display. Inspect CPU-owned
+        // stamps only.
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&second));
-            assert!(!capture.acknowledged(&future).unwrap());
-            assert!(!capture.acknowledged(&second_future).unwrap());
-            if capture.future_committed_stamp_for_test().unwrap().as_ref() == Some(&future)
-                && capture.worker_started_stamp_for_test().unwrap().as_ref() == Some(&second_future)
+            for future in &futures {
+                assert!(!capture.acknowledged(future).unwrap());
+            }
+            if capture.completed_ahead().unwrap() == STITCH_LOOKAHEAD - 1
+                && capture.worker_started_stamp_for_test().unwrap().as_ref() == futures.last()
             {
                 break;
             }
@@ -8597,48 +8841,59 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(1));
         }
-        assert!(capture.accepted(&future).unwrap());
-        assert!(capture.accepted(&second_future).unwrap());
-        assert!(!capture.acknowledged(&future).unwrap());
-        assert!(!capture.acknowledged(&second_future).unwrap());
+        for future in &futures {
+            assert!(capture.accepted(future).unwrap());
+            assert!(!capture.acknowledged(future).unwrap());
+        }
+        assert_eq!(
+            capture.future_committed_stamp_for_test().unwrap().as_ref(),
+            Some(&futures[0]),
+            "the completed FIFO front changed to a newer future"
+        );
         assert_eq!(scene.frame_stamp().as_ref(), Some(&second));
         assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&second));
 
-        // Pausing hides both media lookaheads but does not lose either admitted
-        // source owner. Recreating the renderer must still draw the old frame.
+        // Pausing hides every media lookahead but does not lose the admitted
+        // source owners. Recreating the renderer preserves the FIFO while it
+        // continues to draw the old frame.
         let paused = scene.primitive(Camera::default());
-        assert!(paused.resident_next.is_none());
-        assert!(paused.resident_next_after.is_none());
+        assert!(paused.resident_ahead.iter().all(Option::is_none));
         drop(pipeline);
         let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
         for _ in 0..3 {
             pipeline.prepare(&scene.primitive(Camera::default()), &device, &queue, 1.0);
             assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&second));
             assert!(capture.acknowledged(&second).unwrap());
-            assert!(!capture.acknowledged(&future).unwrap());
-            assert!(!capture.acknowledged(&second_future).unwrap());
-            assert!(capture.accepted(&future).unwrap());
-            assert!(capture.accepted(&second_future).unwrap());
+            for future in &futures {
+                assert!(!capture.acknowledged(future).unwrap());
+                assert!(capture.accepted(future).unwrap());
+            }
+            assert_eq!(capture.completed_ahead().unwrap(), STITCH_LOOKAHEAD - 1);
+            assert_eq!(
+                capture.future_committed_stamp_for_test().unwrap().as_ref(),
+                Some(&futures[0])
+            );
             draw_resident_test_pass(&pipeline, &device, &queue);
         }
 
         // Only Player's subsequent due promotion authorizes atomic publication
         // of this same opaque delivery and its precomputed map.
         scene.play();
+        assert!(finish_selected_preroll(&scene, &mut pipeline, &device, &queue, &second).is_none());
         let promoted = wait_for_new_scene_frame(&scene, Some(&second));
-        assert_eq!(promoted, future);
+        assert_eq!(promoted, futures[0]);
         scene.pause(Instant::now());
-        prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &future);
-        assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&future));
+        prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &futures[0]);
+        assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&futures[0]));
 
         // Early temporal commit changes scheduling, never the map arithmetic.
         // Compare the published result with a fresh paused lineage that cannot
         // prefetch and installs every source from cold frame zero in order.
         assert_eq!(first.index(), 0);
         assert_eq!(second.index(), 1);
-        assert_eq!(future.index(), 2);
+        assert_eq!(futures[0].index(), 2);
         let overlapped = capture
-            .diagnostic_installed_map(&future)
+            .diagnostic_installed_map(&futures[0])
             .unwrap()
             .expect("overlapped future has no installed diagnostic map");
 
@@ -8657,7 +8912,7 @@ mod tests {
             &control_frame,
         );
         control.pump(Instant::now());
-        while control_frame.index() < future.index() {
+        while control_frame.index() < futures[0].index() {
             let expected = control_frame.index() + 1;
             control.step(Instant::now(), 1);
             let next = wait_for_new_scene_frame(&control, Some(&control_frame));
@@ -8673,12 +8928,12 @@ mod tests {
             control.pump(Instant::now());
             control_frame = next;
         }
-        assert_eq!(control_frame.index(), future.index());
+        assert_eq!(control_frame.index(), futures[0].index());
         let serial = control_capture
             .diagnostic_installed_map(&control_frame)
             .unwrap()
             .expect("serial control has no installed diagnostic map");
-        assert_eq!(overlapped.frame(), &future);
+        assert_eq!(overlapped.frame(), &futures[0]);
         assert_eq!(serial.frame(), &control_frame);
         assert_eq!(overlapped.packed(), serial.packed());
         assert_eq!(overlapped.alpha(), serial.alpha());
@@ -8712,10 +8967,12 @@ mod tests {
         let old_capture =
             prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &first);
 
-        scene.play();
+        assert!(!matches!(scene.pump(Instant::now()), Next::Stopped(_)));
+        scene.step(Instant::now(), 1);
         let second = wait_for_new_scene_frame(&scene, Some(&first));
         let before_due = Instant::now();
         prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &second);
+        scene.play();
 
         // Admit the actual decoded successor without advancing logical time.
         // Once accepted, the test main stops pumping, preparing, drawing and
@@ -8724,7 +8981,7 @@ mod tests {
         let future = loop {
             assert!(!matches!(scene.pump(before_due), Next::Stopped(_)));
             let primitive = scene.primitive(Camera::default());
-            let Some(next) = primitive.resident_next.as_ref() else {
+            let Some(next) = primitive.resident_ahead[0].as_ref() else {
                 assert!(Instant::now() < deadline);
                 std::thread::yield_now();
                 continue;
@@ -8738,6 +8995,7 @@ mod tests {
             std::thread::yield_now();
         };
         assert!(old_capture.accepted(&future).unwrap());
+        scene.pause(before_due);
         let worker_deadline = Instant::now() + Duration::from_secs(10);
         while old_capture
             .future_committed_stamp_for_test()
@@ -8844,6 +9102,7 @@ mod tests {
         let mut exact = wait_for_new_scene_frame(&scene, None);
         let mut capture =
             prepare_and_draw_exact_resident_frame(&scene, &mut pipeline, &device, &queue, &exact);
+        assert!(finish_selected_preroll(&scene, &mut pipeline, &device, &queue, &exact).is_none());
         for _ in 1..5 {
             let next = wait_for_new_scene_frame(&scene, Some(&exact));
             let next_capture = prepare_and_draw_exact_resident_frame(
@@ -9455,6 +9714,68 @@ mod tests {
             assert!(
                 Instant::now() < deadline,
                 "ONE X2 test playback did not deliver its next frame"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn finish_selected_preroll(
+        scene: &Scene,
+        pipeline: &mut ScenePipeline,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        displayed: &FrameStamp,
+    ) -> Option<(Next, FrameStamp)> {
+        let held = scene.position(Instant::now());
+        let capture = scene.show.as_ref().unwrap().one_xs.clone().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let now = Instant::now();
+            let next = scene.pump(now);
+            assert!(!matches!(&next, Next::Stopped(_)));
+            assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(displayed));
+            if scene.player(Player::is_playing) == Some(true) {
+                let decoded = scene
+                    .player(|player| {
+                        (0..STITCH_LOOKAHEAD)
+                            .take_while(|&ahead| player.decoded_ahead(ahead).is_some())
+                            .count()
+                    })
+                    .unwrap();
+                assert!(preroll_ready(
+                    capture.completed_ahead().unwrap(),
+                    decoded,
+                    scene.player(Player::decode_exhausted).unwrap()
+                ));
+                return None;
+            }
+            if scene.player(Player::is_ended) == Some(true) {
+                let offered = scene
+                    .frame_stamp()
+                    .expect("terminal preroll EOF did not offer its final decoded frame");
+                assert_ne!(&offered, displayed);
+                assert!(scene.show.as_ref().unwrap().replay.borrow().is_none());
+                assert!(!scene.show.as_ref().unwrap().preroll.get());
+                assert!(capture.accepted(&offered).unwrap());
+                assert_eq!(
+                    capture.future_committed_stamp_for_test().unwrap().as_ref(),
+                    Some(&offered),
+                    "terminal preroll did not retain the exact ready FIFO head"
+                );
+                return Some((next, offered));
+            }
+
+            assert!(scene.show.as_ref().unwrap().preroll.get());
+            assert_eq!(scene.position(now), held);
+            assert_eq!(scene.position(now + Duration::from_secs(60)), held);
+            let primitive = scene.primitive(Camera::default());
+            pipeline.prepare(&primitive, device, queue, 1.0);
+            if pipeline.resident_draw != ResidentDrawSelection::None {
+                draw_resident_test_pass(pipeline, device, queue);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "selected playback did not finish its three-successor preroll"
             );
             std::thread::sleep(Duration::from_millis(1));
         }

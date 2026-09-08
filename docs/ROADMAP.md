@@ -45,7 +45,64 @@ source order, calculations, refresh cadence and fresh seek history. This aims
 to absorb isolated work spikes without adding more GPU work ahead of draws;
 it does not increase mean compute capacity. Startup/seek-resume latency and
 memory use must be measured and surfaced before owner testing. The design is
-not implemented or a smoothness result at this checkpoint.
+not implemented or a smoothness result at that installed-build checkpoint.
+
+**Controls-wake pause corrected in native tests, 2026-09-07:** both native X4
+arms show a roughly 250 ms gap in Scene pumping immediately after the cursor
+wakes the hidden controls. The candidate has three exact future pictures
+already ready, and draw/presentation callbacks finish promptly. This episode
+is not an empty stitch queue or evidence of slow seam computation. Inspection
+then found the pinned iced named-child reconciliation overwrites the retained
+content when inserting the named COSMIC header ahead of it. The new app
+regression reproduces the failure: the expected two-child tree has only one
+child after the transition. No Scene widget means no media deadline request;
+the next 250 ms controls Tick rebuilds the missing content. The local dependency
+correction now passes that test and all 67 app tests, without changing seam
+calculations or UI layout. The new private-compositor regression reproduces
+three X4 wake gaps of 253.70/253.24/253.45 ms before the correction. The corrected
+build passes all three X4 wakes (maximum pump gaps 33.43/33.55/33.77 ms) and all
+three ONE X2 wakes (33.99/33.42/33.52 ms), at 1280x720. These are source-playback
+update intervals, not a 240 fps changing-view capacity pass. The parser's 14
+synthetic tests cover malformed, incomplete and delayed evidence; CI runs them.
+Full workspace gates now pass: 1,258 tests, zero failures, 30 ignored, plus
+the two device-limit and three real-GPU presentation-readiness checks. The
+first full run exposed an EOF test assuming an immediate redraw even when the
+two draw slots are full; its corrected assertion requires the existing bounded
+1 ms retry and retains exact final-frame/EOF acknowledgement checks. Runtime
+code did not change for that test correction. The broader native UI suite is
+running for this combined candidate. Actual X4 sourced-presentation holds
+around the three wakes fall from 286.80/256.30/255.65 ms to 41.73/43.68/46.15 ms;
+none of the corrected wake windows contains a presentation without a Scene
+draw. These are native commits, not physical scanout measurements.
+This is a verified correction for the reproduced controls-wake pause, not all
+of the owner's pauses or the separately reported issue #149. Evidence starts at
+`scratch/fusion-live-20260907/controls-wake-01/` and the X4 `ready-fifo-idle-01`
+logs. No upstream interaction, new installed build or owner acceptance.
+
+**Ready-frame reserve implementation, 2026-09-07, performance not yet qualified:** the
+branch now implements that three-completed/one-additional FIFO and explicit
+clock-held pre-roll. The first exact target becomes visible before playback
+starts; startup, seek and resume prepare successors while the actual media
+clock and audio Beat remain paused. A real decoder EOF permits fewer than
+three successors, so a short tail need not wait for nonexistent frames. Pause
+cancels new pre-roll admission; accepted source owners remain valid. Source
+order, seam arithmetic, full-refresh cadence and draw-retirement capacity are
+unchanged. Media unit tests pass (79 passed, zero failed, three footage tests
+ignored); the production renderer compiles. A new regression first reproduced
+and then verified the correction for forward stepping losing an already observed
+same-epoch EOF, which otherwise strands resume pre-roll at the tail. Native
+real-camera checks now pass: 68 Scene, six root, one worker and 35 facade tests,
+plus 50 X4 and 54 ONE X2 UI checks. All 460 frame/map/alpha/color artifacts over
+31 X4 and 61 X2 frames match the preceding deadline build byte for byte. Evidence
+is in `ready-fifo-02/` and `ui-08-ready-fifo/` under the same scratch parent.
+The idle comparison does not establish a smoothness win: the valid X2 common
+cohort has essentially unchanged p95/p99 holds and two long holds versus one;
+the X4 pair is refused for a source-less presentation inside its common cohort.
+The controls-wake gap above falls on different sides of the two arms' steady
+selection boundary, so their maximum-hold figures are not a valid comparison.
+Startup latency/memory and active-view capacity remain
+pending. The installed Flatpak remains the qualified b2 worker build,
+not this unqualified candidate. No main merge or new owner acceptance.
 
 **Autonomous source processing under qualification, 2026-09-07:** the owner
 challenged the prolonged micro-hitch investigation and the pipeline's design

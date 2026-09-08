@@ -1847,6 +1847,35 @@ fn applied_optical_flow(saved: bool, available: bool) -> bool {
 mod tests {
     use super::*;
 
+    /// The stock COSMIC template inserts its named header before its named
+    /// content when the controls wake. Losing that second child also loses
+    /// the Scene's redraw deadline until another application message arrives.
+    #[test]
+    fn waking_header_keeps_video_content_in_the_same_reconciliation() {
+        use cosmic::iced::advanced::widget::{Id, Tree};
+
+        let named = |name: &&'static str| Tree {
+            id: Some(Id::new(*name)),
+            ..Tree::empty()
+        };
+        let content = named(&"COSMIC_content_container");
+        let content_id = content.id.clone();
+        let mut tree = Tree {
+            children: vec![content],
+            ..Tree::empty()
+        };
+        let mut children = ["COSMIC_header", "COSMIC_content_container"];
+        let ids = children.iter().map(|name| Some(Id::new(*name))).collect();
+        tree.diff_children_custom(&mut children, ids, |_, _| {}, named);
+
+        assert_eq!(
+            tree.children.len(),
+            2,
+            "the waking header displaced the video"
+        );
+        assert_eq!(tree.children[1].id, content_id);
+    }
+
     #[test]
     fn copied_view_names_the_displayed_frame_before_a_newer_offered_one() {
         let displayed = Duration::from_secs_f64(212.512_3);

@@ -13,6 +13,8 @@
 pub mod app;
 pub mod args;
 pub mod config;
+#[cfg(test)]
+mod controls_tree_tests;
 mod dnd;
 mod fail;
 mod key_bind;
