@@ -14,6 +14,56 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Delivery split after capacity failure, 2026-09-07:** the combined `8c6921cf`
+package is built but will not replace the installed app. Its final native
+binary's 40-second 2256x1504, nominal-300-Hz ONE X2 panning run passes the
+pointer cohort's trace-integrity check, but delivers only 25.875 consecutive
+source advances/sec and ends with 5.77 s reported worst lateness. Completed
+draws average 254.77/sec, which does not excuse the source deficit; draw wall
+time p99 is 13.04 ms. The corresponding X4 trace is refused because stdout's
+ordinary `play:` report interleaved into a stderr JSON record. Its counters
+cannot substitute for a valid capacity result. No player arithmetic needs to
+change to separate those two diagnostic output streams on the next run.
+GPU temperature reaches 91 C and CPU Tctl 100.6 C by the X2 run's end; those
+readings are context, not proof that throttling caused the failure.
+
+The coordinator is separating the independently verified controls-tree
+correction from the unqualified larger reserve: restore b2's autonomous worker,
+two decoded successors and one completed future, while retaining the UI fix.
+The larger FIFO/pre-roll adds measured memory/startup cost without a qualified
+overall smoothness benefit, and its owner tradeoff question is withdrawn from
+this delivery. This is not a claim that the FIFO caused the capacity failure
+or that the smaller reserve resolves it. The full performance goal remains open;
+the intent is to deliver the concrete controls correction without bundling the
+unproven reserve. Exact-source build/native/UI/package checks for this split
+are still required. The independent same-epoch forward-step EOF correction
+is retained. The split passes full workspace gates: 1,247 tests, zero failures,
+30 ignored, formatting, all-target Clippy, name/source-list checks, both
+device-limit tests and three real-GPU preflight tests. Its rebuilt native
+executable is `6927f39e4bc9a58d447d1bef837b66a036477e1ea18a729ea7a8234528906d19`;
+the full two-camera UI suite is running. No merge, release or new installation.
+
+The archived combined package has executable SHA-256
+`04c836b981a4a973e69d9cedea3e91dfc23b6cda6fbaca8d6cc001b782df86d7`
+and OSTree `c8be21c36024a7f872eb72a2e074fa40fd6a891ad38fa825699335f5c996dbde`.
+The first build stopped on a 300-second dependency-download timeout; its logs
+remain in `scratch/flatpak-delivery-8c6921cf-fetch-failed/`. An offline retry
+using the exact cached pins completed all archive/hash/source-list/link checks
+in `scratch/flatpak-delivery-8c6921cf/`. It is not an installed-runtime pass.
+Capacity evidence is `x4-capacity-controls-fifo-01/` and
+`x2-capacity-controls-fifo-01/` under `scratch/fusion-live-20260907/`.
+
+The dedicated controls-wake harness now also tests the actual installed
+Flatpak. Its verified b2 X4 baseline reproduces all three pauses at
+252.86/253.26/252.81 ms in `scratch/controls-wake/run.SqclrhZI/`. Exact installed
+commit, manifest command and running executable are authenticated; Flatpak's
+reported child PID is its wrapper, so the app is found only beneath that
+authenticated sandbox. Transient proxy/compositor sockets use a unique directory
+under the caller's runtime and are removed; all logs/private config/evidence
+remain in scratch. Earlier startup failures from an unsuitable proxy-socket
+path, abbreviated commit comparison and wrapper-PID hashing are preserved as
+failed harness attempts, not player failures. No owner desktop/config is changed.
+
 **Installed test build and seam-preserving redesign, 2026-09-07:** the owner
 clarified that preserving the old installed Flatpak is not a requirement,
 rejected staggering the two directions' refresh cadence if it affects the

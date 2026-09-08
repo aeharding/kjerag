@@ -37,7 +37,7 @@ use ffmpeg_next as ff;
 
 pub use audio::Audio;
 pub use decode::{DrmFrame, HwDevice, MissingDecoder, SwFrame, open_decoder};
-pub use player::{Player, PresentationPolicy, STITCH_LOOKAHEAD, Stats};
+pub use player::{Player, PresentationPolicy, Stats};
 pub use reader::{Accuracy, Cue, FrameStamp, Frames, Read, Reader, Timing};
 pub use walk::{Chroma, Pair, Plane, Walk};
 

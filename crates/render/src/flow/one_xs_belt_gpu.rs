@@ -583,7 +583,7 @@ impl ResidentCaptureState {
             session,
             transaction: ResidentTransaction::Idle,
             installed: None,
-            queued: VecDeque::with_capacity(kjerag_media::STITCH_LOOKAHEAD),
+            queued: VecDeque::with_capacity(2),
             worker_running: false,
             worker_active: None,
             parked: None,
@@ -595,15 +595,6 @@ impl ResidentCaptureState {
             seek_restart,
         }
     }
-}
-
-fn accepted_unpublished_count(
-    future_depth: usize,
-    active: bool,
-    queued: usize,
-    parked: bool,
-) -> usize {
-    future_depth + usize::from(active) + queued + usize::from(parked)
 }
 
 // One transient worker-local handoff, never an array or queued population.
@@ -1089,7 +1080,7 @@ impl ResidentCaptureFacadeInner {
             .cloned()
             .ok_or("ONE X2 admitted worker has no capture session")?;
         if state.parked.is_some() {
-            if session.capture.pipeline.root.future_full()? {
+            if session.capture.pipeline.root.has_future()? {
                 state.worker_running = false;
                 return Ok(None);
             }
@@ -1141,7 +1132,7 @@ impl ResidentCaptureFacadeInner {
             .session
             .as_ref()
             .ok_or("ONE X2 completed worker has no capture session")?;
-        if session.capture.pipeline.root.future_full()? {
+        if session.capture.pipeline.root.has_future()? {
             state.worker_active = None;
             state.parked = Some(ready);
             state.worker_running = false;
@@ -1288,7 +1279,7 @@ impl ResidentCaptureFacade {
         {
             let mut state = self.state()?;
             let parked_can_commit =
-                state.parked.is_some() && !session.capture.pipeline.root.future_full()?;
+                state.parked.is_some() && !session.capture.pipeline.root.has_future()?;
             if state.retired
                 || matches!(state.transaction, ResidentTransaction::Quarantined)
                 || state.worker_running
@@ -1335,25 +1326,16 @@ impl ResidentCaptureFacade {
             || state
                 .session
                 .as_ref()
-                .map(|session| session.capture.pipeline.root.contains_future(frame))
+                .map(|session| session.capture.pipeline.root.future_stamp())
                 .transpose()?
-                .unwrap_or(false))
+                .flatten()
+                .as_ref()
+                == Some(frame))
     }
 
     /// Computational admission head, never permission to present a picture.
     pub(crate) fn accepted_stamp(&self) -> Fallible<Option<FrameStamp>> {
         Ok(self.state()?.submitted.clone())
-    }
-
-    /// Number of fully computed source results waiting ahead of publication.
-    /// An unattached capture has no resident root and therefore reports zero.
-    pub(crate) fn completed_ahead(&self) -> Fallible<usize> {
-        self.state()?
-            .session
-            .as_ref()
-            .map(|session| session.capture.pipeline.root.future_depth())
-            .transpose()
-            .map(|depth| depth.unwrap_or(0))
     }
 
     pub(crate) fn same_capture(&self, other: &Self) -> bool {
@@ -1614,7 +1596,7 @@ impl ResidentSceneFacade {
                     .capture
                     .pipeline
                     .root
-                    .future_full()
+                    .has_future()
                     .is_ok_and(|full| !full)
         });
         state.worker_running
@@ -1672,18 +1654,16 @@ impl ResidentSceneFacade {
                     .parked
                     .as_ref()
                     .is_some_and(|ready| ready.frame() == &stamp)
-                || session.capture.pipeline.root.contains_future(&stamp)?
+                || session.capture.pipeline.root.future_stamp()?.as_ref() == Some(&stamp)
             {
                 return Ok(ResidentSubmit::Retry(ResidentRetry::InFlight));
             }
             debug_assert!(state.worker_active.is_none() || state.parked.is_none());
-            let accepted_unpublished = accepted_unpublished_count(
-                session.capture.pipeline.root.future_depth()?,
-                state.worker_active.is_some(),
-                state.queued.len(),
-                state.parked.is_some(),
-            );
-            if accepted_unpublished >= kjerag_media::STITCH_LOOKAHEAD {
+            let accepted_unpublished = usize::from(session.capture.pipeline.root.has_future()?)
+                + usize::from(state.worker_active.is_some())
+                + state.queued.len()
+                + usize::from(state.parked.is_some());
+            if accepted_unpublished >= 2 {
                 return Ok(ResidentSubmit::Retry(ResidentRetry::InFlight));
             }
             if (frames.size.width, frames.size.height)
@@ -1806,8 +1786,8 @@ impl ResidentSceneFacade {
         }
 
         // A full global worker channel is transient backpressure. Retry a
-        // parked result only after publication has made room in the FIFO; a
-        // parked result behind a full FIFO never causes busy redraws.
+        // parked result only after publication has made its future slot empty;
+        // a parked result behind a full future never causes busy redraws.
         let kick_pending = !self.capture.kick_worker(&session)?;
 
         let mut state = self.capture.state()?;
@@ -1851,7 +1831,7 @@ impl ResidentSceneFacade {
             let _ = self.capture.kick_worker(&session)?;
             return Ok(ResidentPrepare::Staged { installed: frame });
         }
-        let parked_can_commit = state.parked.is_some() && !root.future_full()?;
+        let parked_can_commit = state.parked.is_some() && !root.has_future()?;
         let pending =
             kick_pending || state.worker_running || !state.queued.is_empty() || parked_can_commit;
         let installed = state.installed.clone();
@@ -1924,7 +1904,7 @@ impl ResidentSceneFacade {
                     .capture
                     .pipeline
                     .root
-                    .future_full()
+                    .has_future()
                     .map(|full| state.parked.is_some() && !full)
             })
             .transpose()?
@@ -4260,15 +4240,6 @@ mod tests {
     use super::*;
     use crate::projection::tests::{ONE_XS_FRAME, fixture_lenses, one_xs_lenses};
 
-    #[test]
-    fn accepted_unpublished_bound_counts_every_resident_owner_once() {
-        assert_eq!(kjerag_media::STITCH_LOOKAHEAD, 4);
-        assert_eq!(accepted_unpublished_count(3, false, 0, true), 4);
-        assert_eq!(accepted_unpublished_count(2, true, 1, false), 4);
-        assert_eq!(accepted_unpublished_count(0, true, 3, false), 4);
-        assert_eq!(accepted_unpublished_count(3, false, 0, false), 3);
-    }
-
     const SESSION_CENTER: Duration = Duration::from_micros(2_000_000);
 
     #[test]
@@ -4932,8 +4903,6 @@ mod tests {
         assert!(state.installed.is_none());
         assert!(matches!(state.transaction, ResidentTransaction::Idle));
         assert!(!facade.same_capture(&restart));
-        drop(state);
-        assert_eq!(restart.completed_ahead().unwrap(), 0);
     }
 
     #[test]

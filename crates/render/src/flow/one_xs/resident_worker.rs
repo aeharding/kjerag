@@ -2,9 +2,9 @@
 //!
 //! Admission/import and publication remain on the caller. Once admitted, a
 //! capture actor owns source execution, final validity acknowledgement and
-//! temporal-future commit. It fills the bounded completed-future FIFO without
-//! a UI poll. A fourth completed result parks in capture state when that FIFO
-//! is full; the actor then ends until publication kicks it again.
+//! temporal-future commit. It may run the second admitted source without a UI
+//! poll. A completed second result parks in capture state when the one future
+//! slot is occupied; the actor then ends until publication kicks it again.
 
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -26,8 +26,7 @@ pub(super) struct ResidentStitchWorker {
 impl ResidentStitchWorker {
     pub(super) fn new(context: &super::OneXsGpuContext) -> Fallible<Self> {
         // One executing capture actor and one queued actor across seek
-        // restarts. Each capture independently applies the shared lookahead
-        // bound across completed, active, queued and parked work.
+        // restarts. Each capture independently limits accepted sources to two.
         let (jobs, incoming) = mpsc::sync_channel::<Job>(1);
         let thread = std::thread::Builder::new()
             .name("kjerag-stitch".into())
