@@ -9157,6 +9157,8 @@ mod tests {
         let glare = std::env::var_os("KJERAG_GLARE_TEST_MEDIA")
             .expect("reference review needs KJERAG_GLARE_TEST_MEDIA");
         std::fs::create_dir(&output).expect("reference review output must be a new directory");
+        let selected = std::env::var_os("KJERAG_PHOTOMETRIC_REFERENCE_REVIEW_CASE");
+        let mut matched = false;
 
         // All three captures report 30000/1001 and paired equal frame counts.
         // These are Timing::index_at's nearest-rational answers for the four
@@ -9207,6 +9209,10 @@ mod tests {
                 },
             ),
         ] {
+            if selected.as_ref().is_some_and(|requested| requested != name) {
+                continue;
+            }
+            matched = true;
             post_seek_review_sequence(
                 path,
                 &output.join(name),
@@ -9216,6 +9222,7 @@ mod tests {
                 ReviewDiagnostic::Photometric { expected_start },
             );
         }
+        assert!(matched, "unknown photometric reference review case");
     }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -9547,6 +9554,10 @@ mod tests {
         use std::io::Write;
 
         let size = Size::new(1280, 720);
+        // Optional exact pixel membership, recorded in the same traversal as
+        // the automatic reading. u16::MAX means ineligible; bins are 0..255.
+        let mut selection = std::env::var_os("KJERAG_INTERIOR_SELECTION_REVIEW")
+            .map(|_| vec![u16::MAX; (size.width * size.height) as usize]);
         let readings = [
             ("automatic", on, 0.0),
             ("null", neutral, 0.0),
@@ -9554,11 +9565,34 @@ mod tests {
             ("ripple_2.0", neutral, 2.0),
         ]
         .map(|(arm, after, ripple)| {
-            (
-                arm,
-                crate::field_interior::measure(neutral, after, reframe, size, ripple),
-            )
+            let reading = if arm == "automatic"
+                && let Some(selection) = selection.as_mut()
+            {
+                crate::field_interior::measure_with_selection(
+                    neutral,
+                    after,
+                    reframe,
+                    size,
+                    ripple,
+                    |pixel, bin| selection[pixel] = u16::try_from(bin).unwrap(),
+                )
+            } else {
+                crate::field_interior::measure(neutral, after, reframe, size, ripple)
+            };
+            (arm, reading)
         });
+        if let Some(selection) = selection {
+            let mut file = std::io::BufWriter::new(
+                std::fs::File::create_new(
+                    output.join(format!("frame-{index:010}.interior-selection.u16le")),
+                )
+                .unwrap(),
+            );
+            for bin in selection {
+                file.write_all(&bin.to_le_bytes()).unwrap();
+            }
+            file.flush().unwrap();
+        }
         for (_, reading) in &readings {
             assert_eq!(reading.bins.len(), readings[0].1.bins.len());
             assert_eq!(reading.summary.is_some(), readings[0].1.summary.is_some());

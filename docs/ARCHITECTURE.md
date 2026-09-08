@@ -207,6 +207,10 @@ The review retains all admitted azimuth bins and runs the original zero and
 new image-quality threshold is selected. Its fixed body-chart interpretation
 must be checked against the capture's alpha before treating it as off-seam
 coverage. It does not qualify arbitrary two-dimensional fields by itself.
+An optional diagnostic observer records the exact eligible pixel/bin membership
+in that same traversal, before the per-bin population gate. Scene can retain it
+as a row-major little-endian u16 raster, with 65535 marking ineligible pixels.
+This is a test-only artifact, not another rendering pass or playback allocation.
 
 The explicit saved-map diagnostic can attach an `image_fusion::RatioPair` to
 its `OneXsMapFrame`. A separate shader variant samples these two 200x100 RGB

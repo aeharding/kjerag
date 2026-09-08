@@ -14,6 +14,35 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**May color-reading localization, 2026-09-08:** exact pixel membership now
+locates the previously reported neighboring-bin peaks. At source 18916, bin 77
+has 447 eligible pixels confined to x1168..1205/y700..719; bin 78 has 2,115
+pixels spread across x1133..1279/y437..719. Root viewed native ON/neutral images,
+exact red/cyan overlays and identically amplified crops for sources 18916,
+18921, 18933 and 18934. The selection includes separated right-edge patches;
+the 10.649% statistic is not a direct adjacent-output-pixel discontinuity or
+a localized stripe through the central field. This does not establish color
+acceptance, explain every roughness component, or dismiss the owner's gate.
+Accounting by exact empty-row gaps explains the mixed averages: source 18916's
+bin 78 combines 1,144 pixels in negative-mean-lift upper patches and 971 pixels
+in a +2.393-code bottom patch, yielding only +0.071 codes overall. At source
+18921 the two bottom patches receive +2.579/+2.546 codes, while one bin also
+contains a separate -2.255-code upper patch. The large bin-to-bin statistic
+therefore cannot be treated as the correction difference between those nearby
+bottom patches. No smoothing change is justified by that reading alone.
+
+The optional observer preserves the original measurement arithmetic. The May
+31-source rerun leaves all 281 existing artifacts, including metric TSVs,
+byte-identical. Every retained population reconciles exactly; independent
+RGB-sum regrouping differs by at most 1.542e-12 neutral luma codes and
+3.997e-14 applied codes. Four CPU tests and full workspace gates pass:
+1,260 tests, zero failures, 30 ignored, formatting, all-target Clippy and
+name/source-list checks. Frozen test executable is
+`cc7d62f4057ab4b31d891216012b5e53ee7c43179e4a2b06441c93b2618bf7c2`.
+Evidence is `scratch/photometric-interior-20260908-01/selection-01/` and
+`localization-01/`. The installed player remains `31ea781d`; no color correction,
+stitch cadence, new quality threshold or live carried-correction policy changed.
+
 **Current-GPU field-interior readings, 2026-09-08:** the registered dark-ground
 coherence check now consumes the exact GPU ON/neutral pairs and the prepared
 Reframe before Scene advances. Its existing arithmetic is shared with `colour`

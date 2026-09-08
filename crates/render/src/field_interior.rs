@@ -18,7 +18,7 @@ const DARK: f64 = 64.0;
 /// How far off the seam the diagnostic samples, in degrees.
 pub const INTERIOR: (f64, f64) = (7.0, 60.0);
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Interior {
     /// Mean absolute applied correction, in gamma-coded RGB luma codes.
     pub applied: f64,
@@ -45,7 +45,7 @@ impl Interior {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bin {
     /// Zero-based index in the 256-bin azimuth sweep.
     pub index: usize,
@@ -59,7 +59,7 @@ pub struct Bin {
     pub level: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Reading {
     pub summary: Option<Interior>,
     pub bins: Vec<Bin>,
@@ -70,6 +70,21 @@ pub struct Reading {
 /// `ripple` is the diagnostic's existing eight-cycle positive control, in
 /// codes. Both inputs must be tightly packed RGBA8 pictures of exactly `size`.
 pub fn measure(before: &[u8], after: &[u8], reframe: &Reframe, size: Size, ripple: f64) -> Reading {
+    measure_with_selection(before, after, reframe, size, ripple, |_, _| {})
+}
+
+/// Measure while observing each eligible pixel's row-major index and azimuth bin.
+///
+/// Selection is reported before the per-bin minimum population is applied.
+/// The observer does not participate in the measurement or change its order.
+pub fn measure_with_selection(
+    before: &[u8],
+    after: &[u8],
+    reframe: &Reframe,
+    size: Size,
+    ripple: f64,
+    mut selected: impl FnMut(usize, usize),
+) -> Reading {
     let width = size.width as usize;
     let pixels = width
         .checked_mul(size.height as usize)
@@ -121,6 +136,7 @@ pub fn measure(before: &[u8], after: &[u8], reframe: &Reframe, size: Size, rippl
         if level <= 0.0 || level > DARK {
             continue;
         }
+        selected(index, bin);
         let planted = ripple * (8.0 * phi).cos();
         held[bin].0 += lift + planted;
         held[bin].1 += level;
@@ -293,6 +309,40 @@ mod tests {
         let reading = measure(&tiny_picture, &tiny_picture, &reframe, tiny, 0.0);
         assert!(reading.summary.is_none());
         assert!(reading.bins.len() < 16);
+    }
+
+    #[test]
+    fn selection_observer_preserves_reading_and_exact_bin_populations() {
+        let reframe = Reframe::blank(1.0, false);
+        let mut before = picture(32);
+        for (index, pixel) in before.chunks_exact_mut(4).enumerate() {
+            if index % 3 == 0 {
+                pixel[..3].fill(65);
+            } else if index % 7 == 0 {
+                pixel[..3].fill(0);
+            }
+        }
+        let after = picture(36);
+        let plain = measure(&before, &after, &reframe, SIZE, 0.5);
+        let mut population = [0usize; SWEEP];
+        let mut previous = None;
+        let observed =
+            measure_with_selection(&before, &after, &reframe, SIZE, 0.5, |index, bin| {
+                assert!(previous.is_none_or(|last| index > last));
+                assert_eq!(before[4 * index], 32);
+                previous = Some(index);
+                population[bin] += 1;
+            });
+        assert!(observed.summary.is_some());
+        assert_eq!(plain, observed);
+        assert_eq!(
+            observed.bins.len(),
+            population.iter().filter(|&&count| count > 16).count()
+        );
+        for bin in observed.bins {
+            assert_eq!(bin.pixels, population[bin.index]);
+            assert_eq!(bin.level, 32.0);
+        }
     }
 
     #[test]
