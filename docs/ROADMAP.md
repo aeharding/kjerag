@@ -14,6 +14,33 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Registered hard-view color coverage, 2026-09-08:** the current GPU producer
+now has 31-source ON/neutral sequences at each of the four registered dark-soil,
+sun-facing and glare-heavy owner views. All 124 sources retain one capture per
+sequence, pass exact source/map/ratio ownership checks, and match ordinary Scene
+output within one 8-bit code/channel. The first wide-angle attempt correctly
+failed that null: the test helper forced a flat-perspective mesh above 110
+degrees. The helper now follows the exact prepared Reframe's projection choice,
+matching the unchanged player. Both failed and passing receipts are retained in
+`scratch/photometric-hard-views-20260908-01/`.
+
+Root inspected all four first/middle/last contact sheets. The correction is
+subtle in these views and visible green/dark variation remains in the April
+ground pictures; this does not close the reported color-cast or field-interior
+streak requirements. The existing owner-built Studio screenshots were also
+viewed, but have different framing and are not paired output evidence for
+these sequences. No new Studio export, fit, correction rule or live scheduling
+change is introduced. The four 31-frame videos show neutral and automatic GPU
+color on identical geometry, not a Studio comparison or owner acceptance.
+
+The frozen test executable is `2152dd3f4e77192b454dcbb4dce49331816b06dfbaf1ea71d137a9276c9e0dd4`.
+All 460 original X4/X2 regression artifacts remain byte-identical. Full workspace
+gates pass 1,256 tests, zero failures, 30 ignored, formatting, all-target Clippy
+and name/source-list checks. This is test-only coverage; the installed `31ea781d`
+app and its known performance limits below are unchanged. The registered
+estimator-free field-interior check still needs to consume these exact pairs
+and matching view geometry before the dark-soil gate can be evaluated.
+
 **Automatic-GPU color output comparison, 2026-09-08:** a test-only Scene
 sequence now captures sources 34538 through 34639 of the owner's X4 file,
 retaining one live GPU producer and its history across all 102 sources. Each

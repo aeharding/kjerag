@@ -8432,6 +8432,12 @@ mod tests {
     ) -> Vec<u8> {
         assert_eq!(width * 4 % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT, 0);
         MapBindError::require_frame(map.frame(), pipeline.prepared_picture.as_ref()).unwrap();
+        let rectilinear = pipeline
+            .prepared_picture
+            .as_ref()
+            .unwrap()
+            .reframe()
+            .is_rectilinear();
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("CPU-reference fusion consumer"),
             size: wgpu::Extent3d {
@@ -8464,7 +8470,7 @@ mod tests {
         {
             let view = texture.create_view(&Default::default());
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("CPU-reference fusion rectilinear mesh consumer"),
+                label: Some("CPU-reference fusion view consumer"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     depth_slice: None,
@@ -8476,7 +8482,13 @@ mod tests {
                 })],
                 ..Default::default()
             });
-            draw.draw_mesh_for_test(&mut pass, &pipeline.bind_group);
+            // Match resident drawing: curved and ball views use the full
+            // Screen ray law, while flat perspective uses the mesh path.
+            if rectilinear {
+                draw.draw_mesh_for_test(&mut pass, &pipeline.bind_group);
+            } else {
+                draw.draw(&mut pass, &pipeline.bind_group);
+            }
         }
         encoder.copy_texture_to_buffer(
             texture.as_image_copy(),
@@ -9122,14 +9134,94 @@ mod tests {
                 pitch: 3.55f32.to_radians(),
                 fov: 63.63f32.to_radians(),
             },
-            ReviewDiagnostic::Photometric,
+            ReviewDiagnostic::Photometric {
+                expected_start: 34538,
+            },
         );
+    }
+
+    /// Four registered owner views which expose dark-field coherence, a
+    /// lens-confined green cast and simultaneous glare/geometry difficulty.
+    /// This writes review evidence; it does not score or fit the pictures.
+    #[test]
+    fn registered_photometric_reference_review_sequences() {
+        let Some(output) =
+            std::env::var_os("KJERAG_PHOTOMETRIC_REFERENCE_REVIEW_DIR").map(PathBuf::from)
+        else {
+            return;
+        };
+        let may26 = std::env::var_os("KJERAG_MAY26_TEST_MEDIA")
+            .expect("reference review needs KJERAG_MAY26_TEST_MEDIA");
+        let x4 = std::env::var_os("KJERAG_X4_TEST_MEDIA")
+            .expect("reference review needs KJERAG_X4_TEST_MEDIA");
+        let glare = std::env::var_os("KJERAG_GLARE_TEST_MEDIA")
+            .expect("reference review needs KJERAG_GLARE_TEST_MEDIA");
+        std::fs::create_dir(&output).expect("reference review output must be a new directory");
+
+        // All three captures report 30000/1001 and paired equal frame counts.
+        // These are Timing::index_at's nearest-rational answers for the four
+        // registered decimal-second requests, not a rounded 29.97 estimate.
+        for (name, path, target, expected_start, camera) in [
+            (
+                "may26-dark-soil",
+                Path::new(&may26),
+                630.763,
+                18904,
+                Camera {
+                    yaw: -86.02f32.to_radians(),
+                    pitch: -17.08f32.to_radians(),
+                    fov: 114.41f32.to_radians(),
+                },
+            ),
+            (
+                "april-sun-facing-1",
+                Path::new(&x4),
+                594.027,
+                17803,
+                Camera {
+                    yaw: -89.89f32.to_radians(),
+                    pitch: -62.95f32.to_radians(),
+                    fov: 41.19f32.to_radians(),
+                },
+            ),
+            (
+                "april-sun-facing-2",
+                Path::new(&x4),
+                602.368,
+                18053,
+                Camera {
+                    yaw: -139.23f32.to_radians(),
+                    pitch: -37.74f32.to_radians(),
+                    fov: 71.04f32.to_radians(),
+                },
+            ),
+            (
+                "aug02-hard-mode",
+                Path::new(&glare),
+                31.064,
+                931,
+                Camera {
+                    yaw: -64.71f32.to_radians(),
+                    pitch: -31.44f32.to_radians(),
+                    fov: 142.89f32.to_radians(),
+                },
+            ),
+        ] {
+            post_seek_review_sequence(
+                path,
+                &output.join(name),
+                Duration::from_secs_f64(target),
+                31,
+                camera,
+                ReviewDiagnostic::Photometric { expected_start },
+            );
+        }
     }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum ReviewDiagnostic {
         Existing,
-        Photometric,
+        Photometric { expected_start: u64 },
     }
 
     fn post_seek_review_sequence(
@@ -9161,10 +9253,10 @@ mod tests {
             );
             start
         };
-        if review == ReviewDiagnostic::Photometric {
+        if let ReviewDiagnostic::Photometric { expected_start } = review {
             assert_eq!(
-                start, 34538,
-                "index-derived photometric review target did not select source 34538"
+                start, expected_start,
+                "index-derived photometric review target selected source {start}, expected {expected_start}"
             );
         }
         scene.seek(target, Accuracy::Exact);
@@ -9175,7 +9267,7 @@ mod tests {
         // history remain unchanged; carried corrections never enter playback.
         let carried_review = review == ReviewDiagnostic::Existing
             && std::env::var_os("KJERAG_CARRIED_FLOW_REVIEW").is_some();
-        let photometric_review = review == ReviewDiagnostic::Photometric;
+        let photometric_review = matches!(review, ReviewDiagnostic::Photometric { .. });
         let mut previous_inputs = None;
         let mut previous_ratios = None;
         let mut diagnostic = (carried_review || photometric_review)
@@ -9202,6 +9294,24 @@ mod tests {
         } else {
             None
         };
+        if let ReviewDiagnostic::Photometric { expected_start } = review {
+            let mut request = std::io::BufWriter::new(
+                std::fs::File::create_new(output.join("request.txt")).unwrap(),
+            );
+            writeln!(request, "target_seconds={:.9}", target.as_secs_f64()).unwrap();
+            writeln!(request, "expected_first_source={expected_start}").unwrap();
+            writeln!(request, "source_count={count}").unwrap();
+            writeln!(request, "yaw_degrees={:.2}", camera.yaw.to_degrees()).unwrap();
+            writeln!(request, "pitch_degrees={:.2}", camera.pitch.to_degrees()).unwrap();
+            writeln!(
+                request,
+                "horizontal_fov_degrees={:.2}",
+                camera.fov.to_degrees()
+            )
+            .unwrap();
+            writeln!(request, "horizon_locked=true").unwrap();
+            request.flush().unwrap();
+        }
         let mut photometric_capture = None;
         for index in start..start + count {
             let frame = wait_for_new_scene_frame(&scene, previous.as_ref());
