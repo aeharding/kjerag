@@ -14,6 +14,104 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Owner feedback and seam reports, 2026-09-08:** chromatic calibration
+"looks really good"; pausing "seems ok on initial glance". Preserve that color
+result and treat pause feedback as preliminary, not blanket smoothness or
+branch acceptance. The owner confirms that the April X4 Air t607.574 Scene
+clip reproduces the reported moving seam, described as "almost like blotting".
+The 61-source capture covers sources 18209..18269. All 61 alpha maps are
+identical. No-color, no-flow and solo-lens diagnostic controls complete for the
+first 31 sources without changing the original source maps or screenshots.
+They are discriminatory views, not fixes or a cause finding. The owner requires
+a direct Studio/Kjerag A/B at this exact view before assuming the products
+differ or choosing a fix. Actual Studio 6.0.2 exports now cover all three
+reported intervals; the direct visual-review set is described below.
+
+A separate broader-smoothing report is registered on the July X4 Air footage
+at t1616.348, yaw109.01, pitch-1.50, fov66.70, horizon locked. Its initial
+31-source Scene capture completes for sources 48442..48472; owner confirmation
+of that new capture is pending. Do not assume the April and July reports share
+a cause or that either differs from Studio before direct matched A/B evidence.
+A third exact report is registered on August X4 Air footage at t19.686,
+yaw-142.64, pitch-19.92, fov114.41, horizon locked; capture and owner
+confirmation were pending initially. Its 31-source Scene capture now completes
+for sources 590..620; owner confirmation remains pending. None of these
+fresh-seek sequences establishes uninterrupted-history behavior. No production
+stitch/color/cadence change or new installed build is selected. Scene evidence
+is `scratch/x4-ground-seam-20260908-01/` and the August capture below.
+
+**Direct three-view Studio A/B, 2026-09-08:** actual source-size/source-rate
+Studio exports and muted side-by-side movies now cover April, July and August.
+Kjerag is left, Studio right. Initial Direction Lock ON exports align their
+anchors but drift to different viewing directions through July/August; those
+movies are not valid moving-seam evidence. Corrected exports use Direction
+Lock OFF with stabilization, AI stitching and Image Fusion still ON. Complete
+project diffs change only Direction Lock plus source-identical hard-link aliases,
+generated IDs/cache paths and timestamps. No camera/stitch parameter was fitted.
+
+Each presentation uses one fixed rigid rotation of the entire Studio panorama,
+unchanged requested FOV, and Kjerag's screen projection, including August's
+wide-angle projection. Root inspected April samples 0/15/30/45/60 and July/
+August 0/15/30. The large viewing drift is absent in these corrected samples;
+residual framing and texture differences remain. This is visual-review evidence,
+not a seam cause finding or parity verdict. Saved-trim arithmetic supplies the
+source/output association, which is not independently authenticated; neighboring
+candidates do not prove a one-frame uncertainty bound. Sampling/encoding
+differences are not isolated, and fitting bands are not proven seam-free.
+Private movies, hashes, complete project diffs and provenance are retained in
+`scratch/studio-seam-ab-20260908-01/`, using its `*-direction-off-ab/` set.
+No production behavior, installed app or native player changed.
+
+**April localization and sampling control, 2026-09-08:** the saved-alpha
+0.5 trace crosses the reported mottled ground corridor and moves across the
+locked view. Original Scene pixels are preserved outside the diagnostic red
+marks; ray-replay RGB was rejected as an exact image replacement. In the
+inspected controls, the corridor remains with public flow or color disabled.
+One higher-resolution Scene capture at each of sources 18209/18224/18239,
+reduced by a fixed 2x2 area average, reduces fine speckling but does not remove
+the broader mottled pattern. The 31-source sampling test passes and all 155
+original image/map/alpha/ratio artifacts remain byte-identical. Sampling
+contributes to texture appearance; these three stills do not establish the
+moving defect's cause, a Studio difference isolated to stitching, or a fix.
+The new `sampling` mode is test-only. No production filter or temporal change
+is selected. Artifacts are the comparison directory's `april-local-review-02/`,
+`april-sampling-01/` and `april-sampling-review-01/`.
+
+**April coverage and blend-weight controls, 2026-09-08:** dense CPU reference
+rasters at sources 18209/18224/18239 contain no out-of-range lens coordinates
+with nonzero blend weight. Invalid regions in the solo-lens pictures therefore
+do not establish edge-clamping leakage in these normal blends. This does not
+check physical image-circle support or the GPU filter footprint; no coverage
+clamp is selected.
+
+A retained Studio X4 alpha upload from t1152.417933 contains 2,004 fractional
+nodes, versus 2,392 in Kjerag's current map. A fixed-convention coordinate/lens
+conversion was tested as an explicitly cross-time shape proxy, not as Studio's
+actual alpha at t607.574 or a proven static producer law. Three same-consumer
+baseline/proxy pairs preserve source, geometry and saved color ratios; all
+seven alpha-independent image arms remain byte-identical, as do the earlier
+baseline replays. Root and independent visual review find the broader mottled
+corridor and apparent row bending/merging still present. The proxy does not
+provide a convincing fix or isolate the direct Studio/Kjerag difference.
+Native chart orientation is convention-derived, not independently landmark-
+authenticated; native texture contents and cross-time lifecycle remain unproven.
+No new export, production blend rule, filter, temporal policy or installed build
+is selected. Evidence: `april-coverage-01/` and `april-alpha-proxy-01/` under
+the existing private comparison directory. Owner review of the direct A/Bs
+remains the quality gate, not these diagnostic substitutions.
+
+The follow-up performance audit identifies an unqualified view family: August's
+114.41-degree view uses the curved fragment-ray consumer, while the installed
+240-capacity measurements below use narrower hardware-mesh views. This is a
+coverage gap, not a measured slowdown. The proposed installed reported-view
+idle tests refused before launch because a desktop Kjerag instance is already
+open; it was left untouched and the owner was asked before closing it. No new
+performance measurement or optimization follows. CPU-only checks pass: full
+workspace/all-target Clippy, 135 metadata tests including the doc test, and the
+frozen render test's fusion-shader validation. Formatting and name/source-list
+checks pass; no new full workspace runtime or installed UI qualification is
+claimed. Attempt record: `scratch/reported-view-playback-20260908-01/`.
+
 **May color-reading localization, 2026-09-08:** exact pixel membership now
 locates the previously reported neighboring-bin peaks. At source 18916, bin 77
 has 447 eligible pixels confined to x1168..1205/y700..719; bin 78 has 2,115

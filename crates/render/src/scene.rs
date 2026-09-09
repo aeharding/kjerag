@@ -9114,6 +9114,38 @@ mod tests {
         );
     }
 
+    /// Review any reported locked view through the same live capture helper.
+    /// Diagnostic removals never become selected playback policies.
+    #[test]
+    fn reported_seam_review_sequence() {
+        let Some(output) = std::env::var_os("KJERAG_REPORTED_SEAM_REVIEW_DIR").map(PathBuf::from)
+        else {
+            return;
+        };
+        let line =
+            std::env::var("KJERAG_REPORTED_SEAM_VIEW").expect("review needs a full view line");
+        let (path, view) = crate::Framing::read_line(&line).expect("invalid review view line");
+        assert_eq!(
+            view.horizon,
+            Horizon::Locked,
+            "review helper holds the horizon"
+        );
+        let mode = std::env::var("KJERAG_REPORTED_SEAM_MODE").unwrap_or_default();
+        let review = match mode.as_str() {
+            "" => ReviewDiagnostic::Existing,
+            "components" => ReviewDiagnostic::SeamComponents,
+            "sampling" => ReviewDiagnostic::SamplingAnchors,
+            _ => panic!("unknown seam review mode {mode}"),
+        };
+        eprintln!("reported-seam-review: {line}, mode={mode}, sources=31");
+        post_seek_review_sequence(&path, &output, view.at, 31, view.camera, review);
+        std::fs::write(
+            output.join("request.txt"),
+            format!("{line}\nmode={mode}\nsources=31\n"),
+        )
+        .unwrap();
+    }
+
     /// Candidate-ordinal photometric evidence only. Studio output frame zero
     /// is not authenticated as this source, so these automatic-GPU ON and
     /// neutral pictures do not establish Studio alignment or parity.
@@ -9229,6 +9261,8 @@ mod tests {
     enum ReviewDiagnostic {
         Existing,
         Photometric { expected_start: u64 },
+        SeamComponents,
+        SamplingAnchors,
     }
 
     fn post_seek_review_sequence(
@@ -9275,10 +9309,16 @@ mod tests {
         let carried_review = review == ReviewDiagnostic::Existing
             && std::env::var_os("KJERAG_CARRIED_FLOW_REVIEW").is_some();
         let photometric_review = matches!(review, ReviewDiagnostic::Photometric { .. });
+        let seam_components = review == ReviewDiagnostic::SeamComponents;
         let mut previous_inputs = None;
         let mut previous_ratios = None;
-        let mut diagnostic = (carried_review || photometric_review)
+        let mut diagnostic = (carried_review || photometric_review || seam_components)
             .then(|| ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm));
+        if seam_components {
+            for arm in ["no-color", "no-flow", "lens-0", "lens-1"] {
+                std::fs::create_dir(output.join(arm)).unwrap();
+            }
+        }
         if carried_review {
             for arm in ["direct-current", "carried-flow", "carried-flow-color"] {
                 std::fs::create_dir(output.join(arm)).unwrap();
@@ -9363,6 +9403,119 @@ mod tests {
             assert_eq!(shot.index, index);
             let map = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
             assert_eq!(map.frame(), &frame);
+            if review == ReviewDiagnostic::SamplingAnchors && matches!(index - start, 0 | 15 | 30) {
+                // The ordinary Scene shutter draws the exact installed source,
+                // map and ratios again. Only the output extent changes. Retain
+                // full pixels for an explicit offline sampling comparison;
+                // this is not a playback policy or a stitch-quality verdict.
+                let (send, receive) = std::sync::mpsc::channel();
+                scene.capture(Request {
+                    width: 2560,
+                    then: Box::new(move |shot| {
+                        let _ = send.send(shot);
+                    }),
+                });
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let high = loop {
+                    pipeline.prepare(&scene.primitive(camera), &device, &queue, 16.0 / 9.0);
+                    if let Ok(high) = receive.recv_timeout(Duration::from_millis(10)) {
+                        break high.unwrap();
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "sampling screenshot did not complete"
+                    );
+                };
+                assert_eq!(high.index, shot.index);
+                assert_eq!(high.time, shot.time);
+                assert_eq!((high.width, high.height), (2560, 1440));
+                let folder = output.join("sampling-2560");
+                if index == start {
+                    std::fs::create_dir(&folder).unwrap();
+                }
+                write_review_ppm_sized(&folder, index, high.width, high.height, &high.rgba);
+                let installed = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
+                assert_eq!(installed.frame(), map.frame());
+                assert_eq!(installed.packed().bytes(), map.packed().bytes());
+                assert_eq!(installed.alpha().bytes(), map.alpha().bytes());
+                assert_eq!(installed.pis_backend(), map.pis_backend());
+                assert_eq!(installed.fusion(), map.fusion());
+            }
+            if seam_components {
+                use crate::studio_type2::{AlphaMap, MAP_NODES};
+
+                let diagnostic = diagnostic.as_mut().unwrap();
+                let prepared = diagnostic
+                    .prepare_one_xs_picture(&scene.primitive(camera), 16.0 / 9.0)
+                    .unwrap();
+                assert_eq!(prepared.frame(), &frame);
+                let control =
+                    render_direct_map_pixels_sized(&device, &queue, diagnostic, &map, 1280, 720);
+                assert_eq!(control.len(), shot.rgba.len());
+                for (&a, &b) in control.iter().zip(&shot.rgba) {
+                    assert!(a.abs_diff(b) <= 1, "component control differs from Scene");
+                }
+                let ratios = map.fusion().expect("component review needs active color");
+                let neutral = OneXsMapFrame::new(
+                    frame.clone(),
+                    map.packed().clone(),
+                    map.alpha().clone(),
+                    map.pis_backend(),
+                );
+                let capture = scene.show.as_ref().unwrap().one_xs.clone().unwrap();
+                let mut inputs = capture
+                    .diagnostic_cold_final_inputs(&frame)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(inputs.frame, frame);
+                assert_eq!(
+                    inputs
+                        .materialize_with_public_from(&inputs)
+                        .unwrap()
+                        .bytes(),
+                    map.packed().bytes(),
+                    "same-flow recomposition differs from installed map"
+                );
+                // Only the public corrections change. The method retains this
+                // source's private preimage/base/static inputs, not older UVs.
+                inputs.lens_a_public.fill(0.0_f32.to_bits());
+                inputs.lens_b_public.fill(0.0_f32.to_bits());
+                let no_flow = OneXsMapFrame::new(
+                    frame.clone(),
+                    inputs.materialize_with_public_from(&inputs).unwrap(),
+                    map.alpha().clone(),
+                    map.pis_backend(),
+                )
+                .with_fusion(ratios.clone());
+                let solo = |weight| {
+                    OneXsMapFrame::new(
+                        frame.clone(),
+                        map.packed().clone(),
+                        AlphaMap::new(vec![weight; MAP_NODES]).unwrap(),
+                        map.pis_backend(),
+                    )
+                    .with_fusion(ratios.clone())
+                };
+                // Solo-lens pictures are meaningful only in their own valid
+                // coverage, particularly the shared overlap. They are not
+                // proposed whole-sphere playback modes.
+                for (arm, preview) in [
+                    ("no-color", neutral),
+                    ("no-flow", no_flow),
+                    ("lens-0", solo(1.0)),
+                    ("lens-1", solo(0.0)),
+                ] {
+                    let pixels = render_direct_map_pixels_sized(
+                        &device, &queue, diagnostic, &preview, 1280, 720,
+                    );
+                    write_review_ppm(&output.join(arm), index, &pixels);
+                }
+                let installed = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
+                assert_eq!(installed.frame(), map.frame());
+                assert_eq!(installed.packed().bytes(), map.packed().bytes());
+                assert_eq!(installed.alpha().bytes(), map.alpha().bytes());
+                assert_eq!(installed.fusion(), map.fusion());
+            }
             if photometric_review {
                 assert_finite_fusion(&map);
                 let diagnostic = diagnostic.as_mut().unwrap();
@@ -9660,12 +9813,16 @@ mod tests {
     }
 
     fn write_review_ppm(output: &Path, index: u64, rgba: &[u8]) {
+        write_review_ppm_sized(output, index, 1280, 720, rgba);
+    }
+
+    fn write_review_ppm_sized(output: &Path, index: u64, width: u32, height: u32, rgba: &[u8]) {
         use std::io::Write;
-        assert_eq!(rgba.len(), 1280 * 720 * 4);
+        assert_eq!(rgba.len(), width as usize * height as usize * 4);
         let mut file = std::io::BufWriter::new(
             std::fs::File::create_new(output.join(format!("frame-{index:010}.ppm"))).unwrap(),
         );
-        write!(file, "P6\n1280 720\n255\n").unwrap();
+        write!(file, "P6\n{width} {height}\n255\n").unwrap();
         for pixel in rgba.chunks_exact(4) {
             file.write_all(&pixel[..3]).unwrap();
         }

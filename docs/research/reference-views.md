@@ -10,6 +10,104 @@ expands a tilde, which makes such a paste a silent no-op (issue #157).
 Agents: read this at the start of any seam task;
 add new owner references here with date, category, and status.
 
+## X4 Air moving ground seam (2026-09-08, owner-confirmed reproduction)
+
+```text
+/home/aeharding/Videos/VID_20260410_185407_00_004.insv time=607.574 yaw=-76.84 pitch=-55.87 fov=108.79 lock=1
+```
+
+The owner confirms that the captured Scene sequence reproduces the seam defect
+and describes it as "almost like blotting". The earlier description was that
+the seam "wiggles/doesn't look quite right in certain circumstances vs studio".
+The owner separately said chromatic calibration "looks really good" and pausing
+"seems ok on initial glance". That is positive color feedback and preliminary
+pause feedback, not acceptance of this remaining seam defect or authorization
+to merge.
+
+The opt-in `reported_seam_review_sequence` reuses the existing post-seek
+capture helper for consecutive sources through ordinary Scene source/map/color
+ownership, with automatic correction retained. Whether the symptom depends on
+uninterrupted history, seeking or view motion is not yet established. Do not
+infer a cause from the view alone. No stitching arithmetic or refresh cadence
+changes.
+
+The first capture completes: sources 18209..18269, 607.573633..609.575633,
+1280x720, same capture with adjacent forward steps after one exact seek. Actual
+Scene screenshots, packed maps, alpha and color ratios are retained under
+`scratch/x4-ground-seam-20260908-01/run-01/`. The 61-frame `reported-view.mp4`
+is the owner-confirmed reproduction. All 61 alpha maps are byte-identical. The
+no-color, zero-public-flow and two solo-lens diagnostic arms complete over the
+first 31 sources; their work leaves the original source maps and screenshots
+unchanged. These arms isolate components only and neither establish a cause nor
+propose a fix. This is the native Scene path, not a recording of installed
+Flatpak window timing or uninterrupted frame-zero history. The owner requires a
+direct Studio/Kjerag A/B at this exact view before assuming the products differ
+or choosing a fix. A new actual Studio export now covers this interval; see the
+direct comparison record below. Cause remains open.
+
+Follow-up source18209/18224/18239 overlays place the computed saved-alpha 0.5
+trace on the original Scene pixels, preserving every unmarked pixel. The
+inspected mottled corridor remains in the no-color and no-public-flow controls.
+The test-only `sampling` mode captures the same installed Scene at 2560x1440
+at those three sources. A fixed offline 2x2 area reduction reduces fine
+speckling but leaves the broader pattern. All 155 original artifacts over the
+31-source rerun remain byte-identical. This is sampling sensitivity, not a
+Studio-matching filter, a motion-quality verdict or a chosen seam fix.
+
+## X4 Air broader smoothing report (2026-09-08, capture awaiting owner confirmation)
+
+```text
+/home/aeharding/Videos/Insta/VID_20260714_193252_00_006.insv time=1616.348 yaw=109.01 pitch=-1.50 fov=66.70 lock=1
+```
+
+This is a second, broader-smoothing report and is not assumed to have the same
+cause as the owner-confirmed April blotting defect. An initial native Scene
+capture completes for sources 48442..48472, 31 adjacent sources after the exact
+seek. Owner confirmation that this new capture shows the reported symptom is
+pending. The full source is now hash-verified on the Mac, and an actual Studio
+export covers this interval. Do not infer a shared cause or a fix merely from
+the report; see the direct comparison record below.
+
+## X4 Air third seam report (2026-09-08, capture awaiting owner confirmation)
+
+```text
+/home/aeharding/Videos/Insta/debug-inside/VID_20260814_145120_00_001.insv time=19.686 yaw=-142.64 pitch=-19.92 fov=114.41 lock=1
+```
+
+This is a third exact owner view. Its native Scene capture completes for sources
+590..620, and an actual Studio export covers the interval. Owner confirmation
+remains pending. Do not assume it differs from Studio or shares a cause with
+either earlier report. Direct Studio/Kjerag A/B comes before cause selection
+or a fix.
+
+### Direct comparison record for these three reports
+
+`scratch/studio-seam-ab-20260908-01/README.md` indexes the private source hashes,
+Studio projects/exports, registration manifests and muted A/B movies. Use the
+`april-direction-off-ab/`, `july-direction-off-ab/` and
+`august-direction-off-ab/` movies, with Kjerag left and Studio right. The initial
+Direction Lock ON July/August movies have a moving-view mismatch despite an
+aligned anchor, so their later frames cannot establish a seam difference.
+Direction Lock OFF, with stabilization and the original AI/Image Fusion settings
+retained, removes that large drift in the inspected samples. Full project diffs
+record only the lock change plus alias paths, generated identifiers/cache paths
+and timestamps. Aliases are hard links to verified original footage, not edited
+sources. This corrects the comparison settings, not the player.
+
+Studio's entire exported panorama receives one fixed rigid rotation per view;
+there is no per-frame, local, lens or FOV fit. The requested screen projection
+is retained, including August's existing curved projection above 110 degrees.
+Root inspected April 0/15/30/45/60 and July/August 0/15/30. Gross view
+correspondence holds, but residual framing and texture differences remain.
+Output association is index-derived from saved trims, not independently
+authenticated. The retained neighbor candidates do not bound uncertainty to
+one frame. Sampling/encoding differences are not isolated and the fitting
+bands were not proved seam-free. These are direct visual-review artifacts,
+not proof of seam parity or a chosen cause/fix. No production behavior changed.
+
+Historical pool instructions below describe retired behavior. Current work
+uses the factory/shared resident path as required by `MANDATES.md`.
+
 **A `seam=` on an acceptance line is `SeamPool::answer` over the pool this box held on the line's
 own date, and is never a knob-by-knob median of that pool.** The five knobs trade against each
 other inside one fit, so a middle taken knob by knob is a pose no capture ever asked for, and the

@@ -17,6 +17,10 @@
 //! is a diagnostic, not Studio source-sampler or other-camera equivalence.
 //! Its two 800x16 BGR bands use the selected map composition and endpoint
 //! expansion before the reference's content gate and area reduction.
+//! `KJERAG_STITCH_LAYERS_DENSE_ONLY=1` instead retains the existing CPU
+//! rasterization for coordinate/coverage inspection and skips map-image arms.
+//! Its little-endian float8 pixels are packed A.xy, packed B.xy, alpha,
+//! covered, padding[2], row-major at the declared 1280x720 view.
 
 use std::fs;
 use std::path::Path;
@@ -179,6 +183,16 @@ fn main() -> Fallible<()> {
         fusion = Some(output.ratios);
     }
     let dense = final_map.rasterize(&prepared, SIZE)?;
+    if std::env::var_os("KJERAG_STITCH_LAYERS_DENSE_ONLY").is_some() {
+        if !cfg!(target_endian = "little") {
+            return Err("dense map capture requires a little-endian host".into());
+        }
+        fs::write(out.join("final-dense-f32le.bin"), dense.dense().bytes())?;
+        println!(
+            "dense: 1280x720 float8; CPU reference coordinates and alpha, not GPU fragment readback"
+        );
+        return Ok(());
+    }
     for (name, geometry) in [("parent", parent), ("final", packed)] {
         for (suffix, weights) in [
             ("", alpha.clone()),
