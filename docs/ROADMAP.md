@@ -27,9 +27,24 @@ passes real X4/ONE X2 input checks and the actual Scene capture completes all
 candidate-left/Studio-right loop is ready in `april-full-overlap-01/review/`
 under the existing comparison directory. No new Studio export was needed;
 the installed candidate's rejection below still stands until a new owner
-verdict. The full-overlap change is not installed or accepted for merge.
+verdict. The full-overlap change is now installed for testing, not accepted
+for merge.
 The full workspace gate passes with both cameras and required GPU fixtures:
 1,274 passed, 34 ignored; all-target workspace Clippy and formatting also pass.
+
+**Full-overlap player delivery, 2026-09-09:** source `365cedf6` now backs the
+usual installed `dev.harding.Kjerag`. The native release harness passes 50
+checks at the exact April flicker view; installed-ID harnesses pass 40 X4 and
+44 ONE X2 checks, all with zero failures. Playback, reported views, backward
+and late scrubber seeks, and ONE X2's four paired-file arrival paths pass.
+The installed tests retain the prior audio-unavailable and import-injection
+skips; X4's paired-file checks do not apply. These are functional checks,
+not audio, performance, or flicker acceptance. The package/source/executable
+identities verify before and after testing, and the previous `9e193956`
+bundle remains available for rollback. Evidence is in
+`scratch/flatpak-delivery-365cedf6/` and the comparison directory's
+`april-full-overlap-01/native-qualification/`. The new moving A/B remains
+pending owner review. No further color policy, merge or release is selected.
 
 **Owner rejects the color-boundary candidate, 2026-09-09:** on the candidate's
 moving candidate-left/Studio-right comparison, the owner reports "The left

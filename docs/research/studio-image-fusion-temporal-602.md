@@ -538,3 +538,52 @@ invented smoother, installation or owner acceptance is implied by these
 results. The native numeric trace remains the recorded type2 diagnostic path,
 distinct from the owner's accepted panorama comparison. Full native/Flatpak
 delivery and the owner's moving verdict remain separate gates.
+
+## Full-overlap installed delivery, 2026-09-09
+
+Source `365cedf69eff54e81596d01ba11a2a5259ef8b27` was built as a native
+release executable and an offline 25.08 SDK Flatpak. No further production
+changes accompany delivery. A bounded independent GPU review found no
+inconsistency in the 848-control buffer layout, full-overlap node mapping,
+RHS signs or matching diagonal/quadratic terms; it did not re-audit unchanged
+CG, ratio production or camera bindings.
+
+The native player passes 50 headless harness checks at the exact April
+flicker view, with zero failures. The four paired-file tests do not apply
+to this one-file X4 capture. Its saved executable SHA-256 is
+`19bcddf8dd009cb834fc2b23043e0b5d6b9e107a99130c561162caf38144920a`.
+The binary, harness hashes, complete session and receipts remain in
+`april-full-overlap-01/native-qualification/`. Root inspected the actual
+reported-view pixels via lossless PNG conversion, not moving flicker.
+Part of this functional run overlapped the CPU-only package build; it is
+not isolated playback timing evidence.
+
+The Flatpak build completed successfully from an immutable source snapshot,
+whose file hashes verify against the exact commit. Independent package review
+also verified dependency coverage, unchanged permissions, Freedesktop 25.08,
+and FFmpeg 7 linkage. The candidate is installed through the usual user
+`dev.harding.Kjerag`, with identities verified before and after qualification:
+
+- OSTree: `17df9824f8f3f49a2dc7bc33b62ea86bceaf6e6d7f51a7b6e8e2dc585acd5a2a`
+- Executable SHA-256: `2bda56861cbed4c507d5294b381ecdd193527f8ff41d2c299fa909bc751ea394`
+- Bundle SHA-256: `bd48a2bb43d5a1a901853d55982c2ec94015f5e342fb02002b92fe781f18f714`
+
+The installed-ID harness completes 40 X4 and 44 ONE X2 checks with zero
+failures. Both exercise actual opening, zero-copy playback, the original
+reported starting views, backward seeking, the real late-content scrubber,
+controls and error surfaces; ONE X2 also passes all four paired-file arrival
+paths. The harness's additional shader/Rust-twin test is compiled and run
+natively from the same source, not extracted from the installed package.
+Both sandbox runs retain the previous volume-popup skip because the isolated
+PulseAudio connection is refused, and the import-failure injection skip
+because there is no preload into the sandbox. X4's paired-file cases do not
+apply. These results do not qualify audio, sustained performance, 240 fps
+capacity or the owner's moving flicker.
+
+Build/install receipts and both complete sessions are preserved in
+`scratch/flatpak-delivery-365cedf6/`; root inspected both installed
+reported-view captures for picture/layout integrity. The previous `9e193956`
+bundle and its evidence remain intact and their hashes reverify for rollback.
+No files were deleted for this delivery. The owner still needs to judge the
+new full-overlap moving comparison, not the previously rejected camera-datum
+candidate. Nothing was merged, tagged or released.
