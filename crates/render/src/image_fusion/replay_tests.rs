@@ -2,6 +2,7 @@
 //! CPU reference. This is deliberately test-only and owns no capture policy.
 
 use super::{RatioMap, RatioPair, spatial};
+use crate::stitch_camera::StitchCamera;
 use crate::studio_type2::MAP_NODES;
 use std::{
     fs,
@@ -21,6 +22,110 @@ struct Row {
     invalid: PathBuf,
     native_left: Option<PathBuf>,
     native_right: Option<PathBuf>,
+}
+
+/// Replay one complete native capture prefix without writing diagnostics.
+///
+/// The returned vector is indexed by native Process ordinal and holds the
+/// selected camera's published coefficients after that observation. Skipped
+/// observations repeat the preceding coefficients. The native-chart arm is
+/// checked against both authenticated native maps at every ordinal before its
+/// camera-rebased twin is returned to a Scene diagnostic.
+pub(crate) fn replay_bands_for_camera(root: &Path, camera: StitchCamera) -> Vec<RatioPair> {
+    let rows = read_manifest(root).expect("native fusion replay manifest must be readable");
+    validate_contiguous_ordinals(&rows)
+        .expect("native fusion replay must contain contiguous ordinals starting at zero");
+
+    let neutral = || {
+        let map = RatioMap::new(vec![[1.0, 1.0, 1.0, 0.0]; MAP_NODES]).unwrap();
+        RatioPair {
+            left: map.clone(),
+            right: map,
+        }
+    };
+    let mut native_held = neutral();
+    let mut camera_held = neutral();
+    let mut native_reference = spatial::Reference::new();
+    let mut camera_reference = spatial::Reference::for_camera(camera);
+    let mut saw_first_solve = false;
+    let mut output = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        let left = read_exact(&root.join(&row.left_band), BAND_BYTES)
+            .expect("native left fusion band must have its recorded shape");
+        let right = read_exact(&root.join(&row.right_band), BAND_BYTES)
+            .expect("native right fusion band must have its recorded shape");
+        let invalid = read_exact(&root.join(&row.invalid), INVALID_BYTES)
+            .expect("native fusion validity must have its recorded shape");
+        let native = native_reference
+            .observe_bands([&left, &right], &invalid)
+            .expect("native-chart fusion replay inputs must be valid");
+        let rebased = camera_reference
+            .observe_bands([&left, &right], &invalid)
+            .expect("camera-chart fusion replay inputs must be valid");
+        assert_eq!(
+            native.is_some(),
+            rebased.is_some(),
+            "native and camera references disagreed on admission at ordinal {}",
+            row.frame
+        );
+        assert_eq!(
+            native.as_ref().map(|value| &value.diagnostics),
+            rebased.as_ref().map(|value| &value.diagnostics),
+            "native and camera references disagreed on solve admission at ordinal {}",
+            row.frame
+        );
+        if row.frame == 0 {
+            assert_eq!(
+                native.as_ref().and_then(|value| value.diagnostics.budget),
+                Some(100),
+                "native replay ordinal zero must be an admitted cold solve"
+            );
+        }
+
+        if let Some(value) = native {
+            if !saw_first_solve && value.diagnostics.budget.is_some() {
+                assert_eq!(
+                    value.diagnostics.budget,
+                    Some(100),
+                    "native replay's first actual solve must use the cold budget"
+                );
+                saw_first_solve = true;
+            }
+            native_held = value.ratios;
+        }
+        if let Some(value) = rebased {
+            camera_held = value.ratios;
+        }
+
+        for (lens, (path, actual)) in [
+            (row.native_left.as_deref(), &native_held.left),
+            (row.native_right.as_deref(), &native_held.right),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = path.unwrap_or_else(|| {
+                panic!(
+                    "native replay ordinal {} is missing published map {lens}",
+                    row.frame
+                )
+            });
+            let (_, max_abs) = compare_required(root, path, actual)
+                .expect("native published ratio must be finite and have its recorded shape");
+            assert!(
+                max_abs <= 1.0e-5,
+                "native replay ordinal {} map {lens} differs by {max_abs}, above 1e-5",
+                row.frame
+            );
+        }
+        output.push(camera_held.clone());
+    }
+    assert!(
+        saw_first_solve,
+        "native replay contained no actual fusion solve"
+    );
+    output
 }
 
 /// `KJERAG_FUSION_CPU_REPLAY` names a directory containing `manifest.tsv`.
@@ -182,6 +287,21 @@ fn validate_order(rows: &[Row]) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_contiguous_ordinals(rows: &[Row]) -> Result<(), String> {
+    if rows.is_empty() {
+        return Err("fusion replay manifest is empty".into());
+    }
+    for (ordinal, row) in rows.iter().enumerate() {
+        if row.frame != ordinal as u64 {
+            return Err(format!(
+                "manifest ordinal {ordinal} names frame {}, expected {ordinal}",
+                row.frame
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn read_exact(path: &Path, expected: usize) -> Result<Vec<u8>, String> {
     let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if bytes.len() != expected {
@@ -202,8 +322,13 @@ fn compare_optional(
     let Some(path) = path else {
         return Ok(("-".into(), "-".into()));
     };
+    let (bit_diffs, max_abs) = compare_required(root, path, actual)?;
+    Ok((bit_diffs.to_string(), max_abs.to_string()))
+}
+
+fn compare_required(root: &Path, path: &Path, actual: &RatioMap) -> Result<(usize, f32), String> {
     let path = root.join(path);
-    let expected = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let expected = read_exact(&path, NATIVE_RATIO_BYTES)?;
     let expected = decode_native_bgr(&expected)?;
     let mut bit_diffs = 0usize;
     let mut max_abs = 0.0f32;
@@ -225,7 +350,7 @@ fn compare_optional(
             max_abs = max_abs.max((expected - actual).abs());
         }
     }
-    Ok((bit_diffs.to_string(), max_abs.to_string()))
+    Ok((bit_diffs, max_abs))
 }
 
 fn decode_native_bgr(bytes: &[u8]) -> Result<Vec<[f32; 3]>, String> {
@@ -294,4 +419,25 @@ fn manifest_rejects_duplicate_or_backwards_frames() {
     assert!(validate_order(&rows(&[1, 2, 3])).is_ok());
     assert!(validate_order(&rows(&[1, 1])).is_err());
     assert!(validate_order(&rows(&[2, 1])).is_err());
+}
+
+#[test]
+fn scene_replay_requires_a_nonempty_contiguous_zero_based_prefix() {
+    let rows = |frames: &[u64]| {
+        frames
+            .iter()
+            .map(|&frame| Row {
+                frame,
+                left_band: "l".into(),
+                right_band: "r".into(),
+                invalid: "i".into(),
+                native_left: None,
+                native_right: None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(validate_contiguous_ordinals(&rows(&[0, 1, 2])).is_ok());
+    assert!(validate_contiguous_ordinals(&rows(&[])).is_err());
+    assert!(validate_contiguous_ordinals(&rows(&[1, 2])).is_err());
+    assert!(validate_contiguous_ordinals(&rows(&[0, 2])).is_err());
 }

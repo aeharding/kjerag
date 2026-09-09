@@ -15,6 +15,8 @@ mod coordinates;
 pub(crate) mod gpu;
 #[cfg(test)]
 mod replay_tests;
+#[cfg(test)]
+pub(crate) use replay_tests::replay_bands_for_camera;
 pub(crate) mod sample;
 pub mod solve;
 pub mod spatial;

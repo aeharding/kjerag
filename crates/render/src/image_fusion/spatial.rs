@@ -1,8 +1,8 @@
-//! Selected Windows X4 photometric spatial reference.
+//! Selected Studio X4 photometric spatial reference.
 //!
 //! This is an explicit diagnostic, not an automatic playback producer or a
 //! Mac 6.0.2 parity claim. The inner solve consumes horizontally extended
-//! BGR8 images; the ratio map is made after cropping that extension away.
+//! BGR8 images; the ratio map follows the recovered Mac periodic-edge join.
 //! Spatial filtering uses the recovered kernel and boundaries, but readable
 //! reductions rather than OpenCV's implementation-specific summation order.
 
@@ -105,7 +105,10 @@ impl Reference {
         let working = current.each_ref().map(|image| extend(image));
         let input = solve::Inputs::new(&working[0], &working[1], invalid)?;
         let output = self.inner.observe(input);
-        let prepared = output.prepared.each_ref().map(|image| crop(image));
+        let prepared = output
+            .prepared
+            .each_ref()
+            .map(|image| fuse_periodic_edges(image));
         let ratios = self.finish([&current[0], &current[1]], [&prepared[0], &prepared[1]]);
         Ok(Output {
             ratios,
@@ -183,13 +186,41 @@ fn extend(image: &[u8]) -> Vec<u8> {
     output
 }
 
-/// `0x183c0f510`: center crop, not a resize or a 212-to-200 coordinate scale.
+/// Plain center crop used inside the periodic join. This alone is not the
+/// selected Mac handoff, and neither operation rescales the coordinates.
 fn crop(image: &[u8]) -> Vec<u8> {
     debug_assert_eq!(image.len(), WORK_WIDTH * HEIGHT * 3);
     image
         .chunks_exact(WORK_WIDTH * 3)
         .flat_map(|row| row[EXTENSION * 3..(EXTENSION + WIDTH) * 3].iter().copied())
         .collect()
+}
+
+/// Mac 6.0.2 `FuseLeftAndRightSide<u8>` (`0x32312d0`) joins the separately
+/// solved periodic copies after cropping. The selected caller passes rows
+/// 40 through 60, inclusive. Each six-column edge mixes with its matching
+/// opposite extension, not with the other edge of the cropped image.
+/// Native converts the nonnegative fused result by truncation, not rounding.
+fn fuse_periodic_edges(image: &[u8]) -> Vec<u8> {
+    let mut output = crop(image);
+    for row in 40..=60 {
+        for edge in 0..EXTENSION {
+            let fraction = edge as f32 / (2 * EXTENSION) as f32;
+            for (column, extension, weight) in [
+                (edge, WIDTH + EXTENSION + edge, 0.5 + fraction),
+                (WIDTH - EXTENSION + edge, edge, 1.0 - fraction),
+            ] {
+                for channel in 0..3 {
+                    let at = (row * WIDTH + column) * 3 + channel;
+                    let other = image[(row * WORK_WIDTH + extension) * 3 + channel];
+                    output[at] = f32::from(output[at])
+                        .mul_add(weight, f32::from(other) * (1.0 - weight))
+                        as u8;
+                }
+            }
+        }
+    }
+    output
 }
 
 /// `0x183c11260` copies the ROI into a separate, periodically padded Mat.
@@ -314,7 +345,7 @@ mod tests {
             let prepared = [0, 1].map(|lens| {
                 let image = fs::read(folder.join(format!("prepared-{lens}.bgr8"))).unwrap();
                 assert_eq!(image.len(), WORK_WIDTH * HEIGHT * 3);
-                crop(&image)
+                fuse_periodic_edges(&image)
             });
             let working = current.each_ref().map(|image| extend(image));
             let inner_output =
@@ -647,6 +678,42 @@ mod tests {
                 &source[..EXTENSION * 3]
             );
         }
+    }
+
+    #[test]
+    fn periodic_fusion_uses_solved_extensions_and_only_selected_rows() {
+        let central = [100_u8, 60, 20].repeat(MAP_NODES);
+        let mut prepared = extend(&central);
+        for row in 0..HEIGHT {
+            for column in (0..EXTENSION).chain(WIDTH + EXTENSION..WORK_WIDTH) {
+                let at = (row * WORK_WIDTH + column) * 3;
+                prepared[at..at + 3].copy_from_slice(&[111, 71, 31]);
+            }
+        }
+        let output = fuse_periodic_edges(&prepared);
+        for row in 0..HEIGHT {
+            for column in 0..WIDTH {
+                let delta = if !(40..=60).contains(&row) {
+                    0
+                } else if column < EXTENSION {
+                    [5, 4, 3, 2, 1, 0][column]
+                } else if column >= WIDTH - EXTENSION {
+                    [0, 0, 1, 2, 3, 4][column - (WIDTH - EXTENSION)]
+                } else {
+                    0
+                };
+                let at = (row * WIDTH + column) * 3;
+                assert_eq!(
+                    output[at..at + 3],
+                    [100 + delta, 60 + delta, 20 + delta],
+                    "row {row}, column {column}"
+                );
+            }
+        }
+        // Plain cropping and using the other cropped edge would both leave
+        // this fixture unchanged, and rounding would turn 105.5 into 106.
+        assert_ne!(output, central);
+        assert_eq!(crop(&prepared), central);
     }
 
     #[test]

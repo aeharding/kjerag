@@ -4,6 +4,10 @@ This records the Windows 5.9.10.0 selected X4 CPU path, not proof of the Mac
 6.0.2 producer or other-camera equivalence. The DLL SHA-256 is
 `75801cc67d890d0769ed2182136e21d6dc3ca10281c5ec5dd8c8adc3ea95f6dc`.
 The readable implementation is `crates/render/src/image_fusion/spatial.rs`.
+The later Mac 6.0.2 read corrects the prepared-image handoff: it joins the
+periodic edges as well as cropping. That step is now in the readable reference,
+not yet in the GPU producer; the table's older crop-only interpretation below
+is superseded at this boundary by `studio-image-fusion-temporal-602.md`.
 It does not run automatically during playback. `observe_bands` takes two
 aligned 800x16 BGR8 source bands and extended 212x4 validity bytes, performs
 content admission and reduction, then runs the spatial reference. The direct

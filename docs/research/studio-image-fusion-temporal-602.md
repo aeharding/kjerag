@@ -587,3 +587,111 @@ bundle and its evidence remain intact and their hashes reverify for rollback.
 No files were deleted for this delivery. The owner still needs to judge the
 new full-overlap moving comparison, not the previously rejected camera-datum
 candidate. Nothing was merged, tagged or released.
+
+## Owner rejects the full-overlap flicker candidate, 2026-09-09
+
+On the new full-overlap candidate-left/Studio-right moving comparison
+(`016dddc5795192647c4c4c177ff0e91edbcc5845b8cf6762b62aeb1926d51568`), the
+owner reports "Yep still flickers". This rejects source `365cedf6` as a
+visible flicker fix. The saved native prepared-image agreement authenticates
+the missing-equations correction, not the reported temporal defect. Neither
+test coverage nor installation changes this verdict. The candidate is not
+accepted for merge; no automatic rollback is inferred.
+
+The next bounded discriminator is the already captured changing color maps
+and their final consumption. In particular, the native/reference outer-stage
+residual and the real Scene's input sequence are not yet excluded as causes.
+Do not repeat the rejected sampling/mesh trials, infer success from update
+counts, or replace this evidence with another export or invented smoother.
+
+## Periodic prepared-image join and native-input control
+
+The next Mac read identifies another omitted operation, after MGP and before
+ratio construction. The selected u8 branch calls `FuseLeftAndRightSide<u8>`
+at `0x321dad4` and `0x321daf4`, independently for the two prepared lens images;
+ratio construction follows at `0x321db1c`. The callee at `0x32312d0` clones
+the two six-column extensions and center-crops columns `[6,206)` into a
+separate 200-wide destination. It then joins the extensions into the cropped
+edges, rather than discarding them. For rows 40..60 inclusive and j in 0..6:
+
+- Destination j mixes original prepared column 6+j with 206+j, using cropped
+  weight `0.5+j/12`.
+- Destination 194+j mixes original column 200+j with j, using cropped weight
+  `1-j/12`.
+
+The other weight is formed as `1-cropped_weight`. The scalar u8 three-channel
+path uses an f32 multiply for the extension term, an FMA for the cropped term,
+then truncation toward zero, not ties-to-even byte rounding. The source edges
+are clones of the separately solved extensions, not the opposite cropped edge.
+Rows outside this interval are just the center crop. Addresses
+`0x3231300..0x32313a0`, `0x3231444..0x3231598` and
+`0x3231808..0x32319ac` establish these bindings and loops. The selected caller's
+default p=0.2 gives row bounds 40 and 60 at `0x321da2c..0x321da5c`.
+An independent read confirms the source/destination ownership, u8 selection,
+indices, weights and conversion. The 3x11 ROI blur and periodic/reflected
+boundaries remain unchanged.
+
+Adding this operation to the readable reference reduces the six same-native-
+input final map maxima to at most 0.000006795, versus 0.00085..0.00255 before.
+Both the full reference and native-prepared substitution agree after this
+change. An independent saved-output replay localizes the former error to the
+remapped working-chart edge columns; temporal error changes also fall below
+0.00000442. This closes that measured outer discrepancy, not the owner's
+flicker. Rust outputs are in `april-native-periodic-fusion-01/`; the independent
+script and report are `april-native-full-overlap-01/analyze_outer_edges.py`
+and `edge-fusion-analysis.json`. The ordinary GPU producer deliberately remains
+unchanged while the next diagnostic distinguishes the larger input-history
+difference. This is not a completed GPU port or a newly installed fix.
+
+The test-only `native-color` Scene review consumes the original 15 native
+observations through the corrected reference, including their admission holds
+and warm history. It requires a contiguous zero-based native prefix, an admitted
+100-budget cold solve, finite exact-size payloads, and both published maps at
+every ordinal. Before drawing, each native-chart result must agree with its
+saved native map to 1e-5; the camera-chart reference must make identical
+admission/solve decisions. That tolerance is a diagnostic identity guard,
+not a visible-quality acceptance threshold. The camera reference performs the
+existing chart/lens conversion, avoiding an invented resampling of native maps.
+
+The actual Scene then processes sources 18208..18222 normally at the reported
+April view and draws a separate control with those replayed coefficients.
+The original source/frame, packed geometry, alpha and ordinary producer remain
+unchanged. Every diagnostic baseline is checked against the actual Scene pixels
+within one byte, and the installed Scene map/ratios remain unchanged after the
+control draw. All 15 sources complete; all 30 geometry/alpha artifacts match
+the earlier same-start capture byte-for-byte. This is a native-like coefficient
+sequence substitution: it changes the sampling/admission history and includes
+the recovered periodic join, so a positive verdict alone would not isolate
+which difference matters. It does not freeze coefficients or add a smoother.
+
+The ordinary sequence updates at 18208/18215/18222; the native-input arm at
+18208/18215/18221. Even at the first two common updates, maps differ by maxima
+roughly 0.0125..0.0222, with different local amplitudes, not only timing. Rendered
+same-frame differences peak at two codes through18220 and three thereafter.
+These differences are not a flicker verdict. The native source association
+remains timestamp/trim-derived, and the native capture remains type2 diagnostic
+output, not proof of the accepted type11 panorama's internal sequence.
+
+Evidence is in `april-native-input-control-01/`: exact source patch/hashes,
+test executable, ordinary and control pictures/ratios, completion log and
+unchanged installed identity. Test executable SHA-256:
+`6a972f8e60bc4a11900f9287f707023bdc000aebb4a1204459786b0effd6b385`.
+The moving review uses the 14 sources18209..18222 shared with the accepted
+Studio movie, after both Kjerag arms consumed cold source18208. Each loop
+repeats those 14 sources 16 times (224 encoded frames, 30000/1001 fps), not
+224 distinct observations. Root inspected frame6's actual pixels and labels;
+stills do not establish moving quality. Owner review is pending.
+
+- `review/own-vs-native-inputs-loop-muted.mp4`: ordinary Kjerag left, Kjerag
+  with recorded native color inputs right; SHA-256
+  `03e1723395ee5742d245b1147fbf3efcf77de34785ef8bdb91484bae82a114f1`.
+- `review/native-inputs-vs-studio-loop-muted.mp4`: native-input Kjerag left,
+  existing Studio comparison right; SHA-256
+  `f1506cacfeaf9706602d6e4e1b98002d063e2dc4d6dc058064d1cb34fa96468a`.
+
+Focused CPU color tests pass 55 cases, four opt-in probes ignored; the native
+prepared replay and actual Scene native-input control were additionally run
+explicitly and passed. All-target workspace Clippy passes. This increment has
+not rerun full workspace/GPU/UI gates and does not qualify a new player build.
+The installed Flatpak remains source365cedf6. No new Studio export, installed
+app replacement, merge or release occurred.

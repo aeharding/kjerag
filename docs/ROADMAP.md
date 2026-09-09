@@ -14,6 +14,28 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Owner rejects the full-overlap flicker candidate, 2026-09-09:** on the new
+candidate-left/Studio-right movie for source `365cedf6`, the owner reports
+"Yep still flickers". Correcting the missing equations does not resolve the
+visible defect. The native prepared-image match remains a calculation finding,
+not flicker acceptance. Keep the installed candidate and evidence intact while
+isolating the remaining changing color-map discrepancy against saved Studio
+output. No new export, invented smoother, merge or rollback is selected.
+
+The subsequent native read identifies the missing periodic-edge join between
+the prepared images and ratio construction. Adding it to the readable
+reference reduces the maximum same-native-input ratio discrepancy below
+0.0000068 on all six saved maps. This is reference-only; the ordinary GPU
+producer and installed app remain unchanged, and no flicker fix is claimed.
+A 15-source actual-Scene diagnostic now replaces only draw coefficients with
+the recorded native-band history, validated against every saved native map
+before rebasing to the camera chart. The moving control, covering the 14
+sources shared with the existing Studio movie, is ready under
+`april-native-input-control-01/review/` in the comparison directory. Its
+owner verdict is pending. It tests the native-like coefficient sequence,
+including both the different input history and recovered edge join, rather
+than declaring either one the cause from numeric agreement.
+
 **Missing color equations identified, 2026-09-09:** Studio measures robust
 color bounds from rows 49/50 and columns 18..193, then admits equations over
 the entire four-row, 212-column overlap. Kjerag incorrectly used the narrow
@@ -43,8 +65,8 @@ not audio, performance, or flicker acceptance. The package/source/executable
 identities verify before and after testing, and the previous `9e193956`
 bundle remains available for rollback. Evidence is in
 `scratch/flatpak-delivery-365cedf6/` and the comparison directory's
-`april-full-overlap-01/native-qualification/`. The new moving A/B remains
-pending owner review. No further color policy, merge or release is selected.
+`april-full-overlap-01/native-qualification/`. The owner subsequently rejected
+this moving A/B as a flicker fix, as recorded above. No merge or release is selected.
 
 **Owner rejects the color-boundary candidate, 2026-09-09:** on the candidate's
 moving candidate-left/Studio-right comparison, the owner reports "The left

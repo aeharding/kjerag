@@ -9150,9 +9150,15 @@ mod tests {
             "sampling-sequence" => ReviewDiagnostic::SamplingSequence,
             "geometry-fields" => ReviewDiagnostic::GeometryFields,
             "fixed-color" => ReviewDiagnostic::FixedColor,
+            "native-color" => ReviewDiagnostic::NativeColor,
             _ => panic!("unknown seam review mode {mode}"),
         };
-        let count = if review == ReviewDiagnostic::SamplingSequence {
+        let count = if review == ReviewDiagnostic::NativeColor {
+            std::env::var("KJERAG_REPORTED_SEAM_COUNT")
+                .expect("native-color review needs its captured source count")
+                .parse()
+                .expect("invalid native-color source count")
+        } else if review == ReviewDiagnostic::SamplingSequence {
             61
         } else {
             31
@@ -9302,6 +9308,7 @@ mod tests {
         SamplingSequence,
         GeometryFields,
         FixedColor,
+        NativeColor,
     }
 
     fn post_seek_review_sequence(
@@ -9322,6 +9329,32 @@ mod tests {
         scene.set_muted(true);
         scene.pause(Instant::now());
         scene.set_horizon(Horizon::Locked);
+        let native_color = review == ReviewDiagnostic::NativeColor;
+        let native_ratios = native_color.then(|| {
+            assert!(
+                start_override.is_some(),
+                "native-color needs an explicit source association"
+            );
+            let root = PathBuf::from(
+                std::env::var_os("KJERAG_REVIEW_NATIVE_COLOR")
+                    .expect("native-color needs its captured input directory"),
+            );
+            let camera = scene
+                .show
+                .as_ref()
+                .unwrap()
+                .one_xs_profile
+                .as_ref()
+                .unwrap()
+                .camera();
+            let ratios = crate::image_fusion::replay_bands_for_camera(&root, camera);
+            assert_eq!(
+                ratios.len() as u64,
+                count,
+                "native-color capture count differs"
+            );
+            ratios
+        });
         let (start, seek_target) = {
             let playing = scene.show.as_ref().unwrap().playing.borrow();
             let Source::Live(player) = &playing.source else {
@@ -9392,10 +9425,14 @@ mod tests {
             || photometric_review
             || seam_components
             || fixed_color
+            || native_color
             || fusion_input_review)
             .then(|| ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm));
         if fixed_color {
             std::fs::create_dir(output.join("fixed-color")).unwrap();
+        }
+        if native_color {
+            std::fs::create_dir(output.join("native-color")).unwrap();
         }
         if seam_components {
             for arm in ["no-color", "no-flow", "lens-0", "lens-1"] {
@@ -9548,11 +9585,12 @@ mod tests {
                 assert_eq!(installed.pis_backend(), map.pis_backend());
                 assert_eq!(installed.fusion(), map.fusion());
             }
-            if fixed_color {
-                // Isolate coefficient updates without removing calibration or
-                // freezing video/geometry. The ordinary producer still runs
-                // at every source; only this diagnostic draw reuses the first
-                // source's ratio pair in the same fixed spherical chart.
+            if fixed_color || native_color {
+                // Keep ordinary video, geometry and the producer unchanged.
+                // The fixed control reuses its first coefficients; the native
+                // input control uses the saved native-band history replayed
+                // through the reference with this camera's output conversion.
+                // Both change only this diagnostic draw's ratio pair.
                 let diagnostic = diagnostic.as_mut().unwrap();
                 let prepared = diagnostic
                     .prepare_one_xs_picture(&scene.primitive(camera), 16.0 / 9.0)
@@ -9564,33 +9602,52 @@ mod tests {
                 for (&a, &b) in null.iter().zip(&shot.rgba) {
                     assert!(
                         a.abs_diff(b) <= 1,
-                        "fixed-color baseline differs from Scene"
+                        "color diagnostic baseline differs from Scene"
                     );
                 }
-                let current = map.fusion().expect("fixed-color review needs active color");
-                let first = fixed_ratios.get_or_insert_with(|| current.clone());
+                let current = map.fusion().expect("color review needs active color");
+                let selected = if let Some(ratios) = &native_ratios {
+                    &ratios[(index - start) as usize]
+                } else {
+                    fixed_ratios.get_or_insert_with(|| current.clone())
+                };
                 let fixed = OneXsMapFrame::new(
                     frame.clone(),
                     map.packed().clone(),
                     map.alpha().clone(),
                     map.pis_backend(),
                 )
-                .with_fusion(first.clone());
+                .with_fusion(selected.clone());
                 let pixels =
                     render_direct_map_pixels_sized(&device, &queue, diagnostic, &fixed, 1280, 720);
-                if index == start {
+                if fixed_color && index == start {
                     assert_eq!(
                         pixels, null,
                         "first fixed-color frame must be the exact null"
                     );
                 }
-                write_review_ppm(&output.join("fixed-color"), index, &pixels);
+                let mode = if native_color {
+                    "native-color"
+                } else {
+                    "fixed-color"
+                };
+                let folder = output.join(mode);
+                write_review_ppm(&folder, index, &pixels);
+                if native_color {
+                    for (lens, ratio) in [("left", &selected.left), ("right", &selected.right)] {
+                        std::fs::write(
+                            folder.join(format!("frame-{index:010}.fusion-{lens}.float4")),
+                            ratio.bytes(),
+                        )
+                        .unwrap();
+                    }
+                }
                 let installed = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
                 assert_eq!(installed.frame(), map.frame());
                 assert_eq!(installed.packed().bytes(), map.packed().bytes());
                 assert_eq!(installed.alpha().bytes(), map.alpha().bytes());
                 assert_eq!(installed.fusion(), map.fusion());
-                eprintln!("fixed-color-review: source {index}, ratio source {start}");
+                eprintln!("{mode}-review: source {index}, sequence start {start}");
             }
             if sampling_sequence
                 || (review == ReviewDiagnostic::SamplingAnchors
