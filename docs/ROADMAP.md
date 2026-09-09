@@ -14,6 +14,24 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Owner rejects the color-boundary candidate, 2026-09-09:** on the candidate's
+moving candidate-left/Studio-right comparison, the owner reports "The left
+still flickers same way". The input/admission improvements do not fix the
+reported defect. Preserve this negative verdict alongside the authenticated
+lens/chart finding; neither full test passes nor closer update counts
+substitute for the owner's moving result. The installed `9e193956` build is
+not accepted for merge. Next compare the already captured native bands and
+coefficient sequence to distinguish remaining calculation/output differences,
+without another Studio export or an invented temporal smoother.
+The first split replay substitutes Studio's saved inner-solver output into
+our unchanged outer ratio stages: maximum coefficient differences fall from
+0.024/0.014 to about 0.0012/0.0016 on the first observation. Most of this
+measured discrepancy therefore precedes ratio construction, although its
+relevance to visible flicker is not yet proven. A test-only native node-order
+permutation produces identical prepared bytes and is not a fix. No further
+product change, install or export was made; the new tests and native boundary
+checks are recorded in `studio-image-fusion-temporal-602.md`.
+
 **Owner feedback and seam reports, 2026-09-08:** chromatic calibration
 "looks really good"; pausing "seems ok on initial glance". Preserve that color
 result and treat pause feedback as preliminary, not blanket smoothness or

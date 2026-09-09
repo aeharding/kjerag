@@ -454,6 +454,104 @@ const fn evidence_slot(row: usize, column: usize) -> usize {
 mod tests {
     use super::*;
 
+    /// Isolate the recovered Mac node permutation without changing physical
+    /// equations, support, sparse accumulation, centering or warm history.
+    #[test]
+    #[ignore = "requires the native prepared-stage replay inputs"]
+    fn replay_native_node_order() {
+        use std::{fs, io::Write, path::PathBuf};
+        let root = PathBuf::from(std::env::var_os("KJERAG_FUSION_NODE_ORDER_INPUT").unwrap());
+        let output = PathBuf::from(std::env::var_os("KJERAG_FUSION_NODE_ORDER_OUTPUT").unwrap());
+        fs::create_dir(&output).expect("node-order output must be a new directory");
+        let order: Vec<_> = (0..chroma::WINDOW_ROWS)
+            .flat_map(|row| {
+                (0..chroma::COLUMNS).flat_map(move |column| {
+                    (0..2).filter_map(move |lens| chroma::node(lens, row, column))
+                })
+            })
+            .collect();
+        assert_eq!(order.len(), chroma::NODES);
+        let mut inverse = vec![usize::MAX; chroma::NODES];
+        for (native, &physical) in order.iter().enumerate() {
+            assert_eq!(inverse[physical], usize::MAX);
+            inverse[physical] = native;
+        }
+        let mut reference = Reference::new();
+        let mut fields: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0; chroma::NODES]);
+        let mut report = fs::File::create_new(output.join("report.tsv")).unwrap();
+        writeln!(
+            report,
+            "frame\tlens\tchanged_prepared_bytes\tmax_prepared_byte_delta"
+        )
+        .unwrap();
+        // This fixture contains the three authenticated admitted observations.
+        // Its skipped observations have zero invalidity and do not advance MGP.
+        for frame in [0, 7, 13] {
+            let current = [0, 1].map(|lens| {
+                fs::read(root.join(format!("frame-{frame:03}.reference-current-{lens}.bgr8")))
+                    .unwrap()
+            });
+            let valid = vec![0; VALIDITY_BYTES];
+            let ordinary = reference.observe(input(&current[0], &current[1], &valid));
+            let samples = samples(
+                [&current[0], &current[1]],
+                reference.control.as_ref().unwrap(),
+                reference.metric.scale(),
+            );
+            let system = chroma::System::new(&samples);
+            let pre = system.preconditioner();
+            let native_pre: Vec<_> = order.iter().map(|&i| pre[i]).collect();
+            for (channel, field) in fields.iter_mut().enumerate() {
+                let q = system.rhs(&samples, channel);
+                let native_q: Vec<_> = order.iter().map(|&i| q[i]).collect();
+                let mut native_x: Vec<_> = order.iter().map(|&i| field[i]).collect();
+                chromatic::conjugate_gradient(
+                    |x, y| {
+                        let physical: Vec<_> = inverse.iter().map(|&i| x[i]).collect();
+                        let mut product = vec![0.0; chroma::NODES];
+                        system.apply(&physical, &mut product);
+                        for (native, &i) in order.iter().enumerate() {
+                            y[native] = product[i];
+                        }
+                    },
+                    &native_pre,
+                    &native_q,
+                    &mut native_x,
+                    ordinary.diagnostics.budget.unwrap(),
+                );
+                for (native, &i) in order.iter().enumerate() {
+                    field[i] = native_x[native];
+                }
+                chroma::centre(field);
+            }
+            let mut prepared = current;
+            apply_fields(&mut prepared, &fields);
+            for (lens, image) in prepared.iter().enumerate() {
+                let baseline =
+                    fs::read(root.join(format!("frame-{frame:03}.reference-prepared-{lens}.bgr8")))
+                        .unwrap();
+                assert_eq!(baseline, ordinary.prepared[lens]);
+                let differences: Vec<_> = image
+                    .iter()
+                    .zip(&baseline)
+                    .map(|(&a, &b)| a.abs_diff(b))
+                    .collect();
+                writeln!(
+                    report,
+                    "{frame}\t{lens}\t{}\t{}",
+                    differences.iter().filter(|&&d| d != 0).count(),
+                    differences.iter().max().unwrap()
+                )
+                .unwrap();
+                fs::write(
+                    output.join(format!("frame-{frame:03}.permuted-prepared-{lens}.bgr8")),
+                    image,
+                )
+                .unwrap();
+            }
+        }
+    }
+
     fn image(value: u8) -> Vec<u8> {
         vec![value; IMAGE_BYTES]
     }

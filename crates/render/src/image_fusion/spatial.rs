@@ -259,6 +259,122 @@ fn remap(map: &BgrMap, coords: &[[f32; 2]], rows: [f32; 2]) -> RatioMap {
 mod tests {
     use super::*;
 
+    /// Locate a native/reference difference on either side of the inner solve.
+    /// The recorder's prepared BGR images are actual native MGP outputs. This
+    /// diagnostic bypasses only our inner solve, retaining the normal ratio,
+    /// blur and remap history. Current denominator rows are reconstructed from
+    /// native bands, so a native area-reduction rounding difference is not
+    /// excluded. Processing successfully is not a numeric or visual parity gate.
+    #[test]
+    #[ignore = "requires the captured native fusion bands and prepared outputs"]
+    fn replay_captured_native_prepared_outputs() {
+        use std::{fs, io::Write, path::PathBuf};
+        let root = PathBuf::from(
+            std::env::var_os("KJERAG_FUSION_NATIVE_PREPARED_REPLAY")
+                .expect("native prepared replay needs its captured input directory"),
+        );
+        let output = PathBuf::from(
+            std::env::var_os("KJERAG_FUSION_NATIVE_PREPARED_OUTPUT")
+                .expect("native prepared replay needs a new output directory"),
+        );
+        fs::create_dir(&output).expect("replay output must be a new directory");
+        let manifest = fs::read_to_string(root.join("manifest.tsv")).unwrap();
+        let mut full = Reference::new();
+        let mut native_prepared = Reference::new();
+        let mut inner = solve::Reference::new();
+        let mut report = fs::File::create_new(output.join("report.tsv")).unwrap();
+        writeln!(
+            report,
+            "frame\tlens\tarm\tmax_abs\trow\tcolumn\trgb_channel\tactual\tnative"
+        )
+        .unwrap();
+        let mut admitted = 0;
+        for line in manifest.lines().filter(|line| {
+            !line.is_empty() && !line.starts_with('#') && !line.starts_with("frame\t")
+        }) {
+            let fields: Vec<_> = line.split('\t').collect();
+            assert_eq!(fields.len(), 6);
+            let frame: u64 = fields[0].parse().unwrap();
+            let bands = [fields[1], fields[2]].map(|name| fs::read(root.join(name)).unwrap());
+            let invalid = fs::read(root.join(fields[3])).unwrap();
+            solve::validate_invalid(&invalid).unwrap();
+            inner.accumulate_invalid(&invalid);
+            let folder = root.join(format!("frame-{frame:03}"));
+            let value = full
+                .observe_bands([&bands[0], &bands[1]], &invalid)
+                .unwrap();
+            assert_eq!(value.is_some(), folder.join("prepared-0.bgr8").exists());
+            let Some(value) = value else { continue };
+            admitted += 1;
+            let current = bands.each_ref().map(|band| {
+                let mut image = content::working_chart(band);
+                prepare_current(&mut image);
+                image
+            });
+            let prepared = [0, 1].map(|lens| {
+                let image = fs::read(folder.join(format!("prepared-{lens}.bgr8"))).unwrap();
+                assert_eq!(image.len(), WORK_WIDTH * HEIGHT * 3);
+                crop(&image)
+            });
+            let working = current.each_ref().map(|image| extend(image));
+            let inner_output =
+                inner.observe(solve::Inputs::new(&working[0], &working[1], &invalid).unwrap());
+            for (lens, image) in inner_output.prepared.iter().enumerate() {
+                fs::write(
+                    output.join(format!("frame-{frame:03}.reference-prepared-{lens}.bgr8")),
+                    image,
+                )
+                .unwrap();
+                fs::write(
+                    output.join(format!("frame-{frame:03}.reference-current-{lens}.bgr8")),
+                    &working[lens],
+                )
+                .unwrap();
+            }
+            let bypass =
+                native_prepared.finish([&current[0], &current[1]], [&prepared[0], &prepared[1]]);
+            for (arm, pair) in [
+                ("full-reference", value.ratios),
+                ("native-prepared", bypass),
+            ] {
+                for (lens, ratio) in [&pair.left, &pair.right].into_iter().enumerate() {
+                    fs::write(
+                        output.join(format!("frame-{frame:03}.{arm}.{lens}.float4")),
+                        ratio.bytes(),
+                    )
+                    .unwrap();
+                    let bytes = fs::read(root.join(fields[4 + lens])).unwrap();
+                    assert_eq!(bytes.len(), MAP_NODES * 12);
+                    let mut maximum = (0.0_f32, 0, 0, 1.0, 1.0);
+                    for (node, pixel) in bytes.chunks_exact(12).enumerate() {
+                        for channel in 0..3 {
+                            let offset = (2 - channel) * 4;
+                            let native =
+                                f32::from_le_bytes(pixel[offset..offset + 4].try_into().unwrap());
+                            let actual = ratio.values()[node][channel];
+                            assert!(native.is_finite() && actual.is_finite());
+                            if (actual - native).abs() > maximum.0 {
+                                maximum = ((actual - native).abs(), node, channel, actual, native);
+                            }
+                        }
+                    }
+                    writeln!(
+                        report,
+                        "{frame}\t{lens}\t{arm}\t{}\t{}\t{}\t{}\t{}\t{}",
+                        maximum.0,
+                        maximum.1 / WIDTH,
+                        maximum.1 % WIDTH,
+                        maximum.2,
+                        maximum.3,
+                        maximum.4
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        assert!(admitted > 0, "capture contained no prepared output");
+    }
+
     #[test]
     fn current_preparation_replicates_only_the_selected_outer_rows() {
         let original: Vec<u8> = (0..MAP_NODES * 3)

@@ -300,3 +300,89 @@ top-level executables and all personal footage/comparison evidence remain.
 The earlier native UI evidence was moved intact to `native-ui-session/` before
 reusing the harness path. No merge or release occurred. The moving A/B verdict
 is still required before declaring this candidate a visible fix.
+
+## Owner rejects the candidate, 2026-09-09
+
+Owner verdict on the candidate-left/Studio-right moving comparison:
+"The left still flickers same way". The candidate therefore fails the visible
+flicker acceptance gate. The camera-boundary finding and improved admission
+counts remain diagnostic facts, not a solved defect. The build is not accepted
+for merge; no rollback or additional product change is inferred from this
+verdict alone.
+
+The prior owner-confirmed fixed-coefficient control remains the stronger
+causal discriminator: changing color coefficients is necessary for the reported
+flicker in that comparison. Next inspect changing native/reference outputs on
+the same already-captured bands, and the actual final color consumer. Do not
+repeat sampling/mesh trials, infer success from update counts, or start another
+Studio export to replace the accepted oracle.
+
+## Same-input inner/outer split after the rejected candidate
+
+The recorded native MGP return includes 212x100 prepared BGR images on updates
+0, 7 and 13. A test-only spatial replay now substitutes those images for our
+inner solver output, while keeping our ratio construction, retained boundary
+row, blur and final native-chart remap. The denominator/current rows still
+come from our area reduction of the same native bands; a native reduction
+rounding difference is not excluded. No actual-player output changed.
+
+| Update | Lens | Full reference maximum ratio error | Native prepared through our outer stages |
+| --- | --- | --- | --- |
+| 0 | 0 | 0.024082 | 0.001181 |
+| 0 | 1 | 0.013807 | 0.001552 |
+| 7 | 0 | 0.023475 | 0.001174 |
+| 7 | 1 | 0.011313 | 0.002546 |
+| 13 | 0 | 0.016965 | 0.000848 |
+| 13 | 1 | 0.012234 | 0.002119 |
+
+This localizes most of the measured coefficient discrepancy to the inner
+solve or its inputs. It is not evidence that correcting it will remove the
+reported flicker: native and reference outputs differ spatially, and a maximum
+over ratio nodes is not a rendered seam verdict. The residual outer-stage
+difference also remains unclassified. Independent same-band inspection finds
+that native/reference discrepancies change at the admitted updates, rather
+than being only a fixed spatial bias; both hold exactly between updates.
+
+Raw replay reports and outputs are retained in `april-native-prepared-01/02/`
+under the existing comparison directory. The second also records our prepared
+and reconstructed current BGR images for a direct inner-stage comparison.
+The opt-in test is
+`image_fusion::spatial::tests::replay_captured_native_prepared_outputs`, using
+`KJERAG_FUSION_NATIVE_PREPARED_REPLAY` for the original native capture and
+`KJERAG_FUSION_NATIVE_PREPARED_OUTPUT` for a new output directory. A successful
+run validates processing/shape, not numeric equality or visual acceptance.
+
+Two further controls prevent selecting a superficial solver rewrite:
+
+- Native `GenerateXIds` numbers the overlapping lens nodes interleaved per
+  pixel, unlike Kjerag's complete lens blocks. The test-only
+  `image_fusion::solve::tests::replay_native_node_order` changes that vector
+  order while preserving physical equations, sparse accumulation, centering
+  and warm history. All six prepared BGR images at updates 0/7/13 remain
+  byte-identical to the ordinary reference. This particular ordering change
+  does not explain the discrepancy and is not a production fix. The probe
+  does not reproduce every native sparse/reduction arithmetic detail.
+- Prepared images contain untouched current pixels outside each lens's
+  correction mask. Native lens-0 rows 52..60 and lens-1 rows 39..47 are
+  byte-identical to reconstructed current inputs at all three updates
+  (5,724 bytes per lens/update). Thus the copied boundary input rows agree;
+  this does not directly authenticate the other two central rows.
+
+Independent correction-field comparison rules out a simple Cb/Cr exchange
+or a one/two-cell spatial shift on these observations. The remaining field
+difference includes local sign and amplitude differences before ratio
+construction, reaching 8..9 byte codes on used support. These remain numeric
+localization facts, not evidence of a new visible fix. Detailed prepared-field
+and native application/node-order notes are retained under
+`april-native-prepared-02/`; the permutation output/report is under
+`april-native-node-order-01/`.
+
+A bounded native physical-equation check finds the same ordinary open
+four-neighbor penalty, exact `0.1f` edge coefficient and squared contribution,
+with no added diagonal/anchor term. The selected ImageFusionMGPCpu constructor
+disables the alternative triangulation branch. The byte evidence builder also
+uses matching `+w/-w` matrix entries and unweighted Y/Cb/Cr differences; its
+source-value multiplier is initialized to one. These checks do not authenticate
+every evidence/control byte or the native finite-solve trajectory. The next
+unresolved boundary is the actual evidence/control and solved fields, not
+another output fade, source export or vector-layout rewrite.
