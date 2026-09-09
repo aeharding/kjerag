@@ -57,6 +57,21 @@ those correction updates become visible in Kjerag but are lower in the
 accepted Studio output; do not substitute more type2 solver-number agreement
 for that result.
 
+**Drawing-path control rejected, 2026-09-09:** changing only the test draw to
+per-fragment map lookup, the captured type11 1x1 source footprint and explicit
+float-map interpolation leaves coherent color-update pulses at every tested
+event. The ordinary and recorded-native coefficient histories and all geometry
+are unchanged; the disabled-control pictures reproduce the previous capture
+byte-for-byte. At a previously localized native brightening, the signed green
+residual is +2.158 codes before and +2.200 afterward. This is a negative output
+diagnostic, not a new owner verdict or a complete type11 reproduction. The
+test-only draw experiment is retired; no new build is installed or presented
+as a fix. Evidence and limitations are in the temporal note's consumer-control
+section. The remaining important evidence gap is explicit: the accepted April
+panorama export has no captured per-frame type11 color-map history; the replayed
+15-source history belongs to a later type2 diagnostic export. Next observe the
+actual panorama consumer's source identities and bound color-map changes.
+
 **Missing color equations identified, 2026-09-09:** Studio measures robust
 color bounds from rows 49/50 and columns 18..193, then admits equations over
 the entire four-row, 212-column overlap. Kjerag incorrectly used the narrow

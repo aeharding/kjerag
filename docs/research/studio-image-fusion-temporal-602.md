@@ -840,3 +840,84 @@ JSON receipts seal rendered inputs and map files. An unmodified actual
 source18239 PNG was inspected for picture/location context, not a motion
 verdict. The original moving A/B and the owner's negative verdicts remain
 the quality authority.
+
+## Bounded type11-style consumer control, 2026-09-09
+
+The next experiment changes only drawing, keeping source video, geometric maps,
+alpha and both ordinary/native-input coefficient histories fixed. Its
+test-only shader combines three known consumer differences: analytic
+per-fragment chart/map lookup in place of coarse-mesh lookup, a 1x1 source
+box footprint in place of 1.7881766557693481, and explicit four-load float-map
+interpolation in place of optional hardware filtering. It retains Kjerag's
+view projection and draw ownership; it is **not** a complete reproduction of
+the native `map_plane_uv`/`tex2DBiLinear` implementation or accepted panorama.
+The original-chart ratio lookup remains before half-texel packed-map/alpha
+centering. Correction still applies `clamp((RGB+1)*own_ratio-1,0,1)` per lens
+before the alpha blend.
+
+CPU tests validate the diagnostic WGSL and analytic chart at every interior
+mesh vertex. Default shader sources remain exact. Three actual-Scene runs
+cover sources 18208..18222 in the reported April view:
+
+- `april-type11-consumer-null-01/`: opt-in absent. Every ordinary/native PPM,
+  packed map, alpha and both ratio pairs match the preceding saved control
+  byte-for-byte.
+- `april-type11-consumer-control-01/`: alternative drawing. Every packed map,
+  alpha and both ordinary/native ratio histories remain byte-identical.
+- `april-type11-consumer-fixed-02/`: identical alternative drawing, holding
+  the first ordinary ratio pair from source 18208. Ordinary PPMs match the
+  preceding alternative run exactly and the first fixed draw is an exact
+  same-frame null. This is a mechanical negative, not the owner's earlier
+  stable fixed control initialized at 18209.
+
+The first fixed run stopped before rendering because its runner omitted the
+existing required baseline; that test mode also hardcoded 31 sources. It is
+preserved as incomplete in `april-type11-consumer-fixed-01/INVALID.md`.
+The corrected test-only count and baseline setup produce the completed 02 run.
+Each successful run retains the source patch, source/binary hashes and guards
+showing the installed Flatpak unchanged. No playback performance claim follows
+from an offscreen capture. An unmodified alternative source 18215 PNG was viewed
+for picture context, not continuous-video acceptance.
+
+`type11-consumer-temporal.py` compares these lossless frames with the previous
+ordinary/native-input and owner-labeled fixed controls. Each arm estimates its
+own texture motion; a common forward/backward-consistency mask retains
+96.14..99.52 percent of the full image. Signed local RGB samples stay separate
+at the previously defined rows, offsets and scales. The old fixed control has
+no source 18208, so old/new residual comparisons start at 18210. The new control's
+18209 transition is reported separately. The different fixed initializations
+are disclosed; raw residuals are retained as well as fixed-subtracted values.
+
+The result is negative: both new changing-color arms retain same-sign,
+three-neighbor pulses above their own held-frame envelopes at every map update
+and all three rows/scales. Native events remain 18215/18221 and ordinary
+events 18215/18222. For the previously localized source 18215, row 300, offset -48,
+sigma 8 green residual, old/new native is +2.1579/+2.2004 codes. Old/new fixed
+is +0.1030/+0.2197. The ordinary source 18222 pulse at that location is
+-1.3067/-1.0762, with old/new fixed -0.1325/+0.0506. This does not establish
+perceptual equality or a new owner verdict, but supplies no basis for presenting
+the drawing experiment as a flicker fix. The same held-envelope and correlated-
+sample limitations apply as in the preceding measurement section. All three
+draw changes are combined, so this does not isolate each one's individual
+effect or rule out every possible consumer difference.
+
+The rejected test-only Rust draw and count override are removed; their exact
+patches, test executables and pixels remain in the durable evidence directories.
+The measurement is `april-type11-consumer-temporal-01/events.json`, SHA-256
+`85214e16021e8cf2b8fefff1a3473e8385fe1498d94a6f0c70ca582e6eef9587`.
+No production change, install, new Studio export or owner-review movie occurs
+in this control.
+
+### Accepted-output history gap
+
+A read-only local audit confirms the accepted April panorama retains the
+output and project, not its per-frame type11 color-map history. The available
+15-source history is the later 1080p type2 diagnostic export. Its existing
+video was copied from the Mac without a new export; local and remote SHA-256
+are `dd22c4e6969e0fd6d9d11f05c3cba8ecf28486fa9dbd8a26d53f86d2797fd6c0`.
+It contains 63 1920x1080 frames at 30000/1001 fps. Its inspected first frame looks
+toward the horizon, not at the owner's downward ground-seam view, so that
+video cannot replace the accepted panorama comparison. The separate recorded
+type11 ratio pair at t1152.417933 establishes one upload, not the accepted
+t607.574 history. Next target the actual panorama consumer's per-source map
+uploads/holds rather than further numerical convergence to this type2 history.
