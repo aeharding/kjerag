@@ -14,6 +14,23 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Missing color equations identified, 2026-09-09:** Studio measures robust
+color bounds from rows 49/50 and columns 18..193, then admits equations over
+the entire four-row, 212-column overlap. Kjerag incorrectly used the narrow
+measurement domain for both. The corrected readable reference now reproduces
+five of six saved native prepared images byte-for-byte; the sixth differs in
+one byte by one code. The outer-stage result matches the native-prepared
+substitution on all three observations. This confirms the cause of the large
+inner calculation mismatch, not yet the owner's moving flicker. The GPU port
+passes real X4/ONE X2 input checks and the actual Scene capture completes all
+31 reported April sources with unchanged geometric maps and alpha. A new
+candidate-left/Studio-right loop is ready in `april-full-overlap-01/review/`
+under the existing comparison directory. No new Studio export was needed;
+the installed candidate's rejection below still stands until a new owner
+verdict. The full-overlap change is not installed or accepted for merge.
+The full workspace gate passes with both cameras and required GPU fixtures:
+1,274 passed, 34 ignored; all-target workspace Clippy and formatting also pass.
+
 **Owner rejects the color-boundary candidate, 2026-09-09:** on the candidate's
 moving candidate-left/Studio-right comparison, the owner reports "The left
 still flickers same way". The input/admission improvements do not fix the

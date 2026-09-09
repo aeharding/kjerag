@@ -233,6 +233,13 @@ replication, periodic 200-to-212 extension, center crop, same-ordinal ratios,
 ROI-local box filtering and original-chart remap. Its full ratio arrays start
 at one and retain the previous filtered left boundary row 40. The corrected
 binding/constant contract is `docs/research/studio-image-fusion-spatial.md`.
+The reference and GPU distinguish measurement from equation emission. Robust
+color bounds use supported rows 49/50 and columns 18..193; those bounds then
+admit correction equations over **all** rows 48..51 and columns 0..211,
+including the wrapped extension. NCC and sticky invalidity select quantile
+observations, not a second mask on the final equations. Reusing the narrow
+measurement domain for the solve omitted native constraints; the Mac read and
+saved-input regression are recorded in `studio-image-fusion-temporal-602.md`.
 The detached `prepare_one_xs_fusion_inputs` API composes the final packed map
 through the recovered lookup into 200x4 source UVs,
 then expands them endpoint-aligned and samples two 800x16 BGR bands. Each lens

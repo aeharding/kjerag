@@ -15,7 +15,7 @@ use wgpu::util::DeviceExt;
 use crate::stitch_camera::StitchCamera;
 
 const MAP_NODES: u64 = 200 * 100;
-const STATE_WORDS: usize = 1_320;
+const STATE_WORDS: usize = 1_728;
 
 /// One immutable renderer-ordinal publication of 200 by 100 ratio maps.
 pub struct Output {

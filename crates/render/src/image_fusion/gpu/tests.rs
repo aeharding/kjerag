@@ -183,6 +183,63 @@ fn synthetic_observations_match_reference_and_retain_skips() {
 }
 
 #[test]
+fn full_overlap_equations_match_reference_for_outer_rows_and_edges() {
+    let Some((device, queue)) = gpu() else { return };
+    // The quantile evidence remains in the two central rows and inner 176
+    // columns. Give the other two rows and wrapped edge columns distinct,
+    // non-gray corrections so a solver which reuses that evidence mask for
+    // equation emission cannot accidentally agree with the reference.
+    let bands: [Vec<u8>; 2] = std::array::from_fn(|lens| {
+        (0..800 * 16)
+            .flat_map(|pixel| {
+                let source_row = pixel / 800;
+                let source_column = pixel % 800;
+                let reduced_row = source_row / 4;
+                let reduced_column = source_column / 4;
+                let left = [
+                    60 + (reduced_column % 31) as u8,
+                    95 + (7 * reduced_row + reduced_column % 17) as u8,
+                    130 + (reduced_column % 23) as u8,
+                ];
+                if lens == 0 {
+                    left
+                } else {
+                    let wrapped_edge = !(6..194).contains(&reduced_column);
+                    let delta: [i16; 3] = if reduced_row == 0 || reduced_row == 3 {
+                        [-7, 8, -5]
+                    } else if wrapped_edge {
+                        [14, -11, 10]
+                    } else {
+                        [6, -4, 5]
+                    };
+                    std::array::from_fn(|channel| (i16::from(left[channel]) + delta[channel]) as u8)
+                }
+            })
+            .collect()
+    });
+    let invalid = vec![0u8; 4 * 212];
+    let expected = super::super::spatial::Reference::new()
+        .observe_bands([&bands[0], &bands[1]], &invalid)
+        .unwrap()
+        .unwrap()
+        .ratios;
+    let mut producer = Producer::new(&device, StitchCamera::OneX2).unwrap();
+    let actual = observe(
+        &device,
+        &queue,
+        &mut producer,
+        [&bands[0], &bands[1]],
+        &invalid,
+        u32::MAX,
+    );
+    compare(
+        &actual,
+        [&expected.left.values()[..], &expected.right.values()[..]],
+        RATIO_TOLERANCE,
+    );
+}
+
+#[test]
 fn integer_content_boundary_skips_3168_and_admits_3169() {
     let Some((device, queue)) = gpu() else { return };
     let pixels = 800 * 16;
@@ -345,10 +402,11 @@ fn captured_x4_and_x2_bands_track_cpu_reference_outputs() {
         let left = std::fs::read(root.join("fusion-band-left.bgr8")).unwrap();
         let right = std::fs::read(root.join("fusion-band-right.bgr8")).unwrap();
         let invalid = std::fs::read(root.join("fusion-invalid.bin")).unwrap();
-        let expected = [
-            read_float4(root.join("fusion-left.float4")),
-            read_float4(root.join("fusion-right.float4")),
-        ];
+        let expected = super::super::spatial::Reference::new()
+            .observe_bands([&left, &right], &invalid)
+            .unwrap()
+            .unwrap()
+            .ratios;
         let mut producer = Producer::new(&device, StitchCamera::OneX2).unwrap();
         let actual = observe(
             &device,
@@ -358,13 +416,25 @@ fn captured_x4_and_x2_bands_track_cpu_reference_outputs() {
             &invalid,
             u32::MAX,
         );
-        compare(&actual, [&expected[0], &expected[1]], RATIO_TOLERANCE);
+        compare(
+            &actual,
+            [&expected.left.values()[..], &expected.right.values()[..]],
+            RATIO_TOLERANCE,
+        );
         let identity = vec![[1.0, 1.0, 1.0, 0.0]; MAP_NODES as usize];
         assert!(max_error(&actual, [&identity, &identity]) > RATIO_TOLERANCE);
-        assert!(max_error(&actual, [&expected[1], &expected[0]]) > RATIO_TOLERANCE);
-        let swizzled: [Vec<[f32; 4]>; 2] = expected
-            .each_ref()
-            .map(|map| map.iter().map(|v| [v[2], v[1], v[0], v[3]]).collect());
+        assert!(
+            max_error(
+                &actual,
+                [&expected.right.values()[..], &expected.left.values()[..]],
+            ) > RATIO_TOLERANCE
+        );
+        let swizzled: [Vec<[f32; 4]>; 2] = [&expected.left, &expected.right].map(|map| {
+            map.values()
+                .iter()
+                .map(|v| [v[2], v[1], v[0], v[3]])
+                .collect()
+        });
         assert!(max_error(&actual, [&swizzled[0], &swizzled[1]]) > RATIO_TOLERANCE);
     }
 }
@@ -677,16 +747,6 @@ fn max_error(actual: &[Vec<[f32; 4]>; 2], expected: [&[[f32; 4]]; 2]) -> f32 {
         }
     }
     worst
-}
-
-fn read_float4(path: PathBuf) -> Vec<[f32; 4]> {
-    std::fs::read(path)
-        .unwrap()
-        .chunks_exact(16)
-        .map(|p| {
-            std::array::from_fn(|c| f32::from_le_bytes(p[c * 4..c * 4 + 4].try_into().unwrap()))
-        })
-        .collect()
 }
 
 fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {

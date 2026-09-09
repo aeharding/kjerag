@@ -21,7 +21,10 @@ const IMAGE_BYTES: usize = 3 * IMAGE_PIXELS;
 const SAMPLE_TOP: usize = 48;
 const SAMPLE_ROWS: usize = 4;
 const VALIDITY_BYTES: usize = chroma::COLUMNS * SAMPLE_ROWS;
+// The metric/quantiles read the narrow strip, but native emits equations over
+// the full overlap. Mac 0x32250d0..0x32252c8 and 0x3228714..0x3228844.
 const SUPPORT_ROWS: std::ops::Range<usize> = 49..51;
+const SOLVE_ROWS: std::ops::Range<usize> = SAMPLE_TOP..SAMPLE_TOP + SAMPLE_ROWS;
 
 #[cfg(test)]
 #[path = "solve_arithmetic_probe.rs"]
@@ -30,8 +33,9 @@ mod arithmetic_probe;
 /// Shape-checked inputs to one inner selected-X4 observation.
 pub struct Inputs<'a> {
     lenses: [&'a [u8]; 2],
-    /// Nonzero excludes the matching pixel in rows 48 through 51. The owner
-    /// folds this into a sticky invalid-coordinate mask across observations.
+    /// Four-row mask for rows 48 through 51, retained across observations.
+    /// Only central rows 49/50 exclude matching quantile-support pixels;
+    /// invalidity is not applied again to the final equation controls.
     invalid: &'a [u8],
 }
 
@@ -92,8 +96,8 @@ pub struct Reference {
     /// The channel vector is populated by any actual solve, including an
     /// invalid post-reset solve which reuses stale control.
     seeds_populated: bool,
-    /// Selected dynamic distance/control bytes over rows 49 and 50 and all
-    /// columns. They survive invalid/empty observations and reset.
+    /// Selected dynamic distance/control bytes over rows 48 through 51 and
+    /// all columns. They survive invalid/empty observations and reset.
     control: Option<Vec<u8>>,
     /// The outer validity input is monotone for the lifetime of its owner.
     sticky_invalid: Vec<u8>,
@@ -160,7 +164,7 @@ impl Reference {
                 self.metric.advance(f32::from(m));
             }
             let retained = self.metric;
-            let distances = distances(&differences, retained.level());
+            let distances = distances(input.lenses, &differences, retained.level());
             self.control = Some(distances);
             self.retained_budget = chromatic::budget(f32::from(m));
             self.first_valid = false;
@@ -284,7 +288,6 @@ fn support_masks(lenses: [&[u8]; 2], invalid: &[u8]) -> Vec<bool> {
 
 #[derive(Clone, Copy)]
 struct Difference {
-    slot: usize,
     bgr: [i16; 3],
 }
 
@@ -299,7 +302,6 @@ fn supported_byte_differences(lenses: [&[u8]; 2], support: &[bool]) -> Vec<Diffe
             let zero = pixel(lenses[0], row, column);
             let one = pixel(lenses[1], row, column);
             out.push(Difference {
-                slot,
                 bgr: std::array::from_fn(|channel| {
                     i16::from(one[channel]) - i16::from(zero[channel])
                 }),
@@ -324,8 +326,8 @@ fn metric(differences: &[Difference]) -> Option<u16> {
     Some(worst as u16)
 }
 
-fn distances(differences: &[Difference], retained_metric: i32) -> Vec<u8> {
-    let mut control = vec![0u8; 2 * chroma::COLUMNS];
+fn distances(lenses: [&[u8]; 2], differences: &[Difference], retained_metric: i32) -> Vec<u8> {
+    let mut control = vec![0u8; VALIDITY_BYTES];
     let rank = chromatic::trim(differences.len());
     let mut low = [0i16; 3];
     let mut high = [0i16; 3];
@@ -348,31 +350,39 @@ fn distances(differences: &[Difference], retained_metric: i32) -> Vec<u8> {
             .for_each(|endpoint| *endpoint = (*endpoint).max(0));
     }
 
-    for difference in differences {
-        let excess = (0..3)
-            .map(|channel| {
-                (i32::from(difference.bgr[channel]) - i32::from(high[channel]))
-                    .max(i32::from(low[channel]) - i32::from(difference.bgr[channel]))
-            })
-            .max()
-            .unwrap_or(0);
-        control[difference.slot] = if excess > retained_metric {
-            0
-        } else if excess <= 0 {
-            1
-        } else {
-            excess.max(1) as u8
-        };
+    // NCC and invalidity choose the trusted quantile observations above, not
+    // the equation sites below. Native tests every overlap pixel against the
+    // resulting color bounds, including the wrapped horizontal extension.
+    for row in SOLVE_ROWS {
+        for column in 0..chroma::COLUMNS {
+            let zero = pixel(lenses[0], row, column);
+            let one = pixel(lenses[1], row, column);
+            let excess = (0..3)
+                .map(|channel| {
+                    let difference = i32::from(one[channel]) - i32::from(zero[channel]);
+                    (difference - i32::from(high[channel]))
+                        .max(i32::from(low[channel]) - difference)
+                })
+                .max()
+                .unwrap_or(0);
+            control[validity_slot(row, column)] = if excess > retained_metric {
+                0
+            } else if excess <= 0 {
+                1
+            } else {
+                excess.max(1) as u8
+            };
+        }
     }
     control
 }
 
 fn samples(lenses: [&[u8]; 2], control: &[u8], scale: f32) -> Vec<chroma::Sample> {
     let mut out = Vec::new();
-    for row in SUPPORT_ROWS {
+    for row in SOLVE_ROWS {
         let window_row = row - chroma::ROI_TOP;
-        for column in chroma::EVIDENCE_COLUMNS {
-            let distance = control[evidence_slot(row, column)];
+        for column in 0..chroma::COLUMNS {
+            let distance = control[validity_slot(row, column)];
             if distance == 0 {
                 continue;
             }
@@ -667,6 +677,60 @@ mod tests {
         let differences = supported_byte_differences([&left, &right], &support);
         assert_eq!(differences.len(), 2 * chroma::EVIDENCE_COLUMNS.len());
         assert_eq!(metric(&differences), Some(0));
+    }
+
+    #[test]
+    fn solve_equations_cover_full_overlap_not_only_metric_support() {
+        let left = image(100);
+        let mut right = image(100);
+        for (row, column) in [(48, 0), (51, 211), (49, 17), (50, 194)] {
+            right[pixel_offset(row, column)] = 105;
+        }
+        let mut invalid = vec![0; VALIDITY_BYTES];
+        invalid[validity_slot(49, 100)] = 1;
+        let mut reference = Reference::new();
+        let output = reference.observe(input(&left, &right, &invalid));
+        assert_eq!(output.diagnostics.current_metric, Some(0));
+        assert_eq!(output.diagnostics.admitted, 4 * chroma::COLUMNS);
+        assert!(!support_at([&left, &right], 48, 0).correlated);
+        let control = reference.control.as_ref().unwrap();
+        // Border NCC is absent and one central site is invalid for measuring
+        // bounds. Neither is an additional mask on native equation emission.
+        for (row, column) in [(48, 0), (51, 211), (49, 17), (50, 194), (49, 100)] {
+            assert_eq!(control[validity_slot(row, column)], 1);
+        }
+        let equations = samples([&left, &right], control, reference.metric.scale());
+        for row in SOLVE_ROWS {
+            for column in 0..chroma::COLUMNS {
+                let equation = &equations[validity_slot(row, column)];
+                assert_eq!(
+                    equation.k0,
+                    chroma::node(0, row - chroma::ROI_TOP, column).unwrap()
+                );
+                assert_eq!(
+                    equation.k1,
+                    chroma::node(1, row - chroma::ROI_TOP, column).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn full_overlap_controls_still_apply_inner_and_outer_color_bounds() {
+        let left = image(100);
+        let mut right = image(100);
+        // These sites are outside the quantile domain, so its difference
+        // remains zero and the inner bounds stay [-10,10], retained width20.
+        for (column, difference) in [(0, 10), (1, 29), (2, 30), (3, 31)] {
+            right[pixel_offset(48, column)] = 100 + difference;
+        }
+        let valid = vec![0; VALIDITY_BYTES];
+        let mut reference = Reference::new();
+        let output = reference.observe(input(&left, &right, &valid));
+        assert_eq!(output.diagnostics.current_metric, Some(0));
+        assert_eq!(output.diagnostics.admitted, 4 * chroma::COLUMNS - 1);
+        let control = reference.control.as_ref().unwrap();
+        assert_eq!(&control[..4], &[1, 19, 20, 0]);
     }
 
     #[test]

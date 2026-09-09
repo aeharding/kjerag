@@ -48,6 +48,7 @@ fn windex(lens: u32, row: u32, x: u32) -> u32 {
   return lens * EW * H + row * EW + x;
 }
 fn evidence_slot(row: u32, x: u32) -> u32 { return (row - 49u) * EW + x; }
+fn control_slot(row: u32, x: u32) -> u32 { return (row - 48u) * EW + x; }
 
 fn round_div_even(sum: u32, divisor: u32) -> u32 {
   let q = sum / divisor;
@@ -278,14 +279,12 @@ fn measure(@builtin(local_invocation_index) lane: u32) {
   let low = vec3<i32>(measure_bounds[0], measure_bounds[1], measure_bounds[2]);
   let high = vec3<i32>(measure_bounds[3], measure_bounds[4], measure_bounds[5]);
   let retained = i32(state[RETAINED_METRIC]);
-  for (var cell = lane; cell < 352u; cell += 64u) {
-    let row = 49u + cell / 176u;
-    let x = 18u + cell % 176u;
-    let slot = evidence_slot(row, x);
-    if measure_support[slot] == 0u {
-      state[CONTROL + slot] = 0u;
-      continue;
-    }
+  // The supported/sticky sites above select quantile evidence only. Native
+  // emits controls over every cell in the four-row overlap from those bounds.
+  for (var cell = lane; cell < 848u; cell += 64u) {
+    let row = 48u + cell / EW;
+    let x = cell % EW;
+    let slot = control_slot(row, x);
     let d = vec3<i32>(
       difference(row, x, 0u),
       difference(row, x, 1u),
@@ -324,7 +323,7 @@ fn answers(lens: u32, absolute_row: u32, node_row_: u32) -> bool {
 }
 
 fn weight(row: u32, x: u32) -> f32 {
-  let d = state[CONTROL + evidence_slot(row, x)];
+  let d = state[CONTROL + control_slot(row, x)];
   if d == 0u { return 0.0; }
   if d == 1u { return 1.0; }
   return (f32(d) - 1.0) * (4.0 / f32(state[RETAINED_METRIC])) + 1.0;
@@ -344,8 +343,7 @@ fn rhs_at(n: u32, c: u32) -> f32 {
   let nr = node_row(n);
   let x = node_x(n);
   var out = 0.0;
-  if x < 18u || x >= 194u { return 0.0; }
-  for (var row = 49u; row <= 50u; row += 1u) {
+  for (var row = 48u; row <= 51u; row += 1u) {
     if answers(lens, row, nr) {
       let d = ycc(working[windex(1u, row, x)]) - ycc(working[windex(0u, row, x)]);
       out += select(-weight(row, x) * d[c], weight(row, x) * d[c], lens == 0u);
@@ -363,12 +361,10 @@ fn diagonal_at(n: u32) -> f32 {
   if row < lens * 8u + 11u { d += QSQ; }
   if x > 0u { d += QSQ; }
   if x + 1u < EW { d += QSQ; }
-  if x >= 18u && x < 194u {
-    for (var ar = 49u; ar <= 50u; ar += 1u) {
-      if answers(lens, ar, row) {
-        let w = weight(ar, x);
-        d += w * w;
-      }
+  for (var ar = 48u; ar <= 51u; ar += 1u) {
+    if answers(lens, ar, row) {
+      let w = weight(ar, x);
+      d += w * w;
     }
   }
   return d;
@@ -400,15 +396,13 @@ fn quadratic(n: u32, field_base: u32, work_base: u32, direction: bool) -> f32 {
     let other = node_at(lens, row, x + 1u);
     out += QSQ * (here - vector_at(other, field_base, work_base, direction));
   }
-  if x >= 18u && x < 194u {
-    for (var ar = 49u; ar <= 50u; ar += 1u) {
-      if answers(lens, ar, row) {
-        let other_lens = 1u - lens;
-        let other_row = clamp(ar - 40u, other_lens * 8u, other_lens * 8u + 11u);
-        let other = node_at(other_lens, other_row, x);
-        let w = weight(ar, x);
-        out += w * w * (here - vector_at(other, field_base, work_base, direction));
-      }
+  for (var ar = 48u; ar <= 51u; ar += 1u) {
+    if answers(lens, ar, row) {
+      let other_lens = 1u - lens;
+      let other_row = clamp(ar - 40u, other_lens * 8u, other_lens * 8u + 11u);
+      let other = node_at(other_lens, other_row, x);
+      let w = weight(ar, x);
+      out += w * w * (here - vector_at(other, field_base, work_base, direction));
     }
   }
   return out;
