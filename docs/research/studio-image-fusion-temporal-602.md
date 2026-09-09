@@ -783,7 +783,10 @@ Neither scalar is selected as an autonomous quality gate.
 
 The useful result is the event-localized check in `temporal-events.py` and
 `april-temporal-events-01/events.json`. Independent saved left/right map
-hashes identify updates rather than choosing events from output peaks:
+hashes identify updates rather than choosing events from output peaks. This
+event report uses detector01's shared no-color motion, not detector04's
+self-motion/common-mask residuals; the robust scalar ordering above and the
+example below are separate checks, not a masked rerun of these inequalities:
 
 - Full-overlap: 18215, 18222 and 18239.
 - Ordinary short: 18215 and 18222.
@@ -792,9 +795,11 @@ hashes identify updates rather than choosing events from output peaks:
 For each same-motion local RGB residual, subtract the fixed-color control,
 then compare each location against that same location's largest held-frame
 residual. Every listed update has coherent, same-sign excess across at least
-three neighboring samples at **all three rows and all three scales**. This
-survives dropping any one update because the other listed updates individually
-show it. The independent static-field control, no-color minus fixed-color,
+three neighboring samples at **all three rows and all three scales**. Each
+listed update independently exceeds its held-only envelope; deleting another
+update does not change that envelope. This is descriptive, not statistical
+leave-one-out validation, and neighboring smoothed samples are not independent
+replicates. The independent static-field control, no-color minus fixed-color,
 does not show those widespread update-linked runs. Its occasional local
 exceedances remain in the complete report rather than being suppressed.
 The held maximum is a descriptive within-sequence reference, not a tuned
