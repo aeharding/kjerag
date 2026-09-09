@@ -23,6 +23,10 @@ const SAMPLE_ROWS: usize = 4;
 const VALIDITY_BYTES: usize = chroma::COLUMNS * SAMPLE_ROWS;
 const SUPPORT_ROWS: std::ops::Range<usize> = 49..51;
 
+#[cfg(test)]
+#[path = "solve_arithmetic_probe.rs"]
+mod arithmetic_probe;
+
 /// Shape-checked inputs to one inner selected-X4 observation.
 pub struct Inputs<'a> {
     lenses: [&'a [u8]; 2],

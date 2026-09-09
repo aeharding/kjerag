@@ -31,6 +31,12 @@ relevance to visible flicker is not yet proven. A test-only native node-order
 permutation produces identical prepared bytes and is not a fix. No further
 product change, install or export was made; the new tests and native boundary
 checks are recorded in `studio-image-fusion-temporal-602.md`.
+The next saved-input controls also leave every prepared output byte unchanged:
+explicit normal-matrix multiplication, native binary32 centering, native
+dot-product reduction order, and their combination. These measured arithmetic
+differences are not a useful fix for this discrepancy. Native tolerance,
+initialization and stopping conditions match the reference; the remaining
+check is the actual input/evidence construction. Playback remains unchanged.
 
 **Owner feedback and seam reports, 2026-09-08:** chromatic calibration
 "looks really good"; pausing "seems ok on initial glance". Preserve that color

@@ -386,3 +386,53 @@ source-value multiplier is initialized to one. These checks do not authenticate
 every evidence/control byte or the native finite-solve trajectory. The next
 unresolved boundary is the actual evidence/control and solved fields, not
 another output fade, source export or vector-layout rewrite.
+
+## Same-input finite-solve arithmetic controls
+
+The selected Mac `solveCorrectionColor` and its Eigen channel body use the
+same exact tolerance (`0x38d1b717`), cold maximum 100, retained warm budget,
+zero-cold/prior-centered-warm initialization, reciprocal diagonal
+preconditioner, zero-RHS handling and strict pre/post residual tests as the
+readable reference. The selected reductions and CG vector updates use separate
+multiply/add/subtract instructions, not fused multiply-add. This finite-loop
+check does not authenticate every sparse matrix or evidence entry.
+
+Two arithmetic differences were read, rather than inferred from output:
+Mac dot products finish their two four-lane accumulators with adjacent pairs
+`(0+1)+(2+3)`, while `chromatic::dot` chooses `(0+2)+(1+3)`; native also centers
+each channel with a binary32 vector reduction instead of `chroma::centre`'s
+binary64 sum. Native retains the centered vector as the next warm guess.
+The initial static note incorrectly equated the dot products from their
+two-accumulator shape alone; the actual `faddp` finish corrects that claim.
+Instruction addresses are in
+`april-native-prepared-02/cg-semantics-audit.md` under the private comparison
+directory; the recovered fixed-length centering is the test-only
+`native_centre` helper in `solve_arithmetic_probe.rs`.
+
+The opt-in `image_fusion::solve::arithmetic_probe::replay_native_arithmetic`
+runs five independent histories on the same reconstructed current images at
+native updates 0/7/13: the already checked native node-order control,
+materialized normal-matrix multiplication, native centering alone, native dot
+finish alone, and all three arithmetic changes together. Evidence, physical
+equations, preconditioner and budgets remain unchanged. The sparse control
+accumulates separate diagonal/off-diagonal products in ascending native column
+order; it is not a claim to duplicate every Eigen sparse instruction. The
+test-only CG copy is checked against ordinary reference outputs and exits by
+the node-order control. Small synthetic tests pin the reduction discriminator
+and the materialized matrix's diagonal/symmetry.
+
+**Every arm leaves all six prepared BGR images byte-identical to the ordinary
+reference.** All preserve cold exits 49/28/34 and warm truncations at five
+iterations. The greatest pre-byte channel-field difference is approximately
+0.000036 codes. Native prepared discrepancies still reach 8..9 byte codes.
+None of these arithmetic controls explains the saved-output mismatch, and
+none is selected as a production change or a flicker fix. This is a bounded
+negative on these observations, not a guarantee for arbitrary videos or all
+floating-point implementations.
+
+Reports and output images are retained in `april-native-arithmetic-01/02/`.
+The replay reads `KJERAG_FUSION_ARITHMETIC_INPUT` (prepared-02 current images),
+`KJERAG_FUSION_ARITHMETIC_NATIVE` (original native capture) and creates
+`KJERAG_FUSION_ARITHMETIC_OUTPUT` (a new directory). No new Studio export,
+installed build, temporal smoother or playback code change accompanies this
+test. Input/evidence construction remains the next unresolved boundary.
