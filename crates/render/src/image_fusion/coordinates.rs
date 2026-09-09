@@ -25,15 +25,29 @@ pub(super) fn selected_x4_band() -> Vec<[f32; 2]> {
 
 /// Ratio-map publication coordinates in the selected camera's chart.
 ///
-/// ONE X2 keeps the recovered native inverse. X4's fixed `Ry(pi)` camera
-/// datum composes that inverse to the opposite quarter turn; this evaluates
-/// the producer arithmetic directly rather than reversing its 100 sampled
-/// rows, whose polar denominator is 100 rather than 99.
+/// ONE X2 keeps the recovered native inverse. X4's fixed `Ry(pi)` body datum
+/// reflects the consumed native ratio texture. That reflection is an exact
+/// permutation of bilinear texel centers, not a second evaluation of the
+/// producer's endpoint lattice: row/column `(r,c)` reads native
+/// `(99-r,(99-c) mod 200)`.
 pub(super) fn for_camera_output(camera: StitchCamera) -> Vec<[f32; 2]> {
     match camera {
         StitchCamera::OneX2 => selected_x4(),
-        StitchCamera::CalibratedMei => selected(FRAC_PI_2, 0..MAP_HEIGHT, false),
+        StitchCamera::CalibratedMei => reindex_x4_output(&selected_x4()),
     }
+}
+
+fn reindex_x4_output<T: Copy>(native: &[T]) -> Vec<T> {
+    assert_eq!(native.len(), MAP_WIDTH * MAP_HEIGHT);
+    let mut output = Vec::with_capacity(native.len());
+    for row in 0..MAP_HEIGHT {
+        for column in 0..MAP_WIDTH {
+            let native_row = MAP_HEIGHT - 1 - row;
+            let native_column = (MAP_WIDTH / 2 - 1 + MAP_WIDTH - column) % MAP_WIDTH;
+            output.push(native[native_row * MAP_WIDTH + native_column]);
+        }
+    }
+    output
 }
 
 /// Source-band lookup in the selected camera's packed-map chart.
@@ -100,6 +114,7 @@ fn ordered_upper(value: f32, upper: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::image_fusion::RatioMap;
     use crate::studio_type2::MAP_NODES;
 
     fn at(coordinates: &[[f32; 2]], row: usize, column: usize) -> [f32; 2] {
@@ -192,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn x4_camera_datum_composes_both_quarter_turns_on_the_same_ray() {
+    fn x4_body_datum_composes_continuous_quarter_turns_on_the_same_ray() {
         let rotate_y = |angle: f32, [x, y, z]: [f32; 3]| {
             let (s, c) = angle.sin_cos();
             [c * x + s * z, y, -s * x + c * z]
@@ -208,14 +223,75 @@ mod tests {
         for (actual, expected) in bridged_output.into_iter().zip(direct_output) {
             near(actual, expected, 2.0e-7);
         }
+    }
 
+    #[test]
+    fn x4_source_band_lookup_remains_the_negative_quarter_turn() {
         assert_eq!(
             for_camera_band(StitchCamera::CalibratedMei),
             selected(-FRAC_PI_2, 48..52, true)
         );
-        assert_eq!(
-            for_camera_output(StitchCamera::CalibratedMei),
-            selected(FRAC_PI_2, 0..MAP_HEIGHT, false)
+    }
+
+    #[test]
+    fn x4_production_output_table_is_the_exact_native_texture_permutation() {
+        let native = selected_x4();
+        let actual = for_camera_output(StitchCamera::CalibratedMei);
+        assert_eq!(actual.len(), MAP_NODES);
+        for row in 0..MAP_HEIGHT {
+            for column in 0..MAP_WIDTH {
+                let native_row = MAP_HEIGHT - 1 - row;
+                let native_column = (MAP_WIDTH / 2 - 1 + MAP_WIDTH - column) % MAP_WIDTH;
+                assert_eq!(
+                    actual[row * MAP_WIDTH + column],
+                    native[native_row * MAP_WIDTH + native_column],
+                    "X4 output coordinate differs at row {row}, column {column}"
+                );
+            }
+        }
+        assert_ne!(
+            actual,
+            selected(FRAC_PI_2, 0..MAP_HEIGHT, false),
+            "endpoint-lattice recomputation must remain distinct from texture rebasing"
         );
+    }
+
+    #[test]
+    fn x4_output_permutation_commutes_with_ratio_texture_sampling() {
+        let values = (0..MAP_NODES)
+            .map(|node| {
+                let column = (node % MAP_WIDTH) as f32;
+                let row = (node / MAP_WIDTH) as f32;
+                [
+                    0.25 + column * 0.003 + row * 0.0007,
+                    0.5 + column * 0.0002 + row * 0.004,
+                    0.75 + column * 0.001 + row * 0.002,
+                    column - row * 0.5,
+                ]
+            })
+            .collect();
+        let native = RatioMap::new(values).unwrap();
+        let rebased = RatioMap::new(reindex_x4_output(native.values())).unwrap();
+        let points: [[f32; 2]; 7] = [
+            [0.0013, 0.0017],
+            [0.9981, 0.9989],
+            [0.2473, 0.3821],
+            [0.5037, 0.6159],
+            [0.7511, 0.9437],
+            [0.0, 0.0],
+            [1.0, 1.0],
+        ];
+        for uv in points {
+            let native_uv = [(0.5 - uv[0]).rem_euclid(1.0), 1.0 - uv[1]];
+            let expected = native.sample(native_uv);
+            let actual = rebased.sample(uv);
+            for channel in 0..3 {
+                let difference = (actual[channel] - expected[channel]).abs();
+                assert!(
+                    difference <= 2.0e-5,
+                    "sample {uv:?} channel {channel} differs by {difference}, above binary32 tolerance"
+                );
+            }
+        }
     }
 }

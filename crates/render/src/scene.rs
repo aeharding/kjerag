@@ -9638,6 +9638,29 @@ mod tests {
                     .prepare_one_xs_picture(&scene.primitive(camera), 16.0 / 9.0)
                     .unwrap();
                 assert_eq!(prepared.frame(), &frame);
+                if native_color {
+                    // Retain the exact prepared view, not a view reconstructed
+                    // later from a timestamp or fitted to the Studio image.
+                    let reframe = prepared.reframe();
+                    let folder = output.join("native-color");
+                    std::fs::write(
+                        folder.join(format!("frame-{index:010}.reframe.bin")),
+                        reframe.bytes(),
+                    )
+                    .unwrap();
+                    let columns = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+                        .map(|axis| reframe.body_ray(axis));
+                    let bytes: Vec<_> = columns
+                        .into_iter()
+                        .flatten()
+                        .flat_map(f32::to_le_bytes)
+                        .collect();
+                    std::fs::write(
+                        folder.join(format!("frame-{index:010}.view-to-body-columns-f32le.bin")),
+                        bytes,
+                    )
+                    .unwrap();
+                }
                 let null =
                     render_direct_map_pixels_sized(&device, &queue, diagnostic, &map, 1280, 720);
                 assert_eq!(null.len(), shot.rgba.len());

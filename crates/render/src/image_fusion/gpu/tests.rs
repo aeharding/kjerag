@@ -75,28 +75,19 @@ fn x4_publishes_native_corrections_in_the_delivered_lens_and_body_chart() {
         RATIO_TOLERANCE,
     );
     for lens in 0..2 {
-        for row in 1..100 {
+        for row in 0..100 {
             for column in 0..200 {
-                // Ratio nodes use theta=row*pi/100, unlike the geometric
-                // map's 99-step endpoints. Ry(pi) therefore maps row to
-                // 100-row, not 99-row, and longitude to pi-longitude.
-                // Row zero maps to the unstored opposite pole and is tested
-                // by the full CPU comparison above. At columns 0/100, f32
-                // sin(pi) can choose azimuth TAU instead of zero: native's
-                // upper clamp then yields column 199 rather than column 0.
-                // A permutation of two already-rounded tables is not an
-                // independent oracle on those discontinuous meridians.
-                if column == 0 || column == 100 {
-                    continue;
-                }
-                let expected = original[1 - lens][(100 - row) * 200 + (300 - column) % 200];
+                // The consumer reflects a texel-centered texture, not the
+                // producer's endpoint sphere. The same native coordinates
+                // must therefore produce an exact permutation, including
+                // poles and the producer's discontinuous azimuth clamp.
+                let expected = original[1 - lens][(99 - row) * 200 + (299 - column) % 200];
                 let actual = delivered[lens][row * 200 + column];
                 for channel in 0..4 {
-                    assert!(
-                        (actual[channel] - expected[channel]).abs() <= RATIO_TOLERANCE,
-                        "X4 lens {lens} row {row} column {column} channel {channel}: {} != {}",
-                        actual[channel],
-                        expected[channel],
+                    assert_eq!(
+                        actual[channel].to_bits(),
+                        expected[channel].to_bits(),
+                        "X4 texture rebase lens {lens} row {row} column {column} channel {channel}",
                     );
                 }
             }
@@ -237,6 +228,145 @@ fn full_overlap_equations_match_reference_for_outer_rows_and_edges() {
         [&expected.left.values()[..], &expected.right.values()[..]],
         RATIO_TOLERANCE,
     );
+}
+
+#[test]
+fn periodic_edge_join_uses_solved_extensions_and_truncates_half_codes() {
+    let Some((device, queue)) = gpu() else { return };
+    let producer = Producer::new(&device, StitchCamera::OneX2).unwrap();
+    let storage = |label, contents: &[u8], copy_src| {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents,
+            usage: wgpu::BufferUsages::STORAGE
+                | if copy_src {
+                    wgpu::BufferUsages::COPY_SRC
+                } else {
+                    wgpu::BufferUsages::empty()
+                },
+        })
+    };
+
+    let mut state = vec![0u32; STATE_WORDS];
+    state[19] = 1; // CHANGED
+    state[20] = 1; // SOLVE_ACTIVE
+    let state = storage("periodic join state", words_as_bytes(&state), false);
+    let packed_gray = 100u32 | (100u32 << 8) | (100u32 << 16);
+    let working_words = vec![packed_gray; 2 * 212 * 100];
+    let working = storage(
+        "periodic join working images",
+        words_as_bytes(&working_words),
+        false,
+    );
+    let mut fields = vec![0.0f32; 3 * 5_088];
+    // Lens zero's row-49, extended-column-206 node solves 11 codes brighter
+    // than the separately corrected center-crop node at extended column 6.
+    fields[9 * 212 + 206] = 11.0;
+    let field = storage("periodic join fields", floats_as_bytes(&fields), false);
+    let initial_ratios = vec![[1.0f32, 1.0, 1.0, 0.0]; 2 * MAP_NODES as usize];
+    let ratios = storage(
+        "periodic join ratios",
+        float4_as_bytes(&initial_ratios),
+        true,
+    );
+    let zeros = vec![0u32; 800 * 16];
+    let band = storage("periodic join band", words_as_bytes(&zeros), false);
+    let invalid_words = vec![0u32; 4 * 212];
+    let invalid = storage(
+        "periodic join invalid",
+        words_as_bytes(&invalid_words),
+        false,
+    );
+    let validity = storage("periodic join validity", words_as_bytes(&[u32::MAX]), false);
+    let textures: [wgpu::Texture; 2] = std::array::from_fn(|_| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("periodic join unused output"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        })
+    });
+    let views = textures
+        .each_ref()
+        .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("periodic join focused regression"),
+        layout: &producer.layout,
+        entries: &[
+            entry(0, &band),
+            entry(1, &band),
+            entry(2, &invalid),
+            entry(3, &validity),
+            entry(4, &state),
+            entry(5, &working),
+            entry(6, &field),
+            entry(7, &producer.cg),
+            entry(8, &ratios),
+            entry(9, &producer.blurred),
+            entry(10, &producer.fixed),
+            texture_entry(11, &views[0]),
+            texture_entry(12, &views[1]),
+        ],
+    });
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("periodic join ratio readback"),
+        size: ratios.size(),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("periodic join focused regression"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("periodic join focused regression"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&producer.pipelines[4]);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.dispatch_workgroups(625, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&ratios, 0, &readback, 0, ratios.size());
+    let submission = queue.submit([encoder.finish()]);
+    let slice = readback.slice(..);
+    let (send, receive) = mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |answer| {
+        let _ = send.send(answer);
+    });
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        })
+        .unwrap();
+    receive.recv().unwrap().unwrap();
+    let mapped = slice.get_mapped_range();
+    let node = 49 * 200;
+    let actual: [f32; 4] = std::array::from_fn(|channel| {
+        let at = node * 16 + channel * 4;
+        f32::from_ne_bytes(mapped[at..at + 4].try_into().unwrap())
+    });
+    let expected = (105.0f32 + 255.0) / (100.0 + 255.0);
+    let rounded = (106.0f32 + 255.0) / (100.0 + 255.0);
+    for (channel, value) in actual[..3].iter().copied().enumerate() {
+        assert!(
+            (value - expected).abs() <= 1.0e-6,
+            "joined channel {channel} ratio {value} differs from truncated 105-code result {expected}"
+        );
+        assert!(
+            (value - rounded).abs() > 1.0e-3,
+            "joined channel {channel} used rounded 106-code result"
+        );
+    }
+    assert_eq!(actual[3].to_bits(), 0);
 }
 
 #[test]

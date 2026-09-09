@@ -14,6 +14,39 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Two color corrections implemented on the branch, 2026-09-09:** X4 output
+coordinates now preserve the exact native ratio-texture centers instead of
+recomputing the endpoint lattice. The shared GPU producer also now performs
+the already-recovered periodic-edge join. Both real-camera GPU fixtures pass
+without loosening tolerances; the previous sealed binary failed the ONE X2
+fixture because the readable reference had the join and the GPU did not.
+The X4 GPU test now requires a bit-exact opposite-lens permutation at every
+node, including the previously excluded poles/meridians.
+
+Separate coordinate-only and coordinate-plus-join actual-Scene captures cover
+15 April sources. Packed geometry, alpha and the exact-native diagnostic
+images/maps remain byte-identical. Ordinary color updates still occur at
+18215/18222. The join changes coefficients outside this view but none of its
+15 rendered pictures; the visible change here comes from texture centering.
+The coordinate correction lowers the selected green residual at18215 from
+0.543 to0.230 codes, but18222 retains a larger residual than Studio. These
+are localized diagnostics, not a flicker pass. Installed build, owner verdict,
+broader camera-view acceptance and rendering-capacity status are unchanged.
+The full workspace gate passes with both cameras and required GPU fixtures:
+1,282 passed,34 ignored; all-target workspace Clippy, formatting, name and
+crate-source checks pass. A focused GPU test rejects missing joining and
+round-to-even at the105.5-code boundary. A short candidate-left/Studio-right
+movie is available in `april-color-coordinate-edge-01/review/` under the
+comparison directory; it has no owner verdict yet.
+
+An intervening apparent camera-basis mismatch was an analysis error: the
+wrong trace row's center was used, and native panorama V was interpreted
+upside down. The corrected pixel is(685,300); actual Kjerag view-matrix and
+native packed-UV checks support the existing physical bridge. Native's own
+coefficient update also predicts about one green code there, so a zero
+same-source color delta is not a Studio-parity requirement. See the temporal
+note for the invalidated receipt and the exact-run VS limitation.
+
 **Color-texture coordinate discrepancy, 2026-09-09:** a test-only exact rebase
 of Studio's published X4 textures identifies a texel-centering difference in
 the camera-output conversion. The packed-map comparison supports the existing
@@ -23,7 +56,8 @@ lens `[99-r,(99-c)%200]`, whereas centered packed-map/alpha conversion uses
 `[99-r,(100-c)%200]` (and complements alpha). At the previously localized
 source18215 green pulse, the moving diagnostic decreases from 2.158 to 1.385
 codes versus Studio's 0.420. This is partial output evidence, not a visible
-fix, and other residuals remain. No production coordinate change is selected.
+fix, and other residuals remain. At that diagnostic stage no production
+coordinate change had been selected; the branch implementation is recorded above.
 
 The bound type11 Metal color, packed-UV and alpha textures at source18215
 have also been read back and match their CPU uploads exactly. This closes

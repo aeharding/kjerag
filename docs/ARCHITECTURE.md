@@ -240,12 +240,13 @@ including the wrapped extension. NCC and sticky invalidity select quantile
 observations, not a second mask on the final equations. Reusing the narrow
 measurement domain for the solve omitted native constraints; the Mac read and
 saved-input regression are recorded in `studio-image-fusion-temporal-602.md`.
-The readable reference also retains the separately solved six-column periodic
-copies when joining the prepared images before ratios, as the Mac selected
-caller does. Its new native-input Scene diagnostic validates the saved native
-coefficient sequence before camera rebasing and changes only diagnostic draw
-bindings. The ordinary GPU producer has not yet received this edge-join change;
-the diagnostic is not a production fallback or accepted flicker fix.
+Both the readable reference and GPU retain the separately solved six-column
+periodic copies when joining prepared bytes before ratios, as the Mac selected
+caller does. The GPU joins within its existing ratio dispatch, with the same
+FMA and byte truncation; the current-image denominator remains unjoined.
+The native-input Scene diagnostic validates saved native coefficients before
+camera rebasing and changes only diagnostic draw bindings. It is not a
+production fallback or accepted flicker fix.
 The detached `prepare_one_xs_fusion_inputs` API composes the final packed map
 through the recovered lookup into 200x4 source UVs,
 then expands them endpoint-aligned and samples two 800x16 BGR bands. Each lens
@@ -266,8 +267,12 @@ The admitted camera profile now carries the photometric coordinate boundary
 as well as geometry. Native X4 fusion ordinals are delivered streams `[1,0]`,
 and its native sphere differs from Kjerag's established chart by `Ry(pi)`,
 the same fixed datum used in `x4_model6_static`. Composing the native source
-lookup gives `Ry(-pi/2)` against the Kjerag packed map; composing the native
-ratio lookup gives `Ry(+pi/2)` in the renderer's chart. Input bindings and final
+lookup gives `Ry(-pi/2)` against the Kjerag packed map. Ratio publication
+instead preserves the consumed texture's centers: Kjerag `(r,c)` reads the
+native output table at `(99-r,(99-c) mod200)`. Re-evaluating the producer's
+endpoint lattice with `Ry(+pi/2)` would introduce a texel-center discrepancy.
+This fixed coordinate table is prepared once, not remapped each frame.
+Input bindings and final
 texture bindings perform the lens exchange, without copies or additional
 passes. ONE X2 keeps its original positive input/negative output lookups and
 `[0,1]` lens order. The solve and temporal history remain in native fusion

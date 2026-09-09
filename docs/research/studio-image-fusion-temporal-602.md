@@ -1121,3 +1121,126 @@ Frozen-alpha temporal measurements SHA-256:
 These remain diagnostics, not another presumed fix for owner testing. No
 production smoothing, player change, installation, merge or performance claim
 occurs in these controls.
+
+### Corrected pixel/view association and selected native V
+
+`april-view-coordinates-01` retains the actual prepared `Reframe` and a
+9-f32 view-to-body matrix for every source in the unchanged Scene diagnostic.
+The matrix is constructed by calling `body_ray` on the three unit axes, not
+by guessing uniform offsets. All prior ordinary and exact-native images and
+maps remain byte-identical. Source18215 matrix SHA-256:
+`19bff679dca4708395f851c153e4a034f5d4d39a5d2a6be9b305178b7a1f9623`.
+
+The first `native-consumer-coordinate-01` analysis selected row300 but used
+row150's center872.2. The shared trace helper actually gives centers
+`[872.2,732.6,537.4]` at18215, so row300/offset-48 is pixel(685,300),
+not(824,300). Its `INVALID.md` rejects that earlier reported-bin conclusion.
+The coordinator also retracts the resulting apparent opposite-sign or
+different-correction-region claim. This error is separate from the verified
+texel-center discrepancy above.
+
+Native type11 uses `BuildPlane`, not the common `FullScreenQuad(bool)`.
+`InitRenderResource` at worker+`0x4a880c` calls BuildPlane with identity UV
+transform at+`0x4a8884`. BuildPlane+`0x4f3ae8` maps row fraction to object
+`y=2*(row/H-.5)` and texture V=`row/H`. The selected VS forwards that UV and
+applies MVP to position. All ten older exact-class submitted VS receipts
+have no X/Y transform; Metal raster top therefore receives V=1, not V=0.
+The established panorama path uses native V=`1-top-left-image-V`. Run03
+did not retain its own VS submission, so this is static plus earlier
+selected-class evidence, not exact-run VS authentication.
+
+`native-consumer-coordinate-02` imports the common trace helper, verifies the
+centers/pixel, and uses the actual K matrix. Kjerag's view ray has Y down;
+the existing registration helper uses Y up. With those conventions explicit,
+native fusion UV at the selected pixel is(0.2390540,0.3858023), versus
+(0.2391438,0.3860701) from Kjerag. The composed bridge has determinant
+0.9999997 and differs from `diag(1,-1,-1)` by at most0.001098. After atlas
+normalization and stream exchange, the physical lens UVs also agree within
+the existing registration discrepancy. There is no evidence here for a
+second camera-basis correction.
+
+Native left owns the center with alpha1 and its green-ratio increment is
++0.00347458. A native-left-only approximate sigma8 patch effect is+1.04113
+green codes, consistent with Kjerag's actual same-source+1.07076, not an
+opposite sign. This estimate uses encoded panorama color and omits the
+separate right-lens term where patch alpha reaches0.9215; it is not an exact
+native framebuffer replay. A zero coefficient-update delta would therefore
+not be a justified parity requirement. The corrected initial02 receipt is
+`050d05e87543ddd1d6b6d8de4a1a319ede43584641c48b9deffefbf0708b2422`;
+its then-pending static-V note is resolved only to the limited extent above.
+
+### Production texture rebase and GPU periodic-edge join
+
+The branch now applies the exact X4 output-coordinate permutation in
+`coordinates::for_camera_output`. Source-band coordinates, physical stream
+exchange and ONE X2's native coordinate table are unchanged. The table is
+prepared once for the capture and shared by the readable and GPU paths; no
+per-frame remapping pass, smoothing or new history policy is added. Nine
+coordinate unit tests pass. The real GPU X4 test now requires all20,000
+nodes/all4 lanes to equal the native opposite-lens permutation bit-for-bit,
+including poles and meridians previously excluded by its approximate check.
+
+The sealed pre-change `april-view-coordinates-01/render-tests` exposes an
+existing GPU/reference failure: the X4 fixture's maximum ratio error is
+0.0017317533 and ONE X2's is0.0030160546, above the unchanged1/510 tolerance.
+The reference already contains the recovered periodic join, whereas GPU
+`make_ratios` still used the unjoined prepared image. This failure predates
+the output-coordinate patch.
+
+The GPU port corrects cropped and extension bytes separately, joins the six
+columns at each edge with the recovered row40..60 bounds, extension indices,
+FMA order and truncation, then constructs ratios with the unchanged current
+denominator. It adds no dispatch, buffers, admission or temporal state. On
+RADV PHOENIX/AMD760M the X4 and ONE X2 fixture errors become0.000001013279
+and0.00008547306. All eight GPU test entries pass; the optional profile entry
+returns early because profiling is unset. Synthetic cold/warm, failure/skip,
+full-overlap and exact X4 permutation checks pass without relaxed tolerances.
+These are arithmetic checks, not a visual or performance gate.
+
+`april-color-coordinate-only-01` and `april-color-coordinate-edge-01` each
+run15 sources18208..18222 through the actual Scene with separately sealed
+binaries and source patches. Original executable instructions/read-only data
+are compared against the stripped evidence executable before each run.
+Both finish with15 worker-ready wakes, unchanged packed maps/alpha and
+bit-identical exact-native diagnostic pictures/maps. Production color maps
+retain the original update/hold sequence: initial18208, updates18215/18222.
+Adding the edge join changes map values but none of these15 view pictures;
+the joined and coordinate-only PPMs are byte-identical. No installation changes.
+
+The existing robust temporal check is rerun on both production sequences
+with the same lossless Studio projection, motion policy and shared masks.
+An optional `--no-snapshots` only omits regenerable dense arrays to conserve
+disk; it retains every measurement and input hash. At row300/offset-48/sigma8,
+ordinary old/new green residuals are0.54307→0.23034 at18215 and
+-1.30673→-0.99610 at18222. Studio is0.42033/-0.21307 respectively. At18222
+the new red residual remains-3.09778 versus Studio-0.35199; fixed-color is
+also-1.86299 there, illustrating why total residual is not all color pulse.
+Some other bins still differ. Neither lower numbers nor closer GPU/reference
+agreement is treated as a flicker pass or a reason to override the owner.
+Measurement SHA-256s:
+
+- Coordinate-only: `12153f1f5aa54fc22a1450fa628ff19bc2eddf5a4d4cae2987f4858609ed6887`.
+- Coordinate plus join: `eb3be703bb1570db26cb725452c322fa8fccb4fe873e1e5f16b283e0b9731232`.
+
+A focused GPU regression dispatches the production ratio stage with distinct
+solved extension bytes: cropped100 and extension111 at the half-weight edge
+must give truncated105, not unjoined100 or rounded106. This passes along with
+the full workspace qualification in `color-coordinate-qualification-02`:
+1,282 passed,34 ignored; all-target workspace Clippy, formatting, name and
+crate-source checks pass with required GPU and both real cameras. Tests log
+SHA-256 `b7df349046de129c68f8b2bf22e688b3279a15c8203a497d0e3ca11b08d02dc8`.
+Attempt01 ran out of disk during Clippy and never reached tests; its
+`INCOMPLETE.md` explicitly rejects a gate pass. The retry uses the established
+compact test-profile settings. Only regenerable compiler artifacts were
+discarded. Seven older sealed debug executables were losslessly archived to
+adjacent `render-tests.zst` files, each checked against its original decompressed
+SHA-256; `EXECUTABLE-ARCHIVED.txt` beside each gives exact restoration steps.
+No captured source, maps, output pictures or executable bytes were lost.
+
+`april-color-coordinate-edge-01/review/coordinate-vs-studio-loop-muted.mp4`
+shows production Kjerag left and the unchanged fixed Studio projection right.
+The14 shared source-associated frames repeat16 times, at30000/1001 with no
+audio; labels are outside the original1280x720 pixels. Frame6 was inspected
+for layout/context, not motion acceptance. Movie SHA-256:
+`737b9f3441c2db793c1eff07777f976fbc8c6088f699ef16de2d0d7ccc1e31b1`.
+It has been linked for owner review without claiming the flicker is fixed.

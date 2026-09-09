@@ -524,11 +524,11 @@ fn byte(v: f32) -> u32 {
   if !(v >= -2147483648.0 && v < 2147483648.0) { return 0u; }
   return u32(clamp(round_even(v), 0, 255));
 }
-fn corrected(lens: u32, row: u32, x: u32) -> vec3<f32> {
-  let packed = working[windex(lens, row, x + 6u)];
+fn corrected_extended(lens: u32, row: u32, x: u32) -> vec3<f32> {
+  let packed = working[windex(lens, row, x)];
   if state[SOLVE_ACTIVE] == 0u { return bgr(packed); }
   let source_ycc = ycc(packed);
-  let node = node_at(lens, row - 40u, x + 6u);
+  let node = node_at(lens, row - 40u, x);
   let value = source_ycc + vec3<f32>(field[node], field[NODES + node], field[2u * NODES + node]);
   let cb = value.y - 128.0;
   let cr = value.z - 128.0;
@@ -537,6 +537,30 @@ fn corrected(lens: u32, row: u32, x: u32) -> vec3<f32> {
     f32(byte(value.x - cb * 0.34414 - cr * 0.71414)),
     f32(byte(cr * 1.402 + value.x)),
   );
+}
+
+// Native FuseLeftAndRightSide corrects the separately solved 212-column
+// image first, center-crops it, then joins each six-column periodic extension
+// into its matching cropped edge. Only rows 40 through 60 participate. The
+// nonnegative fused byte truncates toward zero rather than using round_even.
+fn joined_prepared(lens: u32, row: u32, x: u32) -> vec3<f32> {
+  let cropped = corrected_extended(lens, row, x + 6u);
+  if row < 40u || row > 60u { return cropped; }
+  var extension_x = 0u;
+  var cropped_weight = 0.0;
+  if x < 6u {
+    extension_x = 206u + x;
+    cropped_weight = 0.5 + f32(x) / 12.0;
+  } else if x >= 194u {
+    let edge = x - 194u;
+    extension_x = edge;
+    cropped_weight = 1.0 - f32(edge) / 12.0;
+  } else {
+    return cropped;
+  }
+  let extension = corrected_extended(lens, row, extension_x);
+  let fused = fma(cropped, vec3<f32>(cropped_weight), extension * (1.0 - cropped_weight));
+  return vec3<f32>(vec3<u32>(fused));
 }
 
 @compute @workgroup_size(64)
@@ -567,7 +591,7 @@ fn make_ratios(@builtin(global_invocation_id) id: vec3<u32>) {
     ratios[lens * 20000u + index] = vec4<f32>(1.0, 1.0, 1.0, 0.0);
   } else if write {
     let current = bgr(working[windex(lens, source_row, x + 6u)]);
-    let prepared = corrected(lens, source_row, x);
+    let prepared = joined_prepared(lens, source_row, x);
     ratios[lens * 20000u + index] = vec4<f32>((prepared + 255.0) / (current + 255.0), 0.0);
   }
 }
