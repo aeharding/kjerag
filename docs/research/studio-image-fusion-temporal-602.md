@@ -988,3 +988,136 @@ Hashes (remote/local file copies agree):
 - Observer: `463369ea1a80c10b4acc4dcb9f854e80f053865ee69450161d63b5688cab435b`.
 - Native session: `5a5f935786cc40cd06be46acc0c1d1485f91ec3897db4cf8eea462d862041fed`.
 - New panorama: `3bb92046b26b9d7772c84668b585fc13c1486910b6678aa33dc595627841e4ec`.
+
+## Bound textures and exact texture-coordinate rebase, 2026-09-09
+
+The next bounded observation selects source18215 at the type11 consumer,
+native ticks18233215/30000. `mac-panorama-consumer-03/run-01/` retains the
+exact source record, CPU packed/alpha/color uploads, submitted FS/Texture
+uniforms, actual fragment texture bindings and four Metal `getBytes`
+readbacks. The renderer, source thread, exporter invocation/CFA, private
+texture-array pointers and apply-call stack identities are checked together.
+The selected exporter project remains the accepted Direction-Lock-Off setup.
+
+The recovered ordering matters: `UpdateMediaTextures` supplies the source;
+the later same-exporter `UpdateParams` applies texture bindings **before**
+FS uniforms. `TextureParam::apply` is a sibling after UpdateParams returns,
+not its descendant. The final all-stop is OnRender `+0x4d0998`, after that
+uniform upload and before the next virtual draw call at `+0x4d09a8`.
+Stale global uniforms or an ancestor requirement on UpdateMediaTextures would
+not authenticate this draw.
+
+The full observer stops with one explicit missing-slot9 fatal. A separately
+recorded **core-only** readback then admits slots0..3, not a silent full-pass
+override. All four are 200x100, one mip, managed storageMode1; slots0..2 are
+RGBA32Float/125 and slot3 is R32Float/55. Each readback is byte-identical to
+its corresponding CPU upload:
+
+| Slot / payload | Bytes | SHA-256 |
+| --- | ---: | --- |
+| 0 / left RGB ratios | 320000 | `dd3c9cafcf5bd298123966004764c21e0ca81c0f0d62ab0cc0c0e4fd65540498` |
+| 1 / right RGB ratios | 320000 | `c3a312716902796f64b4fb3d4e64a916665951ead82917aea42ca111fbc88565` |
+| 2 / packed UV | 320000 | `88ecedc4b878c07df635da82fd02f91c2b361bcba6a3832d3486f211b439b421` |
+| 3 / left alpha | 80000 | `721ae03df12faec7b0a7766028038c3972112515524d59d22ef800b8014d578d` |
+
+This establishes CPU-visible contents of the exact bound objects, **not**
+managed-resource GPU coherence, slot9's fisheye texel, the final framebuffer
+or encoder-frame identity. The submitted uniforms disable separate color
+adjustment and cubemap output, give the source filter a 1x1 footprint and
+the fisheye mask a 1x1 size. The ordinary shader corrects each own lens with
+`clamp((RGB+1)*ratio-1,0,1)` before blending. It reweights alpha by fisheye
+coverage; a uniformly sampled 1x1 value cancels, but the missing actual texel
+and sampler binding are not asserted as authenticated.
+
+`mac-panorama-consumer-01/run-01` is an earlier partial attempt that missed
+the texture array because it assumed the wrong apply ordering. Its run02
+armed a later source but observed none after LLDB command replacement failed.
+Neither is combined with the successful core receipt. The initial Metal
+expression also failed to compile; the completed core uses the SDK's exact
+48-byte region layout and an explicit void-cast Objective-C message. All
+debuggers detached and quit. Two new research exports were used in this
+consumer investigation; no new export is used by the tests below. The locally
+copied run03 movie is not output evidence because copying overlapped export
+completion. Core event receipt SHA-256:
+`0208c53febf8d4ac38f99fe85620eb1c8992e6791db3819f21d02dfadac57d26`.
+
+### Camera basis versus texture centers
+
+Normalize native packed atlas X to lens-local X before checking lane order:
+`2*x` for the first lens and `2*(x-.5)` for the second. The source18215 packed
+map supports the existing physical lens exchange and reflected camera chart;
+the valid-lens mean UV difference is about0.000293. An initial contrary
+same-lane result omitted the atlas offset and was rejected before a code
+decision. The rotation basis is not the newly identified error.
+
+For ratio textures the consumer transform is
+`uv_native=((.5-u_K) mod1,1-v_K)`. Bilinear **texel-center** sampling therefore
+commutes with this exact texture permutation:
+
+```text
+K_left [r,c] = native_right[99-r,(99-c) mod200]
+K_right[r,c] = native_left [99-r,(99-c) mod200]
+```
+
+Recomputing `Ry(+pi/2)` through the producer's endpoint lattice instead of
+permuting the final native texture is not that operation. At source18215
+the maximum coefficient discrepancy is0.021325; for the 18214→18215 update
+the maximum delta discrepancy is0.021725. At that peak, the current
+camera-recomputed node changes while the exact-rebased native node holds.
+The asymmetric synthetic Rust test checks the complete permutation and
+bilinear equivalence, including wrapping/clamped endpoints. A shift100 ratio
+control is not equivalent. Centered packed UV and alpha instead require
+shift100; alpha also complements physical ownership.
+
+The explicit `KJERAG_REVIEW_NATIVE_COLOR_EXACT_REBASE=1` test mode reads the
+authenticated published maps after retaining all native replay validation.
+It changes only diagnostic drawing, not the production coordinates/producer.
+`april-exact-rebase-null-01` and `april-exact-rebase-01` each process15 actual
+Scene sources18208..18222. Ordinary pixels, packed maps, alpha and ratios
+are byte-identical to the prior control; the null's native-color outputs are
+also identical. All30 exact diagnostic maps equal the exact permutation of
+the corresponding actual panorama uploads, bit-for-bit.
+
+The previous self-motion/common-mask output check, with the additional arm
+explicitly marked unreviewed, gives source18215/row300/offset-48/sigma8 green
+residual2.15793→1.38491, versus Studio0.42033 and fixed-color0.10301. At18221
+the same location is1.18125→0.54839 versus Studio0.11196. Other local residuals
+remain, including increases in some bins. These values do not establish
+uniform improvement or perceptual acceptance. An unmodified source18215 PNG
+was inspected for context, not a motion verdict. Exact-rebase measurements:
+`96b3b19924ac49889d29b27746193c286da9a70896e1ec0d50f7928ff6dace5c`.
+
+### Frozen native alpha and same-source coefficient counterfactual
+
+`april-exact-native-alpha-01` keeps those exact ratios and adds only the
+source18215 captured native alpha, converted as
+`K[r,c]=1-native[99-r,(100-c)%200]`. Holding this one map across15 sources is
+explicitly a **frozen proxy**, not an observed native alpha history. The test
+requires X4/exact-native-color mode and rejects wrong-size, non-finite and
+out-of-range payloads. Every original ordinary/exact-native picture and map
+is still byte-identical to the preceding capture; the installed app is
+unchanged. First-frame current/previous coefficient draws are exact nulls.
+
+The frozen alpha does not eliminate the first localized temporal pulse:
+its green residual is1.37879 versus1.38491 with Kjerag alpha. More directly,
+two extra arms apply **previous and current ratios to the identical current
+source and packed map**. This subtraction needs no optical flow or cross-frame
+source-image comparison; selecting the prior coefficients still relies on
+their authenticated source association. At18215/row300/offset-48/sigma8, the signed RGB increments
+are `[.79140,1.07076,.62048]` with Kjerag alpha and
+`[.79722,1.08827,.64506]` with captured native alpha. This isolates a real
+coefficient-update effect not removed by native fractional blending there.
+All13 held transitions/initial null are exactly zero. At18221 the same-source
+green increments at this location are only−.01987/−.02108, so the raw temporal
+residual there must not be described as all color-update pulse.
+
+The first analysis attempt refused a relative input path before reading
+diagnostic frames; `april-same-source-color-update-01/INVALID.md` records it.
+The corrected02 analysis retains the full signed rows/offsets/scales and
+input hashes, SHA-256
+`3ada1deff87811c2f75a72ee4932470ae5f774bdc63b5f36787b6e8434f92e26`.
+Frozen-alpha temporal measurements SHA-256:
+`ca7aeb9ce0fcd6894bb16114ebf7616cbe9b8d9daf01eeb5a8b57e172c945612`.
+These remain diagnostics, not another presumed fix for owner testing. No
+production smoothing, player change, installation, merge or performance claim
+occurs in these controls.

@@ -6276,6 +6276,7 @@ mod tests {
     };
     use crate::flow::one_xs::{COLS, LensPair, ROWS};
     use crate::projection::tests::{ONE_XS_FRAME, one_xs_lenses};
+    use crate::studio_type2::{AlphaMap, MAP_HEIGHT, MAP_NODES, MAP_WIDTH};
 
     #[test]
     fn fusion_input_binding_rejects_a_foreign_delivery_or_source_owner() {
@@ -9330,6 +9331,31 @@ mod tests {
         scene.pause(Instant::now());
         scene.set_horizon(Horizon::Locked);
         let native_color = review == ReviewDiagnostic::NativeColor;
+        let native_camera = native_color.then(|| {
+            scene
+                .show
+                .as_ref()
+                .unwrap()
+                .one_xs_profile
+                .as_ref()
+                .unwrap()
+                .camera()
+        });
+        let native_alpha_path = native_color
+            .then(|| std::env::var_os("KJERAG_REVIEW_NATIVE_ALPHA"))
+            .flatten();
+        if native_alpha_path.is_some() {
+            assert!(
+                std::env::var_os("KJERAG_REVIEW_NATIVE_COLOR_EXACT_REBASE")
+                    .is_some_and(|value| value == "1"),
+                "native alpha review requires exact native-color texture rebasing"
+            );
+            assert_eq!(
+                native_camera,
+                Some(crate::stitch_camera::StitchCamera::CalibratedMei),
+                "native alpha review is an X4-only diagnostic"
+            );
+        }
         let native_ratios = native_color.then(|| {
             assert!(
                 start_override.is_some(),
@@ -9339,21 +9365,22 @@ mod tests {
                 std::env::var_os("KJERAG_REVIEW_NATIVE_COLOR")
                     .expect("native-color needs its captured input directory"),
             );
-            let camera = scene
-                .show
-                .as_ref()
-                .unwrap()
-                .one_xs_profile
-                .as_ref()
-                .unwrap()
-                .camera();
-            let ratios = crate::image_fusion::replay_bands_for_camera(&root, camera);
+            let ratios = crate::image_fusion::replay_bands_for_camera(
+                &root,
+                native_camera.expect("native-color needs an admitted stitch camera"),
+            );
             assert_eq!(
                 ratios.len() as u64,
                 count,
                 "native-color capture count differs"
             );
             ratios
+        });
+        // This is one captured source's alpha texture frozen across the whole
+        // review. It is a proxy control, not authenticated native alpha history.
+        let native_alpha = native_alpha_path.map(|path| {
+            read_and_rebase_native_alpha(Path::new(&path))
+                .unwrap_or_else(|error| panic!("native alpha review input is invalid: {error}"))
         });
         let (start, seek_target) = {
             let playing = scene.show.as_ref().unwrap().playing.borrow();
@@ -9420,6 +9447,7 @@ mod tests {
         });
         let mut previous_inputs = None;
         let mut previous_ratios = None;
+        let mut previous_native_ratios = None;
         let mut fixed_ratios = None;
         let mut diagnostic = (carried_review
             || photometric_review
@@ -9433,6 +9461,20 @@ mod tests {
         }
         if native_color {
             std::fs::create_dir(output.join("native-color")).unwrap();
+        }
+        if let Some(alpha) = &native_alpha {
+            for arm in [
+                "native-alpha-color",
+                "native-color-previous",
+                "native-alpha-color-previous",
+            ] {
+                std::fs::create_dir(output.join(arm)).unwrap();
+            }
+            std::fs::write(
+                output.join("native-alpha-color/native-alpha-rebased-f32le.bin"),
+                alpha.bytes(),
+            )
+            .unwrap();
         }
         if seam_components {
             for arm in ["no-color", "no-flow", "lens-0", "lens-1"] {
@@ -9641,6 +9683,83 @@ mod tests {
                         )
                         .unwrap();
                     }
+                }
+                if let Some(native_alpha) = &native_alpha {
+                    let previous_selected =
+                        previous_native_ratios.as_ref().unwrap_or(selected).clone();
+                    let frozen_current = OneXsMapFrame::new(
+                        frame.clone(),
+                        map.packed().clone(),
+                        native_alpha.clone(),
+                        map.pis_backend(),
+                    )
+                    .with_fusion(selected.clone());
+                    let frozen_current_pixels = render_direct_map_pixels_sized(
+                        &device,
+                        &queue,
+                        diagnostic,
+                        &frozen_current,
+                        1280,
+                        720,
+                    );
+                    write_review_ppm(
+                        &output.join("native-alpha-color"),
+                        index,
+                        &frozen_current_pixels,
+                    );
+
+                    let ordinary_previous = OneXsMapFrame::new(
+                        frame.clone(),
+                        map.packed().clone(),
+                        map.alpha().clone(),
+                        map.pis_backend(),
+                    )
+                    .with_fusion(previous_selected.clone());
+                    let ordinary_previous_pixels = render_direct_map_pixels_sized(
+                        &device,
+                        &queue,
+                        diagnostic,
+                        &ordinary_previous,
+                        1280,
+                        720,
+                    );
+                    write_review_ppm(
+                        &output.join("native-color-previous"),
+                        index,
+                        &ordinary_previous_pixels,
+                    );
+
+                    let frozen_previous = OneXsMapFrame::new(
+                        frame.clone(),
+                        map.packed().clone(),
+                        native_alpha.clone(),
+                        map.pis_backend(),
+                    )
+                    .with_fusion(previous_selected);
+                    let frozen_previous_pixels = render_direct_map_pixels_sized(
+                        &device,
+                        &queue,
+                        diagnostic,
+                        &frozen_previous,
+                        1280,
+                        720,
+                    );
+                    write_review_ppm(
+                        &output.join("native-alpha-color-previous"),
+                        index,
+                        &frozen_previous_pixels,
+                    );
+                    if index == start {
+                        assert_eq!(
+                            ordinary_previous_pixels, pixels,
+                            "first previous-color frame must use the current exact ratios"
+                        );
+                        assert_eq!(
+                            frozen_previous_pixels, frozen_current_pixels,
+                            "first frozen-alpha previous frame must be the exact ratio null"
+                        );
+                    }
+                    previous_native_ratios = Some(selected.clone());
                 }
                 let installed = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
                 assert_eq!(installed.frame(), map.frame());
@@ -10177,6 +10296,77 @@ mod tests {
 
     fn write_review_ppm(output: &Path, index: u64, rgba: &[u8]) {
         write_review_ppm_sized(output, index, 1280, 720, rgba);
+    }
+
+    fn read_and_rebase_native_alpha(path: &Path) -> Result<AlphaMap, String> {
+        let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        decode_and_rebase_native_alpha(&bytes)
+    }
+
+    /// Convert Studio's captured left-alpha texture to Kjerag's selected
+    /// left-alpha chart. Alpha is centered with the packed map, so its X
+    /// reflection uses `100 - column`; ratio textures instead use shift 99.
+    fn decode_and_rebase_native_alpha(bytes: &[u8]) -> Result<AlphaMap, String> {
+        let expected = MAP_NODES * std::mem::size_of::<f32>();
+        if bytes.len() != expected {
+            return Err(format!(
+                "native alpha has {} bytes, expected {expected}",
+                bytes.len()
+            ));
+        }
+        let native = bytes
+            .chunks_exact(std::mem::size_of::<f32>())
+            .enumerate()
+            .map(|(node, bytes)| {
+                let value = f32::from_le_bytes(bytes.try_into().unwrap());
+                if !value.is_finite() {
+                    Err(format!("native alpha node {node} is non-finite"))
+                } else if !(0.0..=1.0).contains(&value) {
+                    Err(format!(
+                        "native alpha node {node} is {value}, outside zero through one"
+                    ))
+                } else {
+                    Ok(value)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut rebased = vec![0.0; MAP_NODES];
+        for row in 0..MAP_HEIGHT {
+            for column in 0..MAP_WIDTH {
+                let native_row = MAP_HEIGHT - 1 - row;
+                let native_column = (MAP_WIDTH / 2 + MAP_WIDTH - column) % MAP_WIDTH;
+                rebased[row * MAP_WIDTH + column] =
+                    1.0 - native[native_row * MAP_WIDTH + native_column];
+            }
+        }
+        AlphaMap::new(rebased).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn native_alpha_decoder_checks_payload_and_uses_centered_shift_100() {
+        let native: Vec<f32> = (0..MAP_NODES)
+            .map(|node| node as f32 / (MAP_NODES - 1) as f32)
+            .collect();
+        let bytes: Vec<u8> = native
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let rebased = decode_and_rebase_native_alpha(&bytes).unwrap();
+        for (row, column) in [(0, 0), (0, 199), (17, 63), (50, 100), (99, 137)] {
+            let native_row = MAP_HEIGHT - 1 - row;
+            let native_column = (MAP_WIDTH / 2 + MAP_WIDTH - column) % MAP_WIDTH;
+            assert_eq!(
+                rebased.nodes()[row * MAP_WIDTH + column],
+                1.0 - native[native_row * MAP_WIDTH + native_column]
+            );
+        }
+
+        assert!(decode_and_rebase_native_alpha(&bytes[..bytes.len() - 1]).is_err());
+        for rejected in [f32::NAN, f32::INFINITY, -0.001, 1.001] {
+            let mut invalid = bytes.clone();
+            invalid[..4].copy_from_slice(&rejected.to_le_bytes());
+            assert!(decode_and_rebase_native_alpha(&invalid).is_err());
+        }
     }
 
     fn write_review_artifact(path: PathBuf, bytes: &[u8], reference: Option<&Path>) {

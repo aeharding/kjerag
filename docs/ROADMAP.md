@@ -14,6 +14,29 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Color-texture coordinate discrepancy, 2026-09-09:** a test-only exact rebase
+of Studio's published X4 textures identifies a texel-centering difference in
+the camera-output conversion. The packed-map comparison supports the existing
+physical camera rotation/lens ordering; recomputing the producer's endpoint
+lattice is not equivalent to reflecting the consumed texture. The exact ratio permutation is opposite
+lens `[99-r,(99-c)%200]`, whereas centered packed-map/alpha conversion uses
+`[99-r,(100-c)%200]` (and complements alpha). At the previously localized
+source18215 green pulse, the moving diagnostic decreases from 2.158 to 1.385
+codes versus Studio's 0.420. This is partial output evidence, not a visible
+fix, and other residuals remain. No production coordinate change is selected.
+
+The bound type11 Metal color, packed-UV and alpha textures at source18215
+have also been read back and match their CPU uploads exactly. This closes
+those four CPU-visible payloads, not GPU coherence or final output provenance;
+the separate fisheye texture was not read. Substituting the captured native
+alpha as a frozen diagnostic does not eliminate the first pulse. A new
+same-source counterfactual holds pixels/geometry fixed while changing only
+old/new ratios: that update adds 1.071 green codes with Kjerag alpha and 1.088
+with native alpha at the selected bin. The native alpha is one source's map,
+not an observed temporal history. The installed player and owner's latest
+negative verdict remain unchanged. Details, failed attempts and receipts are
+in `docs/research/studio-image-fusion-temporal-602.md`.
+
 **Owner rejects the full-overlap flicker candidate, 2026-09-09:** on the new
 candidate-left/Studio-right movie for source `365cedf6`, the owner reports
 "Yep still flickers". Correcting the missing equations does not resolve the

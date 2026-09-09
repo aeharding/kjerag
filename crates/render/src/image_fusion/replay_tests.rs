@@ -3,7 +3,7 @@
 
 use super::{RatioMap, RatioPair, spatial};
 use crate::stitch_camera::StitchCamera;
-use crate::studio_type2::MAP_NODES;
+use crate::studio_type2::{MAP_HEIGHT, MAP_NODES, MAP_WIDTH};
 use std::{
     fs,
     io::Write,
@@ -30,8 +30,19 @@ struct Row {
 /// selected camera's published coefficients after that observation. Skipped
 /// observations repeat the preceding coefficients. The native-chart arm is
 /// checked against both authenticated native maps at every ordinal before its
-/// camera-rebased twin is returned to a Scene diagnostic.
+/// camera-rebased twin is returned to a Scene diagnostic. The explicit exact-
+/// texture review mode instead returns the authenticated captured publications
+/// after only the X4 texture-coordinate reindexing and physical lens exchange.
 pub(crate) fn replay_bands_for_camera(root: &Path, camera: StitchCamera) -> Vec<RatioPair> {
+    let exact_texture_rebase = std::env::var_os("KJERAG_REVIEW_NATIVE_COLOR_EXACT_REBASE")
+        .is_some_and(|value| value == "1");
+    if exact_texture_rebase {
+        assert_eq!(
+            camera,
+            StitchCamera::CalibratedMei,
+            "exact native-color texture rebase is an X4-only review mode"
+        );
+    }
     let rows = read_manifest(root).expect("native fusion replay manifest must be readable");
     validate_contiguous_ordinals(&rows)
         .expect("native fusion replay must contain contiguous ordinals starting at zero");
@@ -119,7 +130,19 @@ pub(crate) fn replay_bands_for_camera(root: &Path, camera: StitchCamera) -> Vec<
                 row.frame
             );
         }
-        output.push(camera_held.clone());
+        if exact_texture_rebase {
+            let native_left = row.native_left.as_deref().unwrap();
+            let native_right = row.native_right.as_deref().unwrap();
+            let captured = RatioPair {
+                left: read_native_rgb_ratio(root, native_left)
+                    .expect("native published left ratio must have its recorded shape"),
+                right: read_native_rgb_ratio(root, native_right)
+                    .expect("native published right ratio must have its recorded shape"),
+            };
+            output.push(exact_texture_rebase_for_x4(&captured));
+        } else {
+            output.push(camera_held.clone());
+        }
     }
     assert!(
         saw_first_solve,
@@ -327,19 +350,17 @@ fn compare_optional(
 }
 
 fn compare_required(root: &Path, path: &Path, actual: &RatioMap) -> Result<(usize, f32), String> {
-    let path = root.join(path);
-    let expected = read_exact(&path, NATIVE_RATIO_BYTES)?;
-    let expected = decode_native_bgr(&expected)?;
+    let expected = read_native_rgb_ratio(root, path)?;
     let mut bit_diffs = 0usize;
     let mut max_abs = 0.0f32;
-    for (node, (&bgr, rgba)) in expected.iter().zip(actual.values()).enumerate() {
+    for (node, (expected, rgba)) in expected.values().iter().zip(actual.values()).enumerate() {
         if rgba[3].to_bits() != 0 {
             return Err(format!(
                 "CPU ratio node {node} has nonzero fourth component"
             ));
         }
         for channel in 0..3 {
-            let expected = bgr[2 - channel];
+            let expected = expected[channel];
             let actual = rgba[channel];
             if !actual.is_finite() {
                 return Err(format!(
@@ -351,6 +372,40 @@ fn compare_required(root: &Path, path: &Path, actual: &RatioMap) -> Result<(usiz
         }
     }
     Ok((bit_diffs, max_abs))
+}
+
+fn read_native_rgb_ratio(root: &Path, path: &Path) -> Result<RatioMap, String> {
+    let bytes = read_exact(&root.join(path), NATIVE_RATIO_BYTES)?;
+    let values = decode_native_bgr(&bytes)?
+        .into_iter()
+        .map(|bgr| [bgr[2], bgr[1], bgr[0], 0.0])
+        .collect();
+    RatioMap::new(values).map_err(str::to_owned)
+}
+
+/// Reindex the uploaded native textures themselves under
+/// `uv_native = ((0.5 - u_kjerag) mod 1, 1 - v_kjerag)`.
+///
+/// These are ratio texels sampled at ordinary bilinear texel centers. Their X
+/// reflection is therefore `99 - column`, unlike centered packed UV/alpha's
+/// `100 - column`. X4 also exchanges the two physical lenses at this boundary.
+fn exact_texture_rebase_for_x4(native: &RatioPair) -> RatioPair {
+    let rebase = |opposite: &RatioMap| {
+        let mut values = vec![[0.0; 4]; MAP_NODES];
+        for row in 0..MAP_HEIGHT {
+            for column in 0..MAP_WIDTH {
+                let native_row = MAP_HEIGHT - 1 - row;
+                let native_column = (MAP_WIDTH / 2 - 1 + MAP_WIDTH - column) % MAP_WIDTH;
+                values[row * MAP_WIDTH + column] =
+                    opposite.values()[native_row * MAP_WIDTH + native_column];
+            }
+        }
+        RatioMap::new(values).unwrap()
+    };
+    RatioPair {
+        left: rebase(&native.right),
+        right: rebase(&native.left),
+    }
 }
 
 fn decode_native_bgr(bytes: &[u8]) -> Result<Vec<[f32; 3]>, String> {
@@ -387,6 +442,70 @@ fn native_ratio_decoder_rejects_bad_shape_and_nonfinite_values() {
     assert!(decode_native_bgr(&bytes).is_err());
     bytes[..4].copy_from_slice(&f32::INFINITY.to_le_bytes());
     assert!(decode_native_bgr(&bytes).is_err());
+}
+
+#[test]
+fn exact_texture_rebase_matches_native_uv_sampling() {
+    let values = (0..MAP_NODES)
+        .map(|node| {
+            let column = (node % MAP_WIDTH) as f32;
+            let row = (node / MAP_WIDTH) as f32;
+            [
+                0.25 + column * 0.003 + row * 0.0007,
+                0.5 + column * 0.0002 + row * 0.004,
+                0.75 + column * 0.001 + row * 0.002,
+                column - row * 0.5,
+            ]
+        })
+        .collect();
+    let original = RatioMap::new(values).unwrap();
+    let neutral = RatioMap::new(vec![[1.0; 4]; MAP_NODES]).unwrap();
+    let rebased = exact_texture_rebase_for_x4(&RatioPair {
+        left: neutral,
+        right: original.clone(),
+    });
+    let row = 17;
+    let column = 163;
+    let native_node =
+        (MAP_HEIGHT - 1 - row) * MAP_WIDTH + (MAP_WIDTH / 2 - 1 + MAP_WIDTH - column) % MAP_WIDTH;
+    assert_eq!(
+        rebased.left.values()[row * MAP_WIDTH + column],
+        original.values()[native_node],
+        "the complete RGBA texel must be permuted from the opposite lens"
+    );
+    assert_eq!(
+        rebased.right.values()[row * MAP_WIDTH + column],
+        [1.0; 4],
+        "the physical lens exchange must apply in both directions"
+    );
+
+    // These avoid texel centers and exercise repeat-X on both sides plus the
+    // first/last half-texel clamp regions in Y. Reversing bilinear operands can
+    // change binary32 rounding, so this comparison allows 2e-5 per channel.
+    let points: [[f32; 2]; 10] = [
+        [0.0013, 0.0017],
+        [0.9981, 0.9989],
+        [0.2473, 0.3821],
+        [0.5037, 0.6159],
+        [0.7511, 0.9437],
+        [0.0, 0.0],
+        [1.0, 1.0],
+        [0.5, 0.5],
+        [-0.1, -0.1],
+        [1.1, 1.1],
+    ];
+    for uv in points {
+        let native_uv = [(0.5 - uv[0]).rem_euclid(1.0), 1.0 - uv[1]];
+        let expected = original.sample(native_uv);
+        let actual = rebased.left.sample(uv);
+        for channel in 0..3 {
+            let difference = (actual[channel] - expected[channel]).abs();
+            assert!(
+                difference <= 2.0e-5,
+                "sample {uv:?} channel {channel} differs by {difference}, above binary32 tolerance"
+            );
+        }
+    }
 }
 
 #[test]
