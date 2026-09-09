@@ -269,3 +269,34 @@ times. Private file `review/candidate-vs-studio-loop-muted.mp4`, SHA-256
 An additional `candidate-vs-previous-muted.mp4` preserves the previous Kjerag
 arm for comparison. Root inspected actual output pixels for framing and
 picture integrity; the owner's moving-video flicker judgment is still pending.
+
+## Installed candidate, 2026-09-09
+
+The preceding packaging/storage hold is resolved. Source checkpoint
+`9e193956cebb3034e18660911f8eeaddde11780d` was built offline with the 25.08 SDK,
+then installed locally and tested through `dev.harding.Kjerag`, not an alternate
+app path. The installed X4 harness passes 40 checks and ONE X2 passes 44, with
+zero failures. Both include the exact reported starting view, backward seeking,
+late scrubber seeking and real zero-copy playback; ONE X2 also exercises all
+four paired-file arrival paths. Both skip the volume-popup check because the
+isolated sandbox reports no sound device, and the intentionally injected
+stuck-import check because it cannot preload into the sandbox. X4's paired-file
+checks do not apply to its one-file capture. This does not qualify performance,
+audio or the owner's flicker verdict.
+
+The package source snapshot, build, prior-install identity and both complete UI
+sessions remain in `scratch/flatpak-delivery-9e193956/`. Installed OSTree commit:
+`a3287f9221a40cb7e6895ce8f52e721422a339feed2d64fb800a6cb5b4cb668c`.
+Installed executable SHA-256:
+`68dba116ca0a563d01085ffeb00a1d64bd7a963f504c45848726ca90e0dba056`.
+Source, permissions, executable, installed commit and harness identities were
+checked across qualification. The prior `31ea781d` bundle remains available
+for rollback. Root inspected both installed reported-view captures; stills
+establish picture integrity, not absence of temporal flicker.
+
+To make delivery space, only the 11 GiB generated `target/debug/deps` cache
+in the idle `gpu-warm-post-l1-join` agent worktree was removed. Its source,
+top-level executables and all personal footage/comparison evidence remain.
+The earlier native UI evidence was moved intact to `native-ui-session/` before
+reusing the harness path. No merge or release occurred. The moving A/B verdict
+is still required before declaring this candidate a visible fix.

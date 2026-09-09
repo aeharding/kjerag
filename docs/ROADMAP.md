@@ -257,7 +257,18 @@ and packaging preflight found insufficient disk space (1.1 GiB free).
 The owner has been sent the muted candidate-left/Studio-right moving A/B from
 `april-camera-fusion-01/review/`, using the existing Studio reference. Await
 that flicker verdict before declaring success or selecting further changes.
-No installation or merge has occurred.
+**Installed for owner testing:** source checkpoint `9e193956` now has an
+offline SDK-built local Flatpak. Installed-by-ID UI runs pass 40 X4 checks and
+44 ONE X2 checks, zero failures, including both exact starting views, backward
+and late scrubber seeking, real playback and the ONE X2 paired-file paths.
+The isolated sessions report no sound device, so their volume-popup checks
+skip; the injected stuck-import check cannot run inside the sandbox. These
+are functional checks, not performance/audio or flicker acceptance. Package
+and complete receipts are in `scratch/flatpak-delivery-9e193956/`; installed
+executable SHA starts `68dba116`. An old 11 GiB compiler dependency cache was
+removed to make room, with source, saved binaries, footage and evidence kept.
+The previous verified Flatpak bundle is retained for rollback. No merge or
+release occurred; await the owner's moving-video verdict before more changes.
 
 **April coverage and blend-weight controls, 2026-09-08:** dense CPU reference
 rasters at sources 18209/18224/18239 contain no out-of-range lens coordinates
