@@ -14,6 +14,23 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Color-coordinate candidate installed for review, 2026-09-09:** source
+`f5be77cd` is now the installed `dev.harding.Kjerag` test candidate. The exact
+native release passes50 UI checks at the reported April607.574 view. The
+installed Flatpak passes40 applicable X4 checks and44 ONE X2 checks, including
+the established1153.452/212.512 views, backward seek, scrubber and paired-file
+opening. Sandbox audio-control and preload-failure checks explicitly skip;
+the native run covers those paths. Steady reports show30 fps and zero dropped
+or starved frames on both cameras. This is functional qualification, not a
+240 fps capacity pass, a perceptual smoothness verdict or flicker acceptance.
+
+Installed executable SHA-256 starts `f89d46a252658578`; OSTree commit starts
+`e0b140d99e9598ac`. The source/archive and installed executable/permissions
+are checked before and after qualification. The owner has the new moving
+comparison and has not yet given a verdict. No merge or release is selected.
+The earlier statements below that the installed app is unchanged describe
+their individual diagnostic checkpoints, not the current installation.
+
 **Two color corrections implemented on the branch, 2026-09-09:** X4 output
 coordinates now preserve the exact native ratio-texture centers instead of
 recomputing the endpoint lattice. The shared GPU producer also now performs

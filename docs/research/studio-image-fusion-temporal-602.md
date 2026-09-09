@@ -1244,3 +1244,56 @@ audio; labels are outside the original1280x720 pixels. Frame6 was inspected
 for layout/context, not motion acceptance. Movie SHA-256:
 `737b9f3441c2db793c1eff07777f976fbc8c6088f699ef16de2d0d7ccc1e31b1`.
 It has been linked for owner review without claiming the flicker is fixed.
+
+### Native and installed-player qualification, 2026-09-09
+
+The implementation checkpoint is `f5be77cd6f8d8d1adc1d024f9b915ccd3fdd323b`.
+`color-coordinate-native-01` builds that exact source in release mode and
+retains the executable before running the isolated UI harness at the reported
+April607.574/yaw-76.84/pitch-55.87/fov108.79/lock1 view. All50 native checks
+pass, including the exact held frame, backward seeking, late-content scrubber,
+audio-control and injected import-failure handling. The captured window was
+inspected for context, not a temporal flicker verdict. Native executable:
+`cbb18671a38fb0505eab8e74988afeb13bca1f84382a7b5c0e6ba9d00c15665e`.
+
+After retaining the final qualified renderer test executable byte-for-byte in
+`color-coordinate-qualification-02/render-tests`, the disposable Cargo debug
+profile was removed, recovering10,947,309,568 bytes. This was not a removal of
+source, native captures, movies or sealed research evidence. Release output
+was retained. Other debug build artifacts can be regenerated; the retained
+test executable and its hashes allow rerunning the completed renderer suite
+without rebuilding. The earlier seven research binaries remain in their
+SHA-verified lossless archives. This creates working room for packaging rather
+than repeating a build into a full filesystem.
+
+`scratch/flatpak-delivery-f5be77cd` archives the exact source commit and builds
+with the cached25.08 SDK/offline dependency inventory. The package links
+`libavcodec.so.61` and runs its version query inside the sandbox. Installation
+replaces the previous rejected365cedf6 candidate, not a main/release update.
+The installed permissions metadata and executable match the package exactly.
+Both remain unchanged through the complete installed-ID qualification:
+
+- X4 at1153.452/yaw132.05/pitch3.55/fov63.63/lock1:40 checks,0 failures.
+- ONE X2 at212.512/yaw71.13/pitch-13.99/fov57.95/lock1:44 checks,0 failures,
+  including four paired-file delivery forms.
+
+Sandbox audio-control and preload-injection checks explicitly skip, as in the
+previous installed harness; they are not silently counted as passes. Captured
+reported-view windows were inspected, not used to infer motion quality. Both
+steady playback reports show30.00 fps with zero dropped/starved frames, with
+worst lateness14.7ms X4/14.8ms ONE X2. The low partial-interval report after
+pause/seek is not a sustained throughput measurement. These reports do not
+establish the240 fps active-rendering capacity target or human smoothness.
+
+Receipts:
+
+- Installed OSTree: `e0b140d99e9598ac03187ed964fe85d9acd62db4ec71b2bc5a6d10d477a53f75`.
+- Installed executable: `f89d46a2526585785bd67c24f66caa6a20fc87a019ee1f0b297100439af36a9b`.
+- Bundle: `b22edf3e71365129e73d9cc08639d28a8fda58db183679929c2e4b2eeabafe66`.
+- X4 UI log: `a4de3489553d1a745c870eb3162b5aad04a52b281321b40da846b1df58e838b0`.
+- ONE X2 UI log: `cdc9a3b60f2a514698c28a5f62ec0a4b33d190d3a6f33ac2509f7b40496c2d2d`.
+
+The owner's last verdict still rejects the older ordinary/native-input
+comparison. The new coordinate-corrected movie and installed candidate have
+no owner verdict yet. No flicker-free claim, merge or release follows from
+these functional checks; the active visual objective remains incomplete.
