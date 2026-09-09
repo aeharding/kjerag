@@ -72,6 +72,21 @@ panorama export has no captured per-frame type11 color-map history; the replayed
 15-source history belongs to a later type2 diagnostic export. Next observe the
 actual panorama consumer's source identities and bound color-map changes.
 
+**Panorama color history observed, 2026-09-09:** the bounded follow-up now
+captures both actual type11 CPU color-map uploads on every source 18208..18222
+through Studio's original 360 export path. The active project matches the
+accepted project's SHA-256 before and after; source-size/rate, Original
+bitrate, codec and extra-processing switches are checked in the UI. All 30
+RGB map payloads exactly match the previous type2 diagnostic's published maps
+after BGR/RGB conversion, including updates at 18215/18221 and every hold.
+Thus a different panorama coefficient history is not the explanation in this
+prefix. The new output retains lower measured pulses at the previously
+localized events, but has no new owner acceptance and is not byte-identical
+to the earlier export. Actual GPU texture-content identity and the complete
+mapping/blending boundary remain unproven; do not infer them from CPU uploads.
+Next isolate the application of these same corrections to source pixels and
+the lens blend. No new player build or temporal smoothing policy is selected.
+
 **Missing color equations identified, 2026-09-09:** Studio measures robust
 color bounds from rows 49/50 and columns 18..193, then admits equations over
 the entire four-row, 212-column overlap. Kjerag incorrectly used the narrow

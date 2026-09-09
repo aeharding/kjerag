@@ -921,3 +921,70 @@ video cannot replace the accepted panorama comparison. The separate recorded
 type11 ratio pair at t1152.417933 establishes one upload, not the accepted
 t607.574 history. Next target the actual panorama consumer's per-source map
 uploads/holds rather than further numerical convergence to this type2 history.
+
+## Actual panorama consumer history, 2026-09-09
+
+The follow-up closes the coefficient-history distinction for the first 15
+sources. `mac-panorama-color-01/` retains the source, records and output.
+The existing active April alias project is byte-identical to the accepted
+Direction-Lock-Off project before and after observation, SHA-256
+`043620056970fb578305399604da8862bb5fad62469fc836dd1227fb6a1f9ef6`.
+Studio's checked export controls select ordinary 360, 7680x3840, source
+30000/1001, Original bitrate and H.265, with Anti-Flicker, Dolby Vision and
+APMP off. A new 63-frame research export goes to a separate directory; the
+accepted output is never overwritten. No new registration fit is performed.
+
+The observer selects directly at type11 `UpdateMediaTextures`, worker offset
+`0x4aa2d8`, using each consumer call's 56-byte `IdxTimed`. It verifies the pinned
+arm64 worker hash before installing numeric probes. Recorded panorama caller
+return PCs `0x47fba8` and `0x8ed76c` distinguish the exporter route; these are
+**caller PCs, not function starts**. Root corrected that guard distinction
+before running. Disabling LLDB's prologue skip ensures entry argument registers
+are read at the actual entry. Renderer/vtable and same-thread call context
+are retained with each source's shared `FrameTextureData` identity.
+
+At the two previously authenticated upload BLs, `0x4aae58` and `0x4ab1d4`,
+each selected entry supplies both exact 320000-byte, 200x100 float4 payloads.
+The observer refuses absent/duplicate pairs rather than inventing a hold and
+detaches only after the 15th complete pair. All 15 source identities match
+18208..18222 on the native 30000 timebase. The capture completes with 9600000
+payload bytes, then removes its breakpoints and detaches; the debugger exits.
+The 63-frame export also completes. This is an observed CPU upload boundary,
+not a readback of GPU texture contents or final-encoder frame association.
+
+Every RGB coefficient of all 30 uploads is **exactly equal** to the same-source,
+same-ordinal previous type2 diagnostic's `published-{0,1}.f32x3`, after BGR to
+RGB conversion. The float4 fourth lane is not consumed. Both maps update at
+sources 18215/18221 and are byte-identical on all other successive sources.
+The peak ratio steps are about 0.0211/0.0217 at the first update and
+0.0178/0.0157 at the second. The observed panorama path therefore does not
+receive an extra temporally smoothed coefficient sequence in this prefix.
+This does not establish the behavior of uncaptured downstream stages or every
+camera/history, and does not close the owner's flicker defect.
+
+`compare-output.py` projects new export frames 1..14 using the old fixed
+registration and sampler, and checks sequential decode/no adjacent duplicates
+and lossless PPM round trips. The projected source 18215 PNG was inspected for
+context. The new export is not pixel-identical to the older accepted output:
+mean absolute full-image differences range 0.96..2.05 RGB codes, with maxima
+19..27. These aggregate differences are context only, not a quality judgment.
+The unchanged `temporal-probe-robust.py` is also run against these 14 projections.
+Its inherited `studio-stable` key does **not** label this new movie owner-accepted.
+At source 18215, row 300, offset -48, sigma 8, the new Studio green residual is
++0.2108 codes versus the prior accepted export's +0.4203 and replayed-native
+Kjerag's approximately +2.16. At 18221 it is +0.3632 versus the prior +0.1120.
+The sampled output pulses remain lower here despite the identical captured
+coefficient sequence. Neither this local measurement nor the aggregate RMS
+is a perceptual pass, and the output-source association remains index-derived.
+
+Consequently the next boundary is how those same corrections are applied and
+combined with source pixels and alpha, including the still-unverified actual
+GPU resource contents. More convergence to the type2 producer or an invented
+temporal smoother does not answer this result. No player code, installation,
+merge or owner-review candidate changes in this step.
+
+Hashes (remote/local file copies agree):
+
+- Observer: `463369ea1a80c10b4acc4dcb9f854e80f053865ee69450161d63b5688cab435b`.
+- Native session: `5a5f935786cc40cd06be46acc0c1d1485f91ec3897db4cf8eea462d862041fed`.
+- New panorama: `3bb92046b26b9d7772c84668b585fc13c1486910b6678aa33dc595627841e4ec`.
