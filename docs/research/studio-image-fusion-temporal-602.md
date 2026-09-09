@@ -680,7 +680,13 @@ The moving review uses the 14 sources18209..18222 shared with the accepted
 Studio movie, after both Kjerag arms consumed cold source18208. Each loop
 repeats those 14 sources 16 times (224 encoded frames, 30000/1001 fps), not
 224 distinct observations. Root inspected frame6's actual pixels and labels;
-stills do not establish moving quality. Owner review is pending.
+stills do not establish moving quality. The subsequent owner verdict is
+"both side have it. why cant you see it?": both ordinary and recorded-input
+Kjerag arms still flicker. This rejects the control as a visible improvement;
+native coefficient agreement does not establish the accepted panorama's
+temporal output. The owner approved testing a temporal output discriminator
+against these negative labels and the previously stable Studio, color-off and
+fixed-first-color controls before another speculative correction.
 
 - `review/own-vs-native-inputs-loop-muted.mp4`: ordinary Kjerag left, Kjerag
   with recorded native color inputs right; SHA-256
@@ -695,3 +701,137 @@ explicitly and passed. All-target workspace Clippy passes. This increment has
 not rerun full workspace/GPU/UI gates and does not qualify a new player build.
 The installed Flatpak remains source365cedf6. No new Studio export, installed
 app replacement, merge or release occurred.
+
+## Owner-labeled temporal output localization, 2026-09-09
+
+The owner rejects both native-input control arms as still flickering. The
+coordinator explicitly acknowledged that extracted stills and coefficient
+numbers had not established continuous-playback perception. The owner then
+approved building a check against the existing labels before another candidate:
+original, full-overlap, ordinary-short and native-input-short Kjerag flicker;
+Studio, no-color and fixed-first-color are the owner-stable controls. Stable
+does not mean the controls' remaining line or color is an accepted final result.
+
+The new measurement localizes color-update pulses in actual rendered output.
+It is **not a universal flicker classifier or a merge threshold**. It uses
+existing footage only and changes no player code or photometric policy.
+
+### Measurement and controls
+
+All evidence below is under `scratch/studio-seam-ab-20260908-01/` in the
+authoritative worktree, not `/tmp`. `temporal-probe.py` measures the original
+31-source controls and 14-source native-input controls. It estimates backward
+dense texture motion from the no-color picture, transports the previous
+picture into the current one, and measures the remaining signed RGB change.
+The same motion is used for all Kjerag arms; Studio estimates its own motion.
+Only consecutive unique source images enter the calculation, never encoded
+loop resets or title pixels.
+
+Locations are the computed alpha-trace anchors at sources 18209/18224/18239,
+sampled at screen rows 150/300/510 and thirteen separate horizontal offsets
+-96..96 in steps of 16. Between anchors, piecewise interpolation is explicitly
+navigation, not an authenticated new alpha trace. The third full-overlap
+update at 18239 is on an exact trace anchor. Each 17-high, 9-wide local sample
+retains all three signed channels separately after Gaussian spatial averaging
+at sigma 4, 8 and 16 pixels. Opposite sides and channels are never pooled.
+These are diagnostic spatial scales, not proposed production smoothing.
+
+`temporal-probe-robust.py` repeats the equal first-14-source comparison with
+independently estimated motion for every arm and a shared intersection mask
+requiring forward/backward consistency within one pixel. This prevents an
+arm from improving just by omitting its own unreliable pixels. Re-estimating
+motion and masking preserve the observed ordering at all three scales.
+`test-temporal-probe.py` passes three mechanical nulls: exact known transport,
+identical-frame zero innovation, and opposite-sign color pulses remaining
+separate even though their whole-image mean is zero. The original duplicate
+arm also matches exactly; no-color's color-only residual is exactly zero.
+
+The first attempt to remove the comparison movie's additional compression
+used ffmpeg trim without timestamp passthrough. The coordinator caught a
+duplicated first frame in the receipt. That `april-temporal-studio-raw-01/`
+sequence is preserved and marked invalid; no completed measurement used it.
+The corrected `april-temporal-studio-raw-02/` uses the original registration
+script's sequential OpenCV decode and exact retained projection, with no fit.
+All 31 saved PPMs match a second independent decode/projection pass exactly,
+there are no adjacent decoded duplicates, and the first image matches the
+retained Studio anchor exactly. This removes extra A/B encoding, not the
+Studio export's own compression. The inherited source association remains
+index-derived, not independently authenticated.
+
+### Results and the deliberately rejected scalar interpretation
+
+`april-temporal-detector-04/measurements.json` contains the final equal-length
+self-motion/common-mask run using the corrected lossless projection. At
+sigma 8, the maximum local temporal RMS, in 8-bit RGB codes, is:
+
+| Owner label / arm | Measured local RMS |
+| --- | ---: |
+| Flicker: original Kjerag | 1.475 |
+| Flicker: full-overlap | 1.325 |
+| Flicker: ordinary short | 1.409 |
+| Flicker: native-input short | 1.261 |
+| Stable: no-color | 1.092 |
+| Stable: fixed-first-color | 1.070 |
+| Stable: Studio | 0.550 |
+
+This ordering agrees with the owner's labels, but **is not an acceptance
+score**. Different arms peak at different places and transitions. Some peaks
+are source-motion residuals also present in stable controls. Removing source
+18222 alone nearly erases the earlier full-overlap/ordinary-short scalar
+margin. The simpler color-only RMS also fails to order all owner labels.
+Neither scalar is selected as an autonomous quality gate.
+
+The useful result is the event-localized check in `temporal-events.py` and
+`april-temporal-events-01/events.json`. Independent saved left/right map
+hashes identify updates rather than choosing events from output peaks:
+
+- Full-overlap: 18215, 18222 and 18239.
+- Ordinary short: 18215 and 18222.
+- Native-input short: 18215 and 18221.
+
+For each same-motion local RGB residual, subtract the fixed-color control,
+then compare each location against that same location's largest held-frame
+residual. Every listed update has coherent, same-sign excess across at least
+three neighboring samples at **all three rows and all three scales**. This
+survives dropping any one update because the other listed updates individually
+show it. The independent static-field control, no-color minus fixed-color,
+does not show those widespread update-linked runs. Its occasional local
+exceedances remain in the complete report rather than being suppressed.
+The held maximum is a descriptive within-sequence reference, not a tuned
+perceptual threshold; held frames cannot exceed their own maximum by definition.
+
+For example, at source 18215 / t607.773833, row300, offset -48, the self-motion
+native-input output changes about +2.16 green codes; fixed-color is +0.10,
+no-color +0.28 and Studio +0.42. Adjacent offsets -64/-32 show the same native
+brightening. Full-overlap instead darkens that region at the same update.
+Both are owner-rejected: matching pulse direction is not necessary to share
+the reported flickering symptom. At source18222 the ordinary/full-overlap
+update darkens the region again, while the native arm holds its coefficients
+and its local result is close to the stable Kjerag controls. Native's other
+coherent update is one source earlier, at 18221. Thus the instrument can locate
+real output pulses and distinguish update timing without declaring that any
+native-number match solved the visible defect.
+
+### Boundary of this finding
+
+This is enough to target particular color-update events in subsequent output
+checks. It does not prove exactly which pulses the owner notices, explain
+every pixel, authenticate the native type2 capture as the accepted type11
+panorama's history, or justify freezing/smoothing color in production. The
+next comparison must explain why these updates become visible in Kjerag but
+are lower in the accepted Studio output. More agreement with type2 solver
+numbers alone cannot close that question. No new export, GPU run, build,
+installation, playback-performance claim or final fix occurred in this step.
+
+Evidence hashes:
+
+- Final robust measurements:
+  `df16f219aef3e1b63246eb6c1e7e27012a8ebd1f3eed5baa2f0ca292fad75c47`.
+- Complete map-tagged output events:
+  `8b920230ee424b765a01eb9a4b8d26b352b5c03258e18c5efe0c87f188fc45dc`.
+
+The final robust evidence directory retains its exact analysis/base source;
+JSON receipts seal rendered inputs and map files. An unmodified actual
+source18239 PNG was inspected for picture/location context, not a motion
+verdict. The original moving A/B and the owner's negative verdicts remain
+the quality authority.

@@ -30,11 +30,32 @@ producer and installed app remain unchanged, and no flicker fix is claimed.
 A 15-source actual-Scene diagnostic now replaces only draw coefficients with
 the recorded native-band history, validated against every saved native map
 before rebasing to the camera chart. The moving control, covering the 14
-sources shared with the existing Studio movie, is ready under
+sources shared with the existing Studio movie, is preserved under
 `april-native-input-control-01/review/` in the comparison directory. Its
-owner verdict is pending. It tests the native-like coefficient sequence,
+owner verdict is negative: "both side have it. why cant you see it?" Both
+ordinary and recorded-native-input Kjerag arms retain the flicker. It tests the native-like coefficient sequence,
 including both the different input history and recovered edge join, rather
 than declaring either one the cause from numeric agreement.
+The owner approved first developing a temporal output check against the
+existing human-labeled sequences: flickering Kjerag variants versus stable
+Studio, color-off and fixed-first-color controls. Until that check actually
+distinguishes the labels, neither closer native numbers nor still inspection
+will be used to present another presumed improvement. No new export or
+production smoothing policy is selected.
+
+The saved-output check now locates coherent color pulses at every changing-map
+event in the full-overlap and both short controls, with the fixed-color and
+no-color sequences as same-frame controls. The ordering persists with
+independent texture motion, unreliable-motion masking and lossless projection
+of the existing Studio export. A single aggregate score is explicitly rejected
+as a quality gate: moving-ground residuals can dominate it. The useful result
+is event-localized output evidence, including native-input updates18215/18221
+and ordinary updates18215/18222, not a fix or owner acceptance. Details and
+limitations are in the temporal research note's owner-labeled output section.
+The installed app remains the rejected full-overlap build. Next isolate why
+those correction updates become visible in Kjerag but are lower in the
+accepted Studio output; do not substitute more type2 solver-number agreement
+for that result.
 
 **Missing color equations identified, 2026-09-09:** Studio measures robust
 color bounds from rows 49/50 and columns 18..193, then admits equations over
