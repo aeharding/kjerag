@@ -20,13 +20,103 @@ const STAGES: [&str; 8] = [
 #[test]
 fn shader_constructs_on_required_vulkan_adapter() {
     let Some((device, _)) = gpu() else { return };
-    let _ = Producer::new(&device).unwrap();
+    let _ = Producer::new(&device, StitchCamera::OneX2).unwrap();
+}
+
+#[test]
+fn x4_publishes_native_corrections_in_the_delivered_lens_and_body_chart() {
+    let Some((device, queue)) = gpu() else { return };
+    let mut native = Producer::new(&device, StitchCamera::OneX2).unwrap();
+    let mut x4 = Producer::new(&device, StitchCamera::CalibratedMei).unwrap();
+    // Both producers receive the same native-ordinal observations. Spatially
+    // varying, non-gray evidence distinguishes both the lens swap and the
+    // fixed sphere Ry(pi) datum from a coincidentally neutral publication.
+    let bands: [Vec<u8>; 2] = std::array::from_fn(|lens| {
+        (0..800 * 16)
+            .flat_map(|pixel| {
+                let column = (pixel % 800) / 8;
+                let row = pixel / 800;
+                if lens == 0 {
+                    [70 + column as u8, 100 + row as u8, 90]
+                } else {
+                    [100 + column as u8, 85, 120 + row as u8]
+                }
+            })
+            .collect()
+    });
+    let invalid = vec![0u8; 4 * 212];
+    let original = observe(
+        &device,
+        &queue,
+        &mut native,
+        [&bands[0], &bands[1]],
+        &invalid,
+        u32::MAX,
+    );
+    let delivered = observe(
+        &device,
+        &queue,
+        &mut x4,
+        [&bands[0], &bands[1]],
+        &invalid,
+        u32::MAX,
+    );
+    assert_ne!(original, delivered);
+    let expected = super::super::spatial::Reference::for_camera(StitchCamera::CalibratedMei)
+        .observe_bands([&bands[0], &bands[1]], &invalid)
+        .unwrap()
+        .unwrap()
+        .ratios;
+    // All nodes, including both poles and the discontinuous native azimuth
+    // clamp, must match the readable camera-boundary calculation.
+    compare(
+        &delivered,
+        [&expected.left.values()[..], &expected.right.values()[..]],
+        RATIO_TOLERANCE,
+    );
+    for lens in 0..2 {
+        for row in 1..100 {
+            for column in 0..200 {
+                // Ratio nodes use theta=row*pi/100, unlike the geometric
+                // map's 99-step endpoints. Ry(pi) therefore maps row to
+                // 100-row, not 99-row, and longitude to pi-longitude.
+                // Row zero maps to the unstored opposite pole and is tested
+                // by the full CPU comparison above. At columns 0/100, f32
+                // sin(pi) can choose azimuth TAU instead of zero: native's
+                // upper clamp then yields column 199 rather than column 0.
+                // A permutation of two already-rounded tables is not an
+                // independent oracle on those discontinuous meridians.
+                if column == 0 || column == 100 {
+                    continue;
+                }
+                let expected = original[1 - lens][(100 - row) * 200 + (300 - column) % 200];
+                let actual = delivered[lens][row * 200 + column];
+                for channel in 0..4 {
+                    assert!(
+                        (actual[channel] - expected[channel]).abs() <= RATIO_TOLERANCE,
+                        "X4 lens {lens} row {row} column {column} channel {channel}: {} != {}",
+                        actual[channel],
+                        expected[channel],
+                    );
+                }
+            }
+        }
+    }
+    let held = observe(
+        &device,
+        &queue,
+        &mut x4,
+        [&bands[0], &bands[1]],
+        &invalid,
+        u32::MAX,
+    );
+    assert_eq!(delivered, held, "rebasing must not add a new update policy");
 }
 
 #[test]
 fn synthetic_observations_match_reference_and_retain_skips() {
     let Some((device, queue)) = gpu() else { return };
-    let mut producer = Producer::new(&device).unwrap();
+    let mut producer = Producer::new(&device, StitchCamera::OneX2).unwrap();
     let pixels = 800 * 16;
     let mut left = [80u8, 100, 120].repeat(pixels);
     let right = [110u8, 100, 90].repeat(pixels);
@@ -99,7 +189,7 @@ fn integer_content_boundary_skips_3168_and_admits_3169() {
     let base_left = [80u8, 100, 120].repeat(pixels);
     let right = [110u8, 100, 90].repeat(pixels);
     let invalid = vec![0u8; 4 * 212];
-    let mut producer = Producer::new(&device).unwrap();
+    let mut producer = Producer::new(&device, StitchCamera::OneX2).unwrap();
     let baseline = observe(
         &device,
         &queue,
@@ -146,7 +236,7 @@ fn invalid_and_global_failure_state_transitions_match_contract() {
     let clean = vec![0u8; 4 * 212];
     let all_invalid = vec![1u8; 4 * 212];
 
-    let mut invalid_first = Producer::new(&device).unwrap();
+    let mut invalid_first = Producer::new(&device, StitchCamera::OneX2).unwrap();
     let neutral = observe(
         &device,
         &queue,
@@ -160,7 +250,7 @@ fn invalid_and_global_failure_state_transitions_match_contract() {
 
     // A globally failed observation must not alter the baseline or any inner
     // history. Compare the next valid observation with an untouched producer.
-    let mut fresh = Producer::new(&device).unwrap();
+    let mut fresh = Producer::new(&device, StitchCamera::OneX2).unwrap();
     let direct = observe(
         &device,
         &queue,
@@ -170,7 +260,7 @@ fn invalid_and_global_failure_state_transitions_match_contract() {
         u32::MAX,
     );
     for failure in [0, 1, u32::MAX - 1] {
-        let mut after_failure = Producer::new(&device).unwrap();
+        let mut after_failure = Producer::new(&device, StitchCamera::OneX2).unwrap();
         let _ = observe(
             &device,
             &queue,
@@ -195,7 +285,7 @@ fn invalid_and_global_failure_state_transitions_match_contract() {
 
     // Invalidity arriving on a content-skipped observation is nevertheless
     // sticky and excludes a later changed observation.
-    let mut sticky = Producer::new(&device).unwrap();
+    let mut sticky = Producer::new(&device, StitchCamera::OneX2).unwrap();
     let mut sticky_reference = super::super::spatial::Reference::new();
     let _ = observe(
         &device,
@@ -259,7 +349,7 @@ fn captured_x4_and_x2_bands_track_cpu_reference_outputs() {
             read_float4(root.join("fusion-left.float4")),
             read_float4(root.join("fusion-right.float4")),
         ];
-        let mut producer = Producer::new(&device).unwrap();
+        let mut producer = Producer::new(&device, StitchCamera::OneX2).unwrap();
         let actual = observe(
             &device,
             &queue,
@@ -304,7 +394,7 @@ fn profile_captured_producer_stages_when_requested() {
         changed
             .iter_mut()
             .for_each(|byte| *byte = byte.saturating_add(4));
-        let mut producer = Producer::new(&device).unwrap();
+        let mut producer = Producer::new(&device, StitchCamera::OneX2).unwrap();
         let mut reference = super::super::spatial::Reference::new();
         for (observation, bands) in [
             ("cold", [&left[..], &right[..]]),
@@ -354,7 +444,7 @@ fn profile_captured_producer_stages_when_requested() {
         .unwrap()
         .unwrap();
     assert_eq!(expected.diagnostics.budget, Some(25));
-    let mut producer = Producer::new(&device).unwrap();
+    let mut producer = Producer::new(&device, StitchCamera::OneX2).unwrap();
     let _ = profile_observation(
         &device,
         &queue,

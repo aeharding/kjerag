@@ -7,6 +7,7 @@
 //! reductions rather than OpenCV's implementation-specific summation order.
 
 use super::{RatioMap, RatioPair, content, coordinates, solve};
+use crate::stitch_camera::StitchCamera;
 use crate::studio_type2::{MAP_HEIGHT as HEIGHT, MAP_NODES, MAP_WIDTH as WIDTH};
 
 const EXTENSION: usize = 6;
@@ -28,6 +29,7 @@ pub struct Output {
 /// its previous blurred value participates in the next blur. Init seeds both
 /// full matrices to one (`0x183c0317e`, `0x183c03210`).
 pub struct Reference {
+    output_streams: [usize; 2],
     inner: solve::Reference,
     content: content::Gate,
     ratios: [BgrMap; 2],
@@ -42,11 +44,18 @@ impl Default for Reference {
 
 impl Reference {
     pub fn new() -> Self {
+        Self::for_camera(StitchCamera::OneX2)
+    }
+
+    /// Native observations, with output rebased for the admitted renderer.
+    /// The public native replay constructor deliberately keeps its old chart.
+    pub(crate) fn for_camera(camera: StitchCamera) -> Self {
         Self {
+            output_streams: camera.fusion_streams(),
             inner: solve::Reference::new(),
             content: content::Gate::default(),
             ratios: std::array::from_fn(|_| vec![[1.0; 3]; MAP_NODES]),
-            coordinates: coordinates::selected_x4(),
+            coordinates: coordinates::for_camera_output(camera),
         }
     }
 
@@ -117,10 +126,12 @@ impl Reference {
         // can feed these remaps or the retained row 40, on any observation.
         // Do not transplant those operations onto the 20-row blur ROI or
         // final map: that would change the observed output.
-        RatioPair {
-            left: remap(&self.ratios[0], &self.coordinates, [35.0, 55.0]),
-            right: remap(&self.ratios[1], &self.coordinates, [45.0, 65.0]),
+        let mut left = remap(&self.ratios[0], &self.coordinates, [35.0, 55.0]);
+        let mut right = remap(&self.ratios[1], &self.coordinates, [45.0, 65.0]);
+        if self.output_streams == [1, 0] {
+            std::mem::swap(&mut left, &mut right);
         }
+        RatioPair { left, right }
     }
 }
 

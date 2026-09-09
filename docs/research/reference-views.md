@@ -45,6 +45,14 @@ direct Studio/Kjerag A/B at this exact view before assuming the products differ
 or choosing a fix. A new actual Studio export now covers this interval; see the
 direct comparison record below. Cause remains open.
 
+After viewing the direct Studio A/B, the owner explicitly confirms Kjerag is
+worse: blotting along its seam is absent from Studio. He clarifies "flickering
+blotting", explicitly endorses the moving A/B as the fix acceptance oracle,
+and doubts stills could distinguish the products. This is the confirmed product
+difference to fix; still-image similarity is not its acceptance test. It does
+not authenticate frame-exact association, identify the mechanism, or extend
+confirmation to July/August.
+
 Follow-up source18209/18224/18239 overlays place the computed saved-alpha 0.5
 trace on the original Scene pixels, preserving every unmarked pixel. The
 inspected mottled corridor remains in the no-color and no-public-flow controls.
@@ -53,6 +61,62 @@ at those three sources. A fixed offline 2x2 area reduction reduces fine
 speckling but leaves the broader pattern. All 155 original artifacts over the
 31-source rerun remain byte-identical. This is sampling sensitivity, not a
 Studio-matching filter, a motion-quality verdict or a chosen seam fix.
+
+The follow-up test-only `sampling-sequence` retains all 61 sources and their
+original history, maps, alpha and color. It captures the exact Scene at
+5120x2880 and reduces each frame by a fixed 4x4 coded-RGBA area mean. All 305
+original artifacts remain byte-identical. Independent reduction of the retained
+high-resolution anchor and reconstruction of its raw RGBA hash pass. The muted
+current/control and control/Studio movies in the comparison directory's
+`april-sampling-sequence-02/` are for motion review, not a selected production
+filter or a proposal to render every live frame at 16x pixel count. The Studio
+half reuses the original A/B and its stated association/encoding limits.
+The owner watched current/control and reports "Those look the same". Record
+this as no useful visible improvement, not a candidate fix. It does not rule
+out all sampling mechanisms or establish a temporal-solver cause. The original
+moving Kjerag/Studio comparison remains the acceptance oracle.
+
+The follow-up drawing candidate is test-only: a 200x99-cell mesh connects the
+existing map nodes instead of the native 100x50-cell resampling. The April
+31-source Scene run leaves all packed maps, alpha and color ratios byte-exact;
+three lens-isolation anchors improve local zero-offset correspondence at eight
+of nine previously computed trace locations. Residual offsets remain and this
+is not a motion-quality verdict. The private review is
+`scratch/studio-seam-ab-20260908-01/april-map-node-mesh-01/map-node-mesh-vs-studio-loop-muted.mp4`:
+candidate left, existing Studio right, sources18209..18239 repeated six times
+at native cadence. The Studio pane inherits the original fixed registration,
+source-association and encoding limits. No new Studio export or fitted output
+correction was made. The owner watched it and reports "left has same issue".
+The candidate is rejected as the flicker fix and its test hook was removed.
+CPU/GPU topology and bounded ONE X2/August Scene tests passed before that
+verdict, but did not establish temporal quality; further candidate qualification
+was stopped. The installed app is unchanged. `docs/ROADMAP.md` records the
+diagnostic basis and rejected temporal controls.
+
+The next diagnostic is
+`scratch/studio-seam-ab-20260908-01/april-color-motion-control-01/current-vs-color-off-loop-muted.mp4`:
+current Kjerag left, the same sources with final color correction bypassed
+right. This reuses all 31 existing component-control frames, preserving source,
+geometry, alpha and cadence, and repeats the segment six times. On 2026-09-09
+the owner reports "no flicker just line" and explicitly confirms the right-hand
+no-color view is stable while current Kjerag left still flickers. This implicates
+photometric correction's contribution without identifying the remaining line's
+cause. It is not a proposed color-feature removal, a Studio comparison, or an
+isolation of coefficient timing by itself.
+
+The next moving discriminator is
+`scratch/studio-seam-ab-20260908-01/april-fixed-color-01/review/current-vs-fixed-color-loop-muted.mp4`:
+current Kjerag left, first-source color ratios held constant right. Both retain
+the same current source/geometry/alpha and ordinary producer history. All 155
+original artifacts remain byte-identical and the first fixed draw equals the
+same-consumer baseline exactly. This is a test-only time-invariant coefficient
+control, not a selected permanent freeze. On 2026-09-09 the owner confirms
+"yeah right free of flicker". This establishes that holding the correction
+coefficients removes the reported flicker in this comparison, not that Studio
+freezes or smooths them. The owner requested checking actual Studio update
+behavior before considering a proposed Kjerag-specific smoothing workaround;
+that unqualified draft was removed from the active code without a build or
+installation.
 
 ## X4 Air broader smoothing report (2026-09-08, capture awaiting owner confirmation)
 

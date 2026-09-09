@@ -15,6 +15,16 @@ pub(crate) enum StitchCamera {
 }
 
 impl StitchCamera {
+    /// Native fusion ordinal to delivered source stream. X4's geometry
+    /// adapter resolves this same association in `x4_model6_static`; color
+    /// measurement and ratio publication must cross that boundary as well.
+    pub(crate) fn fusion_streams(self) -> [usize; 2] {
+        match self {
+            Self::OneX2 => [0, 1],
+            Self::CalibratedMei => [1, 0],
+        }
+    }
+
     /// Camera admission for live resident playback.
     ///
     /// The generic lens-only classifier remains useful to resource and

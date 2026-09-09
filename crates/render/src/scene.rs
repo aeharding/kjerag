@@ -3691,9 +3691,17 @@ impl ScenePipeline {
             [&live.planes[0], &live.planes[1]]
         };
         let reframe = prepared.reframe();
-        let pipeline = self
+        let camera = profile.camera();
+        if self
             .one_xs_fusion_inputs
-            .get_or_insert_with(|| Box::new(FusionInputPipeline::new(device, &self.layout)));
+            .as_ref()
+            .is_some_and(|pipeline| pipeline.camera() != camera)
+        {
+            self.one_xs_fusion_inputs = None;
+        }
+        let pipeline = self.one_xs_fusion_inputs.get_or_insert_with(|| {
+            Box::new(FusionInputPipeline::new(device, &self.layout, camera))
+        });
         Ok(Some(pipeline.submit(
             device,
             queue,
@@ -8347,7 +8355,8 @@ mod tests {
             .read()
             .unwrap();
         assert_eq!(samples.frame(), map.frame());
-        let expected = crate::image_fusion::spatial::Reference::new()
+        let expected = samples
+            .new_reference()
             .observe_bands(samples.bands(), samples.invalid())
             .unwrap()
             .expect("cold source bands were not admitted by the CPU reference")
@@ -9089,6 +9098,7 @@ mod tests {
                 fov: 57.95f32.to_radians(),
             },
             ReviewDiagnostic::Existing,
+            None,
         );
     }
 
@@ -9111,6 +9121,7 @@ mod tests {
                 fov: 63.63f32.to_radians(),
             },
             ReviewDiagnostic::Existing,
+            None,
         );
     }
 
@@ -9134,14 +9145,36 @@ mod tests {
         let review = match mode.as_str() {
             "" => ReviewDiagnostic::Existing,
             "components" => ReviewDiagnostic::SeamComponents,
+            "component-anchors" => ReviewDiagnostic::SeamComponentAnchors,
             "sampling" => ReviewDiagnostic::SamplingAnchors,
+            "sampling-sequence" => ReviewDiagnostic::SamplingSequence,
+            "geometry-fields" => ReviewDiagnostic::GeometryFields,
+            "fixed-color" => ReviewDiagnostic::FixedColor,
             _ => panic!("unknown seam review mode {mode}"),
         };
-        eprintln!("reported-seam-review: {line}, mode={mode}, sources=31");
-        post_seek_review_sequence(&path, &output, view.at, 31, view.camera, review);
+        let count = if review == ReviewDiagnostic::SamplingSequence {
+            61
+        } else {
+            31
+        };
+        let start_override = std::env::var("KJERAG_REPORTED_SEAM_START")
+            .ok()
+            .map(|value| value.parse().expect("invalid reported seam source start"));
+        eprintln!(
+            "reported-seam-review: {line}, mode={mode}, sources={count}, start_override={start_override:?}"
+        );
+        post_seek_review_sequence(
+            &path,
+            &output,
+            view.at,
+            count,
+            view.camera,
+            review,
+            start_override,
+        );
         std::fs::write(
             output.join("request.txt"),
-            format!("{line}\nmode={mode}\nsources=31\n"),
+            format!("{line}\nmode={mode}\nsources={count}\nstart_override={start_override:?}\n"),
         )
         .unwrap();
     }
@@ -9169,6 +9202,7 @@ mod tests {
             ReviewDiagnostic::Photometric {
                 expected_start: 34538,
             },
+            None,
         );
     }
 
@@ -9252,6 +9286,7 @@ mod tests {
                 31,
                 camera,
                 ReviewDiagnostic::Photometric { expected_start },
+                None,
             );
         }
         assert!(matched, "unknown photometric reference review case");
@@ -9262,7 +9297,11 @@ mod tests {
         Existing,
         Photometric { expected_start: u64 },
         SeamComponents,
+        SeamComponentAnchors,
         SamplingAnchors,
+        SamplingSequence,
+        GeometryFields,
+        FixedColor,
     }
 
     fn post_seek_review_sequence(
@@ -9272,6 +9311,7 @@ mod tests {
         count: u64,
         camera: Camera,
         review: ReviewDiagnostic,
+        start_override: Option<u64>,
     ) {
         use std::io::Write;
         std::fs::create_dir(output).expect("review output must be a new directory");
@@ -9282,17 +9322,19 @@ mod tests {
         scene.set_muted(true);
         scene.pause(Instant::now());
         scene.set_horizon(Horizon::Locked);
-        let start = {
+        let (start, seek_target) = {
             let playing = scene.show.as_ref().unwrap().playing.borrow();
             let Source::Live(player) = &playing.source else {
                 unreachable!()
             };
-            let start = player.timing().index_at(target);
+            let timing = player.timing();
+            let start = start_override.unwrap_or_else(|| timing.index_at(target));
             assert!(
                 player.timing().frames >= start + count,
                 "review fixture is shorter than the owner interval"
             );
-            start
+            let seek_target = start_override.map_or(target, |_| timing.time_of(start));
+            (start, seek_target)
         };
         if let ReviewDiagnostic::Photometric { expected_start } = review {
             assert_eq!(
@@ -9300,7 +9342,7 @@ mod tests {
                 "index-derived photometric review target selected source {start}, expected {expected_start}"
             );
         }
-        scene.seek(target, Accuracy::Exact);
+        scene.seek(seek_target, Accuracy::Exact);
         let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
         let mut previous = None;
         let mut ready_listener = (scene.ready_wake.listen(), 0);
@@ -9309,11 +9351,52 @@ mod tests {
         let carried_review = review == ReviewDiagnostic::Existing
             && std::env::var_os("KJERAG_CARRIED_FLOW_REVIEW").is_some();
         let photometric_review = matches!(review, ReviewDiagnostic::Photometric { .. });
-        let seam_components = review == ReviewDiagnostic::SeamComponents;
+        let geometry_fields = review == ReviewDiagnostic::GeometryFields;
+        let component_anchors = review == ReviewDiagnostic::SeamComponentAnchors;
+        let seam_components =
+            review == ReviewDiagnostic::SeamComponents || component_anchors || geometry_fields;
+        let sampling_sequence = review == ReviewDiagnostic::SamplingSequence;
+        let fixed_color = review == ReviewDiagnostic::FixedColor;
+        let fusion_input_review = std::env::var_os("KJERAG_REVIEW_FUSION_INPUTS").is_some();
+        let verified_reference =
+            (sampling_sequence || geometry_fields || component_anchors || fixed_color).then(|| {
+                PathBuf::from(
+                    std::env::var_os("KJERAG_REPORTED_SEAM_BASELINE")
+                        .expect("review sequence needs its existing exact baseline"),
+                )
+            });
+        let mut sampling_log = sampling_sequence.then(|| {
+            std::fs::create_dir(output.join("sampling-4x-area")).unwrap();
+            let mut log = std::io::BufWriter::new(
+                std::fs::File::create_new(output.join("sampling-sources.tsv")).unwrap(),
+            );
+            writeln!(log, "source\ttime_ns\twidth\theight\traw_rgba_sha256").unwrap();
+            log
+        });
+        let mut fusion_input_log = fusion_input_review.then(|| {
+            std::fs::create_dir(output.join("fusion-inputs")).unwrap();
+            let mut log = std::io::BufWriter::new(
+                std::fs::File::create_new(output.join("fusion-inputs/manifest.tsv")).unwrap(),
+            );
+            writeln!(
+                log,
+                "frame\tleft_band\tright_band\tinvalid\tnative_left\tnative_right"
+            )
+            .unwrap();
+            log
+        });
         let mut previous_inputs = None;
         let mut previous_ratios = None;
-        let mut diagnostic = (carried_review || photometric_review || seam_components)
+        let mut fixed_ratios = None;
+        let mut diagnostic = (carried_review
+            || photometric_review
+            || seam_components
+            || fixed_color
+            || fusion_input_review)
             .then(|| ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm));
+        if fixed_color {
+            std::fs::create_dir(output.join("fixed-color")).unwrap();
+        }
         if seam_components {
             for arm in ["no-color", "no-flow", "lens-0", "lens-1"] {
                 std::fs::create_dir(output.join(arm)).unwrap();
@@ -9403,14 +9486,123 @@ mod tests {
             assert_eq!(shot.index, index);
             let map = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
             assert_eq!(map.frame(), &frame);
-            if review == ReviewDiagnostic::SamplingAnchors && matches!(index - start, 0 | 15 | 30) {
+            if fusion_input_review {
+                assert_finite_fusion(&map);
+                let pending = diagnostic
+                    .as_mut()
+                    .unwrap()
+                    .prepare_one_xs_fusion_inputs(&scene.primitive(camera), 16.0 / 9.0, &map)
+                    .expect("fusion input review submission failed")
+                    .expect("fusion input review lost the displayed source");
+                assert_eq!(pending.frame(), &frame);
+                let inputs = pending.read().expect("fusion input review readback failed");
+                assert_eq!(inputs.frame(), &frame);
+                let folder = output.join("fusion-inputs");
+                let left = format!("frame-{index:010}.band-left.bgr8");
+                let right = format!("frame-{index:010}.band-right.bgr8");
+                let invalid = format!("frame-{index:010}.invalid.bin");
+                let coarse_left = format!("frame-{index:010}.coarse-left.f32x2");
+                let coarse_right = format!("frame-{index:010}.coarse-right.f32x2");
+                let ratio_left = format!("frame-{index:010}.ratio-left.bgr-f32x3");
+                let ratio_right = format!("frame-{index:010}.ratio-right.bgr-f32x3");
+                let bands = inputs.bands();
+                std::fs::write(folder.join(&left), bands[0]).unwrap();
+                std::fs::write(folder.join(&right), bands[1]).unwrap();
+                std::fs::write(folder.join(&invalid), inputs.invalid()).unwrap();
+                for (name, uv) in [
+                    (&coarse_left, inputs.coarse_uv()[0]),
+                    (&coarse_right, inputs.coarse_uv()[1]),
+                ] {
+                    let bytes: Vec<_> = uv
+                        .iter()
+                        .flatten()
+                        .flat_map(|value| value.to_le_bytes())
+                        .collect();
+                    std::fs::write(folder.join(name), bytes).unwrap();
+                }
+                let ratios = map
+                    .fusion()
+                    .expect("fusion input review needs the installed color ratios");
+                for (name, ratio) in [(&ratio_left, &ratios.left), (&ratio_right, &ratios.right)] {
+                    let mut bgr =
+                        Vec::with_capacity(ratio.values().len() * 3 * std::mem::size_of::<f32>());
+                    for rgba in ratio.values() {
+                        for channel in [rgba[2], rgba[1], rgba[0]] {
+                            bgr.extend_from_slice(&channel.to_le_bytes());
+                        }
+                    }
+                    std::fs::write(folder.join(name), bgr).unwrap();
+                }
+                writeln!(
+                    fusion_input_log.as_mut().unwrap(),
+                    // These saved ratios are renderer-ordinal/body-chart
+                    // outputs, not native fusion outputs. A native replay
+                    // must not compare them without that conversion.
+                    "{index}\t{left}\t{right}\t{invalid}\t-\t-"
+                )
+                .unwrap();
+                let installed = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
+                assert_eq!(installed.frame(), map.frame());
+                assert_eq!(installed.packed().bytes(), map.packed().bytes());
+                assert_eq!(installed.alpha().bytes(), map.alpha().bytes());
+                assert_eq!(installed.pis_backend(), map.pis_backend());
+                assert_eq!(installed.fusion(), map.fusion());
+            }
+            if fixed_color {
+                // Isolate coefficient updates without removing calibration or
+                // freezing video/geometry. The ordinary producer still runs
+                // at every source; only this diagnostic draw reuses the first
+                // source's ratio pair in the same fixed spherical chart.
+                let diagnostic = diagnostic.as_mut().unwrap();
+                let prepared = diagnostic
+                    .prepare_one_xs_picture(&scene.primitive(camera), 16.0 / 9.0)
+                    .unwrap();
+                assert_eq!(prepared.frame(), &frame);
+                let null =
+                    render_direct_map_pixels_sized(&device, &queue, diagnostic, &map, 1280, 720);
+                assert_eq!(null.len(), shot.rgba.len());
+                for (&a, &b) in null.iter().zip(&shot.rgba) {
+                    assert!(
+                        a.abs_diff(b) <= 1,
+                        "fixed-color baseline differs from Scene"
+                    );
+                }
+                let current = map.fusion().expect("fixed-color review needs active color");
+                let first = fixed_ratios.get_or_insert_with(|| current.clone());
+                let fixed = OneXsMapFrame::new(
+                    frame.clone(),
+                    map.packed().clone(),
+                    map.alpha().clone(),
+                    map.pis_backend(),
+                )
+                .with_fusion(first.clone());
+                let pixels =
+                    render_direct_map_pixels_sized(&device, &queue, diagnostic, &fixed, 1280, 720);
+                if index == start {
+                    assert_eq!(
+                        pixels, null,
+                        "first fixed-color frame must be the exact null"
+                    );
+                }
+                write_review_ppm(&output.join("fixed-color"), index, &pixels);
+                let installed = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
+                assert_eq!(installed.frame(), map.frame());
+                assert_eq!(installed.packed().bytes(), map.packed().bytes());
+                assert_eq!(installed.alpha().bytes(), map.alpha().bytes());
+                assert_eq!(installed.fusion(), map.fusion());
+                eprintln!("fixed-color-review: source {index}, ratio source {start}");
+            }
+            if sampling_sequence
+                || (review == ReviewDiagnostic::SamplingAnchors
+                    && matches!(index - start, 0 | 15 | 30))
+            {
                 // The ordinary Scene shutter draws the exact installed source,
                 // map and ratios again. Only the output extent changes. Retain
                 // full pixels for an explicit offline sampling comparison;
                 // this is not a playback policy or a stitch-quality verdict.
                 let (send, receive) = std::sync::mpsc::channel();
                 scene.capture(Request {
-                    width: 2560,
+                    width: if sampling_sequence { 5120 } else { 2560 },
                     then: Box::new(move |shot| {
                         let _ = send.send(shot);
                     }),
@@ -9428,12 +9620,39 @@ mod tests {
                 };
                 assert_eq!(high.index, shot.index);
                 assert_eq!(high.time, shot.time);
-                assert_eq!((high.width, high.height), (2560, 1440));
-                let folder = output.join("sampling-2560");
-                if index == start {
-                    std::fs::create_dir(&folder).unwrap();
+                let width = if sampling_sequence { 5120 } else { 2560 };
+                assert_eq!((high.width, high.height), (width, width * 9 / 16));
+                if let Some(log) = sampling_log.as_mut() {
+                    use sha2::{Digest, Sha256};
+                    writeln!(
+                        log,
+                        "{}\t{}\t{}\t{}\t{}",
+                        index,
+                        high.time.as_nanos(),
+                        high.width,
+                        high.height,
+                        Sha256::digest(&high.rgba)
+                            .iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect::<String>()
+                    )
+                    .unwrap();
+                    let reduced = review_area_4x(&high.rgba, high.width, high.height);
+                    write_review_ppm(&output.join("sampling-4x-area"), index, &reduced);
+                    // One full-resolution anchor permits independent verification
+                    // without retaining several gigabytes of redundant captures.
+                    if index == start {
+                        let folder = output.join("sampling-5120-anchor");
+                        std::fs::create_dir(&folder).unwrap();
+                        write_review_ppm_sized(&folder, index, high.width, high.height, &high.rgba);
+                    }
+                } else {
+                    let folder = output.join("sampling-2560");
+                    if index == start {
+                        std::fs::create_dir(&folder).unwrap();
+                    }
+                    write_review_ppm_sized(&folder, index, high.width, high.height, &high.rgba);
                 }
-                write_review_ppm_sized(&folder, index, high.width, high.height, &high.rgba);
                 let installed = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
                 assert_eq!(installed.frame(), map.frame());
                 assert_eq!(installed.packed().bytes(), map.packed().bytes());
@@ -9441,7 +9660,7 @@ mod tests {
                 assert_eq!(installed.pis_backend(), map.pis_backend());
                 assert_eq!(installed.fusion(), map.fusion());
             }
-            if seam_components {
+            if seam_components && (!component_anchors || matches!(index - start, 0 | 15 | 30)) {
                 use crate::studio_type2::{AlphaMap, MAP_NODES};
 
                 let diagnostic = diagnostic.as_mut().unwrap();
@@ -9468,6 +9687,57 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 assert_eq!(inputs.frame, frame);
+                if geometry_fields {
+                    if index == start
+                        && std::env::var_os("KJERAG_ONE_X2_COLD_STAGE_PROBE").is_some()
+                    {
+                        let blurred = capture
+                            .diagnostic_cold_blurred_probe(&frame)
+                            .unwrap()
+                            .expect("reported cold input probe was not retained");
+                        std::fs::write(
+                            output.join(format!("frame-{index:010}.blurred-belt-u8.bin")),
+                            blurred.bytes(),
+                        )
+                        .unwrap();
+                        for (name, words) in [
+                            ("base-a", &inputs.lens_a_base),
+                            ("base-b", &inputs.lens_b_base),
+                            ("preimage-a", &inputs.lens_a_preimage),
+                            ("preimage-b", &inputs.lens_b_preimage),
+                        ] {
+                            let bytes: Vec<_> =
+                                words.iter().flat_map(|v| v.to_le_bytes()).collect();
+                            std::fs::write(
+                                output.join(format!("frame-{index:010}.{name}.bin")),
+                                bytes,
+                            )
+                            .unwrap();
+                        }
+                        let terminals = capture
+                            .diagnostic_cold_l1_terminals(&frame)
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(terminals.len(), 3);
+                        for (call, words) in terminals.iter().enumerate() {
+                            let bytes: Vec<_> =
+                                words.iter().flat_map(|v| v.to_le_bytes()).collect();
+                            std::fs::write(
+                                output.join(format!("frame-{index:010}.cold{call}-l1.bin")),
+                                bytes,
+                            )
+                            .unwrap();
+                        }
+                    }
+                    for (name, words) in [
+                        ("public-a", &inputs.lens_a_public),
+                        ("public-b", &inputs.lens_b_public),
+                    ] {
+                        let bytes: Vec<_> = words.iter().flat_map(|v| v.to_le_bytes()).collect();
+                        std::fs::write(output.join(format!("frame-{index:010}.{name}.bin")), bytes)
+                            .unwrap();
+                    }
+                }
                 assert_eq!(
                     inputs
                         .materialize_with_public_from(&inputs)
@@ -9487,6 +9757,32 @@ mod tests {
                     map.pis_backend(),
                 )
                 .with_fusion(ratios.clone());
+                if geometry_fields {
+                    std::fs::write(
+                        output.join(format!("frame-{index:010}.no-flow-packed.bin")),
+                        no_flow.packed().bytes(),
+                    )
+                    .unwrap();
+                    if matches!(index - start, 0 | 15 | 30) {
+                        for (name, weight) in [("zero-lens-0", 1.0), ("zero-lens-1", 0.0)] {
+                            let folder = output.join(name);
+                            if index == start {
+                                std::fs::create_dir(&folder).unwrap();
+                            }
+                            let preview = OneXsMapFrame::new(
+                                frame.clone(),
+                                no_flow.packed().clone(),
+                                AlphaMap::new(vec![weight; MAP_NODES]).unwrap(),
+                                map.pis_backend(),
+                            )
+                            .with_fusion(ratios.clone());
+                            let pixels = render_direct_map_pixels_sized(
+                                &device, &queue, diagnostic, &preview, 1280, 720,
+                            );
+                            write_review_ppm(&folder, index, &pixels);
+                        }
+                    }
+                }
                 let solo = |weight| {
                     OneXsMapFrame::new(
                         frame.clone(),
@@ -9505,6 +9801,9 @@ mod tests {
                     ("lens-0", solo(1.0)),
                     ("lens-1", solo(0.0)),
                 ] {
+                    if geometry_fields {
+                        continue;
+                    }
                     let pixels = render_direct_map_pixels_sized(
                         &device, &queue, diagnostic, &preview, 1280, 720,
                     );
@@ -9645,36 +9944,37 @@ mod tests {
                     "offline preview changed installed geometry"
                 );
             }
-            std::fs::write(
+            write_review_artifact(
                 output.join(format!("frame-{index:010}.packed-f32le.bin")),
                 map.packed().bytes(),
-            )
-            .unwrap();
-            std::fs::write(
+                verified_reference.as_deref(),
+            );
+            write_review_artifact(
                 output.join(format!("frame-{index:010}.alpha-f32le.bin")),
                 map.alpha().bytes(),
-            )
-            .unwrap();
+                verified_reference.as_deref(),
+            );
             if let Some(fusion) = map.fusion() {
-                std::fs::write(
+                write_review_artifact(
                     output.join(format!("frame-{index:010}.fusion-left.float4")),
                     fusion.left.bytes(),
-                )
-                .unwrap();
-                std::fs::write(
+                    verified_reference.as_deref(),
+                );
+                write_review_artifact(
                     output.join(format!("frame-{index:010}.fusion-right.float4")),
                     fusion.right.bytes(),
-                )
-                .unwrap();
+                    verified_reference.as_deref(),
+                );
             }
-            let mut file = std::io::BufWriter::new(
-                std::fs::File::create(output.join(format!("frame-{index:010}.ppm"))).unwrap(),
-            );
-            write!(file, "P6\n{} {}\n255\n", shot.width, shot.height).unwrap();
+            let mut ppm = format!("P6\n{} {}\n255\n", shot.width, shot.height).into_bytes();
             for pixel in shot.rgba.chunks_exact(4) {
-                file.write_all(&pixel[..3]).unwrap();
+                ppm.extend_from_slice(&pixel[..3]);
             }
-            file.flush().unwrap();
+            write_review_artifact(
+                output.join(format!("frame-{index:010}.ppm")),
+                &ppm,
+                verified_reference.as_deref(),
+            );
             eprintln!(
                 "seek-review: frame {index} time {:.6}",
                 shot.time.as_secs_f64()
@@ -9685,6 +9985,12 @@ mod tests {
             }
         }
         if let Some(log) = source_log.as_mut() {
+            log.flush().unwrap();
+        }
+        if let Some(log) = sampling_log.as_mut() {
+            log.flush().unwrap();
+        }
+        if let Some(log) = fusion_input_log.as_mut() {
             log.flush().unwrap();
         }
         assert!(ready_listener.1 > 0, "review never exercised a worker wake");
@@ -9814,6 +10120,62 @@ mod tests {
 
     fn write_review_ppm(output: &Path, index: u64, rgba: &[u8]) {
         write_review_ppm_sized(output, index, 1280, 720, rgba);
+    }
+
+    fn write_review_artifact(path: PathBuf, bytes: &[u8], reference: Option<&Path>) {
+        if let Some(reference) = reference {
+            let reference = reference.join(path.file_name().unwrap());
+            assert!(
+                std::fs::read(&reference).unwrap() == bytes,
+                "review sequence changed baseline {}",
+                reference.display()
+            );
+            // The baseline is read-only; this saves duplicate disk allocation.
+            std::fs::hard_link(reference, path).unwrap();
+        } else {
+            std::fs::write(path, bytes).unwrap();
+        }
+    }
+
+    /// Diagnostic coded-RGBA area integration, rounded to nearest with ties up.
+    /// This is not a live filter, linear-light model or Studio-derived rule.
+    fn review_area_4x(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+        assert!(width > 0 && height > 0 && width.is_multiple_of(4) && height.is_multiple_of(4));
+        assert_eq!(rgba.len(), width as usize * height as usize * 4);
+        let stride = width as usize * 4;
+        let mut reduced = Vec::with_capacity(rgba.len() / 16);
+        for rows in rgba.chunks_exact(stride * 4) {
+            for x in (0..stride).step_by(16) {
+                let mut sums = [0u32; 4];
+                for row in rows.chunks_exact(stride) {
+                    for pixel in row[x..x + 16].chunks_exact(4) {
+                        for (sum, &channel) in sums.iter_mut().zip(pixel) {
+                            *sum += u32::from(channel);
+                        }
+                    }
+                }
+                reduced.extend(sums.map(|sum| ((sum + 8) / 16) as u8));
+            }
+        }
+        reduced
+    }
+
+    #[test]
+    fn review_area_preserves_tiles_channels_and_half_code_rounding() {
+        let mut rgba = vec![0u8; 8 * 8 * 4];
+        for y in 0..8 {
+            for x in 0..8 {
+                let tile = (y / 4) * 2 + x / 4;
+                let pixel = [17 + tile as u8, u8::from(y % 4 < 2), 203, 255];
+                rgba[4 * (y * 8 + x)..4 * (y * 8 + x + 1)].copy_from_slice(&pixel);
+            }
+        }
+        assert_eq!(
+            review_area_4x(&rgba, 8, 8),
+            [
+                17, 1, 203, 255, 18, 1, 203, 255, 19, 1, 203, 255, 20, 1, 203, 255
+            ]
+        );
     }
 
     fn write_review_ppm_sized(output: &Path, index: u64, width: u32, height: u32, rgba: &[u8]) {

@@ -13,6 +13,8 @@
 mod content;
 mod coordinates;
 pub(crate) mod gpu;
+#[cfg(test)]
+mod replay_tests;
 pub(crate) mod sample;
 pub mod solve;
 pub mod spatial;

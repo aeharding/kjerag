@@ -160,7 +160,7 @@ fn main() -> Fallible<()> {
             return Err("fusion input preparation changed the decoded frame".into());
         }
         let samples = pending.read()?;
-        let mut reference = kjerag_render::image_fusion::spatial::Reference::new();
+        let mut reference = samples.new_reference();
         let output = reference
             .observe_bands(samples.bands(), samples.invalid())?
             .ok_or("first fusion source observation was not admitted")?;

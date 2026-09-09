@@ -12,6 +12,7 @@ use wgpu::util::DeviceExt;
 
 use crate::direct_type2;
 use crate::flow::one_xs::LensPair;
+use crate::stitch_camera::StitchCamera;
 use crate::studio_type2::{MAP_WIDTH, OneXsMapFrame, PACKED_BYTES};
 use crate::{Fallible, Planes, Reframe};
 
@@ -33,8 +34,11 @@ mod gpu_tests;
 
 pub struct FusionInputs {
     frame: FrameStamp,
+    camera: StitchCamera,
     bands: LensPair<Vec<u8>>,
     invalid: Vec<u8>,
+    #[cfg(test)]
+    coarse_uv: LensPair<Vec<[f32; 2]>>,
 }
 
 /// Encoded, not necessarily complete, GPU source-band inputs.
@@ -67,7 +71,14 @@ impl FusionInputs {
         &self.frame
     }
 
-    /// Left (`packed.xy`) and right (`packed.zw`) 800-by-16 BGR8 bands.
+    pub fn new_reference(&self) -> super::spatial::Reference {
+        super::spatial::Reference::for_camera(self.camera)
+    }
+
+    /// Native fusion ordinals zero and one, as 800-by-16 BGR8 bands.
+    ///
+    /// They are delivered streams zero and one on ONE X2, and streams one
+    /// and zero on the calibrated X4 path.
     pub fn bands(&self) -> [&[u8]; 2] {
         [&self.bands.a, &self.bands.b]
     }
@@ -75,6 +86,13 @@ impl FusionInputs {
     /// Four rows by 212 columns, including the six-pixel periodic extension.
     pub fn invalid(&self) -> &[u8] {
         &self.invalid
+    }
+
+    /// Test-only lens-local four-row coordinates already present in this
+    /// diagnostic's readback. This performs no additional GPU work.
+    #[cfg(test)]
+    pub fn coarse_uv(&self) -> [&[[f32; 2]]; 2] {
+        [&self.coarse_uv.a, &self.coarse_uv.b]
     }
 }
 
@@ -87,6 +105,7 @@ pub struct PendingOneXsFusionInputs {
     readback: wgpu::Buffer,
     device: wgpu::Device,
     frame: FrameStamp,
+    camera: StitchCamera,
     submission: wgpu::SubmissionIndex,
     // Last: decoder storage must outlive every bind group which samples it.
     frames: Arc<Frames>,
@@ -114,18 +133,24 @@ impl PendingOneXsFusionInputs {
         self.device.poll(wgpu::PollType::wait_indefinitely())?;
         answer.recv()??;
         let view = self.readback.slice(..).get_mapped_range();
+        #[cfg(test)]
+        let coarse_uv = decode_coarse_uv(&view, self.camera)?;
         let (bands, invalid) = decode(&view)?;
         drop(view);
         self.readback.unmap();
         Ok(FusionInputs {
             frame: self.frame,
+            camera: self.camera,
             bands,
             invalid,
+            #[cfg(test)]
+            coarse_uv,
         })
     }
 }
 
 pub(crate) struct FusionInputPipeline {
+    camera: StitchCamera,
     compose_pipeline: wgpu::ComputePipeline,
     sample_pipeline: wgpu::ComputePipeline,
     map_layout: wgpu::BindGroupLayout,
@@ -136,7 +161,11 @@ pub(crate) struct FusionInputPipeline {
 }
 
 impl FusionInputPipeline {
-    pub(crate) fn new(device: &wgpu::Device, picture_layout: &wgpu::BindGroupLayout) -> Self {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        picture_layout: &wgpu::BindGroupLayout,
+        camera: StitchCamera,
+    ) -> Self {
         let storage = |binding, bytes, read_only| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -169,7 +198,13 @@ impl FusionInputPipeline {
             bind_group_layouts: &[picture_layout, &map_layout, &output_layout],
             immediate_size: 0,
         });
-        let shader = format!("{}\n{}", direct_type2::source_wgsl(), SAMPLE_WGSL);
+        let native_lens_zero_is_delivered_one = camera.fusion_streams() == [1, 0];
+        let shader = format!(
+            "{}\nconst native_lens_zero_is_delivered_one = {};\n{}",
+            direct_type2::source_wgsl(),
+            native_lens_zero_is_delivered_one,
+            SAMPLE_WGSL
+        );
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("fusion source-band sampler"),
             source: wgpu::ShaderSource::Wgsl(shader.into()),
@@ -184,7 +219,7 @@ impl FusionInputPipeline {
                 cache: None,
             })
         };
-        let coordinates = super::coordinates::selected_x4_band();
+        let coordinates = super::coordinates::for_camera_band(camera);
         assert_eq!(coordinates.len(), COMPOSED_NODES);
         let lookup = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("fusion fixed native band lookup"),
@@ -198,6 +233,7 @@ impl FusionInputPipeline {
             ..Default::default()
         });
         Self {
+            camera,
             compose_pipeline: make_pipeline("fusion packed-map composition", "compose_fusion_map"),
             sample_pipeline: make_pipeline("fusion source-band sampling", "sample_fusion_bands"),
             map_layout,
@@ -206,6 +242,10 @@ impl FusionInputPipeline {
             sampler,
             lookup,
         }
+    }
+
+    pub(crate) fn camera(&self) -> StitchCamera {
+        self.camera
     }
 
     /// Bind a caller-owned exact source pair without exposing its planes.
@@ -217,6 +257,7 @@ impl FusionInputPipeline {
         uniforms: &wgpu::Buffer,
         planes: [&Planes; 2],
     ) -> wgpu::BindGroup {
+        let planes = self.fusion_planes(planes);
         direct_type2::bind_picture(
             device,
             &self.picture_layout,
@@ -224,6 +265,11 @@ impl FusionInputPipeline {
             planes,
             &self.sampler,
         )
+    }
+
+    fn fusion_planes<'a>(&self, planes: [&'a Planes; 2]) -> [&'a Planes; 2] {
+        let streams = self.camera.fusion_streams();
+        [planes[streams[0]], planes[streams[1]]]
     }
 
     /// Append the two source-band passes without submitting or waiting.
@@ -396,8 +442,13 @@ impl FusionInputPipeline {
             mapped_at_creation: false,
         });
         queue.write_buffer(&uniforms, 0, reframe.bytes());
-        let picture =
-            direct_type2::bind_picture(device, picture_layout, &uniforms, planes, sampler);
+        let picture = direct_type2::bind_picture(
+            device,
+            picture_layout,
+            &uniforms,
+            self.fusion_planes(planes),
+            sampler,
+        );
         let map_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fusion input packed map"),
             size: PACKED_BYTES as u64,
@@ -426,10 +477,41 @@ impl FusionInputPipeline {
             readback,
             device: device.clone(),
             frame,
+            camera: self.camera,
             submission: queue.submit([encoder.finish()]),
             frames,
         }
     }
+}
+
+#[cfg(test)]
+fn decode_coarse_uv(mapped: &[u8], camera: StitchCamera) -> Fallible<LensPair<Vec<[f32; 2]>>> {
+    if mapped.len() != READBACK_BYTES as usize {
+        return Err(format!(
+            "fusion input readback mapped {} bytes, expected {READBACK_BYTES}",
+            mapped.len()
+        )
+        .into());
+    }
+    let mut uv = LensPair {
+        a: Vec::with_capacity(COMPOSED_NODES),
+        b: Vec::with_capacity(COMPOSED_NODES),
+    };
+    for node in mapped[..COMPOSED_BYTES as usize].chunks_exact(size_of::<[f32; 4]>()) {
+        let component = |at: usize| {
+            f32::from_bits(u32::from_le_bytes(
+                node[at * 4..at * 4 + 4].try_into().unwrap(),
+            ))
+        };
+        let delivered = [
+            [component(0) * 2.0, component(1)],
+            [component(2) * 2.0 - 1.0, component(3)],
+        ];
+        let streams = camera.fusion_streams();
+        uv.a.push(delivered[streams[0]]);
+        uv.b.push(delivered[streams[1]]);
+    }
+    Ok(uv)
 }
 
 fn decode(mapped: &[u8]) -> Fallible<(LensPair<Vec<u8>>, Vec<u8>)> {
@@ -569,6 +651,13 @@ fn source_lens_rgb(lens: u32, uv: vec2<f32>) -> vec3<f32> {
   return source_rgb(luma, chroma - vec2<f32>(0.50196081399917603));
 }
 
+fn native_lens_uv(packed: vec4<f32>, lens: u32) -> vec2<f32> {
+  if native_lens_zero_is_delivered_one {
+    return select(packed.xy, packed.zw, lens == 0u);
+  }
+  return select(packed.zw, packed.xy, lens == 0u);
+}
+
 fn packed_bgr(rgb: vec3<f32>) -> u32 {
   let scaled = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0;
   let bytes = vec3<u32>(u32(round_ties_even(scaled.r)),
@@ -587,8 +676,10 @@ fn sample_fusion_bands(@builtin(global_invocation_id) at: vec3<u32>) {
   if at.x < 212u && at.y < 4u {
     let column = (at.x + 194u) % 200u;
     let packed = composed_map[at.y * 200u + column];
-    let left = vec2<f32>(packed.x * 2.0, packed.y);
-    let right = vec2<f32>(packed.z * 2.0 - 1.0, packed.w);
+    let left_packed = native_lens_uv(packed, 0u);
+    let right_packed = native_lens_uv(packed, 1u);
+    let left = vec2<f32>(left_packed.x * 2.0 - select(0.0, 1.0, native_lens_zero_is_delivered_one), left_packed.y);
+    let right = vec2<f32>(right_packed.x * 2.0 - select(1.0, 0.0, native_lens_zero_is_delivered_one), right_packed.y);
     coordinate_invalid[at.y * 212u + at.x] = u32(
       outside_unit(left.x) || outside_unit(left.y) ||
       outside_unit(right.x) || outside_unit(right.y));
@@ -596,8 +687,10 @@ fn sample_fusion_bands(@builtin(global_invocation_id) at: vec3<u32>) {
   if at.x >= 800u || at.y >= 16u { return; }
   let packed = endpoint_packed(at.xy);
   let index = at.y * 800u + at.x;
-  let left = source_lens_rgb(0u, vec2<f32>(packed.x * 2.0, packed.y));
-  let right = source_lens_rgb(1u, vec2<f32>(packed.z * 2.0 - 1.0, packed.w));
+  let left_packed = native_lens_uv(packed, 0u);
+  let right_packed = native_lens_uv(packed, 1u);
+  let left = source_lens_rgb(0u, vec2<f32>(left_packed.x * 2.0 - select(0.0, 1.0, native_lens_zero_is_delivered_one), left_packed.y));
+  let right = source_lens_rgb(1u, vec2<f32>(right_packed.x * 2.0 - select(1.0, 0.0, native_lens_zero_is_delivered_one), right_packed.y));
   fusion_bands[index].left = vec4<f32>(left, 0.0);
   fusion_bands[index].right = vec4<f32>(right, 0.0);
   packed_left_band[index] = packed_bgr(left);

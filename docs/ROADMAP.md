@@ -27,6 +27,17 @@ a direct Studio/Kjerag A/B at this exact view before assuming the products
 differ or choosing a fix. Actual Studio 6.0.2 exports now cover all three
 reported intervals; the direct visual-review set is described below.
 
+**Owner confirms the April Studio difference, 2026-09-08:** after reviewing
+the direct side-by-side, the owner reports that Kjerag looks worse and has
+blotting along the seam that Studio does not. He clarifies "flickering blotting",
+endorses this moving A/B as the acceptance oracle, and doubts stills could
+distinguish the products. This closes the human A/B confirmation for April,
+not its cause or the July/August reports. Preserve the accepted-looking color
+correction; still-image similarity cannot close this temporal defect.
+The owner also closed Kjerag and handed control back, removing the running-
+player obstruction to the pending isolated playback tests. No fix acceptance
+or permission to merge is inferred.
+
 A separate broader-smoothing report is registered on the July X4 Air footage
 at t1616.348, yaw109.01, pitch-1.50, fov66.70, horizon locked. Its initial
 31-source Scene capture completes for sources 48442..48472; owner confirmation
@@ -77,6 +88,177 @@ The new `sampling` mode is test-only. No production filter or temporal change
 is selected. Artifacts are the comparison directory's `april-local-review-02/`,
 `april-sampling-01/` and `april-sampling-review-01/`.
 
+The follow-up `sampling-sequence` control covers all 61 sources. Each exact
+installed Scene is also captured at 5120x2880 and reduced to 1280x720 by a
+fixed 4x4 coded-RGBA area mean. All 305 original artifacts remain byte-identical;
+one retained high-resolution anchor independently reproduces the reduction and
+raw RGBA hash. This is a test-only sampling control, not a Studio-derived filter
+or a proposed live 16x rendering cost. Muted current/control and control/Studio
+movies are in `april-sampling-sequence-02/` under the comparison directory.
+The owner watched current/control and reports "Those look the same". This
+control therefore provides no useful visible improvement and is not selected
+as a fix. That negative result does not rule out every sampling mechanism or
+prove a temporal-solver cause. The original accepted moving A/B remains the
+oracle. No production filter, stitch history or app changed.
+
+**April residual alignment and drawing candidate, 2026-09-08:** source-owned
+geometry isolation preserves all 155 baseline artifacts and shows that the
+public correction improves a larger parent mismatch but leaves a local
+roughly one-output-pixel residual. Best-assessed descent, unquantized temporal
+median and fresh-only warm blending were tested separately. None supplied a
+convincing flicker fix; their test hooks were removed and their exact source,
+executables and captures retained. Removing histogram rounding improved some
+alignment without removing the localized temporal signatures. Bypassing the
+retained blend worsened the sampled alignment. These are bounded controls,
+not evidence that all temporal mechanisms are excluded.
+
+A follow-up 31-source capture preserves all baseline artifacts while exposing
+the first source's existing blurred-belt and L1 probes. Its public corrections
+substantially align the actual solver images. Separately, reconstructing the
+displayed triangle from saved UVs identifies downstream compact-map/mesh
+resampling error: at two trace locations, a first-order prediction is about
+(+0.74,+0.67) and (+0.83,+0.74) output pixels. This combines compact-map/base
+interpolation with mesh interpolation, not a complete or mesh-only cause
+finding. No clip-fitted output correction is used.
+
+The new **test-only** drawing candidate connects the existing periodic
+200-column, 100-pole-inclusive-row map with 200x99 cells, instead of resampling
+it through 100x50 cells. Both hardware-mesh and curved-ray shader topology and
+draw counts change together; producer, source cadence and history do not.
+Its April 31-source Scene run passes with all 124 packed-map/alpha/fusion
+artifacts byte-identical. Three lens-isolation anchors preserve all 155
+candidate artifacts. Local zero-offset lens correlation improves at eight of
+nine existing trace patches, but residual offsets remain. Root inspected
+actual candidate/current and candidate/Studio pixels. Shader validation and
+full workspace/all-target Clippy passed. Subsequent CPU and GPU topology checks
+passed, including poles, periodic wrap, the August curved view and a ball view;
+the real Scene also completed 61 ONE X2 and 31 August sources. These checks did
+not establish temporal quality or drawing capacity.
+
+**Owner rejects the drawing candidate, 2026-09-08:** after watching the new
+candidate/Studio movie, the owner reports "left has same issue". The local
+alignment gain is therefore not a fix for the reported flickering blotting.
+The test-only mesh hook and its generalized CPU topology were removed; exact
+candidate source, executable and captures remain in scratch. The original
+native-grid regression retains its added curved/ball and coverage-hole checks.
+Further candidate performance and July qualification were stopped. No installed
+app or production policy changed. Private evidence is under
+`scratch/studio-seam-ab-20260908-01/`, especially `april-solver-inputs-01/`,
+`april-map-curvature.json`, `april-map-node-mesh-01/`, and
+`april-map-node-mesh-02/` and `mesh-qualification-01/`.
+
+The next discriminator uses the existing source-matched moving component
+controls, not another alignment score or new Studio export. The current/no-color
+movie in `april-color-motion-control-01/` changes only final photometric
+correction at the same 31 sources. On 2026-09-09 the owner reports "no flicker
+just line" and explicitly confirms this means the right-hand no-color view is
+stable while current Kjerag on the left still flickers. This establishes a
+dependence on photometric correction for the reported flickering, not the cause
+of the remaining line or a reason to remove the accepted-looking calibration.
+It does not yet isolate coefficient timing from a static spatial-field effect.
+Earlier static
+inspection did not exclude either color or public flow as a temporal cause.
+The existing public-field removal is also encoded in
+`april-flow-motion-control-01/`, ready if the color verdict calls for it; it has
+not yet been requested as another owner test. A provenance recheck confirms
+the solo-lens controls retain both public flow and color, so they cannot be
+described as raw-source/sampling-only evidence. No further candidate is selected.
+
+The saved April ratio maps have exact multi-frame holds followed by broad-field
+changes at the previously located color pulses. The producer applies admitted
+updates immediately and has no temporal output transition; GPU/CPU review finds
+no new arithmetic or ownership mismatch. This is a concrete suspect mechanism,
+not a proven complete cause. `april-color-ratio-audit-01/` records the raw-map
+audit. A new **test-only** `fixed-color` Scene review retains the first source's
+ratio pair for diagnostic draws while every source, geometry, alpha and ordinary
+color producer continues unchanged. Its 31-source capture passes, all 155
+ordinary artifacts match the original baseline, and its first fixed draw is an
+exact same-consumer null. The moving comparison is in `april-fixed-color-01/`;
+the owner confirms "yeah right free of flicker" on 2026-09-09. Holding only the
+coefficients removes the reported flicker in this comparison. This localizes
+the dependency to changing color correction, not all possible defects or
+Studio's own update mechanism. A permanent freeze is not selected playback
+behavior.
+
+The coordinator proposed a Kjerag-specific 100 ms source-time publication
+low-pass, then the owner requested actual Studio behavior before considering
+that workaround. The unbuilt/unqualified draft was removed from the active
+code and archived in `paused-color-smoother-01/`; it was never installed or
+accepted. The replacement investigation is bounded to the existing Studio
+color-update boundary. Initial static inspection of the hash-pinned Mac 6.0.2
+worker finds a separate optional `GetOutputColorMaps` recurrence using 0.64
+retained plus 0.36 current maps on admitted updates, with immediate first
+initialization and holds on skipped updates. This is distinct from the older
+Windows reference's inner metric recurrence. The subsequent caller/default
+check **rules this out as an automatic X4 Air behavior**: constructor and reset
+clear the smoothing flag, Init enables it only for camera type 26 (Antigravity
+A1), and the same native name table maps X4 Air to 23 and ONE X2 to 10. The
+ordinary StitchFusion setup does not call the exported override setter, which
+has no direct calls in this worker. An unrelated external API client's override
+is outside that bounded static conclusion. Do not port this optional recurrence
+as the missing X4 Air fix. Evidence is `mac-color-update-01/` under the same
+comparison directory. No new Studio export has been requested.
+
+The bounded Mac inner-state check finds the same metric/budget/warm-solve
+structure, plus a fused metric-rounding difference at seven integer input
+pairs; occurrence or relevance in the April clip is unmeasured. The inspected
+export handoff queues or reuses one correction pair without blending successive
+pairs. No correction policy is selected from these findings. The next necessary
+observation is the reported interval's native color-input/admission/metric/map
+sequence, followed by replay of those inputs through the readable reference.
+This is not a request for another video oracle export or renewed output-frame
+alignment work. `docs/research/studio-image-fusion-temporal-602.md` records the
+exact boundaries. The Mac availability check was read-only; no new capture,
+production change or installed build was made.
+
+**First native color-input prefix, 2026-09-09:** the pinned Mac worker now
+provides 15 complete observations at trim sources 18208..18222. Native color
+updates occur only at ordinals 0/7/13, with exact holds between them and the
+optional smoother confirmed off. Kjerag's readable CPU reference, given those
+same native bands, reproduces all 15 admission decisions and raw/retained
+metrics. Ratio values still differ, so this is not a parity or fix claim.
+The evidence points the excess update frequency toward differing sampled
+inputs. Next is a real-Scene band/coordinate comparison, controlling the
+earlier Kjerag capture's one-source-later cold start.
+The diagnostic used 1080p and an observed type-2 consumer, not the existing
+7680x3840/type-11 movie oracle; that path distinction remains explicit. The
+requested 63-observation trace was manually closed at 15 fully published rows
+after long export-progress gaps, with debugger hooks removed and detached.
+`studio-image-fusion-temporal-602.md` records the initial timestamp-guard
+recovery, native states and CPU-replay differences. No production policy or
+installed app changed; three replay-validation tests and the prefix replay pass.
+
+**X4 color-boundary mismatch localized, 2026-09-09:** the same-cold-start Scene
+capture supplies 31 sources. The first 15 native observations update 3 times;
+Kjerag's update 14 times, and the readable CPU gate reproduces both from their
+respective bands. The missing conversion is the X4 native lens exchange and
+fixed sphere `Ry(pi)` datum already present in `x4_model6_static`, but absent
+from photometric input/output. Native source pixels and a bounded Mac static
+check confirm the association; a guessed half-turn alone was rejected.
+A working candidate carries that camera conversion through both color
+boundaries, preserving ONE X2, the solver and the update policy. It adds no
+GPU pass or history smoother. It is not yet visually qualified or installed.
+Details, including the first failed diagnostic and the earlier-cold-start
+geometry comparison failure, are in `studio-image-fusion-temporal-602.md`.
+
+**Candidate ready for moving review:** both 31-source April Scene passes keep
+their matching baseline's packed maps/alpha byte-identical. New native-start
+color admission is 0/7/14, versus Studio 0/7/13; remaining input differences
+are not declared visually harmless. All 61 ONE X2 pictures/maps/alpha/ratios
+remain byte-identical (305 artifacts). Focused checks pass 58 tests and both
+cameras' actual cold/warm Scene checks pass; all-target workspace Clippy and
+static gates pass. Full offline workspace tests now pass 1,269 tests, zero
+failures, 31 ignored, with both real camera inputs and the GPU required.
+Three more 31-source captures (April riser, July and August reported views)
+preserve all packed maps/alpha against their same-start baselines. The frozen
+native release player passes 47 UI checks, zero failures; this is functional,
+not performance or flicker qualification. Bundle qualification remains pending
+and packaging preflight found insufficient disk space (1.1 GiB free).
+The owner has been sent the muted candidate-left/Studio-right moving A/B from
+`april-camera-fusion-01/review/`, using the existing Studio reference. Await
+that flicker verdict before declaring success or selecting further changes.
+No installation or merge has occurred.
+
 **April coverage and blend-weight controls, 2026-09-08:** dense CPU reference
 rasters at sources 18209/18224/18239 contain no out-of-range lens coordinates
 with nonzero blend weight. Invalid regions in the solo-lens pictures therefore
@@ -103,14 +285,21 @@ remains the quality gate, not these diagnostic substitutions.
 The follow-up performance audit identifies an unqualified view family: August's
 114.41-degree view uses the curved fragment-ray consumer, while the installed
 240-capacity measurements below use narrower hardware-mesh views. This is a
-coverage gap, not a measured slowdown. The proposed installed reported-view
-idle tests refused before launch because a desktop Kjerag instance is already
-open; it was left untouched and the owner was asked before closing it. No new
-performance measurement or optimization follows. CPU-only checks pass: full
+coverage gap, not an established bottleneck. The first installed reported-view
+idle attempt refused while desktop Kjerag was open. After the owner closed it,
+the unchanged installed app completed all three checks at 2256x1504/60 Hz.
+Observed source cadence was only 14.03/s April, 14.18/s July and 7.89/s August;
+all source advances were consecutive. These are not 240-capacity tests. A
+separate no-Kjerag host audit found cosmic-comp using 41–57% graphics-engine
+time. That is a substantial confounder, not proof of the slowdown's cause or
+a code regression. App identity is unchanged; historical runtime deployment
+hashes were not retained. No desktop processes/settings were changed and no
+COSMIC fix is selected. Receipts: `scratch/reported-view-playback-20260908-02/`.
+CPU-only checks before this sampling-sequence addition passed: full
 workspace/all-target Clippy, 135 metadata tests including the doc test, and the
 frozen render test's fusion-shader validation. Formatting and name/source-list
 checks pass; no new full workspace runtime or installed UI qualification is
-claimed. Attempt record: `scratch/reported-view-playback-20260908-01/`.
+claimed. First attempt: `scratch/reported-view-playback-20260908-01/`.
 
 **May color-reading localization, 2026-09-08:** exact pixel membership now
 locates the previously reported neighboring-bin peaks. At source 18916, bin 77

@@ -42,6 +42,7 @@ use resident_worker::ResidentStitchWorker;
 /// X4 support and alpha deliberately remain derived from the established v3
 /// projection here; reviewing their model-6 edge coverage is separate work.
 pub(crate) struct ResidentCameraProfile {
+    camera: StitchCamera,
     source_size: kjerag_meta::Size,
     parent_inputs: ParentMapBuilder,
     resources: OneXsResources,
@@ -81,6 +82,7 @@ impl ResidentCameraProfile {
             ),
         )?;
         Ok(Some(Self {
+            camera,
             source_size: calibration.dimension,
             parent_inputs,
             resources,
@@ -93,6 +95,10 @@ impl ResidentCameraProfile {
     #[cfg(test)]
     fn calibration(&self) -> &CalibrationSet {
         &self.calibration
+    }
+
+    pub(crate) fn camera(&self) -> StitchCamera {
+        self.camera
     }
 }
 
@@ -873,8 +879,12 @@ impl ResidentCaptureSession {
             fusion_inputs: Arc::new(crate::image_fusion::sample::FusionInputPipeline::new(
                 context.device(),
                 &picture_layout,
+                profile.camera,
             )),
-            fusion: Mutex::new(crate::image_fusion::gpu::Producer::new(context.device())?),
+            fusion: Mutex::new(crate::image_fusion::gpu::Producer::new(
+                context.device(),
+                profile.camera,
+            )?),
             retirements: Arc::new(IcedDrawRetirements::new(
                 context.device(),
                 IcedInstalledDrawAdapter::RETIREMENT_CAPACITY,
@@ -905,6 +915,7 @@ impl ResidentCaptureSession {
             fusion_inputs: self.fusion_inputs.clone(),
             fusion: Mutex::new(crate::image_fusion::gpu::Producer::new(
                 self.context.device(),
+                self.fusion_inputs.camera(),
             )?),
             retirements: Arc::new(IcedDrawRetirements::new(
                 self.context.device(),

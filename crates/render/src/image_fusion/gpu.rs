@@ -12,6 +12,8 @@
 
 use wgpu::util::DeviceExt;
 
+use crate::stitch_camera::StitchCamera;
+
 const MAP_NODES: u64 = 200 * 100;
 const STATE_WORDS: usize = 1_320;
 
@@ -22,6 +24,7 @@ pub struct Output {
 
 /// Retained state for one capture/session. Construct a fresh value to reset.
 pub struct Producer {
+    output_streams: [usize; 2],
     pipelines: Vec<wgpu::ComputePipeline>,
     layout: wgpu::BindGroupLayout,
     state: wgpu::Buffer,
@@ -34,7 +37,7 @@ pub struct Producer {
 }
 
 impl Producer {
-    pub fn new(device: &wgpu::Device) -> Result<Self, String> {
+    pub fn new(device: &wgpu::Device, camera: StitchCamera) -> Result<Self, String> {
         const STORAGE_BINDINGS: u32 = 11;
         const LARGEST_BINDING: u32 = (2 * MAP_NODES * 16) as u32;
         let limits = device.limits();
@@ -163,7 +166,7 @@ impl Producer {
                 fixed.push(metric.level() as u32);
             }
         }
-        for coordinate in super::coordinates::selected_x4() {
+        for coordinate in super::coordinates::for_camera_output(camera) {
             fixed.extend(coordinate.map(f32::to_bits));
         }
         let fixed = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -172,6 +175,7 @@ impl Producer {
             usage: wgpu::BufferUsages::STORAGE,
         });
         Ok(Self {
+            output_streams: camera.fusion_streams(),
             pipelines,
             layout,
             state,
@@ -290,8 +294,11 @@ impl Producer {
                 entry(8, &self.ratios),
                 entry(9, &self.blurred),
                 entry(10, &self.fixed),
-                texture_entry(11, &texture_views[0]),
-                texture_entry(12, &texture_views[1]),
+                // The solve stays in native fusion order. The returned
+                // textures, like the stitcher's packed map, stay in delivered
+                // stream order. Rebind here without another pass or copy.
+                texture_entry(11, &texture_views[self.output_streams[0]]),
+                texture_entry(12, &texture_views[self.output_streams[1]]),
             ],
         });
         // Skips republish retained ratios; global failures publish neutral

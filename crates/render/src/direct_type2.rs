@@ -1516,6 +1516,22 @@ mod tests {
                     fov: crate::projection::FOV_FLAT,
                 },
             ),
+            (
+                "reported August curved view",
+                Camera {
+                    yaw: -142.64_f32.to_radians(),
+                    pitch: -19.92_f32.to_radians(),
+                    fov: 114.41_f32.to_radians(),
+                },
+            ),
+            (
+                "ball and uncovered corners",
+                Camera {
+                    yaw: 0.73,
+                    pitch: -0.21,
+                    fov: 450_f32.to_radians(),
+                },
+            ),
         ] {
             let reframe = Reframe::new(
                 &crate::projection::tests::one_xs_lenses(),
@@ -1529,11 +1545,25 @@ mod tests {
             let cpu = map.rasterize(&reframe, size);
             let mesh = crate::map_oracle::Mesh::new(&map);
             for rasterized in [false, true] {
+                // The actual drawing route uses ray intersections beyond the
+                // flat projection threshold, not the perspective mesh shader.
+                if rasterized && camera.fov > crate::projection::FOV_FLAT {
+                    continue;
+                }
                 let gpu = on_gpu(&device, &queue, &reframe, &map, size, rasterized);
                 assert_eq!(gpu.len(), cpu.pixels.len());
                 let mut worst = 0.0f32;
                 let mut coverage_mismatch = 0usize;
                 for (index, (expected, actual)) in cpu.pixels.iter().zip(&gpu).enumerate() {
+                    let uv = [
+                        ((index % size.width as usize) as f32 + 0.5) / size.width as f32,
+                        ((index / size.width as usize) as f32 + 0.5) / size.height as f32,
+                    ];
+                    assert_eq!(
+                        expected.covered > 0.5,
+                        reframe.view_ray(uv).is_some(),
+                        "{label}, pixel {index}: reference mesh has a coverage hole"
+                    );
                     if expected.covered != actual.covered {
                         coverage_mismatch += 1;
                         continue;

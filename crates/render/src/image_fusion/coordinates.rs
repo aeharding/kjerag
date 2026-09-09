@@ -2,6 +2,7 @@
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
+use crate::stitch_camera::StitchCamera;
 use crate::studio_type2::{MAP_HEIGHT, MAP_WIDTH};
 
 const EPSILON: f32 = f32::from_bits(0x2edb_e6ff);
@@ -20,6 +21,30 @@ pub(super) fn selected_x4() -> Vec<[f32; 2]> {
 /// of the later ratio lookup sampled on a 99-step sphere.
 pub(super) fn selected_x4_band() -> Vec<[f32; 2]> {
     selected(FRAC_PI_2, 48..52, true)
+}
+
+/// Ratio-map publication coordinates in the selected camera's chart.
+///
+/// ONE X2 keeps the recovered native inverse. X4's fixed `Ry(pi)` camera
+/// datum composes that inverse to the opposite quarter turn; this evaluates
+/// the producer arithmetic directly rather than reversing its 100 sampled
+/// rows, whose polar denominator is 100 rather than 99.
+pub(super) fn for_camera_output(camera: StitchCamera) -> Vec<[f32; 2]> {
+    match camera {
+        StitchCamera::OneX2 => selected_x4(),
+        StitchCamera::CalibratedMei => selected(FRAC_PI_2, 0..MAP_HEIGHT, false),
+    }
+}
+
+/// Source-band lookup in the selected camera's packed-map chart.
+///
+/// X4's packed map has already crossed the fixed `Ry(pi)` datum at the camera
+/// boundary, so native's positive quarter turn becomes a negative one.
+pub(super) fn for_camera_band(camera: StitchCamera) -> Vec<[f32; 2]> {
+    match camera {
+        StitchCamera::OneX2 => selected_x4_band(),
+        StitchCamera::CalibratedMei => selected(-FRAC_PI_2, 48..52, true),
+    }
 }
 
 fn selected(angle: f32, rows: std::ops::Range<usize>, band: bool) -> Vec<[f32; 2]> {
@@ -158,5 +183,39 @@ mod tests {
         // Its three-quarter counterpart is 151, not a half-circle chart.
         near(coords[2 * MAP_WIDTH + 150][0], 151.0, 0.05);
         near(coords[2 * MAP_WIDTH + 150][1], 49.5, 0.05);
+    }
+
+    #[test]
+    fn one_x2_camera_helpers_preserve_the_recovered_tables_bit_for_bit() {
+        assert_eq!(for_camera_band(StitchCamera::OneX2), selected_x4_band());
+        assert_eq!(for_camera_output(StitchCamera::OneX2), selected_x4());
+    }
+
+    #[test]
+    fn x4_camera_datum_composes_both_quarter_turns_on_the_same_ray() {
+        let rotate_y = |angle: f32, [x, y, z]: [f32; 3]| {
+            let (s, c) = angle.sin_cos();
+            [c * x + s * z, y, -s * x + c * z]
+        };
+        let native = [0.25_f32, -0.5, 0.75];
+        let bridged_band = rotate_y(PI, rotate_y(FRAC_PI_2, native));
+        let direct_band = rotate_y(-FRAC_PI_2, native);
+        let bridged_output = rotate_y(PI, rotate_y(-FRAC_PI_2, native));
+        let direct_output = rotate_y(FRAC_PI_2, native);
+        for (actual, expected) in bridged_band.into_iter().zip(direct_band) {
+            near(actual, expected, 2.0e-7);
+        }
+        for (actual, expected) in bridged_output.into_iter().zip(direct_output) {
+            near(actual, expected, 2.0e-7);
+        }
+
+        assert_eq!(
+            for_camera_band(StitchCamera::CalibratedMei),
+            selected(-FRAC_PI_2, 48..52, true)
+        );
+        assert_eq!(
+            for_camera_output(StitchCamera::CalibratedMei),
+            selected(FRAC_PI_2, 0..MAP_HEIGHT, false)
+        );
     }
 }

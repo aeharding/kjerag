@@ -13,6 +13,21 @@ const FRAME: Size = Size {
 };
 
 #[test]
+fn coarse_diagnostic_uses_native_fusion_ordinals_at_the_camera_boundary() {
+    let mut mapped = vec![0u8; READBACK_BYTES as usize];
+    for (channel, value) in [0.1_f32, 0.2, 0.8, 0.7].into_iter().enumerate() {
+        mapped[channel * 4..channel * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    let one_x2 = decode_coarse_uv(&mapped, crate::stitch_camera::StitchCamera::OneX2).unwrap();
+    assert_eq!(one_x2.a[0], [0.2, 0.2]);
+    assert_eq!(one_x2.b[0], [0.6, 0.7]);
+
+    let x4 = decode_coarse_uv(&mapped, crate::stitch_camera::StitchCamera::CalibratedMei).unwrap();
+    assert_eq!(x4.a[0], [0.6, 0.7]);
+    assert_eq!(x4.b[0], [0.2, 0.2]);
+}
+
+#[test]
 fn gpu_composes_four_packed_rows_then_samples_both_source_bands() {
     let (device, queue) = match gpu() {
         Ok(gpu) => gpu,
@@ -23,7 +38,11 @@ fn gpu_composes_four_packed_rows_then_samples_both_source_bands() {
         }
     };
     let picture_layout = crate::scene::bind_group_layout(&device);
-    let pipeline = FusionInputPipeline::new(&device, &picture_layout);
+    let pipeline = FusionInputPipeline::new(
+        &device,
+        &picture_layout,
+        crate::stitch_camera::StitchCamera::OneX2,
+    );
     let reframe = Reframe::new(
         &[],
         FRAME,
@@ -122,7 +141,8 @@ fn gpu_composes_four_packed_rows_then_samples_both_source_bands() {
             [left_u, 0.2 + 0.6 * y, 0.6 + 0.3 * x, 0.8 - 0.6 * y]
         })
         .collect();
-    let lookup = super::super::coordinates::selected_x4_band();
+    let lookup =
+        super::super::coordinates::for_camera_band(crate::stitch_camera::StitchCamera::OneX2);
     let expected_composed: Vec<[f32; 4]> = lookup
         .iter()
         .copied()

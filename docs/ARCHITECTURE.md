@@ -234,7 +234,7 @@ ROI-local box filtering and original-chart remap. Its full ratio arrays start
 at one and retain the previous filtered left boundary row 40. The corrected
 binding/constant contract is `docs/research/studio-image-fusion-spatial.md`.
 The detached `prepare_one_xs_fusion_inputs` API composes the final packed map
-through the recovered positive-quarter-turn lookup into 200x4 source UVs,
+through the recovered lookup into 200x4 source UVs,
 then expands them endpoint-aligned and samples two 800x16 BGR bands. Each lens
 is bilinearly sampled locally, not through drawing's atlas box footprint.
 It retains private bindings, the exact decoded source owner and the immutable
@@ -248,6 +248,23 @@ the three 66x16 strips per lens against the last admitted means. Only an
 admitted observation area-reduces the full bands into working rows 48..51 and
 advances the solve/ratio history. The CPU gate retains binary64 mean arithmetic.
 Source-map provenance and video scheduling remain the reference caller's responsibility.
+
+The admitted camera profile now carries the photometric coordinate boundary
+as well as geometry. Native X4 fusion ordinals are delivered streams `[1,0]`,
+and its native sphere differs from Kjerag's established chart by `Ry(pi)`,
+the same fixed datum used in `x4_model6_static`. Composing the native source
+lookup gives `Ry(-pi/2)` against the Kjerag packed map; composing the native
+ratio lookup gives `Ry(+pi/2)` in the renderer's chart. Input bindings and final
+texture bindings perform the lens exchange, without copies or additional
+passes. ONE X2 keeps its original positive input/negative output lookups and
+`[0,1]` lens order. The solve and temporal history remain in native fusion
+order for both. `FusionInputs::new_reference()` creates a matching cold CPU
+diagnostic with renderer-ordered outputs; `spatial::Reference::new()` remains
+the unconverted native replay boundary. Detached sampling replaces its cache
+when the admitted camera changes, and a seek preserves the camera conversion
+while resetting color history. The X4 correction is under moving-video owner
+review, not accepted parity; see `studio-image-fusion-temporal-602.md`.
+
 Existing sparse arithmetic, box
 reductions and trigonometric implementations are not claimed numerically
 identical to Studio. Neither reference is selected by ordinary playback.
