@@ -14,6 +14,27 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Selected pulse attenuates in Studio's post-filter stage, 2026-09-09:** the
+follow-up now authenticates both selected sources from final stitch output
+through the image-chain input to AlgoFrameEnd and captures all four post-filter
+Y/UV patches. At the unchanged earlier607 event, the shared-motion green
+residual decreases from1.273177 to0.400292 codes before encoding; direct luma
+decreases from1.222739 to0.420283. This locates attenuation inside the observed
+Defringe/BlockDenois image chain for that event, not specifically in one filter
+or in all owner-reported flicker. Encoder identity remains unclosed despite
+observing through the finished63-frame export. The post-filter result does not
+depend on that missing link. New612 Studio coverage remains absent.
+
+A new opt-in GPU/reference regression covers31 saved X4 observations, four
+admissions and27 bit-exact held GPU outputs; maximum reference discrepancy is
+0.0000667572. All70 image-fusion checks pass with both camera fixtures; five
+opt-in checks remain ignored in that filtered suite, with the new warm test run
+separately and passing. This is implementation consistency, not flicker
+acceptance. No production arithmetic or installed app changes. The owner has
+been asked whether to test a Kjerag-specific gradual color-correction update
+with roughly0.1s catch-up instead of full-picture filtering. That possible
+tradeoff is not yet accepted and no such policy is implemented.
+
 **Post-stitch filter chain observed, 2026-09-09:** the existing follow-up
 export selects `MediaRender -> ImageAlgoNode`, whose instantiated internal
 chain is `Defringe -> BlockDenois -> AlgoFrameEnd`. This is a concrete reason

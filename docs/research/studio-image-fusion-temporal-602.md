@@ -1565,3 +1565,122 @@ This remains an unresolved final-output-to-post-filter pixel boundary, with
 no Studio coverage for the owner's new612.078 view and no new player candidate.
 The installed build remains rejected. No invented smoother or further broad
 optimization reverse engineering is justified by this incomplete capture.
+
+### Final-to-post-filter pixel boundary captured, 2026-09-09
+
+The next bounded run, `mac-handoff-20260909-03`, reuses the unchanged frozen
+observer and supplement, the same project hash, source interval and export
+settings. The supplement is armed at the first selected final stop rather
+than the second. Both sources18214/18215 match original MediaSample/control
+and AVFrame/control/CVPixelBuffer at the ImageAlgo head. Their exact retained
+AlgoFrameInfo pointer/control pairs, FramePosition and original VideoFrameInfo
+then match at the AlgoFrameEnd callback. This closes the association even
+though the post-filter MediaSample and AVFrame are different objects.
+
+The earlier detachment was premature for a queued pipeline. The complete
+static callback audit finds only the one normal AlgoFrameEnd callback site,
+`0x772960`, not another already-AVFrame route. BlockDenois stores incoming
+AlgoFrameInfo shared pointers in a queue and later associates results with
+queued objects at`0x797208..0x797318` or`0x7979d4..0x797b1c`. The new run
+actually observes both selected post-filter callbacks on the BlockDenois
+thread. This is stronger than inferring selected-frame progress from unrelated
+hook counts. A later duplicate head address was rejected; once both valid
+head associations existed, further head collection was disabled.
+
+All four selected post-filter planes were captured with duplicate logical-row
+reads agreeing, read-only lock/unlock return values zero, no uncertain
+transaction, format420f and unchanged7680x3840 dimensions. Both final-output
+patches still exactly match capture01. The same-source post-filter patches
+are different: Y mean absolute changes are3.680/3.767 codes and UV changes
+1.768/1.786, with maximum absolute byte change10 for each plane. Those are
+byte-domain differences, not a perceptual severity estimate. Inspection of
+the actual saved post-filter patch confirms the expected ground structure;
+it does not constitute a moving-video acceptance test.
+
+`analyze-post-filter.py` and `handoff-post-filter-02/receipt.json` reuse the
+unchanged accepted rotation, view pixel(685,300), sigma8,9x17 event patch and
+common motion field from the exact-native-coefficient Kjerag diagnostic. Both
+stages use identical full-range NV12 conversion. Native RGB still assumes
+the movie's BT.709 matrix; direct Y bypasses that assumption.
+
+| Selected signed event residual, codes | Final stitch output | Post-filter output |
+| --- | ---: | ---: |
+| Green, common texture motion | 1.273177 | 0.400292 |
+| Direct luma, common texture motion | 1.222739 | 0.420283 |
+| Green, zero-motion control | 1.207120 | 0.323580 |
+| Direct luma, zero-motion control | 1.145891 | 0.330988 |
+
+Thus the already-observed final/movie attenuation is present at the end of
+the image-processing chain, before encoding. The evidence localizes it to
+the combined Defringe/BlockDenois stage for this event; it does not separate
+those two filters, identify their complete arithmetic, establish a general
+flicker detector, or explain every ordinary-production update. In particular,
+the ordinary producer has a different history and an already smaller pulse
+at this particular bin, as recorded in the earlier analysis.
+
+Post-to-encoder identity remains unresolved. The unchanged selected preencoder
+site receives158 calls through completion but never the captured post-filter
+AVFrame/control pair. No selected encoder pixels were read and no encoder-PTS
+link is claimed. Independently, NV12, Y and UV matching over all63 movie
+patches select movie indices6/7 for the two captured post-filter patches.
+That is pixel correspondence, not an upgrade of the missing identity link.
+The newly encoded movie's green/luma residuals at those inferred indices are
+0.200221/0.366463 with the common motion field; they are not identical to the
+post-filter bytes or the earlier movie. The post-filter-stage finding rests
+on the directly authenticated pre/post pair, not on assuming codec identity.
+
+The export finished63 frames, the project hash stayed unchanged, and the
+debugger detached and exited with no pending or uncertain snapshots. The
+durable capture's `run-01/session-post-filter.json` explicitly separates
+`final_to_post_complete=true` from `post_to_encoder_complete=false`.
+SHA-256 values:
+
+- Post-filter session: `b8c618d559b2303e43f3ce573619382622185dd280a0955ee92432a672ab2801`.
+- Final event log: `8141c863f57c6d0988bb3f07266a71362faaa1ea0c8072cfa8573872868d3daf`.
+- Movie: `4fe80b6498408a63c1a2bd220bb47957477828a76b1bf09ff0ccb37f5d89595c`.
+- Analysis02 receipt: `16b5dda76437015dc2c603d07edd3bda2c8533b4002e3a735cef30fed2a5154e`.
+
+Analysis01 ran while the event log was still growing. Its exact sealed input
+prefix was recovered and saved as `events-input-snapshot.jsonl` alongside its
+original script, rather than treating the later larger event log as the same
+hashed input. Analysis02 consumes the final detached-session artifacts.
+All captures and analysis remain in worktree scratch, not/tmp.
+
+### Captured warm GPU/reference regression
+
+`image_fusion::gpu::tests::captured_warm_sequence_matches_reference_on_every_publish_and_hold`
+adds missing multiframe implementation coverage without new source sampling
+or altered arithmetic. It reads existing saved800x16 BGR input bands and
+212x4 invalid bytes in manifest order, advances one GPU Producer and one
+readable camera-specific Reference, compares every output map with the existing
+ratio tolerance and requires bit-exact retention on every reference hold.
+It also requires a warm update and a hold, so a cold-only fixture cannot pass.
+
+With `KJERAG_FUSION_SEQUENCE_FIXTURE` pointing to
+`scratch/studio-seam-ab-20260908-01/april-full-overlap-01/frames/fusion-inputs`,
+the real RADV GPU run covers31 contiguous X4 sources18209..18239: four
+admissions,27 holds, maximum GPU/reference error0.0000667572. The filtered
+image-fusion suite also passes70 tests with both saved camera fixtures; five
+opt-in tests are ignored in that suite, and the new ignored warm test is run
+separately and passes. The initial sandbox run correctly refused a missing
+Vulkan adapter; the reported passes are the subsequent real-GPU runs, not
+that failure or a no-adapter skip. The release test binary links ffmpeg7.1.
+
+Logs/source patch/binary hash are retained in
+`scratch/studio-seam-flicker-612-20260909-01/warm-sequence-qualification-02`.
+The warm log SHA-256 is
+`3686e0a0df3662cf5bf7d0a8763b1d1883124095c924002b28c2d9170f4f572b`.
+This rerun follows a lint-only assertion rewrite; the earlier01 receipt is
+also retained. Focused release Clippy for the render tests, formatting, name,
+crate-source and diff checks pass. Existing vendored dependency warnings are
+still reported; no dependency cleanup is included.
+No full workspace/UI/Flatpak gate is claimed for this test-only addition,
+and no production arithmetic or installed executable changed.
+
+The owner has been asked whether to evaluate gradual changes of the color
+correction itself, preserving image detail but allowing roughly0.1s of color
+catch-up, instead of implementing full-picture filtering. This is explicitly
+a possible Kjerag design choice, not a recovered Studio constant or approved
+tradeoff. No such policy is implemented or installed at this checkpoint.
+The exact612.078 report still has no Studio output coverage or owner-accepted
+fix; the full flicker-free objective remains unmet.

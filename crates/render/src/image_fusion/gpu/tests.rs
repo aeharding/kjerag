@@ -570,6 +570,112 @@ fn captured_x4_and_x2_bands_track_cpu_reference_outputs() {
 }
 
 #[test]
+#[ignore = "requires a saved multi-frame fusion-input sequence"]
+fn captured_warm_sequence_matches_reference_on_every_publish_and_hold() {
+    let root = PathBuf::from(
+        std::env::var_os("KJERAG_FUSION_SEQUENCE_FIXTURE")
+            .expect("KJERAG_FUSION_SEQUENCE_FIXTURE must name a fusion-inputs directory"),
+    );
+    let Some((device, queue)) = gpu() else { return };
+    let manifest = std::fs::read_to_string(root.join("manifest.tsv")).unwrap();
+    let rows: Vec<_> = manifest
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with("frame\t"))
+        .map(|line| {
+            let fields: Vec<_> = line.split('\t').collect();
+            assert_eq!(fields.len(), 6, "malformed fusion sequence row: {line}");
+            (
+                fields[0].parse::<u64>().unwrap(),
+                fields[1].to_owned(),
+                fields[2].to_owned(),
+                fields[3].to_owned(),
+            )
+        })
+        .collect();
+    assert!(rows.len() > 2, "fusion sequence has no warm observations");
+    assert!(
+        rows.windows(2).all(|pair| pair[1].0 == pair[0].0 + 1),
+        "fusion sequence source indices are not contiguous"
+    );
+    let observations = rows.len();
+    let first_source = rows.first().unwrap().0;
+    let last_source = rows.last().unwrap().0;
+
+    let mut producer = Producer::new(&device, StitchCamera::CalibratedMei).unwrap();
+    let mut reference = super::super::spatial::Reference::for_camera(StitchCamera::CalibratedMei);
+    let mut held = None;
+    let mut previous_actual = None;
+    let mut admissions = 0;
+    let mut holds = 0;
+    let mut worst_error = 0.0f32;
+    for (frame, left, right, invalid) in rows {
+        let left = std::fs::read(root.join(left)).unwrap();
+        let right = std::fs::read(root.join(right)).unwrap();
+        let invalid = std::fs::read(root.join(invalid)).unwrap();
+        let reference_output = reference.observe_bands([&left, &right], &invalid).unwrap();
+        let admitted = reference_output.is_some();
+        if let Some(output) = reference_output {
+            admissions += 1;
+            held = Some(output.ratios);
+        } else {
+            holds += 1;
+        }
+        let expected = held
+            .as_ref()
+            .expect("the first fusion sequence observation was not admitted");
+        let actual = observe(
+            &device,
+            &queue,
+            &mut producer,
+            [&left, &right],
+            &invalid,
+            u32::MAX,
+        );
+        let worst = max_error(
+            &actual,
+            [&expected.left.values()[..], &expected.right.values()[..]],
+        );
+        worst_error = worst_error.max(worst);
+        assert!(
+            worst <= RATIO_TOLERANCE,
+            "frame {frame} GPU/reference worst ratio error {worst} exceeds {RATIO_TOLERANCE}"
+        );
+        if !admitted {
+            assert_bit_exact_hold(
+                frame,
+                previous_actual
+                    .as_ref()
+                    .expect("the first fusion sequence observation was held"),
+                &actual,
+            );
+        }
+        previous_actual = Some(actual);
+    }
+    assert!(admissions > 1, "fusion sequence has no warm update");
+    assert!(
+        admissions < observations,
+        "fusion sequence has no retained hold"
+    );
+    eprintln!(
+        "fusion warm sequence sources={first_source}..={last_source} observations={observations} admissions={admissions} holds={holds} worst_error={worst_error}"
+    );
+}
+
+fn assert_bit_exact_hold(frame: u64, previous: &[Vec<[f32; 4]>; 2], actual: &[Vec<[f32; 4]>; 2]) {
+    for lens in 0..2 {
+        for (node, (previous, actual)) in previous[lens].iter().zip(&actual[lens]).enumerate() {
+            for channel in 0..4 {
+                assert_eq!(
+                    previous[channel].to_bits(),
+                    actual[channel].to_bits(),
+                    "held frame {frame} changed GPU ratio at lens {lens}, node {node}, channel {channel}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn profile_captured_producer_stages_when_requested() {
     if std::env::var_os(PROFILE_ENV).is_none() {
         eprintln!("skipping image fusion GPU profile: {PROFILE_ENV} is unset");
