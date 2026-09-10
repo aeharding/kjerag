@@ -58,6 +58,17 @@ The shell is libcosmic, which pins wgpu 28, so `render` is written against
 28 and owns the one module that wgpu 30 would delete
 (`crates/render/src/dmabuf.rs`).
 
+`render::temporal_fusion` is an unconnected post-stitch primitive, not a
+selected player path. It consumes explicit full-range NV12 image arrays,
+current-to-reference displacement/confidence grids, a luma-index grid and
+effective fusion parameters. Two render passes produce GPU-owned R8/RG8
+planes without queue submission, CPU waits or readback. Studio's selected
+implementation uses compute; narrow render targets are Kjerag's execution
+choice. The caller must supply prepared images and own source association,
+history, seek epochs and completion. None of that scheduling is supplied by
+this primitive. Saved native input/output tests establish its bounded
+arithmetic result, not a complete temporal pipeline or performance verdict.
+
 The shell's pinned `iced_wgpu` renderer is locally patched to request the
 adapter's supported storage-buffer count. Its fixed default of eight caused
 the resident ONE X2 pipeline to panic at startup in the window, despite

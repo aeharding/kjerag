@@ -14,6 +14,18 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**GPU temporal-fusion primitive, 2026-09-10:** the recovered normalized
+pixel fusion now runs on the AMD GPU with explicit image history, motion,
+luma grids and parameters. Both saved native input packets pass a maximum
+one-code output difference: 396,604 of 405,756 components are exact and
+9,152 differ by one code. This is less numerically exact than the CPU
+reference, not a perceptual acceptance or a player-performance result.
+Synthetic checks cover reference ordering, separate Y/UV confidence, signed
+chroma displacement, rejection and limits. Encoding adds no CPU wait.
+The primitive is not selected by playback: motion production, prepared
+panorama history and source-stamped scheduling remain unfinished. No invented
+gradual color update, installed build change, new export or 612-second fix.
+
 **Denoiser inputs captured, 2026-09-10:** the unchanged earlier607 project
 now has same-call input/output receipts for sources18214/18215. Both selected
 frames use six references around current, ISO100, effective noise/limit700/10,

@@ -1959,3 +1959,80 @@ The motion/confidence producer, broader ISO-dependent calibration and a
 standalone Kjerag temporal path remain unclosed, as does moving output
 verification. No player change, installation, owner retest,
 merge or612 Studio coverage is added here.
+
+### GPU normalized fusion primitive, 2026-09-10
+
+`crates/render/src/temporal_fusion.rs` and its original WGSL now implement
+the selected full-range normalized fuse with explicit current/reference
+layers, motion/confidence grids, luma indices and effective parameters.
+There are no inferred defaults, lens-color interpolation, history updates
+or player selection. Y and UV use separate render passes into R8Unorm and
+Rg8Unorm targets; this differs from Studio's compute execution to avoid
+requiring optional narrow storage-texture formats. Encoding performs no
+submission, CPU synchronization or pixel readback. Output allocation and
+small parameter-buffer construction are not yet pooled.
+
+On the owner's AMD Radeon 760M / RADV, three ordinary tests pass: explicit
+layer ordering and separate Y/UV confidence, negative odd UV displacement
+with independent U/V rejection and luma-table limits, and invalid-input
+rejection. The opt-in native-packet test verifies the sealed packet/source
+associations and replays both captured input sets into their original
+full-size texture coordinates, including the nonzero output ROI.
+
+| Source | Y differences / samples | UV component differences / samples | Maximum code difference |
+|---|---:|---:|---:|
+|18214|2119/135252|2343/67626|1|
+|18215|2145/135252|2545/67626|1|
+
+Thus 396,604 of 405,756 components match exactly; 9,152 differ by one code.
+This GPU result is less numerically exact than the preceding CPU reference.
+The difference's cause is not isolated, and the one-code test tolerance is
+not an owner-approved visible tradeoff. No coefficients or thresholds were
+fitted to these differences. This is a same-input kernel check, not full
+image quality, 240 fps capacity or a flicker acceptance. Durable test receipt:
+`scratch/studio-seam-flicker-612-20260909-01/denoise-gpu-01/results.json`.
+
+The integration boundary must remain view-independent: prepare a body-space
+panorama once per exact source/map/color result, retain the input window,
+and publish the denoised current frame with its own source stamp. Redraws
+must not advance temporal history. The existing media lookahead provides
+two future sources, whereas this captured centered window needs three.
+At the captured 7680x3840 geometry, seven NV12 inputs and one output alone
+occupy 337.5 MiB, before motion grids, retirement or decode resources.
+Those resource and scheduling changes are not implemented here.
+
+A bounded static read also locates independent current-to-reference calls
+through `BlockFlow::ComputeFlow`, raw three-i32 motion/cost records and
+Studio's separate confidence packing. Its `PlaneOfBlocks::PseudoEPZSearch`
+and recalculation routines strongly match the MVTools family: the primary
+[motion core](https://github.com/pinterf/mvtools/blob/mvtools-pfmod/Sources/PlaneOfBlocks.cpp)
+and [parameter documentation](https://github.com/pinterf/mvtools/blob/mvtools-pfmod/Documentation/mvtools2.html)
+offer a source-reference route instead of reconstructing the entire search
+from assembly. Matching names and structure do not authenticate Studio's
+runtime geometry or output. No upstream code is imported in this change.
+The bounded source/license comparison and static receipts are in sibling
+`temporal-flow-upstream-01/` and `temporal-flow-law-01/`.
+
+One static-note correction matters: the selected fast-resolution level was
+not captured. Init reads a shift from backend+0x464; the saved backend slice
+does not include that field. DenoiseInfo+0x14 is a boolean and +0x18 is the
+radius, neither establishes that shift. Do not infer a one-level downscale
+from those fields or the final motion-grid dimensions. Motion generation,
+broader ISO calibration, live scheduling, moving output and the new 612
+Studio comparison remain open. No new native session, export, installation
+or merge occurred for this GPU check.
+
+The subsequent bounded constructor read finds the default geometry words
+`(16,16,1,10)` at 0x4118430, loaded into backend+0x45c..+0x468.
+Thus +0x464 has constructor default 1, not a selected-runtime receipt.
+`BlockDenoiseMetal::Init` also forces block size 16. Overlap is a higher
+caller's stack argument, stored at +0x44c/+0x450, and remains unread for
+this instance; exact pyramid depth consequently remains unread too.
+
+Qualification for the isolated change: the full render suite passes 887
+tests with 29 opt-in tests ignored. After an equivalent Clippy-requested
+even-size validation change, all four temporal checks pass again, including
+the native packets with identical difference counts. Workspace all-target
+Clippy, formatting, name and crate-source checks pass. Full workspace tests
+and the UI harness were not run for this unconnected primitive; this is not
+a player delivery qualification.

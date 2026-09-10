@@ -39,6 +39,9 @@ pub mod seam;
 mod stall;
 mod stitch_camera;
 pub mod studio_type2;
+/// Full-range temporal pixel fusion with explicit prepared history and motion.
+/// An isolated primitive, not yet selected by player scheduling.
+pub mod temporal_fusion;
 /// The shader and its Rust mirror, asked the same question on a real GPU
 /// (`src/twin.rs`). Tests only: it exists because a change to one half and not
 /// the other used to pass the whole suite.
