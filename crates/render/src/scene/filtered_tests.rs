@@ -91,6 +91,26 @@ fn x4_filtered_scene_preserves_exact_source_ownership() {
 }
 
 #[test]
+fn x4_filtered_scene_preserves_607_blotch_review_sources() {
+    let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
+        return;
+    };
+    // Begin at the same real source as the accepted offline 607 sequence.
+    // Its first complete seven-source center is 18211; the first three
+    // startup outputs are not used in that moving comparison.
+    assert_filtered_scene(
+        Path::new(&path),
+        Duration::from_micros(607_540_267),
+        Camera {
+            yaw: -76.84_f32.to_radians(),
+            pitch: -55.87_f32.to_radians(),
+            fov: 108.79_f32.to_radians(),
+        },
+        std::env::var_os("KJERAG_FILTERED_REVIEW_607_DIR").map(PathBuf::from),
+    );
+}
+
+#[test]
 fn one_x2_filtered_scene_preserves_exact_source_ownership() {
     let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
         return;
@@ -140,11 +160,40 @@ fn assert_filtered_scene(
         Camera::default(),
         None,
     );
+    let prepared_stats = scene.stats().unwrap();
     assert_eq!(
-        scene.stats().unwrap(),
-        stats,
-        "paused preparation changed player stats"
+        Stats {
+            audio: None,
+            ..prepared_stats
+        },
+        Stats {
+            audio: None,
+            ..stats
+        },
+        "paused preparation changed video accounting"
     );
+    // Audio decoding may fill the ring while paused. Only its queued level
+    // may grow; playback accounting and the presentation clock must not move.
+    match (stats.audio, prepared_stats.audio) {
+        (Some(before), Some(after)) => {
+            assert_eq!(
+                (after.underruns, after.dropped, after.offset, after.worst),
+                (
+                    before.underruns,
+                    before.dropped,
+                    before.offset,
+                    before.worst
+                ),
+                "paused preparation changed audio accounting"
+            );
+            assert!(
+                after.queued >= before.queued,
+                "paused preparation consumed queued audio"
+            );
+        }
+        (None, None) => {}
+        _ => panic!("paused preparation changed audio-device ownership"),
+    }
     assert_eq!(scene.position(Instant::now()), position);
     assert_eq!(filtered.accepted_stamp().unwrap().unwrap().index(), 6);
     assert!(!raw.acknowledged(&first).unwrap());

@@ -101,18 +101,27 @@ Its `stream` child supplies worker-owned full-picture execution, automatically
 selected for supported live captures. Seven real sources emit startup
 centers0..3, steady center3 and flush4..6. The source's matrix and retained
 automatic settings travel with its exact stamp. Full RGB/NV12 conversion,
-GPU pyramid/finest refinement/fusion and temporary CPU coarse search reuse the
-existing candidate. Readback and completion waits use callbacks with nonblocking
-device polls on a separate serial temporal worker, never a blocking fence wait. These
-CPU steps are still a performance limitation, not a GPU-residency claim.
-Independent coarse reference searches use at most six scoped threads with
-unchanged per-reference serial arithmetic and ordered results. Only levels one
-through six return to the CPU; the finest level remains a packed GPU image.
-On x86-64, SAD checks both complete16-row footprints before an unaligned SSE2
-leaf. It accumulates two bounded64-bit lanes and reduces once, avoiding repeated
-row arithmetic/checks while preserving every byte difference and search tie.
-The safe portable expression remains the non-x86 path and a test oracle.
-The coarse-only API takes explicit finest geometry without dummy CPU pixels.
+GPU pyramid/search/refinement/fusion now use resident images throughout. Arrival
+encodes all seven packed motion-pyramid levels and submits without waiting for
+CPU pixels. Coarse levels six through one produce GPU motion records; histogram,
+global prediction and seed interpolation feed the next level directly, followed
+by the finest search. Motion packing reads the retained level-three luma texture,
+not an uploaded CPU copy. Source stamps and effective settings remain in the
+same seven-source history. Same-queue ordering establishes preparation/search
+dependencies; only final filtered-output publication waits for completion, using
+callbacks and nonblocking device polls on the temporal worker.
+
+This candidate deliberately changes coarse search execution semantics: blocks
+read immutable same-level predictors instead of serially updated neighbours,
+and omit the row-major bad-block counter and adaptive UMH recovery. Level order,
+strict candidate ties, penalties, fixed-center radius-two search, global
+prediction and interpolation remain. Both the preceding serial CPU oracle and a
+readable CPU reference for the new independent-block candidate remain available.
+GPU/CPU candidate equality does not establish Studio-like moving output. This
+architecture is undergoing visual and playback qualification, not an accepted
+seam-quality or performance result. GPU work still has dependent levels and one
+large filter submission/completion boundary per output; GPU residency alone does
+not establish smooth drawing or full-rate playback.
 RGB conversion writes directly into the arriving source's resident history
 layer, using the same R8/RG8 targets and quantization. Its typed single-layer
 luma view supplies the pyramid without allocating and copying another NV12 pair.

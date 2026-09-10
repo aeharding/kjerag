@@ -6,6 +6,9 @@
 //! records work; it does not submit, wait, read back, or select frame history.
 
 use std::fmt;
+use std::sync::OnceLock;
+
+use super::coarse::prepare::Prepared;
 
 use crate::temporal_fusion::pyramid::gpu::PackedGray;
 use wgpu::util::DeviceExt;
@@ -47,6 +50,8 @@ pub enum Error {
         globals: usize,
     },
     Geometry,
+    CoarseGeometry,
+    ResidentSeeds,
     SeedCount {
         ordinal: usize,
         expected: usize,
@@ -78,6 +83,12 @@ impl fmt::Display for Error {
             Self::Geometry => formatter.write_str(
                 "parallel finest refinement needs equal image dimensions from 1024 through 8191",
             ),
+            Self::CoarseGeometry => formatter.write_str(
+                "parallel coarse search needs equal image dimensions from 16 through 4095",
+            ),
+            Self::ResidentSeeds => formatter.write_str(
+                "resident motion seeds differ from the search geometry or reference count",
+            ),
             Self::SeedCount {
                 ordinal,
                 expected,
@@ -104,6 +115,20 @@ pub struct Builder {
     device: wgpu::Device,
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
+    coarse: OnceLock<[wgpu::ComputePipeline; 2]>,
+}
+
+#[derive(Clone, Copy)]
+enum Mode {
+    Finest,
+    Coarse,
+    Smallest,
+}
+
+struct Inputs<'a> {
+    seeds: &'a wgpu::Buffer,
+    globals: &'a wgpu::Buffer,
+    mode: Mode,
 }
 
 impl Builder {
@@ -169,6 +194,7 @@ impl Builder {
             device: device.clone(),
             layout,
             pipeline,
+            coarse: OnceLock::new(),
         }
     }
 
@@ -187,25 +213,7 @@ impl Builder {
     ) -> Result<Output, Error> {
         let reference_count =
             validate_reference_count(references.len(), seeds.len(), globals.len())?;
-        if self.device != *device
-            || current.device() != device
-            || references.iter().any(|image| image.device() != device)
-        {
-            return Err(Error::ForeignDevice);
-        }
-        let [width, height] = current.logical_size();
-        if !(MIN_DIMENSION..MAX_DIMENSION_EXCLUSIVE).contains(&width)
-            || !(MIN_DIMENSION..MAX_DIMENSION_EXCLUSIVE).contains(&height)
-        {
-            return Err(Error::Geometry);
-        }
-        for reference in references {
-            if reference.logical_size() != [width, height] {
-                return Err(Error::Geometry);
-            }
-        }
-
-        let blocks = [width / BLOCK, height / BLOCK];
+        let blocks = self.validate_images(device, current, references, Mode::Finest)?;
         let records_per_reference = usize::try_from(u64::from(blocks[0]) * u64::from(blocks[1]))
             .map_err(|_| Error::Geometry)?;
         for ordinal in 0..reference_count {
@@ -243,15 +251,6 @@ impl Builder {
             contents: &seed_bytes,
             usage: wgpu::BufferUsages::STORAGE,
         });
-        let output_size = u64::try_from(records_per_reference).map_err(|_| Error::Geometry)?
-            * reference_count as u64
-            * RECORD_BYTES;
-        let raw = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("parallel finest temporal records"),
-            size: output_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
         let global_bytes: Vec<u8> = globals
             .iter()
             .flat_map(|global| global.iter().flat_map(|value| value.to_le_bytes()))
@@ -262,6 +261,193 @@ impl Builder {
             usage: wgpu::BufferUsages::STORAGE,
         });
 
+        Ok(self.encode_bound(
+            device,
+            encoder,
+            current,
+            references,
+            Inputs {
+                seeds: &seed_buffer,
+                globals: &global_buffer,
+                mode: Mode::Finest,
+            },
+        ))
+    }
+
+    /// Consume seeds produced entirely on the GPU, without a readback/upload.
+    pub fn encode_finest_resident(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        current: &PackedGray,
+        references: &[&PackedGray],
+        prepared: &Prepared,
+    ) -> Result<Output, Error> {
+        let blocks = self.validate_images(device, current, references, Mode::Finest)?;
+        validate_prepared(device, blocks, references.len(), prepared)?;
+        Ok(self.encode_bound(
+            device,
+            encoder,
+            current,
+            references,
+            Inputs {
+                seeds: prepared.seeds(),
+                globals: prepared.globals(),
+                mode: Mode::Finest,
+            },
+        ))
+    }
+
+    /// Record one independently parallel coarse plane. Only the smallest
+    /// plane may start without a completed coarser plane's prepared inputs.
+    pub fn encode_coarse_resident(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        current: &PackedGray,
+        references: &[&PackedGray],
+        prepared: Option<&Prepared>,
+    ) -> Result<Output, Error> {
+        let mode = if prepared.is_some() {
+            Mode::Coarse
+        } else {
+            Mode::Smallest
+        };
+        let blocks = self.validate_images(device, current, references, mode)?;
+        if let Some(prepared) = prepared {
+            validate_prepared(device, blocks, references.len(), prepared)?;
+            return Ok(self.encode_bound(
+                device,
+                encoder,
+                current,
+                references,
+                Inputs {
+                    seeds: prepared.seeds(),
+                    globals: prepared.globals(),
+                    mode,
+                },
+            ));
+        }
+        // WebGPU initializes these private buffers to zero before their first
+        // use. This is the smallest plane's explicit zero-seed law, not a
+        // fallback when a predecessor failed or went missing.
+        let buffer = |label, size| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        };
+        let seeds = buffer(
+            "smallest motion zero seeds",
+            u64::from(blocks[0]) * u64::from(blocks[1]) * references.len() as u64 * RECORD_BYTES,
+        );
+        let globals = buffer("smallest motion zero globals", references.len() as u64 * 8);
+        Ok(self.encode_bound(
+            device,
+            encoder,
+            current,
+            references,
+            Inputs {
+                seeds: &seeds,
+                globals: &globals,
+                mode,
+            },
+        ))
+    }
+
+    fn validate_images(
+        &self,
+        device: &wgpu::Device,
+        current: &PackedGray,
+        references: &[&PackedGray],
+        mode: Mode,
+    ) -> Result<[u32; 2], Error> {
+        validate_reference_count(references.len(), references.len(), references.len())?;
+        if self.device != *device
+            || current.device() != device
+            || references.iter().any(|image| image.device() != device)
+        {
+            return Err(Error::ForeignDevice);
+        }
+        let [width, height] = current.logical_size();
+        let (range, error) = match mode {
+            Mode::Finest => (MIN_DIMENSION..MAX_DIMENSION_EXCLUSIVE, Error::Geometry),
+            Mode::Coarse => (BLOCK..MAX_DIMENSION_EXCLUSIVE / 2, Error::CoarseGeometry),
+            Mode::Smallest => (BLOCK..MAX_DIMENSION_EXCLUSIVE / 64, Error::CoarseGeometry),
+        };
+        if !range.contains(&width)
+            || !range.contains(&height)
+            || references
+                .iter()
+                .any(|image| image.logical_size() != [width, height])
+        {
+            return Err(error);
+        }
+        Ok([width / BLOCK, height / BLOCK])
+    }
+
+    fn pipeline(&self, mode: Mode) -> &wgpu::ComputePipeline {
+        let at = match mode {
+            Mode::Finest => return &self.pipeline,
+            Mode::Coarse => 0,
+            Mode::Smallest => 1,
+        };
+        &self.coarse.get_or_init(|| {
+            let layout = self
+                .device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("independent coarse temporal search"),
+                    bind_group_layouts: &[&self.layout],
+                    immediate_size: 0,
+                });
+            let shader = self
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("independent coarse temporal search"),
+                    source: wgpu::ShaderSource::Wgsl(include_str!("gpu.wgsl").into()),
+                });
+            [false, true].map(|smallest| {
+                self.device
+                    .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                        label: Some("independent coarse temporal search"),
+                        layout: Some(&layout),
+                        module: &shader,
+                        entry_point: Some("refine_blocks"),
+                        compilation_options: wgpu::PipelineCompilationOptions {
+                            constants: &[
+                                ("COARSE", 1.0),
+                                ("SMALLEST", if smallest { 1.0 } else { 0.0 }),
+                            ],
+                            ..Default::default()
+                        },
+                        cache: None,
+                    })
+            })
+        })[at]
+    }
+
+    fn encode_bound(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        current: &PackedGray,
+        references: &[&PackedGray],
+        inputs: Inputs<'_>,
+    ) -> Output {
+        let [width, height] = current.logical_size();
+        let blocks = [width / BLOCK, height / BLOCK];
+        let reference_count = references.len();
+        let raw = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("parallel temporal motion records"),
+            size: u64::from(blocks[0])
+                * u64::from(blocks[1])
+                * reference_count as u64
+                * RECORD_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
         let current_view = current.texture().create_view(&Default::default());
         let reference_views: Vec<_> = references
             .iter()
@@ -299,7 +485,7 @@ impl Builder {
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: seed_buffer.as_entire_binding(),
+                            resource: inputs.seeds.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 3,
@@ -311,7 +497,7 @@ impl Builder {
                         },
                         wgpu::BindGroupEntry {
                             binding: 5,
-                            resource: global_buffer.as_entire_binding(),
+                            resource: inputs.globals.as_entire_binding(),
                         },
                     ],
                 })
@@ -321,19 +507,34 @@ impl Builder {
             label: Some("parallel finest temporal refinement"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(self.pipeline(inputs.mode));
         for group in &groups {
             pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(blocks[0], blocks[1], 1);
         }
 
-        Ok(Output {
+        Output {
             raw,
             device: self.device.clone(),
             blocks,
             references: reference_count as u32,
-        })
+        }
     }
+}
+
+fn validate_prepared(
+    device: &wgpu::Device,
+    blocks: [u32; 2],
+    references: usize,
+    prepared: &Prepared,
+) -> Result<(), Error> {
+    if prepared.device() != device {
+        return Err(Error::ForeignDevice);
+    }
+    if prepared.blocks() != blocks || prepared.reference_count() as usize != references {
+        return Err(Error::ResidentSeeds);
+    }
+    Ok(())
 }
 
 fn validate_reference_count(

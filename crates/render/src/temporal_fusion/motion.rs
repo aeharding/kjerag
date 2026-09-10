@@ -25,6 +25,21 @@ pub struct Parameters<'a> {
     pub phase: f64,
 }
 
+/// Captured/calibrated motion-packing inputs whose luma remains GPU-resident.
+///
+/// This is the same scalar contract as [`Parameters`]. The typed resident
+/// pyramid supplies the luma plane, so this descriptor cannot invite a dummy
+/// CPU image merely to pass host-side validation.
+pub struct ResidentParameters<'a> {
+    pub geometry: Geometry,
+    pub confidence_y: &'a [f32; 256],
+    pub confidence_uv: &'a [f32; 256],
+    pub scale_base: i32,
+    pub scale_extra: i32,
+    pub temporal: f32,
+    pub phase: f64,
+}
+
 fn checked_area(size: [u32; 2], what: &str) -> Result<usize, String> {
     let area = size[0]
         .checked_mul(size[1])
@@ -37,7 +52,41 @@ fn validate(raw: &[[i32; 3]], parameters: &Parameters<'_>) -> Result<(), String>
 }
 
 fn validate_count(raw_count: usize, parameters: &Parameters<'_>) -> Result<(), String> {
-    let geometry = parameters.geometry;
+    validate_common(
+        raw_count,
+        parameters.geometry,
+        parameters.confidence_y,
+        parameters.confidence_uv,
+        parameters.temporal,
+        parameters.phase,
+        Some(parameters.luma.len()),
+    )
+}
+
+pub(super) fn validate_resident_count(
+    raw_count: usize,
+    parameters: &ResidentParameters<'_>,
+) -> Result<(), String> {
+    validate_common(
+        raw_count,
+        parameters.geometry,
+        parameters.confidence_y,
+        parameters.confidence_uv,
+        parameters.temporal,
+        parameters.phase,
+        None,
+    )
+}
+
+fn validate_common(
+    raw_count: usize,
+    geometry: Geometry,
+    confidence_y: &[f32; 256],
+    confidence_uv: &[f32; 256],
+    temporal: f32,
+    phase: f64,
+    luma_len: Option<usize>,
+) -> Result<(), String> {
     if geometry
         .full
         .into_iter()
@@ -72,16 +121,17 @@ fn validate_count(raw_count: usize, parameters: &Parameters<'_>) -> Result<(), S
     if raw_count != checked_area(geometry.raw_grid, "raw grid")? {
         return Err("raw motion length does not match its grid".into());
     }
-    if parameters.luma.len() != checked_area(geometry.output_grid, "luma grid")? {
+    if let Some(length) = luma_len
+        && length != checked_area(geometry.output_grid, "luma grid")?
+    {
         return Err("luma length does not match the output grid".into());
     }
-    if !parameters.temporal.is_finite() || !parameters.phase.is_finite() {
+    if !temporal.is_finite() || !phase.is_finite() {
         return Err("temporal scale and phase must be finite".into());
     }
-    if parameters
-        .confidence_y
+    if confidence_y
         .iter()
-        .chain(parameters.confidence_uv)
+        .chain(confidence_uv)
         .any(|value| !value.is_finite())
     {
         return Err("confidence tables must be finite".into());

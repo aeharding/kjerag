@@ -1,8 +1,8 @@
 //! Worker-driven full-panorama temporal filtering.
 //!
-//! This owner has no thread of its own. Its CPU pyramid readbacks and final
-//! GPU completion are intentionally synchronous for the calling worker, but
-//! drive wgpu only with nonblocking polls. Seven real contiguous sources gate
+//! This owner has no thread of its own. Motion images, searches and predictor
+//! handoffs remain on the GPU. Only completed filtered outputs publish; the
+//! current completion boundary drives wgpu with nonblocking polls. Seven real contiguous sources gate
 //! startup centers 0 through 3, steady center 3, and tail centers 4 through 6.
 
 use std::collections::VecDeque;
@@ -15,8 +15,8 @@ use crate::{Fallible, FrameStamp};
 use super::color::{GpuColorConversion, MatrixCoefficients};
 use super::history::History;
 use super::motion::{self, Geometry};
-use super::parallel_refine;
-use super::pyramid::{Level, gpu as pyramid_gpu};
+use super::parallel_refine::coarse::gpu::{self as coarse_gpu, MotionPyramid};
+use super::pyramid::gpu as pyramid_gpu;
 use super::settings::{EffParams, Provider};
 use super::{GpuFuse, Output};
 
@@ -30,8 +30,7 @@ const TEMPORAL: f32 = 1.25;
 struct Retained {
     stamp: FrameStamp,
     effective: EffParams,
-    levels: Option<Vec<Level>>,
-    gpu_base: Option<pyramid_gpu::PackedGray>,
+    motion: Option<MotionPyramid>,
 }
 
 /// One completed full gamma-RGB panorama bound to its actual history center.
@@ -69,7 +68,7 @@ pub(crate) struct Stream {
     failure: Option<String>,
     color: GpuColorConversion,
     pyramid: pyramid_gpu::Builder,
-    refine: parallel_refine::gpu::Builder,
+    coarse: coarse_gpu::Builder,
     motion: motion::gpu::Builder,
     fuse: GpuFuse,
 }
@@ -95,7 +94,7 @@ impl Stream {
             failure: None,
             color: GpuColorConversion::new(device),
             pyramid: pyramid_gpu::Builder::new(device),
-            refine: parallel_refine::gpu::Builder::new(device),
+            coarse: coarse_gpu::Builder::new(device),
             motion: motion::gpu::Builder::new(device),
             fuse: GpuFuse::new(device),
         })
@@ -171,28 +170,28 @@ impl Stream {
             body.texture(),
             matrix,
         )?;
-        let (gpu_base, reads) = if effective.radius == 0 {
-            (None, Vec::new())
+        let motion = if effective.radius == 0 {
+            None
         } else {
             let pyramid =
                 self.pyramid
                     .encode_history_luma(&self.device, &mut encoder, &luma, LEVELS)?;
-            let (packed, reads) = self.prepare_motion_inputs(&mut encoder, &pyramid)?;
-            (Some(packed), reads)
+            Some(MotionPyramid::encode(
+                &self.device,
+                &mut encoder,
+                &self.pyramid,
+                &pyramid,
+            )?)
         };
         self.queue.submit([encoder.finish()]);
-        let levels = if reads.is_empty() {
-            wait_for_queue(&self.device, &self.queue)?;
-            None
-        } else {
-            Some(read_levels(&self.device, reads)?)
-        };
-        trace_elapsed("prepare", &stamp, started);
+        // Subsequent consumers use this same queue. GPU ordering, not a CPU
+        // readback fence, makes these images ready before motion search.
+        // This timer now ends at submission, not preparation completion.
+        trace_elapsed("prepare-submit", &stamp, started);
         self.window.push_back(Retained {
             stamp,
             effective,
-            levels,
-            gpu_base,
+            motion,
         });
 
         let mut output = Vec::new();
@@ -273,28 +272,11 @@ impl Stream {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         luma: &wgpu::Texture,
-    ) -> Fallible<(pyramid_gpu::PackedGray, Vec<PendingLevel>)> {
+    ) -> Fallible<MotionPyramid> {
         let pyramid = self
             .pyramid
             .encode_luma(&self.device, encoder, luma, LEVELS)?;
-        self.prepare_motion_inputs(encoder, &pyramid)
-    }
-
-    fn prepare_motion_inputs(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        pyramid: &pyramid_gpu::Output,
-    ) -> Fallible<(pyramid_gpu::PackedGray, Vec<PendingLevel>)> {
-        let packed = self
-            .pyramid
-            .encode_packed_base(&self.device, encoder, &pyramid.levels[0])?;
-        let reads = pyramid
-            .levels
-            .iter()
-            .skip(1)
-            .map(|level| PendingLevel::encode(&self.device, encoder, level))
-            .collect();
-        Ok((packed, reads))
+        MotionPyramid::encode(&self.device, encoder, &self.pyramid, &pyramid)
     }
 
     /// A source with radius zero needs no motion for its own output, but a
@@ -309,7 +291,7 @@ impl Stream {
         let history = self.history.window_at(center, radius)?;
         let needed: Vec<_> = std::iter::once(center)
             .chain(history.reference_positions())
-            .filter(|&at| self.window[at].levels.is_none())
+            .filter(|&at| self.window[at].motion.is_none())
             .collect();
         if needed.is_empty() {
             return Ok(());
@@ -328,13 +310,12 @@ impl Stream {
                 );
             }
             let source = history.encode_copy_current(&self.device, &mut encoder)?;
-            let (packed, reads) = self.prepare_pyramid(&mut encoder, &source.y)?;
-            pending.push((at, packed, reads));
+            let motion = self.prepare_pyramid(&mut encoder, &source.y)?;
+            pending.push((at, motion));
         }
         self.queue.submit([encoder.finish()]);
-        for (at, packed, reads) in pending {
-            self.window[at].levels = Some(read_levels(&self.device, reads)?);
-            self.window[at].gpu_base = Some(packed);
+        for (at, motion) in pending {
+            self.window[at].motion = Some(motion);
         }
         Ok(())
     }
@@ -350,49 +331,23 @@ impl Stream {
         if phases.len() != references.len() {
             return Err("temporal stream phase count differs from its references".into());
         }
-        let center_levels = center
-            .levels
-            .as_ref()
-            .ok_or("temporal stream nonzero radius has no current pyramid")?;
         let current = center
-            .gpu_base
+            .motion
             .as_ref()
-            .ok_or("temporal stream nonzero radius has no current packed base")?;
-        let reference_levels: Vec<_> = references
+            .ok_or("temporal stream nonzero radius has no resident motion pyramid")?;
+        let reference_pyramids: Vec<_> = references
             .iter()
             .map(|&at| {
                 self.window[at]
-                    .levels
-                    .as_deref()
-                    .ok_or("temporal stream nonzero radius has a missing reference pyramid")
-            })
-            .collect::<Result<_, _>>()?;
-        let finest = current.logical_size().map(|value| value as usize);
-        let started = trace_start();
-        let coarse =
-            super::search::prepare_finest_ordered_coarse(finest, center_levels, &reference_levels)?;
-        trace_elapsed("coarse", &center.stamp, started);
-        let reference_bases: Vec<_> = references
-            .iter()
-            .map(|&at| {
-                self.window[at]
-                    .gpu_base
+                    .motion
                     .as_ref()
-                    .ok_or("temporal stream nonzero radius has a missing packed reference")
+                    .ok_or("temporal stream nonzero radius has a missing resident reference")
             })
             .collect::<Result<_, _>>()?;
-        let seeds: Vec<_> = coarse.iter().map(|input| input.seeds.as_slice()).collect();
-        let globals: Vec<_> = coarse.iter().map(|input| input.global).collect();
-        let refined = self.refine.encode_finest(
-            &self.device,
-            encoder,
-            current,
-            &reference_bases,
-            &seeds,
-            &globals,
-        )?;
-
-        let geometry = geometry(self.full, current.logical_size(), center_levels)?;
+        let geometry = geometry(self.full, current)?;
+        let refined =
+            self.coarse
+                .encode_motion(&self.device, encoder, current, &reference_pyramids)?;
         let flow = array_texture(
             &self.device,
             "streaming temporal packed motion",
@@ -400,25 +355,9 @@ impl Stream {
             references.len() as u32,
             wgpu::TextureFormat::Rgba16Sint,
         );
-        let luma_texture = array_texture(
-            &self.device,
-            "streaming temporal luma indices",
-            geometry.output_grid,
-            1,
-            wgpu::TextureFormat::R8Uint,
-        );
-        write_layer(
-            &self.queue,
-            &luma_texture,
-            0,
-            geometry.output_grid,
-            1,
-            &center_levels[2].pixels,
-        );
         for (ordinal, &phase) in phases.iter().enumerate() {
-            let parameters = motion::Parameters {
+            let parameters = motion::ResidentParameters {
                 geometry,
-                luma: &center_levels[2].pixels,
                 confidence_y: &center.effective.confidence_y,
                 confidence_uv: &center.effective.confidence_uv,
                 scale_base: SCALE_BASE,
@@ -426,16 +365,17 @@ impl Stream {
                 temporal: TEMPORAL,
                 phase,
             };
-            let packed = self.motion.encode_refined(
+            let packed = self.motion.encode_refined_resident(
                 &self.device,
                 encoder,
                 &refined,
                 ordinal as u32,
+                current,
                 &parameters,
             )?;
             copy_layer(encoder, &packed, &flow, ordinal as u32);
         }
-        let inputs = history.inputs(&flow, &luma_texture);
+        let inputs = history.inputs(&flow, current.luma());
         let parameters = history.parameters(
             center.effective.fusion.noise,
             center.effective.fusion.limit,
@@ -557,15 +497,10 @@ fn validate_motion_full(full: [u32; 2]) -> Fallible<()> {
     Ok(())
 }
 
-fn geometry(full: [u32; 2], finest: [u32; 2], levels: &[Level]) -> Fallible<Geometry> {
-    if levels.len() != LEVELS - 1
-        || full.into_iter().any(|value| !value.is_multiple_of(32))
-        || finest != [full[0] / 2, full[1] / 2]
-        || levels[0].width != full[0] as usize / 4
-        || levels[0].height != full[1] as usize / 4
-        || levels[2].width != full[0] as usize / 16
-        || levels[2].height != full[1] as usize / 16
-        || levels[2].pixels.len() != (full[0] as usize / 16) * (full[1] as usize / 16)
+fn geometry(full: [u32; 2], pyramid: &MotionPyramid) -> Fallible<Geometry> {
+    if full.into_iter().any(|value| !value.is_multiple_of(32))
+        || pyramid.finest().logical_size() != [full[0] / 2, full[1] / 2]
+        || [pyramid.luma().width(), pyramid.luma().height()] != [full[0] / 16, full[1] / 16]
     {
         return Err("temporal stream geometry is unsupported by the selected motion path".into());
     }
@@ -575,96 +510,6 @@ fn geometry(full: [u32; 2], finest: [u32; 2], levels: &[Level]) -> Fallible<Geom
         output_grid: [full[0] / 16, full[1] / 16],
         block: [BLOCK, BLOCK],
     })
-}
-
-struct PendingLevel {
-    width: u32,
-    height: u32,
-    row: u32,
-    buffer: wgpu::Buffer,
-}
-
-impl PendingLevel {
-    fn encode(
-        device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
-        texture: &wgpu::Texture,
-    ) -> Self {
-        let width = texture.width();
-        let height = texture.height();
-        let row =
-            width.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("streaming temporal CPU pyramid readback"),
-            size: u64::from(row) * u64::from(height),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        encoder.copy_texture_to_buffer(
-            texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(row),
-                    rows_per_image: Some(height),
-                },
-            },
-            texture.size(),
-        );
-        Self {
-            width,
-            height,
-            row,
-            buffer,
-        }
-    }
-
-    fn finish(self) -> Level {
-        let mapped = self.buffer.slice(..).get_mapped_range();
-        let pixels = mapped
-            .chunks_exact(self.row as usize)
-            .flat_map(|row| row[..self.width as usize].iter().copied())
-            .collect();
-        drop(mapped);
-        self.buffer.unmap();
-        Level {
-            width: self.width as usize,
-            height: self.height as usize,
-            pixels,
-        }
-    }
-}
-
-fn read_levels(device: &wgpu::Device, reads: Vec<PendingLevel>) -> Fallible<Vec<Level>> {
-    let (send, receive) = mpsc::channel();
-    for read in &reads {
-        let send = send.clone();
-        read.buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                let _ = send.send(result);
-            });
-    }
-    drop(send);
-    for _ in 0..reads.len() {
-        loop {
-            match receive.try_recv() {
-                Ok(result) => {
-                    result?;
-                    break;
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    device.poll(wgpu::PollType::Poll)?;
-                    std::thread::park_timeout(Duration::from_micros(100));
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    return Err("temporal pyramid readback callback disconnected".into());
-                }
-            }
-        }
-    }
-    Ok(reads.into_iter().map(PendingLevel::finish).collect())
 }
 
 fn wait_for_queue(device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<()> {
@@ -709,39 +554,6 @@ fn array_texture(
             | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     })
-}
-
-fn write_layer(
-    queue: &wgpu::Queue,
-    texture: &wgpu::Texture,
-    layer: u32,
-    size: [u32; 2],
-    bytes_per_pixel: u32,
-    bytes: &[u8],
-) {
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d {
-                x: 0,
-                y: 0,
-                z: layer,
-            },
-            aspect: wgpu::TextureAspect::All,
-        },
-        bytes,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(size[0] * bytes_per_pixel),
-            rows_per_image: Some(size[1]),
-        },
-        wgpu::Extent3d {
-            width: size[0],
-            height: size[1],
-            depth_or_array_layers: 1,
-        },
-    );
 }
 
 fn copy_layer(

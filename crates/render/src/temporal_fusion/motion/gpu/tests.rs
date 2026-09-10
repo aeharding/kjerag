@@ -1,7 +1,10 @@
 use super::{Builder, Error, Prepared};
-use crate::temporal_fusion::motion::{self, Geometry, Parameters};
-use crate::temporal_fusion::tests::{copy_texture, gpu, read_copy};
+use crate::temporal_fusion::motion::{self, Geometry, Parameters, ResidentParameters};
+use crate::temporal_fusion::parallel_refine::{self, coarse::gpu::MotionPyramid};
+use crate::temporal_fusion::pyramid::{self, gpu as gpu_pyramid};
+use crate::temporal_fusion::tests::{copy_texture, gpu, gpu_pair, read_copy};
 use wgpu::naga::valid::{Capabilities, ValidationFlags, Validator};
+use wgpu::util::DeviceExt;
 
 fn parameters<'a>(
     raw_grid: [u32; 2],
@@ -31,6 +34,86 @@ fn bytes(records: &[[i16; 4]]) -> Vec<u8> {
         .iter()
         .flat_map(|record| record.iter().flat_map(|value| value.to_le_bytes()))
         .collect()
+}
+
+fn upload_motion_pyramid(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    size: [usize; 2],
+) -> (MotionPyramid, Vec<u8>) {
+    let base: Vec<_> = (0..size[0] * size[1])
+        .map(|at| {
+            let x = (at % size[0]) as u32;
+            let y = (at / size[0]) as u32;
+            x.wrapping_mul(73)
+                .wrapping_add(y.wrapping_mul(151))
+                .wrapping_add((x ^ y).rotate_left((x & 7) + 1)) as u8
+        })
+        .collect();
+    let levels = pyramid::build(&base, size[0], size[1], 7).unwrap();
+    let luma = levels[3].pixels.clone();
+    let textures = levels
+        .iter()
+        .map(|level| {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("resident motion packing gray"),
+                size: wgpu::Extent3d {
+                    width: level.width as u32,
+                    height: level.height as u32,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Uint,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                texture.as_image_copy(),
+                &level.pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(level.width as u32),
+                    rows_per_image: None,
+                },
+                texture.size(),
+            );
+            texture
+        })
+        .collect();
+    let mut encoder = device.create_command_encoder(&Default::default());
+    let resident = MotionPyramid::encode(
+        device,
+        &mut encoder,
+        &gpu_pyramid::Builder::new(device),
+        &gpu_pyramid::Output { levels: textures },
+    )
+    .unwrap();
+    queue.submit([encoder.finish()]);
+    (resident, luma)
+}
+
+fn upload_refined(
+    device: &wgpu::Device,
+    blocks: [u32; 2],
+    records: &[[i32; 3]],
+    references: u32,
+) -> parallel_refine::gpu::Output {
+    let contents: Vec<_> = records
+        .iter()
+        .flat_map(|record| record.iter().flat_map(|value| value.to_le_bytes()))
+        .collect();
+    parallel_refine::gpu::Output {
+        raw: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("resident motion packing refined records"),
+            contents: &contents,
+            usage: wgpu::BufferUsages::STORAGE,
+        }),
+        device: device.clone(),
+        blocks,
+        references,
+    }
 }
 
 fn check(
@@ -65,6 +148,120 @@ fn shader_validates_without_optional_capabilities() {
     Validator::new(ValidationFlags::all(), Capabilities::empty())
         .validate(&module)
         .unwrap();
+}
+
+#[test]
+fn resident_luma_is_byte_exact_to_the_upload_path_for_even_and_odd_sources() {
+    let Some((device, queue)) = gpu() else { return };
+    let builder = Builder::new(&device);
+    // Exercise signed, distinct tables without exceeding the existing GPU
+    // threshold limit after the captured scale (4 * 700) is applied.
+    let confidence_y = std::array::from_fn(|at| (at as f32 - 96.0) / 16.0);
+    let confidence_uv = std::array::from_fn(|at| (180.0 - at as f32) / 16.0);
+
+    for size in [[1024, 1024], [1040, 1073]] {
+        let (resident, luma) = upload_motion_pyramid(&device, &queue, size);
+        let raw_grid = [(size[0] / 16) as u32, (size[1] / 16) as u32];
+        let output_grid = raw_grid.map(|value| value * 2);
+        assert_eq!(luma.len(), (output_grid[0] * output_grid[1]) as usize);
+        let count = (raw_grid[0] * raw_grid[1]) as usize;
+        let records: Vec<_> = (0..count * 2)
+            .map(|at| {
+                let ordinal = at / count;
+                let index = at % count;
+                [
+                    (index as i32 % 23) - 11 + ordinal as i32,
+                    9 - (index as i32 % 19) - ordinal as i32,
+                    ((index * 37 + ordinal * 997) % 9_001) as i32,
+                ]
+            })
+            .collect();
+        let refined = upload_refined(&device, raw_grid, &records, 2);
+        let geometry = Geometry {
+            full: output_grid.map(|value| value * 16),
+            raw_grid,
+            output_grid,
+            block: [16, 16],
+        };
+        let uploaded = Parameters {
+            geometry,
+            luma: &luma,
+            confidence_y: &confidence_y,
+            confidence_uv: &confidence_uv,
+            scale_base: 4,
+            scale_extra: 700,
+            temporal: 1.25,
+            phase: 0.375,
+        };
+        let resident_parameters = ResidentParameters {
+            geometry,
+            confidence_y: &confidence_y,
+            confidence_uv: &confidence_uv,
+            scale_base: uploaded.scale_base,
+            scale_extra: uploaded.scale_extra,
+            temporal: uploaded.temporal,
+            phase: uploaded.phase,
+        };
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let old = builder
+            .encode_refined(&device, &mut encoder, &refined, 1, &uploaded)
+            .unwrap();
+        let new = builder
+            .encode_refined_resident(
+                &device,
+                &mut encoder,
+                &refined,
+                1,
+                &resident,
+                &resident_parameters,
+            )
+            .unwrap();
+        let old_copy = copy_texture(&device, &mut encoder, &old, output_grid, 8);
+        let new_copy = copy_texture(&device, &mut encoder, &new, output_grid, 8);
+        queue.submit([encoder.finish()]);
+        let old = read_copy(&device, &old_copy, output_grid, 8);
+        let new = read_copy(&device, &new_copy, output_grid, 8);
+        assert_eq!(new, old, "resident luma {size:?}");
+        let oracle = motion::pack_motion(&records[count..], &uploaded)
+            .expect("CPU oracle accepts the same signed motion and confidence inputs");
+        assert!(oracle.iter().any(|record| record[0] < 0 || record[1] < 0));
+        assert!(oracle.iter().any(|record| record[2] != record[3]));
+        assert_eq!(new, bytes(&oracle), "CPU oracle {size:?}");
+    }
+}
+
+#[test]
+fn resident_luma_from_another_device_is_rejected_before_encoding() {
+    let Some([(device, _local_queue), (foreign, foreign_queue)]) = gpu_pair() else {
+        return;
+    };
+    let (resident, luma) = upload_motion_pyramid(&foreign, &foreign_queue, [1024, 1024]);
+    let raw_grid = [64, 64];
+    let records = vec![[0, 0, 0]; 64 * 64];
+    let refined = upload_refined(&device, raw_grid, &records, 1);
+    let table = [1.0; 256];
+    let parameters = ResidentParameters {
+        geometry: Geometry {
+            full: [2048, 2048],
+            raw_grid,
+            output_grid: [128, 128],
+            block: [16, 16],
+        },
+        confidence_y: &table,
+        confidence_uv: &table,
+        scale_base: 1,
+        scale_extra: 1,
+        temporal: 1.0,
+        phase: 0.0,
+    };
+    assert_eq!(luma.len(), 128 * 128);
+    let builder = Builder::new(&device);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    assert!(matches!(
+        builder
+            .encode_refined_resident(&device, &mut encoder, &refined, 0, &resident, &parameters,),
+        Err(Error::ForeignDevice)
+    ));
 }
 
 #[test]

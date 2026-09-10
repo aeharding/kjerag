@@ -356,6 +356,15 @@ fn validate(current: &[Level], reference: &[Level]) -> Result<(), Error> {
     validate_levels(base, current, reference, 0)
 }
 
+/// Validate the selected seven-level pyramid contract for another readable
+/// motion-search oracle without running the serial controller.
+pub(crate) fn validate_selected_pyramids(
+    current: &[Level],
+    reference: &[Level],
+) -> Result<(), Error> {
+    validate(current, reference)
+}
+
 fn validate_coarse(
     finest: [usize; 2],
     current: &[Level],
@@ -836,6 +845,38 @@ fn estimate_global_doubled(vectors: &[Vector]) -> Result<Vector, Error> {
         y: doubled(sum_y, mode_y)?,
         sad: -1,
     })
+}
+
+/// Apply the selected exact integer interpolation to public raw records.
+pub(crate) fn interpolate_raw_records(
+    coarse: &[[i32; 3]],
+    coarse_shape: [usize; 2],
+    shape: [usize; 2],
+) -> Result<Vec<[i32; 3]>, Error> {
+    let coarse = coarse
+        .iter()
+        .map(|record| Vector {
+            x: record[0],
+            y: record[1],
+            sad: i64::from(record[2]),
+        })
+        .collect::<Vec<_>>();
+    raw_records(interpolate(&coarse, coarse_shape, shape)?)
+}
+
+/// Apply the selected exact histogram, inlier and doubled-mean global
+/// estimator to public raw records.
+pub(crate) fn estimate_global_doubled_raw(vectors: &[[i32; 3]]) -> Result<[i32; 2], Error> {
+    let vectors = vectors
+        .iter()
+        .map(|record| Vector {
+            x: record[0],
+            y: record[1],
+            sad: i64::from(record[2]),
+        })
+        .collect::<Vec<_>>();
+    let global = estimate_global_doubled(&vectors)?;
+    Ok([global.x, global.y])
 }
 
 #[cfg(test)]

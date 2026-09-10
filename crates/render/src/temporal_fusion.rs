@@ -25,7 +25,7 @@ pub mod color;
 /// Deterministic selected CPU motion-search reference, not a playback path.
 pub mod search;
 
-/// Kjerag-specific constant-work refinement candidate, not selected playback.
+/// Kjerag-specific independent-block motion search used by the live stream.
 pub mod parallel_refine;
 
 /// Conservative full-image execution regions for one exact prepared view.

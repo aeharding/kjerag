@@ -19,6 +19,7 @@ struct Geometry {
 @group(0) @binding(1) var<storage, read> luma: array<u32>;
 @group(0) @binding(2) var<storage, read> thresholds: array<i32>;
 @group(0) @binding(3) var<uniform> geometry: Geometry;
+@group(0) @binding(4) var resident_luma: texture_2d<u32>;
 
 @vertex
 fn triangle(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
@@ -91,17 +92,13 @@ fn confidence(threshold: i32, cost: i32) -> i32 {
     return i32(quotient);
 }
 
-@fragment
-fn pack_motion(@builtin(position) position: vec4<f32>) -> @location(0) vec4<i32> {
-    let coordinate = vec2<u32>(position.xy);
+fn packed_motion(coordinate: vec2<u32>, table_index: u32) -> vec4<i32> {
     let expanded_dx = i32(interpolated(coordinate, 0u) / 0.5);
     let expanded_dy = i32(interpolated(coordinate, 1u) / 0.5);
     let cost = i32(interpolated(coordinate, 2u));
     let origin = vec2<i32>(coordinate * 16u);
     let maximum = vec2<i32>(vec2<u32>(geometry.full_width - 16u, geometry.full_height - 16u));
     let displacement = clamp(origin + vec2<i32>(expanded_dx, expanded_dy), vec2<i32>(0), maximum) - origin;
-    let index = coordinate.y * geometry.output_width + coordinate.x;
-    let table_index = luma[index];
     let threshold_y = thresholds[table_index];
     let threshold_uv = thresholds[256u + table_index];
     return vec4<i32>(
@@ -110,4 +107,18 @@ fn pack_motion(@builtin(position) position: vec4<f32>) -> @location(0) vec4<i32>
         confidence(threshold_y, cost),
         confidence(threshold_uv, cost),
     );
+}
+
+@fragment
+fn pack_motion(@builtin(position) position: vec4<f32>) -> @location(0) vec4<i32> {
+    let coordinate = vec2<u32>(position.xy);
+    let index = coordinate.y * geometry.output_width + coordinate.x;
+    return packed_motion(coordinate, luma[index]);
+}
+
+@fragment
+fn pack_motion_resident(@builtin(position) position: vec4<f32>) -> @location(0) vec4<i32> {
+    let coordinate = vec2<u32>(position.xy);
+    let table_index = textureLoad(resident_luma, vec2<i32>(coordinate), 0).r;
+    return packed_motion(coordinate, table_index);
 }

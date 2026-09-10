@@ -57,12 +57,15 @@ const CANDIDATES: u32 = 8u;
 const LANES_PER_CANDIDATE: u32 = 8u;
 const WORKGROUP_LANES: u32 = CANDIDATES * LANES_PER_CANDIDATE;
 const PENALTY_NEW: u32 = 50u;
+override COARSE: bool = false;
+override SMALLEST: bool = false;
 
 var<workgroup> current_pixels: array<vec4<u32>, CURRENT_QUADS>;
 var<workgroup> partials: array<u32, WORKGROUP_LANES>;
 var<workgroup> candidates: array<Candidate, 8>;
 var<workgroup> best: RawMotion;
 var<workgroup> minimum_cost: i32;
+var<workgroup> ring_center: vec2<i32>;
 
 // Each texel is four consecutive horizontal bytes in explicit rgba order.
 fn reference_quad(coordinate: vec2<i32>) -> vec4<u32> {
@@ -210,6 +213,27 @@ fn put_ring(center: vec2<i32>, bounds: Bounds) {
     }
 }
 
+// ExhaustiveTwo's radius-two shell has sixteen candidates. Two batches keep
+// the original ordinal strict-tie order and the center captured before either
+// ring. This adds no adaptive search or same-plane output dependency.
+fn put_outer_ring(batch: u32, bounds: Bounds) {
+    clear_candidates();
+    let offsets = array<vec2<i32>, 16>(
+        vec2<i32>(-1, -2), vec2<i32>(-1, 2),
+        vec2<i32>(0, -2), vec2<i32>(0, 2),
+        vec2<i32>(1, -2), vec2<i32>(1, 2),
+        vec2<i32>(-2, -1), vec2<i32>(2, -1),
+        vec2<i32>(-2, 0), vec2<i32>(2, 0),
+        vec2<i32>(-2, 1), vec2<i32>(2, 1),
+        vec2<i32>(-2, -2), vec2<i32>(-2, 2),
+        vec2<i32>(2, -2), vec2<i32>(2, 2),
+    );
+    for (var slot = 0u; slot < CANDIDATES; slot += 1u) {
+        let value = ring_center + offsets[batch * CANDIDATES + slot];
+        put_candidate(slot, value, is_candidate(value, bounds), true);
+    }
+}
+
 @compute @workgroup_size(WORKGROUP_LANES)
 fn refine_blocks(
     @builtin(workgroup_id) group: vec3<u32>,
@@ -248,7 +272,7 @@ fn refine_blocks(
             up = clipped(vec2<i32>(value.dx, value.dy), bounds);
         }
         var diagonal = zero;
-        if block.y + 1u < params.blocks_y && block.x + 1u < params.blocks_x {
+        if !SMALLEST && block.y + 1u < params.blocks_y && block.x + 1u < params.blocks_x {
             let value = seeds[index + params.blocks_x + 1u];
             diagonal = clipped(vec2<i32>(value.dx, value.dy), bounds);
         } else if block.y > 0u && block.x + 1u < params.blocks_x {
@@ -269,7 +293,7 @@ fn refine_blocks(
         clear_candidates();
         put_candidate(0u, vec2<i32>(0, 0), true, true);
         put_candidate(1u, clipped(globals[params.reference], bounds), true, false);
-        put_candidate(2u, own, true, false);
+        put_candidate(2u, select(own, median, SMALLEST), true, false);
         put_candidate(3u, median, is_candidate(median, bounds), false);
         put_candidate(4u, left, is_candidate(left, bounds), false);
         put_candidate(5u, up, is_candidate(up, bounds), false);
@@ -278,9 +302,23 @@ fn refine_blocks(
     execute_batch(lane, source);
 
     if lane == 0u {
+        if COARSE {
+            ring_center = vec2<i32>(best.dx, best.dy);
+        }
         put_ring(vec2<i32>(best.dx, best.dy), bounds);
     }
     execute_batch(lane, source);
+
+    if COARSE {
+        if lane == 0u {
+            put_outer_ring(0u, bounds);
+        }
+        execute_batch(lane, source);
+        if lane == 0u {
+            put_outer_ring(1u, bounds);
+        }
+        execute_batch(lane, source);
+    }
 
     if lane == 0u {
         output[index] = best;

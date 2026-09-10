@@ -44,13 +44,12 @@ fn lazy_radius_transition_matches_eager_inputs_before_and_after_ring_reuse() {
         seed_pair(&mut lazy, &mut eager, &conversion, source as u64);
     }
     for (at, retained) in lazy.window.iter().enumerate() {
-        assert_eq!(retained.effective.radius == 0, retained.levels.is_none());
-        assert_eq!(retained.effective.radius == 0, retained.gpu_base.is_none());
-        if let Some(levels) = retained.levels.as_ref() {
-            assert_eq!(levels.len(), LEVELS - 1);
+        assert_eq!(retained.effective.radius == 0, retained.motion.is_none());
+        if let Some(motion) = retained.motion.as_ref() {
+            assert_eq!(motion.finest().logical_size(), BASE);
             assert_eq!(
-                [levels[0].width, levels[0].height],
-                [BASE[0] as usize / 2, BASE[1] as usize / 2]
+                [motion.luma().width(), motion.luma().height()],
+                [BASE[0] / 8, BASE[1] / 8]
             );
         }
         assert_eq!(retained.effective.iso, ISO[at] as i32);
@@ -61,10 +60,9 @@ fn lazy_radius_transition_matches_eager_inputs_before_and_after_ring_reuse() {
         assert_output_pair(&mut lazy, &mut eager, center, &expected);
         if lazy.window[center].effective.radius == 0 {
             assert!(
-                lazy.window[center].levels.is_none(),
-                "a radius-zero center built a CPU pyramid for its own output"
+                lazy.window[center].motion.is_none(),
+                "a radius-zero center built resident motion for its own output"
             );
-            assert!(lazy.window[center].gpu_base.is_none());
         }
         lazy.next_center += 1;
         eager.next_center += 1;
@@ -72,19 +70,23 @@ fn lazy_radius_transition_matches_eager_inputs_before_and_after_ring_reuse() {
 
     // Center 3 has radius one. Its radius-zero source 2 is reconstructed,
     // while unrelated radius-zero sources remain untouched.
-    assert!(lazy.window[2].levels.is_some());
-    assert!(lazy.window[2].gpu_base.is_some());
+    assert!(lazy.window[2].motion.is_some());
     for at in [0, 1, 5, 6] {
         assert!(
-            lazy.window[at].levels.is_none(),
-            "unexpected lazy pyramid at {at}"
+            lazy.window[at].motion.is_none(),
+            "unexpected resident motion at {at}"
         );
-        assert!(lazy.window[at].gpu_base.is_none());
     }
-    let retained_handle = lazy.window[2].gpu_base.as_ref().unwrap().texture().clone();
+    let retained_handle = lazy.window[2]
+        .motion
+        .as_ref()
+        .unwrap()
+        .finest()
+        .texture()
+        .clone();
     lazy.prepare_references(3).unwrap();
     assert_eq!(
-        lazy.window[2].gpu_base.as_ref().unwrap().texture(),
+        lazy.window[2].motion.as_ref().unwrap().finest().texture(),
         &retained_handle,
         "a repeated preparation replaced an immutable packed source",
     );
@@ -92,7 +94,13 @@ fn lazy_radius_transition_matches_eager_inputs_before_and_after_ring_reuse() {
     // Keep source zero's eager packed bytes across physical history-layer
     // reuse. Source seven has a deliberately different image and must be the
     // value reconstructed from the newly rotated history slot.
-    let stale_zero = eager.window[0].gpu_base.as_ref().unwrap().texture().clone();
+    let stale_zero = eager.window[0]
+        .motion
+        .as_ref()
+        .unwrap()
+        .finest()
+        .texture()
+        .clone();
     for source in SOURCES as u64..ISO.len() as u64 {
         lazy.window.pop_front();
         eager.window.pop_front();
@@ -117,8 +125,7 @@ fn lazy_radius_transition_matches_eager_inputs_before_and_after_ring_reuse() {
     // genuinely lazy after their own output was copied.
     for retained in lazy.window.iter().rev().take(3) {
         assert_eq!(retained.effective.radius, 0);
-        assert!(retained.levels.is_none());
-        assert!(retained.gpu_base.is_none());
+        assert!(retained.motion.is_none());
     }
 }
 
@@ -156,36 +163,22 @@ fn seed_pair(lazy: &mut Stream, eager: &mut Stream, conversion: &GpuColorConvers
         .unwrap();
     assert_eq!(lazy_effective, eager_effective);
 
-    let lazy_prepared =
+    let lazy_motion =
         (lazy_effective.radius > 0).then(|| lazy.prepare_pyramid(&mut encoder, &nv12.y).unwrap());
-    let eager_prepared = Some(eager.prepare_pyramid(&mut encoder, &nv12.y).unwrap());
+    let eager_motion = Some(eager.prepare_pyramid(&mut encoder, &nv12.y).unwrap());
     queue.submit([encoder.finish()]);
-    let (lazy_base, lazy_levels) = finish_prepared(&device, lazy_prepared);
-    let (eager_base, eager_levels) = finish_prepared(&device, eager_prepared);
     lazy.window.push_back(Retained {
         stamp: stamp.clone(),
         effective: lazy_effective,
-        levels: lazy_levels,
-        gpu_base: lazy_base,
+        motion: lazy_motion,
     });
     eager.window.push_back(Retained {
         stamp,
         effective: eager_effective,
-        levels: eager_levels,
-        gpu_base: eager_base,
+        motion: eager_motion,
     });
     lazy.matrix = Some(MATRIX);
     eager.matrix = Some(MATRIX);
-}
-
-fn finish_prepared(
-    device: &wgpu::Device,
-    prepared: Option<(pyramid_gpu::PackedGray, Vec<PendingLevel>)>,
-) -> (Option<pyramid_gpu::PackedGray>, Option<Vec<Level>>) {
-    match prepared {
-        Some((packed, reads)) => (Some(packed), Some(read_levels(device, reads).unwrap())),
-        None => (None, None),
-    }
 }
 
 fn assert_output_pair(lazy: &mut Stream, eager: &mut Stream, center: usize, expected: &FrameStamp) {
@@ -208,7 +201,11 @@ fn assert_output_pair(lazy: &mut Stream, eager: &mut Stream, center: usize, expe
 }
 
 fn packed_bytes(device: &wgpu::Device, queue: &wgpu::Queue, retained: &Retained) -> Vec<u8> {
-    packed_texture_bytes(device, queue, retained.gpu_base.as_ref().unwrap().texture())
+    packed_texture_bytes(
+        device,
+        queue,
+        retained.motion.as_ref().unwrap().finest().texture(),
+    )
 }
 
 fn packed_texture_bytes(

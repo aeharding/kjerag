@@ -14,6 +14,42 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**GPU-resident temporal architecture candidate, 2026-09-10:**
+the live Stream now retains all seven motion-pyramid levels on the GPU and runs
+coarse search, inter-level prediction, finest search and luma-dependent motion
+packing without image readback, CPU search or motion/luma re-upload. Preparation
+uses queue ordering instead of a CPU completion fence. Exact source history,
+filter settings and completed-only publication remain; the final large GPU
+submission and per-output completion wait still need scheduling work.
+
+Coarse blocks now use immutable same-level predictors, omitting serially updated
+neighbours and adaptive bad-block recovery. This is a disclosed independent-block
+candidate, not a claimed Studio-exact algorithm. The owner accepted its new
+607-second moving comparison below; other views and live performance remain open.
+The GPU coarse-to-finest result matches its new CPU reference on even/odd grids
+with one, three and six references. The integrated app compiles and 124 temporal
+tests pass (10 ignored). The first motion-packing comparison used out-of-range
+test thresholds, rejected by the preceding upload entry; its corrected fixture
+passes without changing production limits. All eight real-camera Scene checks
+pass, including live 607/612 captures. The paused Scene regression now permits
+asynchronous audio-ring filling while requiring unchanged video/audio accounting,
+nondecreasing queued audio and a fixed presentation clock.
+
+The first 2256x1504 sRGB actual-Scene run authenticates automatic temporal output
+but reaches only 14.06 distinct source frames/s, with 104.80 completed redraws/s,
+42.95ms p99 redraw and 6.42s maximum display age. GPU residency has not established
+a throughput gain or smooth playback. All 31 live 612 pictures differ from the
+preceding candidate, so its acceptance cannot carry forward. New lossless moving
+reviews contain 28 current 607 frames against the existing Studio export and 31
+current 612 frames against the previous player output (not Studio). Their decoded
+picture bodies match the input PPMs exactly. The owner responded "visual check
+looks ok" to the new 607 comparison. This does not accept slow playback or the
+separate 612 comparison. Full release-workspace verification passes 1456 tests,
+47 ignored across 48 suites; workspace all-target Clippy passes. GPU filter work
+reduction is next, not a new colour policy. No installation, merge or broader RE.
+Evidence:
+`scratch/studio-seam-flicker-612-20260909-01/temporal-resident-motion-01`.
+
 **Native import recovery restored; performance unresolved, 2026-09-10:**
 checkpoint UI qualification passed43 of44 checks. Its import-fault shim targeted
 only the main thread, missing the selected `kjerag-stitch` import path. A corrected

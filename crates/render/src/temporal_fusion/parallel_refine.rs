@@ -18,6 +18,9 @@ use std::fmt;
 
 pub mod gpu;
 
+/// Readable CPU oracle for the independently parallel coarse-level candidate.
+pub mod coarse;
+
 const BLOCK: usize = 16;
 const MIN_DIMENSION: usize = 1_024;
 const MAX_DIMENSION_EXCLUSIVE: usize = 8_192;
@@ -93,6 +96,20 @@ pub fn finest(
     input: &FinestInput,
 ) -> Result<Vec<[i32; 3]>, Error> {
     let [blocks_x, blocks_y] = validate(current, reference, input)?;
+    refine_plane(current, reference, input, [blocks_x, blocks_y], false, 1)
+}
+
+/// Shared independent-block controller. `smallest` selects the recovered
+/// smallest-plane predictor rule; `radius` is one for finest Hex2 and two for
+/// coarse ExhaustiveTwo. Callers validate their own level contract first.
+pub(super) fn refine_plane(
+    current: &Level,
+    reference: &Level,
+    input: &FinestInput,
+    [blocks_x, blocks_y]: [usize; 2],
+    smallest: bool,
+    radius: i32,
+) -> Result<Vec<[i32; 3]>, Error> {
     let seeds: Vec<Vector> = input
         .seeds
         .iter()
@@ -125,10 +142,9 @@ pub fn finest(
             } else {
                 zero
             };
-            // The finest plane is not the smallest plane: prefer the future
-            // bottom-right immutable seed, then the already-addressable
-            // top-right seed at its bottom edge.
-            let diagonal = if block_y + 1 < blocks_y && block_x + 1 < blocks_x {
+            // The selected smallest plane never reads the future bottom-right
+            // predictor. Other planes prefer it, then the top-right edge seed.
+            let diagonal = if !smallest && block_y + 1 < blocks_y && block_x + 1 < blocks_x {
                 bounds.clip(seeds[index + blocks_x + 1])
             } else if block_y > 0 && block_x + 1 < blocks_x {
                 bounds.clip(seeds[index - blocks_x + 1])
@@ -150,30 +166,14 @@ pub fn finest(
             // costs retain the earlier candidate.
             search.start(zero, PENALTY_ZERO);
             search.start(bounds.clip(global), 0);
-            search.start(coarse, 0);
+            search.start(if smallest { median } else { coarse }, 0);
             for predictor in [median, left, up, diagonal] {
                 search.checked(predictor, 0);
             }
 
             let center = search.best;
-            for [dx, dy] in [
-                [0, -1],
-                [0, 1],
-                [-1, 0],
-                [1, 0],
-                [-1, -1],
-                [-1, 1],
-                [1, -1],
-                [1, 1],
-            ] {
-                search.checked(
-                    Vector {
-                        x: center.x + dx,
-                        y: center.y + dy,
-                        sad: -1,
-                    },
-                    PENALTY_NEW,
-                );
+            for ring in 1..=radius {
+                search.expanding(ring, center);
             }
             output.push([search.best.x, search.best.y, search.best.sad]);
         }
@@ -182,10 +182,27 @@ pub fn finest(
 }
 
 fn validate(current: &Level, reference: &Level, input: &FinestInput) -> Result<[usize; 2], Error> {
+    validate_with_minimum(current, reference, input, MIN_DIMENSION)
+}
+
+pub(super) fn validate_coarse_plane(
+    current: &Level,
+    reference: &Level,
+    input: &FinestInput,
+) -> Result<[usize; 2], Error> {
+    validate_with_minimum(current, reference, input, BLOCK)
+}
+
+fn validate_with_minimum(
+    current: &Level,
+    reference: &Level,
+    input: &FinestInput,
+    minimum: usize,
+) -> Result<[usize; 2], Error> {
     if current.width != reference.width
         || current.height != reference.height
-        || !(MIN_DIMENSION..MAX_DIMENSION_EXCLUSIVE).contains(&current.width)
-        || !(MIN_DIMENSION..MAX_DIMENSION_EXCLUSIVE).contains(&current.height)
+        || !(minimum..MAX_DIMENSION_EXCLUSIVE).contains(&current.width)
+        || !(minimum..MAX_DIMENSION_EXCLUSIVE).contains(&current.height)
     {
         return Err(Error::Geometry);
     }
@@ -299,6 +316,60 @@ impl<'a> Search<'a> {
     fn checked(&mut self, vector: Vector, penalty: i64) {
         if self.bounds.candidate(vector) {
             self.consider(vector, penalty);
+        }
+    }
+
+    fn expanding(&mut self, radius: i32, center: Vector) {
+        for value in (-radius + 1)..radius {
+            self.checked(
+                Vector {
+                    x: center.x + value,
+                    y: center.y - radius,
+                    sad: -1,
+                },
+                PENALTY_NEW,
+            );
+            self.checked(
+                Vector {
+                    x: center.x + value,
+                    y: center.y + radius,
+                    sad: -1,
+                },
+                PENALTY_NEW,
+            );
+        }
+        for value in (-radius + 1)..radius {
+            self.checked(
+                Vector {
+                    x: center.x - radius,
+                    y: center.y + value,
+                    sad: -1,
+                },
+                PENALTY_NEW,
+            );
+            self.checked(
+                Vector {
+                    x: center.x + radius,
+                    y: center.y + value,
+                    sad: -1,
+                },
+                PENALTY_NEW,
+            );
+        }
+        for [x, y] in [
+            [-radius, -radius],
+            [-radius, radius],
+            [radius, -radius],
+            [radius, radius],
+        ] {
+            self.checked(
+                Vector {
+                    x: center.x + x,
+                    y: center.y + y,
+                    sad: -1,
+                },
+                PENALTY_NEW,
+            );
         }
     }
 
