@@ -966,6 +966,60 @@ impl GpuResidentCandidate {
         Ok(())
     }
 
+    /// Commit one whole completed successor for later processing without
+    /// making its raw source/map carrier a display future or ready draw.
+    pub(super) fn commit_processing(&mut self, draw: &Arc<InstalledOneXsDraw>) -> Fallible<()> {
+        self.commit_processing_with(|context, session, root, flight| {
+            draw.ensure_install_identity(context, session, root, flight)
+        })
+    }
+
+    fn commit_processing_with(
+        &mut self,
+        ensure_identity: impl FnOnce(
+            &OneXsGpuContext,
+            &ResidentSourceIdentity,
+            &GpuResidentIdentity,
+            &GpuPisFlight,
+        ) -> Fallible<()>,
+    ) -> Fallible<()> {
+        let reservation = self
+            .reservation
+            .as_mut()
+            .expect("resident candidate retains its reservation");
+        let mut state = match reservation.shared.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                return Err(
+                    "ONE X2 resident processing commit found a poisoned root; candidate quarantined"
+                        .into(),
+                );
+            }
+        };
+        let exact_seal = state.pending.as_ref() == Some(&reservation.seal);
+        let exact_prior = same_successor(state.committed.as_ref(), reservation.prior.as_ref());
+        if !exact_seal || !exact_prior || state.future.is_some() || state.quarantined {
+            state.quarantined = true;
+            state
+                .quarantined_successors
+                .push(Arc::clone(&self.successor));
+            return Err("ONE X2 resident processing commit does not match its seal and prior allocation, or the future slot is occupied; candidate quarantined".into());
+        }
+        let root_identity = reservation.identity();
+        let identity = state
+            .context
+            .as_ref()
+            .zip(state.session.as_ref())
+            .ok_or("ONE X2 resident root has no capture context or session");
+        let (context, session) = identity?;
+        ensure_identity(context, session, &root_identity, &reservation.seal.flight)?;
+        state.committed = Some(Arc::clone(&self.successor));
+        state.pending = None;
+        reservation.active = false;
+        self.disarmed = true;
+        Ok(())
+    }
+
     /// Test-only stand-in for the future atomic successor plus ready install.
     /// It intentionally installs no ready capability.
     #[cfg(test)]
@@ -1122,6 +1176,55 @@ mod tests {
         let first_after_seek = reopened_or_sought.reserve(frame(1)).unwrap();
         assert_eq!(first_after_seek.generation(), 1);
         first_after_seek.abort().unwrap();
+    }
+
+    #[test]
+    fn processing_commit_advances_the_exact_prior_without_a_display_slot() {
+        let (device, queue) = match gpu() {
+            Ok(gpu) => gpu,
+            Err(reason) => {
+                assert!(
+                    std::env::var("KJERAG_REQUIRE_GPU").is_err(),
+                    "KJERAG_REQUIRE_GPU is set and there is no GPU: {reason}"
+                );
+                eprintln!("skipping resident processing-commit test: {reason}");
+                return;
+            }
+        };
+        let context = OneXsGpuContext::new(&device, &queue);
+        let session = ResidentSourceIdentity::for_test();
+        let capture = GpuResidentCapture::new_bound(context.clone(), session.clone());
+        let first_flight = flight(1);
+        let mut first = capture
+            .reserve(first_flight.frame.clone())
+            .unwrap()
+            .seal(successor(&device, first_flight.clone()))
+            .unwrap();
+        let expected_root = first
+            .reservation
+            .as_ref()
+            .expect("candidate retains its reservation")
+            .identity();
+        first
+            .commit_processing_with(|actual_context, actual_session, root, actual_flight| {
+                actual_context.ensure_same(&context)?;
+                actual_session.ensure_matches(&session)?;
+                assert!(root.matches(&expected_root));
+                assert_eq!(actual_flight, &first_flight);
+                Ok(())
+            })
+            .unwrap();
+
+        let committed = Arc::clone(&first.successor);
+        let state = capture.snapshot();
+        assert!(!state.pending);
+        assert!(!state.ready);
+        assert!(!capture.has_future().unwrap());
+        assert!(Arc::ptr_eq(state.committed.as_ref().unwrap(), &committed));
+
+        let next = capture.reserve(frame(2)).unwrap();
+        assert!(Arc::ptr_eq(next.prior.as_ref().unwrap(), &committed));
+        next.abort().unwrap();
     }
 
     #[test]

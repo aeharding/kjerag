@@ -14,6 +14,33 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Non-presenting panorama preparation verified, 2026-09-10:** explicit
+`Player::prepare_ahead` can retain six contiguous successors while startup or
+a seek landing stays paused, without advancing source/audio time or statistics.
+A separate resident panorama owner uses the established bounded stitch worker
+and exact source/map/fusion draw, committing computational history without
+publishing a raw display future. Retirement capacity is reserved before work;
+completed panorama textures do not retain old decoder surfaces.
+
+The real-Scene regression checks both cameras at startup and after the reported
+seeks: X4 sources 18344..18350 and ONE X2 sources 6369..6375, plus 0..6 on each.
+All 28 source-stamped 256x128 panoramas match the unchanged displayed-source path
+exactly. Current delivery, pause intent, clock and stats stay fixed during
+preparation. A weak-owner check proves the first decoder source releases after
+display advances while its retained panorama remains unchanged. All 80 ordinary
+media tests and 980 ordinary render tests pass (3/37 ignored respectively);
+workspace all-target Clippy, formatting, source-lock and name checks pass.
+
+The bounded settings audit also closes April's actual `x4a_sp` selection through
+its 3840/4000 low-rate arm: source group 0, 3840x3840, f32(30000/1001). It is not
+the separate 7680 panorama-size arm or denoiser backend enum 8. Automatic settings
+consumption and filtered-frame publication are still unfinished. This is an
+explicit real-source integration test, not ordinary Scene selection, full-size
+filter qualification, a smoothness result or an installed flicker fix. No new
+Studio capture, gradual colour update, UI/Flatpak qualification or owner verdict.
+Evidence: `scratch/studio-seam-flicker-612-20260909-01/panorama-ingest-01`
+and [configuration input note](research/studio-denoise-config-602.md).
+
 **Temporal ISO lookup and startup/tail bindings verified, 2026-09-10:** the
 render-side lookup now consumes the decoded ISO track with Studio's recovered
 interpolation, zero-cache and invalid-value correction. Resident GPU history

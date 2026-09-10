@@ -91,6 +91,8 @@ const RETAINED: usize = 3;
 const DRAW_RETIREMENT_RETRY: Duration = Duration::from_millis(1);
 
 #[cfg(test)]
+mod panorama_ingest_tests;
+#[cfg(test)]
 mod panorama_review;
 
 /// When the widget should come back, which is the whole of frame pacing:
@@ -6434,7 +6436,7 @@ mod tests {
                     .find("capture.commit_worker_future(bound, &completed)")
                     .unwrap()
         );
-        assert!(worker.contains("self.jobs.try_send(Job { capture })"));
+        assert!(worker.contains("self.jobs.try_send(Job::Capture(capture))"));
         assert!(
             !submit[queued..].contains("failed_import"),
             "the pre-submit import retry must not catch a GPU submission failure"
@@ -7908,7 +7910,7 @@ mod tests {
     /// Opt-in because this is the production dmabuf path: it needs a target
     /// Vulkan adapter, VA-API decode and an actual paired ONE X2 capture.
     /// `KJERAG_ONE_X2_TEST_MEDIA` names either half; media owns sibling
-    fn prepare_and_draw_exact_resident_frame(
+    pub(super) fn prepare_and_draw_exact_resident_frame(
         scene: &Scene,
         pipeline: &mut ScenePipeline,
         device: &wgpu::Device,
@@ -10838,7 +10840,7 @@ mod tests {
 
     type GpuPair = (wgpu::Device, wgpu::Queue);
 
-    fn test_import_gpu_and_foreign() -> Result<(GpuPair, GpuPair), String> {
+    pub(super) fn test_import_gpu_and_foreign() -> Result<(GpuPair, GpuPair), String> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..Default::default()
@@ -10876,7 +10878,10 @@ mod tests {
         Ok((primary, foreign))
     }
 
-    fn wait_for_new_scene_frame(scene: &Scene, previous: Option<&FrameStamp>) -> FrameStamp {
+    pub(super) fn wait_for_new_scene_frame(
+        scene: &Scene,
+        previous: Option<&FrameStamp>,
+    ) -> FrameStamp {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let now = Instant::now();

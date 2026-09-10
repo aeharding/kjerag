@@ -479,7 +479,7 @@ fn differences(reference: &[u8], actual: &[u8]) -> (u8, f64, u8) {
     (maximum, sum as f64 / count as f64, p99)
 }
 
-struct PendingReadback {
+pub(super) struct PendingReadback {
     buffer: wgpu::Buffer,
     width: u32,
     height: u32,
@@ -488,7 +488,7 @@ struct PendingReadback {
 }
 
 impl PendingReadback {
-    fn encode(
+    pub(super) fn encode(
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         texture: &wgpu::Texture,
@@ -529,7 +529,7 @@ impl PendingReadback {
         }
     }
 
-    fn read(self, device: &wgpu::Device, submission: wgpu::SubmissionIndex) -> Vec<u8> {
+    pub(super) fn read(self, device: &wgpu::Device, submission: wgpu::SubmissionIndex) -> Vec<u8> {
         let slice = self.buffer.slice(..);
         let (send, receive) = mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {

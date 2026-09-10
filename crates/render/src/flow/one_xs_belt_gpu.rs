@@ -31,8 +31,14 @@ use crate::stitch_camera::StitchCamera;
 use kjerag_media::{FrameStamp, Frames};
 use kjerag_meta::{CalibrationSet, OrientationTrack, Readout};
 
+#[path = "one_xs/panorama_ingest.rs"]
+mod panorama_ingest;
 #[path = "one_xs/resident_worker.rs"]
 mod resident_worker;
+// The real-Scene regression consumes this preparation boundary; ordinary
+// playback keeps its direct-map route until filtered publication is wired.
+#[cfg(test)]
+pub(crate) use panorama_ingest::ResidentPanoramaIngest;
 use resident_worker::ResidentStitchWorker;
 
 /// One admitted capture's immutable camera interpretation and CPU resources.
@@ -2360,6 +2366,29 @@ impl ResidentBoundInstall {
                     .expect("bound resident result lost its picture"),
             )?;
         Ok(())
+    }
+
+    /// Advance the exact processing history and return its sealed draw without
+    /// populating either display slot. The caller has already reserved the
+    /// retirement that will retain this source/map pair through its panorama
+    /// render pass.
+    fn commit_processing(mut self, permit: DrawPermit) -> Fallible<InstalledOneXsReady> {
+        let draw = self
+            .draw
+            .as_ref()
+            .expect("bound resident result lost its picture");
+        self.root
+            .as_mut()
+            .expect("bound resident result lost its root")
+            .commit_processing(draw)?;
+        Ok(InstalledOneXsReady {
+            draw: self
+                .draw
+                .take()
+                .expect("committed resident processing result lost its picture"),
+            permit,
+            pass: None,
+        })
     }
 
     fn reserve(

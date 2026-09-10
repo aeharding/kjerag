@@ -191,7 +191,30 @@ output is refused before arming. The shared body pipeline is lazily cached.
 `KJERAG_PANORAMA_RESIDENT_INPUT=1` selects this route only in the offline review;
 its first source checks the entire panorama against the uploaded-map oracle.
 Normal playback still draws its direct map and has no selected temporal filter.
-Its optional captured-ISO100 temporal arm keeps seven contiguous source-stamped
+The separate `ResidentPanoramaIngest` is the non-presenting source producer for
+that integration. It owns a fresh resident session and cannot share a root with
+the display facade. A typed job on the existing bounded stitch-worker channel
+imports one exact decoded pair, runs the unchanged stitch/color transaction,
+then commits only its computational successor. Neither the raw future nor ready
+display slot is populated. A draw-retirement permit is reserved before admission
+or computation; its immutable source/map/fusion pass survives through panorama
+submission completion. The returned panorama owns its independent RGB texture
+and source stamp, not a decoder surface. One pending request or untaken output
+provides backpressure. Ordinary playback does not yet call this producer.
+
+`Player::prepare_ahead` supplies the corresponding explicit source horizon:
+up to six successors may be retained without presenting one, including while
+startup or a seek landing is paused. The current source must belong to the
+newest requested epoch; pending seek notes stay available to ordinary promotion.
+Every accepted successor must be adjacent. Stale notes are discarded, while gaps
+and decoder failures remain errors. `is_input_exhausted` distinguishes decoder
+EOF from presentation EOF; if six slots are full, the trailing EOF note is read
+after a slot frees. The ordinary two-frame lookahead, reader depth, presentation
+clock and startup acknowledgement policy remain unchanged. This API and producer
+do not yet supply filtered-frame publication, automatic filter selection or an
+end-to-end temporal playback path.
+
+The offline review's captured-ISO100 temporal arm keeps seven contiguous source-stamped
 NV12 images in resident arrays and their gray pyramids, emits only center
 position three, and never pads either end. Metadata is checked against all seven
 history stamps. The first output records seven arriving copy pairs; subsequent

@@ -9,14 +9,25 @@
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
+use super::panorama_ingest::{ResidentPanoramaIngestInner, service_panorama};
 use super::{
     ResidentCaptureFacadeInner, ResidentPendingMap, ResidentPoll, ResidentReadyMap,
     native_lifecycle_event, native_lifecycle_probe_enabled, prepare_resident_bound,
 };
 use crate::Fallible;
 
-struct Job {
-    capture: Arc<ResidentCaptureFacadeInner>,
+pub(super) struct PanoramaJob {
+    pub(super) ingest: Arc<ResidentPanoramaIngestInner>,
+    pub(super) frames: Arc<kjerag_media::Frames>,
+    pub(super) reframe: crate::Reframe,
+    pub(super) stamp: kjerag_media::FrameStamp,
+    pub(super) size: crate::Size,
+    pub(super) permit: crate::draw_retirement::DrawPermit,
+}
+
+enum Job {
+    Capture(Arc<ResidentCaptureFacadeInner>),
+    Panorama(Box<PanoramaJob>),
 }
 
 pub(super) struct ResidentStitchWorker {
@@ -32,9 +43,19 @@ impl ResidentStitchWorker {
             .name("kjerag-stitch".into())
             .spawn(move || {
                 for job in incoming {
-                    let capture = Arc::clone(&job.capture);
-                    if let Err(error) = catch_capture_panic(|| service_capture(job.capture)) {
-                        capture.fail_worker(error);
+                    match job {
+                        Job::Capture(capture) => {
+                            let owner = Arc::clone(&capture);
+                            if let Err(error) = catch_capture_panic(|| service_capture(capture)) {
+                                owner.fail_worker(error);
+                            }
+                        }
+                        Job::Panorama(job) => {
+                            let owner = Arc::clone(&job.ingest);
+                            if let Err(error) = catch_capture_panic(|| service_panorama(job)) {
+                                owner.fail(&error.to_string());
+                            }
+                        }
                     }
                 }
             })?;
@@ -52,12 +73,29 @@ impl ResidentStitchWorker {
         &self,
         capture: Arc<ResidentCaptureFacadeInner>,
     ) -> Result<bool, mpsc::TrySendError<Arc<ResidentCaptureFacadeInner>>> {
-        match self.jobs.try_send(Job { capture }) {
+        match self.jobs.try_send(Job::Capture(capture)) {
             Ok(()) => Ok(true),
-            Err(mpsc::TrySendError::Full(job)) => Err(mpsc::TrySendError::Full(job.capture)),
-            Err(mpsc::TrySendError::Disconnected(job)) => {
-                Err(mpsc::TrySendError::Disconnected(job.capture))
+            Err(mpsc::TrySendError::Full(Job::Capture(capture))) => {
+                Err(mpsc::TrySendError::Full(capture))
             }
+            Err(mpsc::TrySendError::Disconnected(Job::Capture(capture))) => {
+                Err(mpsc::TrySendError::Disconnected(capture))
+            }
+            Err(_) => unreachable!("capture kick returned another worker job"),
+        }
+    }
+
+    pub(super) fn try_kick_panorama(
+        &self,
+        job: Box<PanoramaJob>,
+    ) -> Result<(), mpsc::TrySendError<Box<PanoramaJob>>> {
+        match self.jobs.try_send(Job::Panorama(job)) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Full(Job::Panorama(job))) => Err(mpsc::TrySendError::Full(job)),
+            Err(mpsc::TrySendError::Disconnected(Job::Panorama(job))) => {
+                Err(mpsc::TrySendError::Disconnected(job))
+            }
+            Err(_) => unreachable!("panorama kick returned another worker job"),
         }
     }
 }
@@ -104,7 +142,7 @@ fn service_capture(capture: Arc<ResidentCaptureFacadeInner>) -> Fallible<()> {
     }
 }
 
-fn finish_pending(
+pub(super) fn finish_pending(
     session: &super::ResidentCaptureSession,
     mut pending: ResidentPendingMap,
 ) -> Fallible<ResidentReadyMap> {
