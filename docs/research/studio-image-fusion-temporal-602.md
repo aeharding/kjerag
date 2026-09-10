@@ -2540,3 +2540,57 @@ flicker verdict from it. No native session, export, installation, push or merge.
 Evidence is in `scratch/studio-seam-flicker-612-20260909-01/temporal-gpu-motion-01`.
 The final exercised binary SHA256 is
 `95b2edec868efd7848f2b1ba758beff0fa494df97ea7a255e9aba8dc91608b7d`.
+
+### Exact finest-level GPU controller fails the performance gate, 2026-09-10
+
+A bounded implementation tested whether preserving the reference's serial
+decisions was useful on the GPU. The CPU reference now exposes the exact
+preparation boundary: search levels six through one, derive the same global
+predictor, and interpolate the finest plane's unsearched seeds. Full `selected`
+search retains its original operations and matches all six sealed adapter
+outputs. A separate replay test verifies that preparation plus the original
+finest controller equals the complete search.
+
+The GPU experiment used one 256-lane workgroup per reference, six groups per
+row, and a separate ordered compute pass for every row. Each group processed
+the row's blocks serially. Eight 32-lane teams evaluated fixed candidate sets
+cooperatively. A leader replayed strict improvements in the CPU's ordinal
+order: three inclusive starting seeds, four exclusive-upper-bound predictor
+checks, then the fixed eight-candidate ring. UMH's fixed lists were batched in
+order and its adaptive Hex decisions retained. The in-place raw field kept
+unsearched future-row seeds intact; prior rows supplied searched neighbors.
+The plane-wide bad count persisted between rows. Core i32/u32 arithmetic is
+sufficient for the selected byte SADs and penalties. No subgroup feature,
+per-block CPU readback or single long whole-plane dispatch was introduced.
+
+All six GPU tests pass on AMD760M/RADV. They include a nonconstant case where
+one future diagonal seed changes the first match and propagates through left
+and up dependencies, an adaptive UMH match beyond the fixed initial range,
+partial image-edge blocks, ties, reference order and rejected input followed
+by valid encoding. Three saved-input repeats match every one of the 172,800
+raw vectors against the sealed combined-adapter outputs. This does not close
+the existing 4,167-vector gap to Studio's native raw fields.
+
+The performance result rejects this implementation. For the saved 3840x1920
+inputs, serial CPU coarse preparation takes 343.344 ms. GPU finest setup and
+encoding take 21.356/7.494/7.258 ms across the three runs; submission through
+completion and the single 2,073,600-byte readback takes
+222.584/158.538/159.758 ms. No other agent build or GPU job overlapped this
+measurement. These are host-observed diagnostic regions, not timestamp-query
+kernel times or an actual-player test. The warm finest stage alone is far
+beyond the 33.37 ms source interval, without filtering or view rendering.
+The separate 177 ms prior CPU measurement used actual Kjerag inputs and
+parallel full searches, so these are not a controlled CPU/GPU speedup ratio.
+
+Do not continue the complete serial-decision GPU port. The prototype is
+archived in branch history and retired from active source under MANDATES.
+The next candidate will evaluate independent block refinement with immutable
+coarse predictors. That changes motion-search semantics and must be tested on
+filtered moving output; it is not presumed visually equivalent or accepted.
+It does not introduce gradual color-coefficient updates or alter the recovered
+pixel-fusion calculation. No new native session/export or installed change.
+
+Evidence is in
+`scratch/studio-seam-flicker-612-20260909-01/temporal-gpu-search-01`:
+build, shader validation, 11 CPU search tests, six GPU tests and timing logs.
+Both existing moving comparisons remain the outstanding human quality gate.

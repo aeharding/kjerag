@@ -21,6 +21,8 @@
 use super::pyramid::Level;
 use std::fmt;
 
+pub mod gpu;
+
 const LEVELS: usize = 7;
 const BLOCK: usize = 16;
 const PENALTY_NEW: i64 = 50;
@@ -139,6 +141,50 @@ struct Plane<'a> {
 /// `(dx, dy, unpenalized 16x16 luma SAD)`. Unsupported level layouts are
 /// rejected rather than assigned semantics from another search mode.
 pub fn selected(current: &[Level], reference: &[Level]) -> Result<Vec<[i32; 3]>, Error> {
+    raw_records(search_through_level(current, reference, 0)?)
+}
+
+/// Exact CPU preparation for a finest-level GPU search. These are the
+/// unsearched interpolated seeds, not the final finest motion vectors.
+pub struct FinestInput {
+    pub seeds: Vec<[i32; 3]>,
+    pub global: [i32; 2],
+}
+
+/// Search levels six through one with the unchanged reference, then prepare
+/// the finest plane's native-order predictor inputs. No finest search runs.
+pub fn prepare_finest(current: &[Level], reference: &[Level]) -> Result<FinestInput, Error> {
+    let coarse = search_through_level(current, reference, 1)?;
+    let global = estimate_global_doubled(&coarse)?;
+    let seeds = interpolate(
+        &coarse,
+        [current[1].width / BLOCK, current[1].height / BLOCK],
+        [current[0].width / BLOCK, current[0].height / BLOCK],
+    )?;
+    Ok(FinestInput {
+        seeds: raw_records(seeds)?,
+        global: [global.x, global.y],
+    })
+}
+
+fn raw_records(vectors: Vec<Vector>) -> Result<Vec<[i32; 3]>, Error> {
+    vectors
+        .into_iter()
+        .map(|vector| {
+            Ok([
+                vector.x,
+                vector.y,
+                i32::try_from(vector.sad).map_err(|_| Error::OutputCostOverflow(vector.sad))?,
+            ])
+        })
+        .collect()
+}
+
+fn search_through_level(
+    current: &[Level],
+    reference: &[Level],
+    last_level: usize,
+) -> Result<Vec<Vector>, Error> {
     validate(current, reference)?;
     let mut previous: Option<Vec<Vector>> = None;
     let mut previous_shape = [0, 0];
@@ -148,7 +194,7 @@ pub fn selected(current: &[Level], reference: &[Level]) -> Result<Vec<[i32; 3]>,
         sad: -1,
     };
 
-    for level_index in (0..LEVELS).rev() {
+    for level_index in (last_level..LEVELS).rev() {
         let current_level = &current[level_index];
         let reference_level = &reference[level_index];
         let blocks_x = current_level.width / BLOCK;
@@ -179,17 +225,7 @@ pub fn selected(current: &[Level], reference: &[Level]) -> Result<Vec<[i32; 3]>,
         previous = Some(plane.vectors);
     }
 
-    previous
-        .expect("seven validated levels were searched")
-        .into_iter()
-        .map(|vector| {
-            Ok([
-                vector.x,
-                vector.y,
-                i32::try_from(vector.sad).map_err(|_| Error::OutputCostOverflow(vector.sad))?,
-            ])
-        })
-        .collect()
+    Ok(previous.expect("validated coarse-to-fine levels were searched"))
 }
 
 /// Run the six independent reference searches concurrently, retaining their

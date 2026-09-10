@@ -41,6 +41,56 @@ fn equal_images_choose_zero_and_report_zero_sad() {
 }
 
 #[test]
+fn finest_preparation_preserves_the_complete_reference_search() {
+    let bytes: Vec<_> = (0..1024usize * 1024)
+        .map(|at| ((at.wrapping_mul(37) ^ (at >> 6).wrapping_mul(173)) >> 3) as u8)
+        .collect();
+    let current = super::super::pyramid::build(&bytes, 1024, 1024, 7).unwrap();
+    let shifted: Vec<_> = (0..bytes.len())
+        .map(|at| bytes[(at + 29) % bytes.len()])
+        .collect();
+    let reference = super::super::pyramid::build(&shifted, 1024, 1024, 7).unwrap();
+    let input = prepare_finest(&current, &reference).unwrap();
+    assert_eq!(
+        finish_finest(&current[0], &reference[0], &input),
+        selected(&current, &reference).unwrap()
+    );
+}
+
+/// The same serial finest-level controller, exposed only to GPU tests so
+/// adversarial seeds can exercise bounds, ties and the adaptive UMH branch.
+pub(super) fn finish_finest(
+    current: &Level,
+    reference: &Level,
+    input: &FinestInput,
+) -> Vec<[i32; 3]> {
+    let mut plane = Plane {
+        current,
+        reference,
+        blocks_x: current.width / BLOCK,
+        blocks_y: current.height / BLOCK,
+        vectors: input
+            .seeds
+            .iter()
+            .map(|record| Vector {
+                x: record[0],
+                y: record[1],
+                sad: i64::from(record[2]),
+            })
+            .collect(),
+        smallest: false,
+        global: Vector {
+            x: input.global[0],
+            y: input.global[1],
+            sad: -1,
+        },
+        bad_count: 0,
+    };
+    plane.search(Refine::HexTwoOne).unwrap();
+    raw_records(plane.vectors).unwrap()
+}
+
+#[test]
 fn parallel_references_preserve_each_serial_result_and_input_order() {
     let current = constant_levels(1024, 1024, 73);
     let references = [10, 42, 73, 94, 121, 255].map(|value| constant_levels(1024, 1024, value));
@@ -256,6 +306,51 @@ fn packed_i32x3(records: &[[i32; 3]]) -> Vec<u8> {
 #[test]
 #[ignore = "requires sealed private inputs and combined adapter outputs"]
 fn matches_combined_adapter_for_all_six_saved_references() {
+    let fixture = native_fixture();
+    let parallel = selected_six(
+        &fixture.current,
+        fixture.references.each_ref().map(Vec::as_slice),
+    )
+    .unwrap();
+    for (ordinal, reference) in fixture.references.iter().enumerate() {
+        let records = selected(&fixture.current, reference).unwrap();
+        let actual = packed_i32x3(&records);
+        assert_eq!(
+            parallel[ordinal], records,
+            "parallel reference {ordinal} differs"
+        );
+        let wanted = &fixture.expected[ordinal];
+        assert_eq!(
+            actual.len(),
+            wanted.len(),
+            "reference {ordinal} byte count differs"
+        );
+        if &actual != wanted {
+            let differing: Vec<_> = actual
+                .chunks_exact(12)
+                .zip(wanted.chunks_exact(12))
+                .enumerate()
+                .filter_map(|(index, (got, expected))| (got != expected).then_some(index))
+                .collect();
+            panic!(
+                "combined adapter reference {ordinal} differs at {}/{} records; first {:?}; actual SHA-256 {}; expected SHA-256 {}",
+                differing.len(),
+                records.len(),
+                &differing[..differing.len().min(8)],
+                sha256(&actual),
+                sha256(wanted),
+            );
+        }
+    }
+}
+
+pub(super) struct NativeFixture {
+    pub current: Vec<Level>,
+    pub references: [Vec<Level>; 6],
+    pub expected: [Vec<u8>; 6],
+}
+
+pub(super) fn native_fixture() -> NativeFixture {
     let capture = std::env::var_os("KJERAG_SEARCH_FIXTURE_DIR")
         .map(std::path::PathBuf::from)
         .expect("set KJERAG_SEARCH_FIXTURE_DIR to temporal-motion-capture-01/run-01");
@@ -293,36 +388,13 @@ fn matches_combined_adapter_for_all_six_saved_references() {
         let name = format!("reference-{ordinal}-super-0.bin");
         captured_levels(&read_hashed(&capture, &name, reference_hashes[ordinal]))
     });
-    let parallel = selected_six(&current, references.each_ref().map(Vec::as_slice)).unwrap();
-    for ordinal in 0..6 {
-        let records = selected(&current, &references[ordinal]).unwrap();
-        let actual = packed_i32x3(&records);
-        assert_eq!(
-            parallel[ordinal], records,
-            "parallel reference {ordinal} differs"
-        );
+    let expected = std::array::from_fn(|ordinal| {
         let expected_name = format!("actual-reference-{ordinal}-raw.bin");
-        let wanted = read_hashed(&expected, &expected_name, output_hashes[ordinal]);
-        assert_eq!(
-            actual.len(),
-            wanted.len(),
-            "reference {ordinal} byte count differs"
-        );
-        if actual != wanted {
-            let differing: Vec<_> = actual
-                .chunks_exact(12)
-                .zip(wanted.chunks_exact(12))
-                .enumerate()
-                .filter_map(|(index, (got, expected))| (got != expected).then_some(index))
-                .collect();
-            panic!(
-                "combined adapter reference {ordinal} differs at {}/{} records; first {:?}; actual SHA-256 {}; expected SHA-256 {}",
-                differing.len(),
-                records.len(),
-                &differing[..differing.len().min(8)],
-                sha256(&actual),
-                sha256(&wanted),
-            );
-        }
+        read_hashed(&expected, &expected_name, output_hashes[ordinal])
+    });
+    NativeFixture {
+        current,
+        references,
+        expected,
     }
 }

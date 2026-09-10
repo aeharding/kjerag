@@ -14,6 +14,18 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Exact row-ordered GPU search rejected on speed, 2026-09-10:** a bounded
+finest-level prototype matches all 172,800 sealed reference vectors in three
+runs, including separate synthetic dependency and adaptive-search tests. It
+takes about 159 ms for the finest level alone on the AMD GPU, before coarser
+search and filtering. This is not a viable playback implementation. Do not
+extend the serial-decision port or mistake numerical identity for delivery.
+The rejected prototype is archived in branch history, not selected by the
+player. Next evaluate independently parallel motion refinement against real
+filtered pictures, explicitly disclosing changed spatial prediction. The
+captured filter and color-update policy remain unchanged; owner moving
+acceptance and an installable flicker fix are still absent.
+
 **GPU temporal motion packing verified, 2026-09-10:** the next optional GPU
 stage reproduces all2,764,800 signed lanes in the six native motion fields.
 The six independent CPU searches can also run concurrently without changing
