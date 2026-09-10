@@ -14,6 +14,32 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Cache and loop experiments retired; bounded overlap next, 2026-09-10:**
+the tested automatic integration is checkpointed at`8843aef7`. A full-body
+triangle/weight cache used450MiB for X4, failed its packed/alpha/fusion bitwise
+regression and changed actual612 output pixels. Its player run remained9.98fps
+and source preparation32.02ms, so the cache was removed, not accepted as a
+picture-quality tradeoff. A separate reference-count shader specialization
+preserved all31 actual612 frames and all104 offline image/map/color artifacts.
+It passed1010 render tests and7 real-camera Scene checks, but its player run
+was only9.25fps despite a faster short isolated fusion measurement. It too was
+removed: neither experiment established improved actual playback. Variable
+clocks mean these short runs do not establish the cause of every timing change.
+
+Selected frame code remains the preceding tested checkpoint. The current native
+binaries still contain the retired loop experiment until rebuilt; they are not
+offered as a test build. Installed Flatpak, main and public releases are unchanged.
+Exact rejected patches, test failures, comparisons and binary hashes remain in
+`scratch/studio-seam-flicker-612-20260909-01/temporal-static-cache-01`.
+
+The next implementation is isolated on`perf/temporal-stage-overlap`: keep
+resident stitch/map/color work serial, move the single-owned temporal stream
+to its own worker, and bound admission to one active source plus one successor.
+Reserve the four-picture ready capacity before admission, including startup's
+four-output batch. Keep completed-only publication and exact seek/EOF stamps.
+This overlap is being implemented, not a measured speedup or a usable-player
+claim. Broad RE remains frozen.
+
 **Exact execution savings; playback still too slow, 2026-09-10:** the automatic
 filter now keeps its finest image on the GPU, reading only the six smaller
 pyramid levels for unchanged CPU coarse search. RGB conversion writes straight
