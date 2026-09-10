@@ -2681,3 +2681,63 @@ observed warm range as 31.1 to 42.9 ms across both runs, not a guaranteed
 31 ms stage. The movies above were made by the earlier named binary and are
 unchanged; the only later source edit parenthesizes the same synthetic-test
 expression for Clippy.
+
+### Exact per-view execution scissors, 2026-09-10
+
+This optimization leaves the preceding parallel-refinement candidate's picture
+unchanged. Fusion still stores full-resolution R8/RG8 planes, conversion still
+stores full-resolution Rgba8, and the same hardware-linear panorama projector
+reads the same absolute coordinates. Only conservative render-pass scissors
+reduce fusion/conversion fragment work. This is not a cropped intermediate,
+view-resolution temporal filter, changed search, or gradual coefficient update.
+
+The planner bounds a rectilinear view with a spherical cap, pads f32 transform
+uncertainty, and falls back to full coverage for unsupported geometry. RGB
+coverage includes the projector's periodic horizontal and clamped vertical
+bilinear footprint. Horizontal padding is applied before longitude splitting:
+a geometric cap that stops just short of the seam can still sample both edge
+texels. Fusion coverage separately expands by two Y texels on every side,
+clamped at physical image edges. Halving that even rectangle supplies the one
+UV-texel halo needed by centered-chroma reconstruction. The chroma converter
+does not wrap its own input at the panorama seam. Full source/reference textures
+remain available for displaced temporal reads.
+
+All 70 temporal tests pass on AMD760M/RADV, retaining the native fixtures.
+New tests compare every projected RGBA byte across both longitude seam sides,
+both poles, portrait and wide fallback views. A negative control omitting the
+UV halo changes converted boundary pixels, proving that support is exercised.
+Coverage/validation and standalone fusion/conversion tests pass as well.
+The actual Scene route takes its bounds from the exact center `Reframe` which
+the unchanged projector consumes. All 290 artifacts at 612 and 274 at 607 match
+the previous parallel-refinement run byte-for-byte: 60 filtered pictures plus
+504 unfiltered picture/map/alpha/color controls. CSV center/reference indices,
+timestamps and filtered RGBA hashes match. The existing moving comparisons
+remain the review artifacts; no replacement movie or repeated owner request.
+Root inspected the rendered 612/607 PNG previews, not a moving flicker verdict.
+
+RGB scissors cover a mean 28.275% of the panorama at 612 (22.665 to 57.344%),
+and 22.218% at 607 (21.360 to 22.873%). Fusion covers slightly more for chroma
+support. Full-sized allocations and clears, full unfiltered history, panorama
+preparation, CPU coarse search and GPU finest search remain. Accordingly the
+saving is modest: GPU/upload/refine/pack/fuse/convert/project/completion/readback
+averages 120.124 ms at 612 and 117.782 ms at 607, against the prior full-path
+134.222/132.368 ms. New maxima are 139.013/138.185 ms. This host-timed region
+also includes planning and rectangle logging; it is not a GPU-only measurement.
+Unchanged CPU coarse search averages 72.736/79.017 ms (max 96.483/108.642).
+Combined means are 192.859/196.799 ms, excluding earlier panorama preparation
+and controls. Whole runs take 12.69/12.05 seconds. No other build/GPU job
+overlapped the captures. These runs do not establish actual-player capacity.
+
+The full path remains the default. Partial filtered targets contain cleared,
+invalid image data outside the scissors and may only serve their exact prepared
+view; this is not a changed-view playback cache. The independent motion search
+remains an unaccepted quality candidate. No installed change, new Studio session,
+export, merge, gradual update or owner-confirmed flicker fix follows.
+Evidence is in
+`scratch/studio-seam-flicker-612-20260909-01/temporal-view-scissors-01`, including
+build/test/capture logs, source-stamped frames and the all-artifacts verifier.
+The exercised render binary SHA256 is
+`09c6dab8b2a49f541075c2bd1bf2c0db5eb064bd2e782fdebdb8f1cf6b62262c`.
+Workspace all-target Clippy, formatting, source-lock and rename checks pass.
+Full workspace tests and the UI harness were not run for this uninstalled
+offline optimization.

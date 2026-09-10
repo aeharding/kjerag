@@ -107,6 +107,19 @@ impl PanoramaReview {
                 true
             })
             .unwrap_or(false);
+        let view_scissors = std::env::var_os("KJERAG_PANORAMA_VIEW_SCISSORS")
+            .map(|value| {
+                assert_eq!(
+                    value, "1",
+                    "set the explicit view-scissor diagnostic flag to 1"
+                );
+                assert!(
+                    temporal_enabled,
+                    "view scissors need the temporal diagnostic"
+                );
+                true
+            })
+            .unwrap_or(false);
         let temporal = temporal_enabled.then(|| {
             temporal::TemporalReview::new(
                 device,
@@ -114,6 +127,7 @@ impl PanoramaReview {
                 gpu_motion,
                 parallel_search,
                 parallel_refine,
+                view_scissors,
             )
         });
         let gpu_pyramid = gpu_pyramid_enabled.then(|| {

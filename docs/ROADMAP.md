@@ -14,6 +14,25 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**View-scissored temporal candidate verified, 2026-09-10:** full-sized targets
+now permit conservative per-view fusion/conversion execution without changing
+their coordinates, shader arithmetic, quantization or final projector. All
+70 temporal tests pass on AMD, including full-versus-scissored projected pixels
+at seam/pole/portrait views and a missing-chroma-halo negative control. Actual
+612/607 Scene runs preserve all 60 filtered frames and 504 controls exactly,
+including source associations and hashes. Existing review movies remain current;
+no new movie or owner acceptance is inferred.
+
+The diagnostic GPU/upload/filter/projection/completion region averages
+120.124/117.782 ms versus the prior full-path 134.222/132.368 ms. This includes
+host work and logging, not GPU-only time. CPU coarse preparation is unchanged;
+the combined measured portion still averages 192.859/196.799 ms, excluding
+earlier panorama preparation. This is a modest execution saving, not playback
+readiness or a flicker fix. Full-size allocation/history cost remains, and the
+partial filtered panorama is valid only for its exact prepared view. No gradual
+color update, installed change, new Studio export or broader RE. Evidence:
+`scratch/studio-seam-flicker-612-20260909-01/temporal-view-scissors-01`.
+
 **Independent GPU refinement candidate rendered, 2026-09-10:** the changed
 finest-level search matches its new readable CPU oracle on all 172,800 saved
 vectors in repeated runs. Warm submit/completion/readback takes 31.1 to 42.9 ms,

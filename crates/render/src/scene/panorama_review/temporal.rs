@@ -53,6 +53,7 @@ pub(super) struct TemporalReview {
     gpu_motion: Option<motion::gpu::Builder>,
     parallel_refine: Option<parallel_refine::gpu::Builder>,
     parallel_search: bool,
+    view_scissors: bool,
     output: PathBuf,
     log: std::io::BufWriter<std::fs::File>,
 }
@@ -64,6 +65,7 @@ impl TemporalReview {
         gpu_motion: bool,
         parallel_search: bool,
         parallel_refine: bool,
+        view_scissors: bool,
     ) -> Self {
         let frames = output.join("panorama-denoised-diagnostic");
         std::fs::create_dir(&frames).unwrap_or_else(|error| {
@@ -80,6 +82,13 @@ impl TemporalReview {
         )
         .unwrap();
         let contract = output.join("panorama-denoised-diagnostic.txt");
+        let coverage_route = if view_scissors {
+            "Coverage route: conservative per-view RGB scissors and separately padded fusion scissors, on full-sized targets.\n\
+             The unchanged projector may only draw this exact prepared view; pixels outside the scissors are not filtered image data.\n\
+             GPU+wait includes region planning; full unfiltered panorama history and motion search remain unchanged.\n"
+        } else {
+            "Coverage route: full-panorama fusion and RGB conversion.\n"
+        };
         let search_route = if parallel_refine && parallel_search {
             "Search route: six scoped CPU workers run search::prepare_finest through levels6..1, preserving supplied reference order.\n"
         } else if parallel_refine {
@@ -108,7 +117,7 @@ impl TemporalReview {
              References are c-3,c-2,c-1,c+1,c+2,c+3.\n\
              No startup/end padding, automatic policy, or gradual color update.\n\
              CPU preparation and explicit GPU completion are diagnostic, not playback performance.\n\
-             {search_route}{motion_route}"
+             {search_route}{motion_route}{coverage_route}"
             ),
         )
         .unwrap_or_else(|error| panic!("write {}: {error}", contract.display()));
@@ -121,6 +130,7 @@ impl TemporalReview {
             gpu_motion: gpu_motion.then(|| motion::gpu::Builder::new(device)),
             parallel_refine: parallel_refine.then(|| parallel_refine::gpu::Builder::new(device)),
             parallel_search,
+            view_scissors,
             output: frames,
             log,
         }
@@ -275,6 +285,18 @@ impl TemporalReview {
         };
 
         let gpu_started = Instant::now();
+        let regions = self.view_scissors.then(|| {
+            crate::temporal_fusion::regions::ViewRegions::for_view(FULL, &center.reframe)
+                .unwrap_or_else(|error| panic!("plan temporal view scissors: {error}"))
+        });
+        if let Some(regions) = &regions {
+            eprintln!(
+                "panorama-temporal-regions: center {} RGB {:?} fusion {:?}",
+                center.stamp.index(),
+                regions.rgb(),
+                regions.fusion(),
+            );
+        }
         let y = array_texture(
             device,
             "offline temporal Y window",
@@ -380,38 +402,53 @@ impl TemporalReview {
                 copy_layer(&mut encoder, &output, &flow, layer as u32);
             }
         }
-        let fused = self
-            .fuse
-            .encode(
+        let inputs = Inputs {
+            y: &y,
+            uv: &uv,
+            flow: &flow,
+            luma: &luma_texture,
+        };
+        let parameters = Parameters {
+            // Exact f32 words consumed by every selected Y/UV UBO in
+            // `denoise-parameters-01/analysis.json`: noise integer
+            // 700 scaled by 1/16320, and limit integer 10 by 1/255.
+            // The authenticated analysis SHA-256 is
+            // f319e651c5077b0e952f62138bbbde0ca8bd6a46e76093fd31fa86fcb823f3aa.
+            noise: f32::from_bits(0x3d2f_afb0),
+            limit: f32::from_bits(0x3d20_a0a1),
+            y_limits: LIMIT_Y,
+            uv_limits: LIMIT_UV,
+            current_layer: CENTER as u32,
+            reference_layers: REFERENCES.map(|value| value as u32).to_vec(),
+        };
+        let fused = if let Some(regions) = &regions {
+            self.fuse
+                .encode_scissored(device, &mut encoder, inputs, &parameters, regions.fusion())
+        } else {
+            self.fuse.encode(
                 device,
                 &mut encoder,
-                Inputs {
-                    y: &y,
-                    uv: &uv,
-                    flow: &flow,
-                    luma: &luma_texture,
-                },
-                &Parameters {
-                    // Exact f32 words consumed by every selected Y/UV UBO in
-                    // `denoise-parameters-01/analysis.json`: noise integer
-                    // 700 scaled by 1/16320, and limit integer 10 by 1/255.
-                    // The authenticated analysis SHA-256 is
-                    // f319e651c5077b0e952f62138bbbde0ca8bd6a46e76093fd31fa86fcb823f3aa.
-                    noise: f32::from_bits(0x3d2f_afb0),
-                    limit: f32::from_bits(0x3d20_a0a1),
-                    y_limits: LIMIT_Y,
-                    uv_limits: LIMIT_UV,
-                    current_layer: CENTER as u32,
-                    reference_layers: REFERENCES.map(|value| value as u32).to_vec(),
-                },
+                inputs,
+                &parameters,
                 [0, 0, FULL[0], FULL[1]],
             )
-            .unwrap_or_else(|error| panic!("fuse captured ISO100 regime: {error}"));
+        }
+        .unwrap_or_else(|error| panic!("fuse captured ISO100 regime: {error}"));
         let matrix = MatrixCoefficients::from_source_rgb(center.reframe.source_color_matrix());
-        let rgb = self
-            .color
-            .encode_planes_to_rgb(&mut encoder, &fused.y, &fused.uv, matrix)
-            .unwrap_or_else(|error| panic!("convert fused NV12 diagnostic: {error}"));
+        let rgb = if let Some(regions) = &regions {
+            self.color.encode_planes_to_rgb_scissored(
+                &mut encoder,
+                &fused.y,
+                &fused.uv,
+                matrix,
+                regions.rgb(),
+            )
+        } else {
+            self.color
+                .encode_planes_to_rgb(&mut encoder, &fused.y, &fused.uv, matrix)
+                .map_err(|error| error.to_string())
+        }
+        .unwrap_or_else(|error| panic!("convert fused NV12 diagnostic: {error}"));
         let projected = self
             .projector
             .encode(device, &mut encoder, &rgb, &center.reframe, VIEW)

@@ -28,6 +28,9 @@ pub mod search;
 /// Kjerag-specific constant-work refinement candidate, not selected playback.
 pub mod parallel_refine;
 
+/// Conservative full-image execution regions for one exact prepared view.
+pub mod regions;
+
 /// Effective values supplied by the calibration/history producer, not defaults.
 pub struct Parameters {
     pub noise: f32,
@@ -50,7 +53,8 @@ pub struct Inputs<'a> {
     pub luma: &'a wgpu::Texture,
 }
 
-/// GPU-owned result for the requested even-aligned region, with local origin.
+/// GPU-owned fusion result. [`GpuFuse::encode`] returns the requested region
+/// with a local origin; [`GpuFuse::encode_scissored`] returns full-size planes.
 /// Submission completion and the source-frame stamp remain the caller's job.
 pub struct Output {
     pub y: wgpu::Texture,
@@ -153,6 +157,40 @@ impl GpuFuse {
         roi: [u32; 4],
     ) -> Result<Output, String> {
         validate(&inputs, params, roi)?;
+        Ok(self.encode_validated(device, encoder, inputs, params, roi, None))
+    }
+
+    /// Encode up to two supplied regions into full-size Y and UV planes.
+    ///
+    /// Pixels outside the rectangles are cleared and are invalid source data
+    /// for a later view that reaches beyond the supplied regions. Rectangles
+    /// affect execution only: shader coordinates, arithmetic, quantization,
+    /// source association, and temporal parameters are unchanged.
+    pub fn encode_scissored(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        inputs: Inputs<'_>,
+        params: &Parameters,
+        rectangles: &[[u32; 4]],
+    ) -> Result<Output, String> {
+        let size = inputs.y.size();
+        let full = [size.width, size.height];
+        let roi = [0, 0, full[0], full[1]];
+        validate(&inputs, params, roi)?;
+        regions::validate(full, rectangles)?;
+        Ok(self.encode_validated(device, encoder, inputs, params, roi, Some(rectangles)))
+    }
+
+    fn encode_validated(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        inputs: Inputs<'_>,
+        params: &Parameters,
+        roi: [u32; 4],
+        scissors: Option<&[[u32; 4]]>,
+    ) -> Output {
         // Two vec4 layer-index groups keep the uniform's alignment explicit.
         let mut words = [0u32; 16];
         words[..4].copy_from_slice(&roi);
@@ -250,7 +288,7 @@ impl GpuFuse {
                 wgpu::TextureFormat::Rg8Unorm,
             ),
         };
-        for (texture, pipeline) in [(&output.y, &self.y), (&output.uv, &self.uv)] {
+        for (texture, pipeline, divisor) in [(&output.y, &self.y, 1), (&output.uv, &self.uv, 2)] {
             let view = texture.create_view(&Default::default());
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("temporal pixel fusion"),
@@ -267,9 +305,21 @@ impl GpuFuse {
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &group, &[]);
-            pass.draw(0..3, 0..1);
+            if let Some(rectangles) = scissors {
+                for &[x, y, width, height] in rectangles {
+                    pass.set_scissor_rect(
+                        x / divisor,
+                        y / divisor,
+                        width / divisor,
+                        height / divisor,
+                    );
+                    pass.draw(0..3, 0..1);
+                }
+            } else {
+                pass.draw(0..3, 0..1);
+            }
         }
-        Ok(output)
+        output
     }
 }
 
@@ -351,3 +401,6 @@ fn validate(inputs: &Inputs<'_>, params: &Parameters, roi: [u32; 4]) -> Result<(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod scissor_tests;

@@ -191,6 +191,31 @@ fn gpu_round_trip(
     let external_output = conversion
         .encode_planes_to_rgb(&mut encoder, &nv12.y, &nv12.uv, matrix)
         .unwrap();
+    assert!(
+        conversion
+            .encode_planes_to_rgb_scissored(&mut encoder, &nv12.y, &nv12.uv, matrix, &[])
+            .is_err()
+    );
+    assert!(
+        conversion
+            .encode_planes_to_rgb_scissored(
+                &mut encoder,
+                &nv12.y,
+                &nv12.uv,
+                matrix,
+                &[[1, 0, 2, 2]],
+            )
+            .is_err()
+    );
+    let scissored_output = conversion
+        .encode_planes_to_rgb_scissored(
+            &mut encoder,
+            &nv12.y,
+            &nv12.uv,
+            matrix,
+            &[[0, 0, 2, 2], [2, 2, 2, 2]],
+        )
+        .unwrap();
     assert_eq!(
         conversion
             .encode_planes_to_rgb(
@@ -226,11 +251,29 @@ fn gpu_round_trip(
     let uv_copy = copy_texture(device, &mut encoder, &nv12.uv, 2, 2, 2);
     let rgb_copy = copy_texture(device, &mut encoder, &output, 4, 4, 4);
     let external_rgb_copy = copy_texture(device, &mut encoder, &external_output, 4, 4, 4);
+    let scissored_rgb_copy = copy_texture(device, &mut encoder, &scissored_output, 4, 4, 4);
     queue.submit([encoder.finish()]);
     let actual_y = read_copy(device, y_copy, 4, 4, 1);
     let actual_uv = read_copy(device, uv_copy, 2, 2, 2);
     let actual_rgb = read_copy(device, rgb_copy, 4, 4, 4);
     let actual_external_rgb = read_copy(device, external_rgb_copy, 4, 4, 4);
+    let actual_scissored_rgb = read_copy(device, scissored_rgb_copy, 4, 4, 4);
+    for y in 0..4 {
+        for x in 0..4 {
+            let at = (y * 4 + x) * 4;
+            let selected = (x < 2 && y < 2) || (x >= 2 && y >= 2);
+            let expected = if selected {
+                &actual_external_rgb[at..at + 4]
+            } else {
+                &[0, 0, 0, 255]
+            };
+            assert_eq!(
+                &actual_scissored_rgb[at..at + 4],
+                expected,
+                "{label} scissor at {x},{y}"
+            );
+        }
+    }
 
     let (expected_y, expected_uv) = reference_nv12(&source_bytes, matrix);
     assert_codes(label, "Y", &actual_y, &expected_y);

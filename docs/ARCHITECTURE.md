@@ -143,6 +143,19 @@ its exact source stamp and NV12 image. Refinement, packing and fusion share one
 encoder. Its receipt discloses the algorithm change, and its timing separates
 CPU coarse preparation from GPU work plus completion/readback.
 
+The optional view-scissor diagnostic keeps full-sized fusion Y/UV and converted
+RGB targets, their absolute coordinates and the unchanged panorama projector.
+`temporal_fusion::regions` conservatively bounds one exact rectilinear `Reframe`;
+unsupported or uncertain geometry uses full coverage. RGB bounds include the
+projector's horizontally periodic linear-sampling footprint. Separate fusion
+bounds expand by two Y texels, clamped on both axes, so halving them supplies
+the centered-chroma reconstruction halo. No shader arithmetic or intermediate
+quantization changes. Scissors restrict fragment execution, not allocations,
+full source history or motion search. Cleared pixels outside those bounds are
+not valid filtered picture data: the caller may project only the prepared view,
+not reuse the partial panorama after a view change. Ordinary playback selects
+none of this diagnostic and gains no changed-view cache or scheduling policy.
+
 The shell's pinned `iced_wgpu` renderer is locally patched to request the
 adapter's supported storage-buffer count. Its fixed default of eight caused
 the resident ONE X2 pipeline to panic at startup in the window, despite

@@ -292,7 +292,25 @@ impl GpuColorConversion {
     ) -> Result<wgpu::Texture, Error> {
         coefficients.validate()?;
         validate_planes(y, uv)?;
-        Ok(self.encode_validated_planes_to_rgb(encoder, y, uv, coefficients))
+        Ok(self.encode_validated_planes_to_rgb(encoder, y, uv, coefficients, None))
+    }
+
+    /// Convert only supplied full-image rectangles, keeping absolute texel
+    /// coordinates and the original full-size output texture. Pixels outside
+    /// the rectangles are cleared, not valid converted image data. The caller
+    /// must prepare the UV halo required by centered chroma reconstruction.
+    pub fn encode_planes_to_rgb_scissored(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        y: &wgpu::Texture,
+        uv: &wgpu::Texture,
+        coefficients: MatrixCoefficients,
+        rectangles: &[[u32; 4]],
+    ) -> Result<wgpu::Texture, String> {
+        coefficients.validate().map_err(|error| error.to_string())?;
+        validate_planes(y, uv).map_err(|error| error.to_string())?;
+        super::regions::validate([y.width(), y.height()], rectangles)?;
+        Ok(self.encode_validated_planes_to_rgb(encoder, y, uv, coefficients, Some(rectangles)))
     }
 
     fn encode_validated_planes_to_rgb(
@@ -301,6 +319,7 @@ impl GpuColorConversion {
         y: &wgpu::Texture,
         uv: &wgpu::Texture,
         coefficients: MatrixCoefficients,
+        rectangles: Option<&[[u32; 4]]>,
     ) -> wgpu::Texture {
         let parameters = uniform(&self.device, coefficients, "diagnostic NV12 to RGB matrix");
         let y_view = y.create_view(&Default::default());
@@ -331,7 +350,7 @@ impl GpuColorConversion {
             size.height,
             wgpu::TextureFormat::Rgba8Unorm,
         );
-        draw(encoder, &output, &self.rgb_pipeline, &group);
+        draw_scissored(encoder, &output, &self.rgb_pipeline, &group, rectangles);
         output
     }
 }
@@ -384,6 +403,16 @@ fn draw(
     pipeline: &wgpu::RenderPipeline,
     group: &wgpu::BindGroup,
 ) {
+    draw_scissored(encoder, target, pipeline, group, None);
+}
+
+fn draw_scissored(
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::Texture,
+    pipeline: &wgpu::RenderPipeline,
+    group: &wgpu::BindGroup,
+    rectangles: Option<&[[u32; 4]]>,
+) {
     let view = target.create_view(&Default::default());
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("diagnostic RGB/NV12 conversion"),
@@ -400,7 +429,14 @@ fn draw(
     });
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, group, &[]);
-    pass.draw(0..3, 0..1);
+    if let Some(rectangles) = rectangles {
+        for &[x, y, width, height] in rectangles {
+            pass.set_scissor_rect(x, y, width, height);
+            pass.draw(0..3, 0..1);
+        }
+    } else {
+        pass.draw(0..3, 0..1);
+    }
 }
 
 fn sampled_2d(texture: &wgpu::Texture, format: wgpu::TextureFormat) -> bool {
