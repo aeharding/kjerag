@@ -10,7 +10,7 @@ use std::fmt;
 use crate::temporal_fusion::pyramid::gpu::PackedGray;
 use wgpu::util::DeviceExt;
 
-const REFERENCES: usize = 6;
+const MAX_REFERENCES: usize = 6;
 const BLOCK: u32 = 16;
 const MIN_DIMENSION: u32 = 1_024;
 const MAX_DIMENSION_EXCLUSIVE: u32 = 8_192;
@@ -19,23 +19,33 @@ const MAX_DISPLACEMENT_EXCLUSIVE: i32 = 8_192;
 const MAX_SAD: i32 = 65_280;
 const RECORD_BYTES: u64 = 3 * size_of::<i32>() as u64;
 
-/// GPU-owned raw motion records. The six supplied-reference slices are
-/// contiguous and each record is `(dx, dy, unpenalized SAD)` as three `i32`s.
+/// GPU-owned raw motion records. The supplied-reference slices are contiguous
+/// and each record is `(dx, dy, unpenalized SAD)` as three `i32`s.
 pub struct Output {
     pub(crate) raw: wgpu::Buffer,
     pub(crate) device: wgpu::Device,
     pub(crate) blocks: [u32; 2],
+    pub(crate) references: u32,
 }
 
 impl Output {
     pub fn blocks(&self) -> [u32; 2] {
         self.blocks
     }
+
+    pub fn reference_count(&self) -> u32 {
+        self.references
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Error {
     ForeignDevice,
+    ReferenceCount {
+        references: usize,
+        seeds: usize,
+        globals: usize,
+    },
     Geometry,
     SeedCount {
         ordinal: usize,
@@ -56,6 +66,14 @@ impl fmt::Display for Error {
         match *self {
             Self::ForeignDevice => formatter.write_str(
                 "parallel-refine builder or packed image belongs to a different graphics device",
+            ),
+            Self::ReferenceCount {
+                references,
+                seeds,
+                globals,
+            } => write!(
+                formatter,
+                "parallel finest refinement needs 1 through 6 matching references, seeds and globals; got {references}, {seeds} and {globals}"
             ),
             Self::Geometry => formatter.write_str(
                 "parallel finest refinement needs equal image dimensions from 1024 through 8191",
@@ -154,7 +172,7 @@ impl Builder {
         }
     }
 
-    /// Record one independent finest-block refinement for all six references.
+    /// Record one independent finest-block refinement for one through six references.
     /// Images come from `pyramid::gpu::Builder::encode_packed_base`; logical
     /// dimensions, not packed texture width, determine search bounds. As with
     /// the producer, all resources must belong to the same wgpu Instance.
@@ -163,10 +181,12 @@ impl Builder {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         current: &PackedGray,
-        references: [&PackedGray; REFERENCES],
-        seeds: [&[[i32; 3]]; REFERENCES],
-        globals: [[i32; 2]; REFERENCES],
+        references: &[&PackedGray],
+        seeds: &[&[[i32; 3]]],
+        globals: &[[i32; 2]],
     ) -> Result<Output, Error> {
+        let reference_count =
+            validate_reference_count(references.len(), seeds.len(), globals.len())?;
         if self.device != *device
             || current.device() != device
             || references.iter().any(|image| image.device() != device)
@@ -188,7 +208,7 @@ impl Builder {
         let blocks = [width / BLOCK, height / BLOCK];
         let records_per_reference = usize::try_from(u64::from(blocks[0]) * u64::from(blocks[1]))
             .map_err(|_| Error::Geometry)?;
-        for ordinal in 0..REFERENCES {
+        for ordinal in 0..reference_count {
             if seeds[ordinal].len() != records_per_reference {
                 return Err(Error::SeedCount {
                     ordinal,
@@ -224,7 +244,7 @@ impl Builder {
             usage: wgpu::BufferUsages::STORAGE,
         });
         let output_size = u64::try_from(records_per_reference).map_err(|_| Error::Geometry)?
-            * REFERENCES as u64
+            * reference_count as u64
             * RECORD_BYTES;
         let raw = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("parallel finest temporal records"),
@@ -252,8 +272,16 @@ impl Builder {
         });
 
         let current_view = current.texture().create_view(&Default::default());
-        let reference_views =
-            references.map(|image| image.texture().create_view(&Default::default()));
+        // The fixed shader layout has six reference bindings. Inactive slots
+        // bind the current texture solely to satisfy wgpu layout completeness;
+        // dispatch z=N makes them unreachable and they have no seed/output
+        // slice.
+        let reference_views: [_; MAX_REFERENCES] = std::array::from_fn(|ordinal| {
+            references
+                .get(ordinal)
+                .map_or(current.texture(), |image| image.texture())
+                .create_view(&Default::default())
+        });
         let mut entries = vec![wgpu::BindGroupEntry {
             binding: 0,
             resource: wgpu::BindingResource::TextureView(&current_view),
@@ -293,14 +321,30 @@ impl Builder {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &group, &[]);
-        pass.dispatch_workgroups(blocks[0], blocks[1], REFERENCES as u32);
+        pass.dispatch_workgroups(blocks[0], blocks[1], reference_count as u32);
 
         Ok(Output {
             raw,
             device: self.device.clone(),
             blocks,
+            references: reference_count as u32,
         })
     }
+}
+
+fn validate_reference_count(
+    references: usize,
+    seeds: usize,
+    globals: usize,
+) -> Result<usize, Error> {
+    if !(1..=MAX_REFERENCES).contains(&references) || seeds != references || globals != references {
+        return Err(Error::ReferenceCount {
+            references,
+            seeds,
+            globals,
+        });
+    }
+    Ok(references)
 }
 
 fn safe_displacement(value: i32) -> bool {

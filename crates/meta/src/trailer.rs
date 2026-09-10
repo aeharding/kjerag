@@ -92,6 +92,10 @@ pub(crate) struct ExtraMetadata {
     /// Milliseconds.
     #[prost(double, tag = "25")]
     pub rolling_shutter_time: f64,
+    /// Source grouping used by Studio's denoiser selector. The parent message
+    /// is optional so an explicit scalar zero remains distinct from absence.
+    #[prost(message, optional, tag = "26")]
+    pub file_group_info: Option<FileGroupInfo>,
     #[prost(message, optional, tag = "27")]
     pub window_crop_info: Option<WindowCropInfo>,
     #[prost(double, tag = "28")]
@@ -122,6 +126,14 @@ pub(crate) struct Vector2 {
     pub x: i32,
     #[prost(int32, tag = "2")]
     pub y: i32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+#[cfg_attr(test, derive(serde::Deserialize))]
+#[cfg_attr(test, serde(default))]
+pub(crate) struct FileGroupInfo {
+    #[prost(int32, tag = "1")]
+    pub source_type: i32,
 }
 
 /// The sensor window the camera crops out of the calibration canvas
@@ -481,6 +493,44 @@ mod tests {
         assert_eq!(decoded, expected);
         assert_eq!(decoded.camera_type, "Insta360 X4 Air");
         assert_eq!(decoded.offset_v3.split('_').count(), 40);
+    }
+
+    #[test]
+    fn absent_file_group_differs_from_an_explicit_zero() {
+        let absent = CalibrationSet::from_trailer(
+            &trailer_of(Capture::of(&fixture::metadata()).insv()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(absent.source_group_type, None);
+
+        let mut explicit = fixture::metadata();
+        explicit.file_group_info = Some(FileGroupInfo { source_type: 0 });
+        let encoded = explicit.encode_to_vec();
+        assert!(
+            encoded.windows(3).any(|bytes| bytes == [0xd2, 0x01, 0x00]),
+            "the explicit empty nested message was omitted"
+        );
+        let present =
+            CalibrationSet::from_trailer(&trailer_of(Capture::of(&explicit).insv()).unwrap())
+                .unwrap();
+        assert_eq!(present.source_group_type, Some(0));
+    }
+
+    #[test]
+    fn file_group_preserves_another_type_and_ignores_unknown_nested_fields() {
+        let mut bytes = fixture::metadata().encode_to_vec();
+        // Top-level tag 26, length-delimited. Its message carries type=8 at
+        // tag 1 and an unrelated varint at tag 99.
+        bytes.extend([0xd2, 0x01, 0x05, 0x08, 0x08, 0x98, 0x06, 0x7b]);
+        let metadata = ExtraMetadata::decode(bytes.as_slice()).unwrap();
+        assert_eq!(
+            metadata.file_group_info,
+            Some(FileGroupInfo { source_type: 8 })
+        );
+        let calibration =
+            CalibrationSet::from_trailer(&trailer_of(Capture::of(&metadata).insv()).unwrap())
+                .unwrap();
+        assert_eq!(calibration.source_group_type, Some(8));
     }
 
     #[test]
@@ -964,5 +1014,14 @@ mod tests {
             worst > 1.05,
             "the two lenses' shutters never differ, which is not a track per lens"
         );
+    }
+
+    #[test]
+    #[ignore = "reads the owner's private April X4 Air capture"]
+    fn april_x4_air_records_source_group_zero() {
+        let path =
+            std::env::var("KJERAG_DENOISE_ISO_X4").expect("KJERAG_DENOISE_ISO_X4 is required");
+        let calibration = CalibrationSet::from_capture(path).unwrap();
+        assert_eq!(calibration.source_group_type, Some(0));
     }
 }

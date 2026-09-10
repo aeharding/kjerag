@@ -697,6 +697,7 @@ mod tests {
         let calibration = CalibrationSet {
             camera_model: "Insta360 X4 Air".to_owned(),
             firmware: "fixture".to_owned(),
+            source_group_type: None,
             dimension: Size {
                 width: FRAME.width,
                 height: FRAME.height,

@@ -322,6 +322,7 @@ mod tests {
         CalibrationSet {
             camera_model: "Insta360 ONE X2".to_owned(),
             firmware: "synthetic".to_owned(),
+            source_group_type: None,
             dimension: Size {
                 width: ONE_XS_FRAME.width,
                 height: ONE_XS_FRAME.height,
@@ -366,6 +367,7 @@ mod tests {
         CalibrationSet {
             camera_model: "Insta360 X4 Air".to_owned(),
             firmware: "fixture".to_owned(),
+            source_group_type: None,
             dimension: Size {
                 width: FRAME.width,
                 height: FRAME.height,

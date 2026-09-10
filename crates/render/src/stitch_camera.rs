@@ -66,6 +66,7 @@ mod tests {
         CalibrationSet {
             camera_model: "admission fixture".to_owned(),
             firmware: String::new(),
+            source_group_type: None,
             dimension: Size {
                 width: 3_840,
                 height: 3_840,

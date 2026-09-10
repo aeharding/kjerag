@@ -23,6 +23,7 @@ fn calibration() -> CalibrationSet {
     CalibrationSet {
         camera_model: "Insta360 ONE X2".to_owned(),
         firmware: "gpu-parent-qualification".to_owned(),
+        source_group_type: None,
         dimension: Size {
             width: ONE_XS_FRAME.width,
             height: ONE_XS_FRAME.height,

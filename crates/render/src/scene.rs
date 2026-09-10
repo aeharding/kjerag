@@ -6617,6 +6617,7 @@ mod tests {
     fn reservation_calibration() -> CalibrationSet {
         CalibrationSet {
             camera_model: "Insta360 ONE X2".to_owned(),
+            source_group_type: None,
             firmware: "synthetic".to_owned(),
             dimension: kjerag_meta::Size {
                 width: ONE_XS_FRAME.width,
@@ -9431,13 +9432,17 @@ mod tests {
         let sampling_sequence = review == ReviewDiagnostic::SamplingSequence;
         let fixed_color = review == ReviewDiagnostic::FixedColor;
         let fusion_input_review = std::env::var_os("KJERAG_REVIEW_FUSION_INPUTS").is_some();
-        let verified_reference =
-            (sampling_sequence || geometry_fields || component_anchors || fixed_color).then(|| {
-                PathBuf::from(
-                    std::env::var_os("KJERAG_REPORTED_SEAM_BASELINE")
-                        .expect("review sequence needs its existing exact baseline"),
-                )
-            });
+        let verified_reference = (sampling_sequence
+            || geometry_fields
+            || component_anchors
+            || fixed_color
+            || (panorama_review && std::env::var_os("KJERAG_REPORTED_SEAM_BASELINE").is_some()))
+        .then(|| {
+            PathBuf::from(
+                std::env::var_os("KJERAG_REPORTED_SEAM_BASELINE")
+                    .expect("review sequence needs its existing exact baseline"),
+            )
+        });
         let mut sampling_log = sampling_sequence.then(|| {
             std::fs::create_dir(output.join("sampling-4x-area")).unwrap();
             let mut log = std::io::BufWriter::new(
@@ -9470,8 +9475,21 @@ mod tests {
             || panorama_review
             || fusion_input_review)
             .then(|| ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm));
-        let mut panorama =
-            panorama_review.then(|| super::panorama_review::PanoramaReview::new(&device, output));
+        let mut panorama = panorama_review.then(|| {
+            super::panorama_review::PanoramaReview::new(
+                &device,
+                output,
+                scene
+                    .show
+                    .as_ref()
+                    .unwrap()
+                    .one_xs
+                    .as_ref()
+                    .unwrap()
+                    .diagnostic_calibration(),
+                scene.player(|player| player.timing().fps() as f32).unwrap(),
+            )
+        });
         if fixed_color {
             std::fs::create_dir(output.join("fixed-color")).unwrap();
         }
@@ -10241,6 +10259,26 @@ mod tests {
             previous = Some(frame);
             if index + 1 < start + count {
                 scene.step(Instant::now(), 1);
+            }
+        }
+        if let Some(panorama) = &mut panorama {
+            panorama.finish(&device, &queue);
+            let temporal_log = output.join("panorama-denoised-diagnostic.csv");
+            if temporal_log.exists() {
+                // Exercise the actual source loop, including its final flush.
+                // The filter gate requires seven real sources even at radius0.
+                let report = std::fs::read_to_string(temporal_log).unwrap();
+                let actual: Vec<u64> = report
+                    .lines()
+                    .skip(1)
+                    .map(|row| row.split(',').next().unwrap().parse().unwrap())
+                    .collect();
+                let expected: Vec<_> = if count >= 7 {
+                    (start..start + count).collect()
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(actual, expected, "temporal output sources after flush");
             }
         }
         if let Some(log) = source_log.as_mut() {

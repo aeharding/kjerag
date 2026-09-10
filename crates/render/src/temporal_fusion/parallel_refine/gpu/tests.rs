@@ -1,4 +1,4 @@
-use super::{Builder, Error};
+use super::{Builder, Error, validate_reference_count};
 use crate::temporal_fusion::{
     motion::{self, Geometry, Parameters},
     parallel_refine,
@@ -119,6 +119,7 @@ fn expected(current: &Level, references: &[Level; 6], inputs: &[FinestInput; 6])
 struct Run {
     bytes: Vec<u8>,
     blocks: [u32; 2],
+    references: u32,
     encode_ms: f64,
     execute_readback_ms: f64,
 }
@@ -128,20 +129,15 @@ fn run(
     queue: &wgpu::Queue,
     builder: &Builder,
     current: &PackedGray,
-    references: [&PackedGray; 6],
-    inputs: &[FinestInput; 6],
+    references: &[&PackedGray],
+    inputs: &[FinestInput],
 ) -> Run {
     let started = Instant::now();
     let mut encoder = device.create_command_encoder(&Default::default());
+    let seeds: Vec<_> = inputs.iter().map(|input| input.seeds.as_slice()).collect();
+    let globals: Vec<_> = inputs.iter().map(|input| input.global).collect();
     let output = builder
-        .encode_finest(
-            device,
-            &mut encoder,
-            current,
-            references,
-            inputs.each_ref().map(|input| input.seeds.as_slice()),
-            inputs.each_ref().map(|input| input.global),
-        )
+        .encode_finest(device, &mut encoder, current, references, &seeds, &globals)
         .unwrap();
     let copy = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("parallel finest test readback"),
@@ -169,8 +165,80 @@ fn run(
     Run {
         bytes,
         blocks: output.blocks,
+        references: output.reference_count(),
         encode_ms,
         execute_readback_ms,
+    }
+}
+
+#[test]
+fn reference_count_rejects_empty_oversized_and_unpaired_inputs() {
+    assert!(matches!(
+        validate_reference_count(0, 0, 0),
+        Err(Error::ReferenceCount { .. })
+    ));
+    assert!(matches!(
+        validate_reference_count(7, 7, 7),
+        Err(Error::ReferenceCount { .. })
+    ));
+    assert!(matches!(
+        validate_reference_count(3, 2, 3),
+        Err(Error::ReferenceCount { .. })
+    ));
+    assert!(matches!(
+        validate_reference_count(3, 3, 2),
+        Err(Error::ReferenceCount { .. })
+    ));
+    for count in 1..=6 {
+        assert_eq!(
+            validate_reference_count(count, count, count).unwrap(),
+            count
+        );
+    }
+}
+
+#[test]
+fn every_reduced_reference_count_matches_the_same_six_reference_prefix() {
+    let Some((device, queue)) = gpu() else {
+        return;
+    };
+    let current_level = patterned_level(1024, 1024, 0x1234_5678);
+    let reference_levels: [Level; 6] = std::array::from_fn(|ordinal| {
+        patterned_level(1024, 1024, 0x9e37_79b9_u32.wrapping_mul(ordinal as u32 + 1))
+    });
+    let inputs = inputs(1024, 1024);
+    let current = upload(&device, &queue, &current_level);
+    let references = reference_levels
+        .each_ref()
+        .map(|reference| upload(&device, &queue, reference));
+    let reference_views = references.each_ref();
+    let builder = Builder::new(&device);
+    let full = run(
+        &device,
+        &queue,
+        &builder,
+        &current,
+        &reference_views,
+        &inputs,
+    );
+    assert_eq!(full.references, 6);
+    let bytes_per_reference = full.bytes.len() / 6;
+
+    for count in 1..=6 {
+        let reduced = run(
+            &device,
+            &queue,
+            &builder,
+            &current,
+            &reference_views[..count],
+            &inputs[..count],
+        );
+        assert_eq!(reduced.references, count as u32);
+        assert_eq!(
+            reduced.bytes,
+            full.bytes[..count * bytes_per_reference],
+            "reduced reference count {count}"
+        );
     }
 }
 
@@ -219,7 +287,7 @@ fn patterned_tail_geometry_matches_the_cpu_oracle() {
         &queue,
         &Builder::new(&device),
         &current,
-        references.each_ref(),
+        &references.each_ref(),
         &inputs,
     );
     assert_eq!(run.blocks, [64, 64]);
@@ -274,7 +342,7 @@ fn packed_tail_lanes_and_signed_edges_match_the_cpu_oracle() {
             &queue,
             &builder,
             &current,
-            references.each_ref(),
+            &references.each_ref(),
             &inputs,
         );
         assert_outputs(&result.bytes, &expected);
@@ -316,7 +384,7 @@ fn packed_max_sad_keeps_start_order_at_the_inclusive_corner() {
         &queue,
         &Builder::new(&device),
         &current,
-        references.each_ref(),
+        &references.each_ref(),
         &inputs,
     );
     assert_outputs(&result.bytes, &expected);
@@ -341,9 +409,9 @@ fn packed_images_from_another_device_are_refused_before_encoding() {
                 &device,
                 &mut encoder,
                 current,
-                references,
-                inputs.each_ref().map(|input| input.seeds.as_slice()),
-                inputs.each_ref().map(|input| input.global)
+                &references,
+                &inputs.each_ref().map(|input| input.seeds.as_slice()),
+                &inputs.each_ref().map(|input| input.global)
             ),
             Err(Error::ForeignDevice)
         ));
@@ -353,9 +421,9 @@ fn packed_images_from_another_device_are_refused_before_encoding() {
             &device,
             &mut encoder,
             &local,
-            [&local; 6],
-            inputs.each_ref().map(|input| input.seeds.as_slice()),
-            inputs.each_ref().map(|input| input.global),
+            &[&local; 6],
+            &inputs.each_ref().map(|input| input.seeds.as_slice()),
+            &inputs.each_ref().map(|input| input.global),
         )
         .unwrap();
     queue.submit([encoder.finish()]);
@@ -381,9 +449,9 @@ fn invalid_input_is_refused_before_a_following_valid_encode() {
             &device,
             &mut encoder,
             &texture,
-            references,
-            inputs.each_ref().map(|input| input.seeds.as_slice()),
-            inputs.each_ref().map(|input| input.global),
+            &references,
+            &inputs.each_ref().map(|input| input.seeds.as_slice()),
+            &inputs.each_ref().map(|input| input.global),
         ),
         Err(Error::Geometry)
     ));
@@ -393,9 +461,9 @@ fn invalid_input_is_refused_before_a_following_valid_encode() {
             &device,
             &mut encoder,
             &texture,
-            [&texture; 6],
-            inputs.each_ref().map(|input| input.seeds.as_slice()),
-            inputs.each_ref().map(|input| input.global),
+            &[&texture; 6],
+            &inputs.each_ref().map(|input| input.seeds.as_slice()),
+            &inputs.each_ref().map(|input| input.global),
         ),
         Err(Error::SeedValue {
             ordinal: 4,
@@ -408,9 +476,9 @@ fn invalid_input_is_refused_before_a_following_valid_encode() {
             &device,
             &mut encoder,
             &texture,
-            [&texture; 6],
-            inputs.each_ref().map(|input| input.seeds.as_slice()),
-            inputs.each_ref().map(|input| input.global),
+            &[&texture; 6],
+            &inputs.each_ref().map(|input| input.seeds.as_slice()),
+            &inputs.each_ref().map(|input| input.global),
         )
         .unwrap();
     queue.submit([encoder.finish()]);
@@ -479,7 +547,7 @@ fn duplicate_sad_case(bias: i32, seed_x: i32, center_expected: [i32; 3]) {
         &queue,
         &Builder::new(&device),
         &current,
-        references.each_ref(),
+        &references.each_ref(),
         &inputs,
     );
     assert_outputs(&actual.bytes, &expected);
@@ -514,7 +582,7 @@ fn typed_refinement_handoff_packs_all_six_offsets_in_one_submission() {
         return;
     };
     let current_level = patterned_level(1024, 1024, 0x1020_3040);
-    let reference_levels =
+    let reference_levels: [Level; 6] =
         std::array::from_fn(|ordinal| patterned_level(1024, 1024, ordinal as u32 * 7919));
     let inputs = inputs(1024, 1024);
     let cpu_raw: [Vec<[i32; 3]>; 6] = std::array::from_fn(|ordinal| {
@@ -547,16 +615,44 @@ fn typed_refinement_handoff_packs_all_six_offsets_in_one_submission() {
             .encode_packed_base(&device, &mut encoder, image)
             .unwrap()
     });
+    let reference_views = references.each_ref();
+    let seeds = inputs.each_ref().map(|input| input.seeds.as_slice());
+    let globals = inputs.each_ref().map(|input| input.global);
     let refined = refine
         .encode_finest(
             &device,
             &mut encoder,
             &current,
-            references.each_ref(),
-            inputs.each_ref().map(|input| input.seeds.as_slice()),
-            inputs.each_ref().map(|input| input.global),
+            &reference_views,
+            &seeds,
+            &globals,
         )
         .unwrap();
+    let reduced = refine
+        .encode_finest(
+            &device,
+            &mut encoder,
+            &current,
+            &reference_views[..2],
+            &seeds[..2],
+            &globals[..2],
+        )
+        .unwrap();
+    let reduced_packed = motion
+        .encode_refined(&device, &mut encoder, &reduced, 1, &parameters)
+        .unwrap();
+    let reduced_copy = copy_texture(
+        &device,
+        &mut encoder,
+        &reduced_packed,
+        parameters.geometry.output_grid,
+        8,
+    );
+    assert!(
+        motion
+            .encode_refined(&device, &mut encoder, &reduced, 2, &parameters)
+            .is_err()
+    );
     let mut copies = Vec::new();
     let mut expected = Vec::new();
     for ordinal in 0u32..6 {
@@ -592,6 +688,10 @@ fn typed_refinement_handoff_packs_all_six_offsets_in_one_submission() {
     );
 
     queue.submit([encoder.finish()]);
+    assert_eq!(
+        read_copy(&device, &reduced_copy, parameters.geometry.output_grid, 8),
+        packed_bytes(&motion::pack_motion(&cpu_raw[1], &parameters).unwrap())
+    );
     for (ordinal, (copy, expected)) in copies.iter().zip(expected).enumerate() {
         let actual = read_copy(&device, copy, parameters.geometry.output_grid, 8);
         assert_eq!(actual.len(), expected.len());
@@ -662,7 +762,7 @@ fn native_six_reference_oracle_is_exact_and_timed_three_times() {
             &queue,
             &builder,
             &current,
-            references.each_ref(),
+            &references.each_ref(),
             &inputs,
         );
         eprintln!(

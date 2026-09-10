@@ -197,6 +197,9 @@ pub struct CalibrationSet {
     /// `fw_version`. The calibration grammar has changed across firmware
     /// generations, so a bug report needs this.
     pub firmware: String,
+    /// Insta360 `FileGroupInfo.type`, when the metadata carries its optional
+    /// parent message. `Some(0)` is a real recorded value, not a fallback.
+    pub source_group_type: Option<i32>,
     /// The delivered frame size of one lens.
     pub dimension: Size,
     /// In file order. Lens 0 is the extrinsic reference.
@@ -757,6 +760,10 @@ impl CalibrationSet {
         Ok(Self {
             camera_model: metadata.camera_type.clone(),
             firmware: metadata.fw_version.clone(),
+            source_group_type: metadata
+                .file_group_info
+                .as_ref()
+                .map(|info| info.source_type),
             dimension,
             lenses,
             model6,

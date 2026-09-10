@@ -1,8 +1,8 @@
-//! Offline seven-source temporal diagnostic for the captured ISO-100 regime.
+//! Offline seven-source temporal diagnostic with native startup/tail selection.
 //!
 //! This is deliberately CPU motion search with explicit GPU waits. It is not
-//! playback policy, a performance path, startup/end padding, or a general ISO
-//! calibration. The caller supplies already-associated NV12 and gray levels.
+//! playback policy or a performance path. The caller supplies already-associated
+//! NV12 and gray levels, and either the captured regime or source-track settings.
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -20,6 +20,7 @@ use crate::temporal_fusion::history::History;
 use crate::temporal_fusion::motion::{self, Geometry};
 use crate::temporal_fusion::parallel_refine;
 use crate::temporal_fusion::pyramid::{Level, gpu::PackedGray};
+use crate::temporal_fusion::settings::{EffParams, FusionParams, Provider};
 use crate::{FrameStamp, Reframe, Size};
 
 mod profile;
@@ -32,12 +33,6 @@ const VIEW: Size = Size {
     height: 720,
 };
 const CENTER: usize = 3;
-const REFERENCES: [usize; 6] = [0, 1, 2, 4, 5, 6];
-const PHASES: [f64; 6] = [1.0, 0.49999999999999994, 0.0, 0.0, 0.49999999999999994, 1.0];
-const CONFIDENCE_Y: [f32; 256] = [1.0; 256];
-const CONFIDENCE_UV: [f32; 256] = [2.0; 256];
-const LIMIT_Y: [f32; 256] = [1.0; 256];
-const LIMIT_UV: [f32; 256] = [0.5; 256];
 
 struct Retained {
     stamp: FrameStamp,
@@ -53,11 +48,29 @@ struct PendingHistory {
     copied_sources: u32,
 }
 
+impl PendingHistory {
+    fn new(device: &wgpu::Device) -> Self {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("resident seven-source temporal diagnostic"),
+        });
+        let profile = profile::Profile::begin(device, &mut encoder);
+        Self {
+            encoder,
+            profile,
+            host_ms: 0.0,
+            copied_sources: 0,
+        }
+    }
+}
+
 pub(super) struct TemporalReview {
     device: wgpu::Device,
     window: VecDeque<Retained>,
     history: History,
     pending_history: Option<PendingHistory>,
+    next_center: usize,
+    finished: bool,
+    settings: Option<Provider>,
     fuse: GpuFuse,
     color: GpuColorConversion,
     projector: PanoramaProjector,
@@ -77,6 +90,7 @@ impl TemporalReview {
         parallel_search: bool,
         parallel_refine: bool,
         view_scissors: bool,
+        settings: Option<Provider>,
     ) -> Self {
         let frames = output.join("panorama-denoised-diagnostic");
         std::fs::create_dir(&frames).unwrap_or_else(|error| {
@@ -89,23 +103,23 @@ impl TemporalReview {
         );
         writeln!(
             log,
-            "center_source,center_time_ns,reference_sources,reference_times_ns,search_ms,pack_ms,gpu_ms,rgba_sha256"
+            "center_source,center_time_ns,reference_sources,reference_times_ns,search_ms,pack_ms,gpu_ms,rgba_sha256,iso,radius,reference_phases,copied_sources"
         )
         .unwrap();
         let contract = output.join("panorama-denoised-diagnostic.txt");
         let coverage_route = if view_scissors {
             "Coverage route: conservative per-view RGB scissors and separately padded fusion scissors, on full-sized targets.\n\
              The unchanged projector may only draw this exact prepared view; pixels outside the scissors are not filtered image data.\n\
-             GPU+wait includes region planning; full unfiltered panorama history and motion search remain unchanged.\n"
+             Region planning precedes the timed GPU section; full unfiltered panorama history and motion search remain unchanged.\n"
         } else {
             "Coverage route: full-panorama fusion and RGB conversion.\n"
         };
         let search_route = if parallel_refine && parallel_search {
-            "Search route: six scoped CPU workers run search::prepare_finest through levels6..1, preserving supplied reference order.\n"
+            "Search route: one scoped CPU worker per reference runs search::prepare_finest through levels6..1, preserving supplied order.\n"
         } else if parallel_refine {
             "Search route: serial CPU search::prepare_finest through levels6..1 for each supplied reference.\n"
         } else if parallel_search {
-            "Search route: CPU search::selected_six, six workers preserving supplied reference order.\n"
+            "Search route: one scoped CPU search::selected worker per reference, preserving supplied order.\n"
         } else {
             "Search route: serial CPU search::selected for each supplied reference.\n"
         };
@@ -120,13 +134,19 @@ impl TemporalReview {
             "Motion route: CPU motion::pack_motion, then explicit packed-flow upload.\n\
              pack_ms measures that CPU stage; GPU+wait begins with GPU texture preparation/upload and includes fusion, conversion, projection and readback completion.\n"
         };
+        let settings_route = if settings.is_some() {
+            "Settings: authenticated camera/source selection and source-time ISO lookup."
+        } else {
+            "Settings: explicit captured ISO100/noise700/radius3/limit10 regime."
+        };
         std::fs::write(
             &contract,
             format!(
-                "Experimental offline ISO100 regime only.\n\
-             Seven contiguous same-epoch sources; center is position3.\n\
-             References are c-3,c-2,c-1,c+1,c+2,c+3.\n\
-             No startup/end padding, automatic policy, or gradual color update.\n\
+                "Experimental offline temporal diagnostic. {settings_route}\n\
+             Seven real same-epoch sources before any output; startup centers0..3, steady3, flush4..6.\n\
+             References are the radius-clipped interval excluding current, in ascending source order.\n\
+             Radius0 copies current after the same gate. Fewer than7 inputs yield no filter outputs.\n\
+             No padding or gradual color update; no claim about Studio's higher exporter short-seek policy.\n\
              Resident seven-layer NV12 history; copies only arriving sources, with unchanged logical reference order.\n\
              History copies precede fusion in the same encoder; GPU+wait also includes their host encoding time.\n\
              CPU preparation and explicit GPU completion are diagnostic, not playback performance.\n\
@@ -140,6 +160,9 @@ impl TemporalReview {
             history: History::new(device, FULL)
                 .unwrap_or_else(|error| panic!("create resident temporal history: {error}")),
             pending_history: None,
+            next_center: 0,
+            finished: false,
+            settings,
             fuse: GpuFuse::new(device),
             color: GpuColorConversion::new(device),
             projector: PanoramaProjector::new(device),
@@ -162,6 +185,10 @@ impl TemporalReview {
         gpu_base: Option<PackedGray>,
     ) {
         assert!(
+            !self.finished,
+            "temporal review received a source after flush"
+        );
+        assert!(
             self.device == *device,
             "temporal review changed graphics devices"
         );
@@ -183,19 +210,15 @@ impl TemporalReview {
                 "temporal review sources are not contiguous"
             );
         }
+        if self.window.len() == 7 {
+            assert_eq!(self.next_center, CENTER + 1, "undrained temporal outputs");
+            self.window.pop_front().unwrap();
+            self.next_center -= 1;
+        }
         let history_started = Instant::now();
-        let pending = self.pending_history.get_or_insert_with(|| {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("resident seven-source temporal diagnostic"),
-            });
-            let profile = profile::Profile::begin(device, &mut encoder);
-            PendingHistory {
-                encoder,
-                profile,
-                host_ms: 0.0,
-                copied_sources: 0,
-            }
-        });
+        let pending = self
+            .pending_history
+            .get_or_insert_with(|| PendingHistory::new(device));
         self.history
             .encode_push(device, &mut pending.encoder, prepared.frame(), &nv12)
             .unwrap_or_else(|error| panic!("retain temporal source: {error}"));
@@ -217,10 +240,28 @@ impl TemporalReview {
             7,
             "temporal review retained too many sources"
         );
-        self.process(device, queue);
-        self.window
-            .pop_front()
-            .expect("seven-frame window has a front");
+        while self.next_center <= CENTER {
+            self.process(device, queue);
+            self.next_center += 1;
+        }
+    }
+
+    pub(super) fn finish(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if self.finished {
+            return;
+        }
+        if self.window.len() == 7 {
+            while self.next_center < self.window.len() {
+                self.process(device, queue);
+                self.next_center += 1;
+            }
+        } else {
+            // Native NAP checks the seven-real-source gate before its flush flag.
+            // Do not invent repeated images or an early pass-through here.
+            self.pending_history.take();
+        }
+        self.finished = true;
+        self.log.flush().unwrap();
     }
 
     fn process(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
@@ -232,239 +273,231 @@ impl TemporalReview {
         } = self
             .pending_history
             .take()
-            .expect("a complete temporal window has recorded source copies");
+            .unwrap_or_else(|| PendingHistory::new(device));
         profile.mark(&mut encoder, "history");
+        let center = &self.window[self.next_center];
+        let effective = self
+            .settings
+            .as_mut()
+            .map_or_else(captured_settings, |provider| {
+                provider
+                    .parameters_at(center.stamp.timestamp().as_secs_f64() * 1000.0)
+                    .unwrap_or_else(|error| panic!("temporal source settings: {error}"))
+            });
         let history = self
             .history
-            .window()
+            .window_at(self.next_center, effective.radius as usize)
             .expect("seven resident temporal sources");
+        let references: Vec<_> = history.reference_positions().collect();
+        let phases: Vec<_> = history.reference_phases().collect();
         let stamps = history.stamps();
-        let center = &self.window[CENTER];
         assert_eq!(stamps.center, &center.stamp);
-        for (stamp, index) in stamps.references.into_iter().zip(REFERENCES) {
+        for (stamp, &index) in stamps.references.into_iter().zip(&references) {
             assert_eq!(stamp, &self.window[index].stamp);
         }
-        let luma = &center.levels[3].pixels;
-        let search_started = Instant::now();
-        let reference_levels = REFERENCES.map(|at| self.window[at].levels.as_slice());
-        let (raw, finest) = if self.parallel_refine.is_some() {
-            let inputs: [crate::temporal_fusion::search::FinestInput; 6] =
-                if self.parallel_search {
-                    prepare_finest_six(&center.levels, reference_levels)
-                } else {
-                    reference_levels
-                        .map(|reference| {
-                            crate::temporal_fusion::search::prepare_finest(
-                                &center.levels,
-                                reference,
-                            )
-                        })
-                        .into_iter()
-                        .collect::<Result<Vec<_>, _>>()
-                        .map(|inputs| {
-                            inputs.try_into().unwrap_or_else(|_| {
-                                panic!("six references produce six finest inputs")
-                            })
-                        })
-                }
+        let regions = self.view_scissors.then(|| {
+            crate::temporal_fusion::regions::ViewRegions::for_view(FULL, &center.reframe)
+                .unwrap_or_else(|error| panic!("plan temporal view scissors: {error}"))
+        });
+        let (fused, search_ms, pack_ms, gpu_started) = if references.is_empty() {
+            let gpu_started = Instant::now();
+            profile.mark(&mut encoder, "refine");
+            profile.mark(&mut encoder, "motion");
+            let copied = history
+                .encode_copy_current(device, &mut encoder)
+                .unwrap_or_else(|error| panic!("copy radius-zero temporal current: {error}"));
+            (copied, 0.0, 0.0, gpu_started)
+        } else {
+            let luma = &center.levels[3].pixels;
+            let search_started = Instant::now();
+            let reference_levels: Vec<_> = references
+                .iter()
+                .map(|&at| self.window[at].levels.as_slice())
+                .collect();
+            let (raw, finest) = if self.parallel_refine.is_some() {
+                let inputs = search_references(
+                    &center.levels,
+                    &reference_levels,
+                    self.parallel_search,
+                    crate::temporal_fusion::search::prepare_finest,
+                )
                 .unwrap_or_else(|error| {
                     panic!(
                         "coarse motion preparation for center {}: {error}",
                         center.stamp.index()
                     )
                 });
-            (None, Some(inputs))
-        } else if self.parallel_search {
-            let raw =
-                crate::temporal_fusion::search::selected_six(&center.levels, reference_levels)
-                    .unwrap_or_else(|error| {
-                        panic!(
-                            "parallel motion search for center {}: {error}",
-                            center.stamp.index()
-                        )
-                    });
-            (Some(raw.into_iter().collect::<Vec<_>>()), None)
-        } else {
-            let raw = REFERENCES
-                .iter()
-                .map(|&at| {
-                    crate::temporal_fusion::search::selected(
-                        &center.levels,
-                        &self.window[at].levels,
-                    )
-                    .unwrap_or_else(|error| {
-                        panic!(
-                            "motion search for center {} reference {}: {error}",
-                            center.stamp.index(),
-                            self.window[at].stamp.index()
-                        )
-                    })
-                })
-                .collect();
-            (Some(raw), None)
-        };
-        let search_ms = search_started.elapsed().as_secs_f64() * 1000.0;
-
-        let geometry = Geometry {
-            full: FULL,
-            raw_grid: RAW_GRID,
-            output_grid: FLOW_GRID,
-            block: [16, 16],
-        };
-        let motion_parameters = |phase| motion::Parameters {
-            geometry,
-            luma,
-            confidence_y: &CONFIDENCE_Y,
-            confidence_uv: &CONFIDENCE_UV,
-            scale_base: 4,
-            scale_extra: 700,
-            temporal: 1.25,
-            phase,
-        };
-        let (packed, pack_ms) = if self.gpu_motion.is_none() {
-            let pack_started = Instant::now();
-            let packed: Vec<Vec<[i16; 4]>> = raw
-                .as_ref()
-                .expect("CPU packing has complete CPU search records")
-                .iter()
-                .zip(PHASES)
-                .map(|(raw, phase)| {
-                    motion::pack_motion(raw, &motion_parameters(phase))
-                        .unwrap_or_else(|error| panic!("pack captured-regime motion: {error}"))
-                })
-                .collect();
-            (Some(packed), pack_started.elapsed().as_secs_f64() * 1000.0)
-        } else {
-            (None, 0.0)
-        };
-
-        let gpu_started = Instant::now();
-        let regions = self.view_scissors.then(|| {
-            crate::temporal_fusion::regions::ViewRegions::for_view(FULL, &center.reframe)
-                .unwrap_or_else(|error| panic!("plan temporal view scissors: {error}"))
-        });
-        if let Some(regions) = &regions {
-            eprintln!(
-                "panorama-temporal-regions: center {} RGB {:?} fusion {:?}",
-                center.stamp.index(),
-                regions.rgb(),
-                regions.fusion(),
-            );
-        }
-        let flow = array_texture(
-            device,
-            "offline temporal packed motion",
-            FLOW_GRID,
-            6,
-            wgpu::TextureFormat::Rgba16Sint,
-        );
-        let luma_texture = array_texture(
-            device,
-            "offline temporal luma indices",
-            FLOW_GRID,
-            1,
-            wgpu::TextureFormat::R8Uint,
-        );
-        if let Some(packed) = &packed {
-            for (layer, bytes) in packed
-                .iter()
-                .map(|records| packed_bytes(records))
-                .enumerate()
-            {
-                write_layer(queue, &flow, layer as u32, FLOW_GRID, 8, &bytes);
-            }
-        }
-        write_layer(queue, &luma_texture, 0, FLOW_GRID, 1, luma);
-
-        if self.parallel_refine.is_none() {
-            profile.mark(&mut encoder, "refine");
-        }
-        if let Some(refiner) = &self.parallel_refine {
-            let inputs = finest
-                .as_ref()
-                .expect("parallel refinement has coarse CPU inputs");
-            let current = center
-                .gpu_base
-                .as_ref()
-                .expect("parallel refinement retains the current GPU base");
-            let references = REFERENCES.map(|at| {
-                self.window[at]
-                    .gpu_base
-                    .as_ref()
-                    .expect("parallel refinement retains every reference GPU base")
-            });
-            let refined = refiner
-                .encode_finest(
-                    device,
-                    &mut encoder,
-                    current,
-                    references,
-                    inputs.each_ref().map(|input| input.seeds.as_slice()),
-                    inputs.each_ref().map(|input| input.global),
+                (None, Some(inputs))
+            } else {
+                let raw = search_references(
+                    &center.levels,
+                    &reference_levels,
+                    self.parallel_search,
+                    crate::temporal_fusion::search::selected,
                 )
                 .unwrap_or_else(|error| {
-                    panic!("parallel finest refinement for captured-regime motion: {error}")
+                    panic!("motion search for center {}: {error}", center.stamp.index(),)
                 });
-            profile.mark(&mut encoder, "refine");
-            let builder = self
-                .gpu_motion
-                .as_ref()
-                .expect("parallel refinement requires GPU motion packing");
-            for (layer, phase) in PHASES.into_iter().enumerate() {
-                let output = builder
-                    .encode_refined(
-                        device,
-                        &mut encoder,
-                        &refined,
-                        layer as u32,
-                        &motion_parameters(phase),
-                    )
-                    .unwrap_or_else(|error| {
-                        panic!("GPU-pack parallel-refined captured-regime motion: {error}")
-                    });
-                copy_layer(&mut encoder, &output, &flow, layer as u32);
+                (Some(raw), None)
+            };
+            let search_ms = search_started.elapsed().as_secs_f64() * 1000.0;
+
+            let geometry = Geometry {
+                full: FULL,
+                raw_grid: RAW_GRID,
+                output_grid: FLOW_GRID,
+                block: [16, 16],
+            };
+            let motion_parameters = |phase| motion::Parameters {
+                geometry,
+                luma,
+                confidence_y: &effective.confidence_y,
+                confidence_uv: &effective.confidence_uv,
+                scale_base: 4,
+                scale_extra: effective.noise_integer,
+                temporal: 1.25,
+                phase,
+            };
+            let (packed, pack_ms) = if self.gpu_motion.is_none() {
+                let pack_started = Instant::now();
+                let packed: Vec<Vec<[i16; 4]>> = raw
+                    .as_ref()
+                    .expect("CPU packing has complete CPU search records")
+                    .iter()
+                    .zip(phases.iter().copied())
+                    .map(|(raw, phase)| {
+                        motion::pack_motion(raw, &motion_parameters(phase))
+                            .unwrap_or_else(|error| panic!("pack captured-regime motion: {error}"))
+                    })
+                    .collect();
+                (Some(packed), pack_started.elapsed().as_secs_f64() * 1000.0)
+            } else {
+                (None, 0.0)
+            };
+
+            let gpu_started = Instant::now();
+            if let Some(regions) = &regions {
+                eprintln!(
+                    "panorama-temporal-regions: center {} RGB {:?} fusion {:?}",
+                    center.stamp.index(),
+                    regions.rgb(),
+                    regions.fusion(),
+                );
             }
-        } else if let Some(builder) = &self.gpu_motion {
-            for (layer, (raw, phase)) in raw
-                .as_ref()
-                .expect("GPU packing has complete CPU search records")
-                .iter()
-                .zip(PHASES)
-                .enumerate()
-            {
-                let output = builder
-                    .encode(device, &mut encoder, raw, &motion_parameters(phase))
-                    .unwrap_or_else(|error| panic!("GPU-pack captured-regime motion: {error}"));
-                // The recorded copy retains its source texture until completion.
-                copy_layer(&mut encoder, &output, &flow, layer as u32);
-            }
-        }
-        profile.mark(&mut encoder, "motion");
-        let inputs = history.inputs(&flow, &luma_texture);
-        let parameters = history.parameters(
-            // Exact f32 words consumed by every selected Y/UV UBO in
-            // `denoise-parameters-01/analysis.json`: noise integer
-            // 700 scaled by 1/16320, and limit integer 10 by 1/255.
-            // The authenticated analysis SHA-256 is
-            // f319e651c5077b0e952f62138bbbde0ca8bd6a46e76093fd31fa86fcb823f3aa.
-            f32::from_bits(0x3d2f_afb0),
-            f32::from_bits(0x3d20_a0a1),
-            LIMIT_Y,
-            LIMIT_UV,
-        );
-        let fused = if let Some(regions) = &regions {
-            self.fuse
-                .encode_scissored(device, &mut encoder, inputs, &parameters, regions.fusion())
-        } else {
-            self.fuse.encode(
+            let flow = array_texture(
                 device,
-                &mut encoder,
-                inputs,
-                &parameters,
-                [0, 0, FULL[0], FULL[1]],
-            )
-        }
-        .unwrap_or_else(|error| panic!("fuse captured ISO100 regime: {error}"));
+                "offline temporal packed motion",
+                FLOW_GRID,
+                references.len() as u32,
+                wgpu::TextureFormat::Rgba16Sint,
+            );
+            let luma_texture = array_texture(
+                device,
+                "offline temporal luma indices",
+                FLOW_GRID,
+                1,
+                wgpu::TextureFormat::R8Uint,
+            );
+            if let Some(packed) = &packed {
+                for (layer, bytes) in packed
+                    .iter()
+                    .map(|records| packed_bytes(records))
+                    .enumerate()
+                {
+                    write_layer(queue, &flow, layer as u32, FLOW_GRID, 8, &bytes);
+                }
+            }
+            write_layer(queue, &luma_texture, 0, FLOW_GRID, 1, luma);
+
+            if self.parallel_refine.is_none() {
+                profile.mark(&mut encoder, "refine");
+            }
+            if let Some(refiner) = &self.parallel_refine {
+                let inputs = finest
+                    .as_ref()
+                    .expect("parallel refinement has coarse CPU inputs");
+                let current = center
+                    .gpu_base
+                    .as_ref()
+                    .expect("parallel refinement retains the current GPU base");
+                let references: Vec<_> = references
+                    .iter()
+                    .map(|&at| {
+                        self.window[at]
+                            .gpu_base
+                            .as_ref()
+                            .expect("parallel refinement retains every reference GPU base")
+                    })
+                    .collect();
+                let seeds: Vec<_> = inputs.iter().map(|input| input.seeds.as_slice()).collect();
+                let globals: Vec<_> = inputs.iter().map(|input| input.global).collect();
+                let refined = refiner
+                    .encode_finest(device, &mut encoder, current, &references, &seeds, &globals)
+                    .unwrap_or_else(|error| {
+                        panic!("parallel finest refinement for captured-regime motion: {error}")
+                    });
+                profile.mark(&mut encoder, "refine");
+                let builder = self
+                    .gpu_motion
+                    .as_ref()
+                    .expect("parallel refinement requires GPU motion packing");
+                for (layer, phase) in phases.iter().copied().enumerate() {
+                    let output = builder
+                        .encode_refined(
+                            device,
+                            &mut encoder,
+                            &refined,
+                            layer as u32,
+                            &motion_parameters(phase),
+                        )
+                        .unwrap_or_else(|error| {
+                            panic!("GPU-pack parallel-refined captured-regime motion: {error}")
+                        });
+                    copy_layer(&mut encoder, &output, &flow, layer as u32);
+                }
+            } else if let Some(builder) = &self.gpu_motion {
+                for (layer, (raw, phase)) in raw
+                    .as_ref()
+                    .expect("GPU packing has complete CPU search records")
+                    .iter()
+                    .zip(phases.iter().copied())
+                    .enumerate()
+                {
+                    let output = builder
+                        .encode(device, &mut encoder, raw, &motion_parameters(phase))
+                        .unwrap_or_else(|error| panic!("GPU-pack captured-regime motion: {error}"));
+                    // The recorded copy retains its source texture until completion.
+                    copy_layer(&mut encoder, &output, &flow, layer as u32);
+                }
+            }
+            profile.mark(&mut encoder, "motion");
+            let inputs = history.inputs(&flow, &luma_texture);
+            let parameters = history.parameters(
+                effective.fusion.noise,
+                effective.fusion.limit,
+                effective.fusion.y_limits,
+                effective.fusion.uv_limits,
+            );
+            let fused = if let Some(regions) = &regions {
+                self.fuse.encode_scissored(
+                    device,
+                    &mut encoder,
+                    inputs,
+                    &parameters,
+                    regions.fusion(),
+                )
+            } else {
+                self.fuse.encode(
+                    device,
+                    &mut encoder,
+                    inputs,
+                    &parameters,
+                    [0, 0, FULL[0], FULL[1]],
+                )
+            }
+            .unwrap_or_else(|error| panic!("fuse temporal diagnostic: {error}"));
+            (fused, search_ms, pack_ms, gpu_started)
+        };
         profile.mark(&mut encoder, "fuse");
         let matrix = MatrixCoefficients::from_source_rgb(center.reframe.source_color_matrix());
         let rgb = if let Some(regions) = &regions {
@@ -511,20 +544,32 @@ impl TemporalReview {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
-        let reference_sources = REFERENCES
-            .map(|at| self.window[at].stamp.index().to_string())
+        let reference_sources = references
+            .iter()
+            .map(|&at| self.window[at].stamp.index().to_string())
+            .collect::<Vec<_>>()
             .join("|");
-        let reference_times = REFERENCES
-            .map(|at| self.window[at].stamp.timestamp().as_nanos().to_string())
+        let reference_times = references
+            .iter()
+            .map(|&at| self.window[at].stamp.timestamp().as_nanos().to_string())
+            .collect::<Vec<_>>()
+            .join("|");
+        let reference_phases = phases
+            .iter()
+            .map(|phase| format!("{:016x}", phase.to_bits()))
+            .collect::<Vec<_>>()
             .join("|");
         writeln!(
             self.log,
-            "{},{},{},{},{search_ms:.6},{pack_ms:.6},{gpu_ms:.6},{}",
+            "{},{},{},{},{search_ms:.6},{pack_ms:.6},{gpu_ms:.6},{},{},{},{},{copied_sources}",
             center.stamp.index(),
             center.stamp.timestamp().as_nanos(),
             reference_sources,
             reference_times,
             digest,
+            effective.iso,
+            effective.radius,
+            reference_phases,
         )
         .unwrap();
         self.log.flush().unwrap();
@@ -579,26 +624,47 @@ fn validate_input(
     }
 }
 
-fn prepare_finest_six(
+fn search_references<T: Send>(
     current: &[Level],
-    references: [&[Level]; 6],
-) -> Result<[crate::temporal_fusion::search::FinestInput; 6], crate::temporal_fusion::search::Error>
-{
+    references: &[&[Level]],
+    parallel: bool,
+    search: fn(&[Level], &[Level]) -> Result<T, crate::temporal_fusion::search::Error>,
+) -> Result<Vec<T>, crate::temporal_fusion::search::Error> {
+    if !parallel {
+        return references
+            .iter()
+            .map(|reference| search(current, reference))
+            .collect();
+    }
     std::thread::scope(|scope| {
-        let jobs = references.map(|reference| {
-            scope.spawn(move || crate::temporal_fusion::search::prepare_finest(current, reference))
-        });
-        let results: Result<Vec<_>, _> = jobs
-            .into_iter()
+        let jobs: Vec<_> = references
+            .iter()
+            .map(|reference| scope.spawn(move || search(current, reference)))
+            .collect();
+        jobs.into_iter()
             .map(|job| {
                 job.join()
                     .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
             })
-            .collect();
-        Ok(results?
-            .try_into()
-            .unwrap_or_else(|_| panic!("six workers produce six finest inputs")))
+            .collect()
     })
+}
+
+fn captured_settings() -> EffParams {
+    // Exact selected UBO words from denoise-parameters-01/analysis.json.
+    EffParams {
+        iso: 100,
+        radius: 3,
+        noise_integer: 700,
+        confidence_y: [1.0; 256],
+        confidence_uv: [2.0; 256],
+        fusion: FusionParams {
+            noise: f32::from_bits(0x3d2f_afb0),
+            limit: f32::from_bits(0x3d20_a0a1),
+            y_limits: [1.0; 256],
+            uv_limits: [0.5; 256],
+        },
+    }
 }
 
 fn array_texture(

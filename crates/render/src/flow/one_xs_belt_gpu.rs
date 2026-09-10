@@ -4533,6 +4533,7 @@ mod tests {
         CalibrationSet {
             camera_model: "Insta360 ONE X2".to_owned(),
             firmware: format!("resident-session-{readout_ms}"),
+            source_group_type: None,
             dimension: Size {
                 width: ONE_XS_FRAME.width,
                 height: ONE_XS_FRAME.height,

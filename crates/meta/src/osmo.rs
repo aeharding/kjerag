@@ -1052,6 +1052,7 @@ fn from_record(record: &[u8]) -> Result<CalibrationSet, Error> {
     Ok(CalibrationSet {
         camera_model: text(camera, field::MODEL).unwrap_or_default(),
         firmware: text(camera, field::FIRMWARE).unwrap_or_default(),
+        source_group_type: None,
         dimension,
         lenses,
         model6: None,

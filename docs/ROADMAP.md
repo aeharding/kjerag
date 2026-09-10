@@ -14,6 +14,31 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Automatic filter inputs and complete offline sequences, 2026-09-10:** the
+source-group metadata field and source-time ISO provider now select the recovered
+X4 Air/ONE X2 parameter tables without a fallback ISO. Runtime GPU motion accepts
+the actual one-through-six references; history supplies native clipped phases
+and a separate radius-zero current-frame copy. All retain exact source identity.
+The existing actual-Scene diagnostic now emits startup0..3, steady3 and flush4..6
+after seven real sources, rather than dropping its first/last three outputs.
+The six-input boundary yields no filtered outputs, as read at the selected
+backend boundary; this is not a claim about Studio's higher short-seek scheduler.
+
+Automatic April runs produce all37/35 requested outputs at612/607. Their60
+shared full-window images and504 controls are byte-identical to the previous
+resident-panorama checkpoint; references, phase bits and copy counts pass.
+All105 temporal tests (including native fixtures and both cameras' settings),
+990 ordinary render tests and145 ordinary metadata tests pass, plus workspace
+all-target Clippy, formatting, source-lock and name checks. Evidence:
+`scratch/studio-seam-flicker-612-20260909-01/temporal-auto-sequence-01`.
+
+This closes automatic settings consumption and edge scheduling in the offline
+consumer, not filtered-frame publication in the player. CPU coarse search and
+explicit completion waits remain diagnostic. No colour fade, new Studio export,
+installed change, speed qualification or owner flicker verdict. Next connect the
+exact filtered-picture readiness to the existing due presentation/audio gate;
+do not mistake earlier stitch-map completion for filtered-frame completion.
+
 **Non-presenting panorama preparation verified, 2026-09-10:** explicit
 `Player::prepare_ahead` can retain six contiguous successors while startup or
 a seek landing stays paused, without advancing source/audio time or statistics.

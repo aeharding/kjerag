@@ -166,13 +166,13 @@ impl Builder {
         if self.device != *device || refined.device != *device {
             return Err(Error::ForeignDevice);
         }
-        if ordinal >= 6 || refined.blocks != parameters.geometry.raw_grid {
+        if ordinal >= refined.references || refined.blocks != parameters.geometry.raw_grid {
             return Err(Error::RefinementLayout);
         }
         let count = refined.blocks[0]
             .checked_mul(refined.blocks[1])
             .ok_or(Error::RefinementLayout)?;
-        if refined.raw.size() != u64::from(count) * 6 * 12 {
+        if refined.raw.size() != u64::from(count) * u64::from(refined.references) * 12 {
             return Err(Error::RefinementLayout);
         }
         let mut prepared = Prepared::from_count(count as usize, parameters)?;

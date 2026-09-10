@@ -37,6 +37,9 @@ pub mod history;
 /// Source-time ISO lookup over the camera's raw denoise observations.
 pub mod iso;
 
+/// Recovered source classification and ISO-dependent denoiser settings.
+pub mod settings;
+
 /// Effective values supplied by the calibration/history producer, not defaults.
 pub struct Parameters {
     pub noise: f32,

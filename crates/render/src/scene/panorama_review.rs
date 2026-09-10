@@ -30,7 +30,12 @@ pub(super) struct PanoramaReview {
 }
 
 impl PanoramaReview {
-    pub(super) fn new(device: &wgpu::Device, output: &Path) -> Self {
+    pub(super) fn new(
+        device: &wgpu::Device,
+        output: &Path,
+        calibration: &kjerag_meta::CalibrationSet,
+        source_fps: f32,
+    ) -> Self {
         for arm in ["panorama-rgb", "panorama-nv12-control"] {
             std::fs::create_dir(output.join(arm)).unwrap();
         }
@@ -42,12 +47,25 @@ impl PanoramaReview {
             "source\ttime_ns\tpanorama_width\tpanorama_height\tarm\trgba_sha256\tmax_code_difference\tmean_absolute_code_difference\tp99_code_difference"
         )
         .unwrap();
-        let temporal_enabled = std::env::var_os("KJERAG_PANORAMA_TEMPORAL_ISO100")
+        let captured_iso100 = std::env::var_os("KJERAG_PANORAMA_TEMPORAL_ISO100")
             .map(|value| {
                 assert_eq!(value, "1", "set the explicit ISO100 diagnostic flag to 1");
                 true
             })
             .unwrap_or(false);
+        let track_settings = std::env::var_os("KJERAG_PANORAMA_TEMPORAL_TRACK").map(|value| {
+            assert_eq!(
+                value, "1",
+                "set the source-track temporal diagnostic flag to 1"
+            );
+            assert!(
+                !captured_iso100,
+                "choose captured or source-track temporal settings, not both"
+            );
+            crate::temporal_fusion::settings::Provider::new(calibration, source_fps)
+                .unwrap_or_else(|error| panic!("select temporal review settings: {error}"))
+        });
+        let temporal_enabled = captured_iso100 || track_settings.is_some();
         let gpu_motion = std::env::var_os("KJERAG_PANORAMA_GPU_MOTION")
             .map(|value| {
                 assert_eq!(
@@ -129,6 +147,7 @@ impl PanoramaReview {
                 parallel_search,
                 parallel_refine,
                 view_scissors,
+                track_settings,
             )
         });
         let gpu_pyramid = gpu_pyramid_enabled.then(|| {
@@ -162,6 +181,12 @@ impl PanoramaReview {
 
     pub(super) fn uses_resident_input(&self) -> bool {
         self.resident_input
+    }
+
+    pub(super) fn finish(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if let Some(temporal) = &mut self.temporal {
+            temporal.finish(device, queue);
+        }
     }
 
     pub(super) fn capture(

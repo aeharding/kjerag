@@ -48,8 +48,15 @@ snapshot and implements the recovered binary64 bracketing/interpolation,
 forward-zero cache and invalid-value correction. Empty or unordered input is
 refused; backward query time requires an explicit reset, which also clears the
 cache. It does not select filter parameters or invent missing ISO values.
-Ordinary file opening now reads this input, but playback still
-does not select the temporal filter. `docs/research/studio-denoise-iso-602.md`
+`CalibrationSet::source_group_type` preserves the presence and int32 type of
+protobuf FileGroupInfo (tag26/type1), including an explicitly present zero.
+`settings::Provider` combines source metadata, source fps and the ISO lookup
+for the authenticated X4 Air and ONE X2 selector routes. It returns per-source
+radius, motion-confidence inputs and fusion settings using the recovered native
+table interpolation. Unsupported sources or missing ISO are errors, not guessed
+defaults. Reset clears the ISO lookup's chronology/cache. Ordinary file opening
+now reads these inputs, but playback still does not select the temporal filter.
+`docs/research/studio-denoise-iso-602.md`
 records the binary and real-file authority.
 
 `spike` has no dependency on `app`. Its stitch instruments default to the
@@ -93,7 +100,10 @@ c-3,c-2,c-1,c+1,c+2,c+3 order. An explicit `window_at(center, radius)` also
 supplies the clipped intervals needed for startup and tail frames: ascending
 logical order excluding the center, with no repeated or fabricated neighbors.
 The ring must still contain seven real sources. A zero radius has no references
-and cannot be sent to the fusion primitive. Neither accessor grants processing
+and cannot be sent to the fusion primitive; `encode_copy_current` instead copies
+the selected physical Y/UV layers into an independent sampled output. Reference
+phases use the recovered binary64 raised-cosine law over the actual clipped
+interval. Neither accessor grants processing
 or presentation authority; the caller supplies the center and effective radius.
 It records copies without submitting or waiting.
 Its caller must submit earlier consumers before a later overwrite and create a
@@ -132,7 +142,11 @@ algorithm: blocks read immutable coarse seeds instead of newly searched
 neighbors, and omit the serial bad-block/UMH recovery. Its readable CPU oracle
 and GPU kernel keep the initial candidate order, SAD penalties, bounds and
 fixed radius-one ring. The GPU assigns one workgroup to each block/reference,
-with distinct immutable input and output buffers. Eight teams of eight lanes
+with distinct immutable input and output buffers. Runtime slices accept one
+through six matching references/seeds/globals; allocation and dispatch use that
+actual count. Inactive shader-required texture slots bind current, but no
+inactive ordinal is dispatched or sampled. Typed output carries its reference
+count into motion packing. Eight teams of eight lanes
 cover each candidate's complete 256-byte SAD. Gray inputs use typed, immutable
 `PackedGray` textures from the pyramid producer: four horizontal bytes in rgba,
 with logical dimensions distinct from physical packed width. Each lane handles
@@ -174,7 +188,7 @@ not GPU motion search. The offline caller may separately run the six pure CPU
 reference searches concurrently, preserving their supplied order. Searches
 within each reference retain their serial predictors and candidate order.
 An alternative typed handoff accepts the validated parallel-refinement output,
-selects one of its six reference slices and records packing without an
+selects one of its actual reference slices and records packing without an
 intermediate readback. Geometry, device, phase and confidence validation remain
 at that boundary; arbitrary unvalidated GPU buffers are not accepted.
 
@@ -214,17 +228,25 @@ clock and startup acknowledgement policy remain unchanged. This API and producer
 do not yet supply filtered-frame publication, automatic filter selection or an
 end-to-end temporal playback path.
 
-The offline review's captured-ISO100 temporal arm keeps seven contiguous source-stamped
-NV12 images in resident arrays and their gray pyramids, emits only center
-position three, and never pads either end. Metadata is checked against all seven
-history stamps. The first output records seven arriving copy pairs; subsequent
-outputs record one, before consumers in the same encoder. Optional GPU
+The offline temporal review keeps seven contiguous source-stamped NV12 images
+and gray pyramids. Settings are either the explicit captured ISO100 regime or,
+with `KJERAG_PANORAMA_TEMPORAL_TRACK=1`, the source-track provider above. These
+diagnostic selectors are mutually exclusive, not user calibration controls.
+After seven real inputs it emits startup centers0..3, then center3 per successor,
+and flushes centers4..6 at the end. References are radius-clipped, source-ordered
+and checked against history stamps. Radius0 copies current after the same gate.
+Fewer than seven sources produce no filtered outputs at this backend boundary;
+this does not establish Studio's higher exporter short-seek behavior.
+The first output records seven arriving copy pairs, each subsequent arrival one,
+and additional startup/tail outputs none. Copies precede consumers in their
+encoder. Optional GPU
 pyramid/packing and concurrent CPU search routes change execution only;
 CPU search and explicit readbacks remain offline
 reference execution, not the player architecture. The source image and its
-color corrections do not change between comparison arms. No ISO selection,
-startup/seek/end policy, gradual color update or performance claim follows from
-this diagnostic. Production playback still selects none of these stages.
+color corrections do not change between comparison arms. This diagnostic does
+not select a player seek/publication policy or gradual color update, and its
+explicit CPU waits are not a performance path. Production playback still selects
+none of these stages.
 The additional explicit parallel-refinement diagnostic is different: it selects
 the changed spatial algorithm described above, retaining each GPU base beside
 its exact source stamp and NV12 image. Refinement, packing and fusion share one
