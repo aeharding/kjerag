@@ -135,6 +135,13 @@ queued stitch job. Alongside current and last-shown owners this retains at most
 six distinct epoch histories in the product seek path. Errors stay with their
 epoch and preserve the first underlying failure. There is no per-seek worker
 thread, UI join, changed source cadence or changed filter arithmetic.
+Panorama source import retries only classified resource exhaustion before the
+stitch transaction begins. The exact decoded pair and reserved draw slot remain
+on the bounded stitch worker, with a 1 ms scarcity backoff and the existing
+two-second import limit. The deadline is checked before another attempt after
+waiting. No successful import sleeps; invalid descriptors fail immediately.
+Exhaustion beyond the bound passes the last underlying error to the existing
+capture-terminal handoff. No later stitching or filtering failure is retried.
 At most four independent ready panoramas and one installed panorama remain per
 epoch. Source leases retire after panorama preparation;
 filtered outputs own their pixels independently of decoder surfaces. Only the

@@ -14,6 +14,28 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Native import recovery restored; performance unresolved, 2026-09-10:**
+checkpoint UI qualification passed43 of44 checks. Its import-fault shim targeted
+only the main thread, missing the selected `kjerag-stitch` import path. A corrected
+probe with thread-specific injection receipts reproduced permanent file stoppage
+after a0.4-second resource shortage. The source importer now retries the same
+decoded pair before the stitch transaction, using the existing two-second limit.
+Only classified resource exhaustion retries; invalid inputs and later pipeline
+errors do not. No seam calculation, source cadence or colour history changes.
+
+The corrected actual-player retest passes all9 fault-path checks, with separate
+authenticated worker injections: transient recovery, sustained stop with raw
+error, held picture, stopped clock/audio, one alert and successful reopening.
+Five matching unit tests pass, including retry deadline oversleep; workspace
+all-target Clippy, formatting, source-lock and rename checks pass. The complete
+release-workspace rerun passes1440 tests with47 ignored across48 suites.
+Native fault-path qualification is not
+installed sandbox qualification or a performance result. Playback remains about
+12–15fps on the30fps X4 clip. Source staging and shorter GPU jobs remain separate
+unmeasured experiments; no installed replacement, owner playback acceptance,
+merge, new colour smoother or broader RE. Evidence is in
+`scratch/studio-seam-flicker-612-20260909-01/temporal-static-cache-01`, suffix10.
+
 **CPU search cost reduced; GPU stalls remain, 2026-09-10:**
 the selected x86-64 SAD validates both full16-row footprints once, then uses
 unaligned SSE2 loads and two64-bit accumulators. The existing portable expression

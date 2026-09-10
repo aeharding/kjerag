@@ -5,6 +5,7 @@
 //! source import, exact map binding and bounded draw-retirement mechanism.
 
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use kjerag_media::{FrameStamp, Frames};
 use kjerag_meta::OrientationTrack;
@@ -182,7 +183,12 @@ pub(super) fn prepare_panorama(
     size: Size,
     permit: crate::draw_retirement::DrawPermit,
 ) -> Fallible<BodyPanorama> {
-    let source = session.capture.import_picture(frames)?;
+    let started = Instant::now();
+    let source = retry_source_import(
+        || session.capture.import_picture(Arc::clone(&frames)),
+        || started.elapsed(),
+        std::thread::sleep,
+    )?;
     if source.resident_frame() != *stamp {
         return Err("ONE X2 panorama import differs from its decoded source delivery".into());
     }
@@ -211,6 +217,39 @@ pub(super) fn prepare_panorama(
     )?;
     session.context.queue().submit(Some(encoder.finish()));
     Ok(output)
+}
+
+/// Retry only resource exhaustion before a source enters the stitch transaction.
+/// The exact decoded pair and retirement permit stay on the bounded stitch
+/// worker. No history, source admission or UI thread advances during a retry.
+/// Other errors, and resource exhaustion lasting the existing import bound,
+/// propagate their original error to the capture's one-shot failure handoff.
+fn retry_source_import<T>(
+    mut import: impl FnMut() -> Fallible<T>,
+    mut elapsed: impl FnMut() -> Duration,
+    mut wait: impl FnMut(Duration),
+) -> Fallible<T> {
+    let mut failed_at = None;
+    loop {
+        let error = match import() {
+            Ok(source) => return Ok(source),
+            Err(error) => error,
+        };
+        if !crate::dmabuf::retryable_import_error(error.as_ref()) {
+            return Err(error);
+        }
+        let now = elapsed();
+        let since = *failed_at.get_or_insert(now);
+        if now.saturating_sub(since) >= crate::STUCK_FOR {
+            return Err(error);
+        }
+        // This is a worker-side scarcity backoff, not source-frame skipping
+        // or a GPU completion fence. Healthy imports never sleep.
+        wait(Duration::from_millis(1));
+        if elapsed().saturating_sub(since) >= crate::STUCK_FOR {
+            return Err(error);
+        }
+    }
 }
 
 impl ResidentPanoramaIngestInner {
@@ -305,9 +344,98 @@ fn validate_ingest_sequence(previous: Option<&FrameStamp>, offered: &FrameStamp)
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::cell::Cell;
 
     use super::*;
+
+    #[test]
+    fn source_import_recovers_without_replacing_its_source() {
+        let source = Arc::new(612);
+        let mut attempts = 0;
+        let now = Cell::new(Duration::ZERO);
+        let imported = retry_source_import(
+            || {
+                attempts += 1;
+                if attempts <= 400 {
+                    Err(std::io::Error::from_raw_os_error(libc::EMFILE).into())
+                } else {
+                    Ok(Arc::clone(&source))
+                }
+            },
+            || now.get(),
+            |delay| now.set(now.get() + delay),
+        )
+        .unwrap();
+        assert_eq!(attempts, 401);
+        assert_eq!(now.get(), Duration::from_millis(400));
+        assert!(Arc::ptr_eq(&source, &imported));
+    }
+
+    #[test]
+    fn source_import_exhaustion_returns_the_underlying_error_at_the_bound() {
+        let now = Cell::new(Duration::ZERO);
+        let error = retry_source_import::<()>(
+            || Err(std::io::Error::from_raw_os_error(libc::EMFILE).into()),
+            || now.get(),
+            |delay| now.set(now.get() + delay),
+        )
+        .unwrap_err();
+        assert_eq!(now.get(), crate::STUCK_FOR);
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::EMFILE)
+        );
+    }
+
+    #[test]
+    fn source_import_does_not_attempt_again_after_an_overslept_deadline() {
+        let now = Cell::new(Duration::ZERO);
+        let mut attempts = 0;
+        let error = retry_source_import(
+            || {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(std::io::Error::from_raw_os_error(libc::EMFILE).into())
+                } else {
+                    Ok(())
+                }
+            },
+            || now.get(),
+            |_| now.set(crate::STUCK_FOR),
+        )
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::EMFILE)
+        );
+    }
+
+    #[test]
+    fn source_import_never_retries_deterministic_errors_or_waits_on_success() {
+        let error = retry_source_import::<()>(
+            || Err("invalid source descriptor".into()),
+            || panic!("deterministic errors have no retry clock"),
+            |_| panic!("deterministic errors must not wait"),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "invalid source descriptor");
+        assert_eq!(
+            retry_source_import(
+                || Ok(42),
+                || panic!("healthy imports have no retry clock"),
+                |_| panic!("healthy imports must not wait"),
+            )
+            .unwrap(),
+            42
+        );
+    }
 
     #[test]
     fn ingest_may_begin_at_a_seek_landing_but_then_requires_exact_continuity() {

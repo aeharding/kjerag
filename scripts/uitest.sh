@@ -7,6 +7,8 @@
 #
 # or set KJERAG_TEST_MEDIA. With that variable set, the view terms may be the
 # first command-line words.
+# Set KJERAG_UITEST_ONLY=stalls to run only the unsandboxed import-failure
+# checks against supplied test media.
 #
 # The same checks run against the installed Flatpak with
 # KJERAG_FLATPAK=dev.harding.Kjerag, which is how a bundle is checked before
@@ -20,11 +22,13 @@
 # release binary, unchanged: nothing here is a test hook.
 #
 # One check is louder than that and says so where it stands: `stalls` needs a
-# frame import to fail, so it preloads twenty lines of C that make `dup(2)`
-# answer EMFILE on the app's own main thread while a file exists. The binary
-# is still the unchanged release build and the failure it meets is a real
-# errno from a real syscall on the real import path; what is arranged is the
-# scarcity, not the handling of it (issue #124).
+# frame import to fail, so it preloads a small C shim that makes `dup(2)`
+# answer EMFILE on either import thread while a file exists. The selected
+# panorama path imports on `kjerag-stitch`; the legacy path imports on the
+# main thread. The binary is still the unchanged release build and the
+# failure it meets is a real errno from a real syscall on the real import
+# path; what is arranged is the scarcity, not the handling of it (issue
+# #124).
 #
 # What the checks are allowed to believe, strongest first:
 #
@@ -194,6 +198,16 @@ else
 	canonical_args=
 	expected_view=
 fi
+
+case ${KJERAG_UITEST_ONLY:-} in
+"") ;;
+stalls)
+	[ -n "$media" ] || die "KJERAG_UITEST_ONLY=stalls needs test media"
+	[ -z "${KJERAG_FLATPAK:-}" ] ||
+		die "KJERAG_UITEST_ONLY=stalls cannot preload into a Flatpak"
+	;;
+*) die "KJERAG_UITEST_ONLY must be stalls when it is set" ;;
+esac
 
 # The session went away with checks still to run: a dead compositor cannot
 # answer anything, so the run stops rather than reporting a UI failure it did
@@ -2019,12 +2033,15 @@ exits_clean() {
 # and one that does not must stop the file, sound and all, and put the alert up.
 #
 # The instrument is a shim over `dup(2)`, which the import calls once per plane
-# (`crates/render/src/dmabuf.rs`) on the thread iced prepares the pass on. The
-# decode thread's own descriptors come out of `av_hwframe_map` and never
-# through `dup`, so failing it on the main thread alone leaves the decoder
-# delivering frames into an import that cannot take them, which is the shape of
-# the hiccup this is about. Nothing in the app is compiled differently and no
-# code path is stood in for; what the shim arranges is the scarcity.
+# (`crates/render/src/dmabuf.rs`). The legacy pass imports on the main thread;
+# the selected temporal panorama path sends the work to the named
+# `kjerag-stitch` thread. The decode thread's own descriptors come out of
+# `av_hwframe_map` and never through `dup`. Targeting both actual import
+# threads leaves the decoder delivering frames into an import that cannot take
+# them, which is the shape of the hiccup this is about. Each phase also needs a
+# syscall-written hit receipt: without it, an unchanged picture says nothing
+# about import failure handling. Nothing in the app is compiled differently
+# and no code path is stood in for; what the shim arranges is the scarcity.
 
 # How long the app is given to notice, which is the render layer's own bound
 # (`STUCK_FOR`, two seconds) and then some.
@@ -2072,44 +2089,76 @@ stalls() {
 	seconds=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$media" 2>/dev/null |
 		cut -d. -f1)
 	if [ -n "$seconds" ] && [ "$seconds" -lt "$STALL_FILM" ] 2>/dev/null; then
+		[ "${KJERAG_UITEST_ONLY:-}" != stalls ] ||
+			die "the stalls-only check needs ${STALL_FILM}s of film (${seconds}s supplied)"
 		skip "a stuck import stops the file and says so (${seconds}s of film, and these checks need ${STALL_FILM})"
 		return
 	fi
 	if ! command -v cc >/dev/null; then
+		[ "${KJERAG_UITEST_ONLY:-}" != stalls ] ||
+			die "the stalls-only check needs cc to build its fault shim"
 		skip "a stuck import stops the file and says so (no cc to build the shim)"
 		return
 	fi
 
-	local shim=$session/dupfail.so gate=$session/dup-fail
-	rm -f "$gate"
+	local shim=$session/dupfail.so gate=$session/dup-fail hit=$session/dup-hit
+	local transient_hit=$session/dup-hit-transient
+	local sustained_hit=$session/dup-hit-sustained
+	rm -f "$gate" "$hit" "$transient_hit" "$sustained_hit"
 	cat >"$session/dupfail.c" <<-'EOF'
 		#define _GNU_SOURCE
-		#include <dlfcn.h>
 		#include <errno.h>
+		#include <fcntl.h>
+		#include <linux/prctl.h>
 		#include <stdlib.h>
 		#include <sys/syscall.h>
 		#include <unistd.h>
 
-		static int (*real_dup)(int);
+		static int stitch_thread(void) {
+		        char name[16] = {0};
+		        static const char wanted[] = "kjerag-stitch";
+		        if (syscall(SYS_prctl, PR_GET_NAME, name, 0, 0, 0) != 0) {
+		                return 0;
+		        }
+		        for (unsigned i = 0; i < sizeof(wanted); ++i) {
+		                if (name[i] != wanted[i]) return 0;
+		                if (wanted[i] == '\0') return 1;
+		        }
+		        return 0;
+		}
+
+		static void receipt(const char *path, char mark) {
+		        if (!path) return;
+		        long out = syscall(SYS_openat, AT_FDCWD, path,
+		                O_WRONLY | O_CREAT | O_APPEND, 0600);
+		        if (out < 0) return;
+		        syscall(SYS_write, out, &mark, 1);
+		        syscall(SYS_close, out);
+		}
 
 		int dup(int fd) {
-		        if (!real_dup) {
-		                real_dup = dlsym(RTLD_NEXT, "dup");
-		        }
 		        const char *gate = getenv("KJERAG_DUP_FAIL");
-		        if (gate && syscall(SYS_gettid) == getpid() && access(gate, F_OK) == 0) {
-		                errno = EMFILE;
-		                return -1;
+		        if (gate) {
+		                long tid = syscall(SYS_gettid);
+		                int stitch = stitch_thread();
+		                if ((tid == syscall(SYS_getpid) || stitch) &&
+		                        syscall(SYS_faccessat, AT_FDCWD, gate, F_OK, 0) == 0) {
+		                        receipt(getenv("KJERAG_DUP_HIT"), stitch ? 'S' : 'M');
+		                        errno = EMFILE;
+		                        return -1;
+		                }
 		        }
-		        return real_dup(fd);
+		        return syscall(SYS_dup, fd);
 		}
 	EOF
-	if ! cc -shared -fPIC -O2 -o "$shim" "$session/dupfail.c" -ldl 2>>"$session/cc.log"; then
+	if ! cc -shared -fPIC -O2 -o "$shim" "$session/dupfail.c" 2>>"$session/cc.log"; then
+		[ "${KJERAG_UITEST_ONLY:-}" != stalls ] ||
+			die "the stalls-only fault shim did not build (log: $session/cc.log)"
 		skip "a stuck import stops the file and says so (the shim did not build)"
 		return
 	fi
 
-	wrap=(env "LD_PRELOAD=$shim" "KJERAG_DUP_FAIL=$gate")
+	wrap=(env "LD_PRELOAD=$shim" "KJERAG_DUP_FAIL=$gate" "KJERAG_DUP_HIT=$hit")
 	boot stall "$media"
 	if ! await '^play:' "$READY"; then
 		fail "the file plays under the shim" "no report line in $READY s" "log: $log"
@@ -2126,6 +2175,14 @@ stalls() {
 	: >"$gate"
 	sleep "$HICCUP"
 	rm -f "$gate"
+	if [ ! -s "$hit" ]; then
+		fail "$check" "the shim recorded no dup failure during the transient phase" \
+			"instrument receipt: $hit" "log: $log"
+		teardown
+		wrap=()
+		return
+	fi
+	mv "$hit" "$transient_hit"
 	sleep "$SETTLE"
 	if said "$STOPPED"; then
 		fail "$check" "$(grep -- "$STOPPED" "$log")" "log: $log"
@@ -2143,14 +2200,30 @@ stalls() {
 	check="a stuck import stops the file and says so"
 	local reports
 	reports=$(grep -c '^play:' "$log")
+	rm -f "$hit"
 	: >"$gate"
 	if ! await "$STOPPED" "$STUCK_BY"; then
 		alive || lost "$check"
-		fail "$check" "nothing said the picture had gone, after $STUCK_BY s" "log: $log"
+		if [ ! -s "$hit" ]; then
+			fail "$check" "the shim recorded no dup failure during the sustained phase" \
+				"instrument receipt: $hit" "log: $log"
+		else
+			mv "$hit" "$sustained_hit"
+			fail "$check" "nothing said the picture had gone, after $STUCK_BY s" \
+				"injection receipt: $sustained_hit" "log: $log"
+		fi
 		teardown
 		wrap=()
 		return
 	fi
+	if [ ! -s "$hit" ]; then
+		fail "$check" "the file stopped without an authenticated sustained injection" \
+			"instrument receipt: $hit" "log: $log"
+		teardown
+		wrap=()
+		return
+	fi
+	mv "$hit" "$sustained_hit"
 	pass "$check ($(grep -- "$STOPPED" "$log" | grep -o 'stopped:.*' | tail -1))"
 
 	# The report subscription runs only while playing, so a line that never
@@ -2786,17 +2859,21 @@ twin_guard() {
 
 # ------------------------------------------------------------------- run
 
-if [ -n "$media" ]; then
-	with_media
-	dropped_files
-	paired_files
+if [ "${KJERAG_UITEST_ONLY:-}" = stalls ]; then
 	stalls
 else
-	welcome
+	if [ -n "$media" ]; then
+		with_media
+		dropped_files
+		paired_files
+		stalls
+	else
+		welcome
+	fi
+	dud
+	foreign
+	twin_guard
 fi
-dud
-foreign
-twin_guard
 
 printf '\n%s checks, %s failed\n' "$checks" "$failures"
 printf 'captures and logs: %s\n' "$session"
