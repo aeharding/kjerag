@@ -14,6 +14,21 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Exact GPU workgroup optimisation verified, 2026-09-10:** a short actual-Scene
+timestamp run locates the remaining dominant kernel in finest motion search,
+not fusion:51.567 ms mean versus about4 ms for fusion. Eight8-lane teams replace
+eight32-lane teams while retaining complete integer SADs and ordered decisions.
+The selected64-lane layout averages33.245/33.888 ms in two short runs; a128-lane
+candidate averages35.210/36.422 ms and is not retained as another active route.
+All77 temporal tests pass, including complete CPU-oracle vector equality.
+Uninstrumented612/607 Scene sequences preserve all60 filtered pictures and504
+controls. GPU/upload/filter/project/completion means fall from90.236/88.817 to
+68.443/66.819 ms. Combined measured motion/filter means79.419/78.540 ms still
+exclude panorama preparation and remain outside playback budgets. The moving
+reviews stay unchanged and unaccepted; no colour fade, installed change or
+flicker-fix claim. Evidence:
+`scratch/studio-seam-flicker-612-20260909-01/temporal-gpu-cost-01`.
+
 **Resident temporal history verified, 2026-09-10:** one source-stamped
 seven-layer NV12 owner replaces per-output allocation and recopying of the
 entire window. Steady outputs copy one arriving pair instead of seven, while

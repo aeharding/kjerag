@@ -57,11 +57,12 @@ struct Candidate {
 
 const BLOCK: u32 = 16u;
 const CANDIDATES: u32 = 8u;
-const LANES_PER_CANDIDATE: u32 = 32u;
+const LANES_PER_CANDIDATE: u32 = 8u;
+const WORKGROUP_LANES: u32 = CANDIDATES * LANES_PER_CANDIDATE;
 const PENALTY_NEW: u32 = 50u;
 
 var<workgroup> current_pixels: array<u32, 256>;
-var<workgroup> partials: array<u32, 256>;
+var<workgroup> partials: array<u32, WORKGROUP_LANES>;
 var<workgroup> candidates: array<Candidate, 8>;
 var<workgroup> best: RawMotion;
 var<workgroup> minimum_cost: i32;
@@ -121,7 +122,7 @@ fn put_candidate(slot: u32, value: vec2<i32>, valid: bool, penalize: bool) {
     );
 }
 
-// Eight 32-lane teams evaluate eight candidates without candidate-dependent
+// Eight teams evaluate eight candidates without candidate-dependent
 // barriers. Team leaders make exact integer sums, then lane zero applies the
 // CPU reference's strict ordinal tie rule.
 fn execute_batch(lane: u32, reference: u32, source: vec2<i32>) {
@@ -192,7 +193,7 @@ fn put_ring(center: vec2<i32>, bounds: Bounds) {
     }
 }
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(WORKGROUP_LANES)
 fn refine_blocks(
     @builtin(workgroup_id) group: vec3<u32>,
     @builtin(local_invocation_index) lane: u32,
@@ -204,12 +205,14 @@ fn refine_blocks(
     let index = reference * block_count + local_index;
     let source_u = block * BLOCK;
     let source = vec2<i32>(source_u);
-    let pixel = vec2<u32>(lane % BLOCK, lane / BLOCK);
-    current_pixels[lane] = textureLoad(
-        current_image,
-        vec2<i32>(source_u + pixel),
-        0,
-    ).x;
+    for (var at = lane; at < 256u; at += WORKGROUP_LANES) {
+        let pixel = vec2<u32>(at % BLOCK, at / BLOCK);
+        current_pixels[at] = textureLoad(
+            current_image,
+            vec2<i32>(source_u + pixel),
+            0,
+        ).x;
+    }
     workgroupBarrier();
 
     let bounds = block_bounds(block);

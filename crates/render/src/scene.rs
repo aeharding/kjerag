@@ -10824,7 +10824,9 @@ mod tests {
         {
             return Err("Scene import test requires a non-CPU graphics adapter".into());
         }
-        let primary = if std::env::var_os("KJERAG_STITCH_GPU_PROFILE").is_some() {
+        let primary = if std::env::var_os("KJERAG_STITCH_GPU_PROFILE").is_some()
+            || std::env::var_os("KJERAG_PANORAMA_GPU_TIMING").is_some()
+        {
             dmabuf::open_device_for_timestamp_test(&adapter)
         } else {
             dmabuf::open_device(&adapter)

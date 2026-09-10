@@ -22,6 +22,8 @@ use crate::temporal_fusion::parallel_refine;
 use crate::temporal_fusion::pyramid::Level;
 use crate::{FrameStamp, Reframe, Size};
 
+mod profile;
+
 const FULL: [u32; 2] = [7680, 3840];
 const RAW_GRID: [u32; 2] = [240, 120];
 const FLOW_GRID: [u32; 2] = [480, 240];
@@ -46,6 +48,7 @@ struct Retained {
 
 struct PendingHistory {
     encoder: wgpu::CommandEncoder,
+    profile: profile::Profile,
     host_ms: f64,
     copied_sources: u32,
 }
@@ -181,12 +184,17 @@ impl TemporalReview {
             );
         }
         let history_started = Instant::now();
-        let pending = self.pending_history.get_or_insert_with(|| PendingHistory {
-            encoder: device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        let pending = self.pending_history.get_or_insert_with(|| {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("resident seven-source temporal diagnostic"),
-            }),
-            host_ms: 0.0,
-            copied_sources: 0,
+            });
+            let profile = profile::Profile::begin(device, &mut encoder);
+            PendingHistory {
+                encoder,
+                profile,
+                host_ms: 0.0,
+                copied_sources: 0,
+            }
         });
         self.history
             .encode_push(device, &mut pending.encoder, prepared.frame(), &nv12)
@@ -218,12 +226,14 @@ impl TemporalReview {
     fn process(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         let PendingHistory {
             mut encoder,
+            mut profile,
             host_ms: history_host_ms,
             copied_sources,
         } = self
             .pending_history
             .take()
             .expect("a complete temporal window has recorded source copies");
+        profile.mark(&mut encoder, "history");
         let history = self
             .history
             .window()
@@ -366,6 +376,9 @@ impl TemporalReview {
         }
         write_layer(queue, &luma_texture, 0, FLOW_GRID, 1, luma);
 
+        if self.parallel_refine.is_none() {
+            profile.mark(&mut encoder, "refine");
+        }
         if let Some(refiner) = &self.parallel_refine {
             let inputs = finest
                 .as_ref()
@@ -392,6 +405,7 @@ impl TemporalReview {
                 .unwrap_or_else(|error| {
                     panic!("parallel finest refinement for captured-regime motion: {error}")
                 });
+            profile.mark(&mut encoder, "refine");
             let builder = self
                 .gpu_motion
                 .as_ref()
@@ -425,6 +439,7 @@ impl TemporalReview {
                 copy_layer(&mut encoder, &output, &flow, layer as u32);
             }
         }
+        profile.mark(&mut encoder, "motion");
         let inputs = history.inputs(&flow, &luma_texture);
         let parameters = history.parameters(
             // Exact f32 words consumed by every selected Y/UV UBO in
@@ -450,6 +465,7 @@ impl TemporalReview {
             )
         }
         .unwrap_or_else(|error| panic!("fuse captured ISO100 regime: {error}"));
+        profile.mark(&mut encoder, "fuse");
         let matrix = MatrixCoefficients::from_source_rgb(center.reframe.source_color_matrix());
         let rgb = if let Some(regions) = &regions {
             self.color.encode_planes_to_rgb_scissored(
@@ -465,14 +481,19 @@ impl TemporalReview {
                 .map_err(|error| error.to_string())
         }
         .unwrap_or_else(|error| panic!("convert fused NV12 diagnostic: {error}"));
+        profile.mark(&mut encoder, "color");
         let projected = self
             .projector
             .encode(device, &mut encoder, &rgb, &center.reframe, VIEW)
             .unwrap_or_else(|error| panic!("project fused panorama diagnostic: {error}"));
+        profile.mark(&mut encoder, "project");
         let readback = PendingReadback::encode(device, &mut encoder, &projected);
+        profile.mark(&mut encoder, "readback");
+        profile.resolve(&mut encoder);
         let submission = queue.submit([encoder.finish()]);
         let rgba = readback.read(device, submission);
         let gpu_ms = gpu_started.elapsed().as_secs_f64() * 1000.0 + history_host_ms;
+        profile.report(device, queue, center.stamp.index());
         eprintln!(
             "panorama-temporal-history: center {} copied_sources {copied_sources} logical_bytes {} host_encode {history_host_ms:.3}ms",
             center.stamp.index(),

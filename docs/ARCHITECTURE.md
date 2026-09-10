@@ -109,7 +109,12 @@ algorithm: blocks read immutable coarse seeds instead of newly searched
 neighbors, and omit the serial bad-block/UMH recovery. Its readable CPU oracle
 and GPU kernel keep the initial candidate order, SAD penalties, bounds and
 fixed radius-one ring. The GPU assigns one workgroup to each block/reference,
-with distinct immutable input and output buffers. This is not Studio-exact
+with distinct immutable input and output buffers. Eight teams of eight lanes
+cover each candidate's complete 256-byte SAD; the 64-lane workgroup also loads
+the current block in four iterations per lane. Team sums remain bounded exact
+u32 arithmetic, followed by the same ordered strict-tie decision. The array
+size, load stride and workgroup attribute derive from one lane-count constant.
+This is not Studio-exact
 search or an accepted quality tradeoff. Coarser preparation still uses the
 existing CPU reference; no player scheduling or color-update rule changes.
 
@@ -161,6 +166,15 @@ the changed spatial algorithm described above, retaining each GPU base beside
 its exact source stamp and NV12 image. Refinement, packing and fusion share one
 encoder. Its receipt discloses the algorithm change, and its timing separates
 CPU coarse preparation from GPU work plus completion/readback.
+
+The test-only `KJERAG_PANORAMA_GPU_TIMING=1` selector adds encoder timestamps
+around history copies, finest refinement, motion packing, fusion, conversion,
+projection and picture-readback copy. The timestamps share the original
+submission; their resolve/map is reported after picture completion, not a new
+wait between stages. The intervals exclude host work and implicit queue-write
+uploads preceding that command buffer. With the selector absent, instrumentation
+allocates no GPU resources and changes no device feature requirements. These measurements
+locate expensive diagnostic stages, not actual-player capacity.
 
 The optional view-scissor diagnostic keeps full-sized fusion Y/UV and converted
 RGB targets, their absolute coordinates and the unchanged panorama projector.

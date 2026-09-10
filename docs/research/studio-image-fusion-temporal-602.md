@@ -2852,3 +2852,60 @@ No new movie, Studio session/export, color-update rule, installation, push,
 merge or owner acceptance. Existing moving reviews remain current. The
 remaining GPU processing still dominates; this is not a player-ready flicker
 fix and does not resolve the disclosed representation/search/ISO boundaries.
+
+### Locate GPU cost and reduce workgroup size exactly, 2026-09-10
+
+An opt-in test-only timestamp helper brackets seven intervals inside the same
+temporal command buffer: history copies, finest refinement, motion packing,
+fusion, color conversion, projection and picture-readback copy. Query resolve
+shares the final submission; mapping/reporting happens after the existing
+picture-completion wait and outside the existing host `gpu_ms` region. No
+per-stage wait or submission is added. These GPU intervals exclude host work
+and implicit queue-write uploads that precede the command buffer; transitions
+and driver work between markers are included. They are not player capacity.
+`KJERAG_PANORAMA_GPU_TIMING=1` enables recording. The Scene test device requests
+timestamp features when this variable is present; leave it unset for ordinary
+uninstrumented qualification. Production playback is untouched.
+
+Thirteen exact612 sources starting18341 produce seven centered outputs.
+All98 artifacts and source associations/hashes match the prior resident-history
+run. The original256-lane kernel averages51.566858 ms, range43.433524..59.184291,
+while fusion is3.782787..4.738804 ms and RGB conversion0.498627..0.651558 ms.
+This establishes finest refinement as the next execution target. These figures
+come from a short instrumented run, not the uninstrumented whole-sequence mean.
+
+Two smaller layouts retain all256 pixel differences for each candidate,
+bounded u32 sums, candidate validity, penalty flags and the strict ordered tie
+decision. The current block load loops over the same256 texels; workgroup size,
+load stride and partial-array length derive from one constant. The128-lane
+layout uses16 lanes per candidate; the selected64-lane layout uses8. No
+subgroup feature, architecture-specific arithmetic, changed search, region
+restriction or duplicate-SAD memoization is introduced. Actual subgroup width
+was not measured, so no occupancy/wave-count speedup is asserted.
+
+The128-lane profile means are35.210472 and36.421836 ms in two runs;64-lane means
+are33.245109 and33.887592 ms. Each short run's98 artifacts remain exact. The
+128-lane candidate is not an additional active implementation. Both smaller
+layouts pass all77 temporal tests, including all172,800 records against the
+unchanged CPU candidate oracle on three repetitions. This preserves, rather
+than closes, the earlier candidate's disclosed native/serial-search gaps.
+
+Final64-lane test binary SHA256:
+`aa4e4af1de9e11727daf55df2a93f24754818b343db58f9e041416d1fa6bc60f`.
+With timing instrumentation unset, the full612/607 runs preserve all290/274
+artifacts, including60 filtered frames,504 controls and all CSV source
+associations/timestamps/RGBA hashes. Root inspected actual centers18344/18214
+as PNGs; there is no new movie or moving flicker verdict. CPU coarse mean/max
+is10.976/15.111 and11.721/13.700 ms; GPU+wait mean/max is68.443/90.088 and
+66.819/88.530 ms, versus previous means90.236/88.817. Combined means are
+79.419/78.540 ms, excluding panorama preparation/controls. Whole runs take
+8.69/8.54 seconds. No build or other GPU task overlaps measurement.
+
+Evidence:
+`scratch/studio-seam-flicker-612-20260909-01/temporal-gpu-cost-01`, including
+saved baseline/128-lane binaries, per-stage logs, exact-prefix verifier,
+full Scene outputs and comparison logs. Workspace all-target Clippy,
+formatting, source-lock and rename checks pass. Full workspace tests/UI harness
+were not run for this offline optimisation. No Studio session/export, colour
+fade, installation, push, merge or owner acceptance. Remaining GPU/host work,
+production history/ISO policy and moving visual acceptance are still required.
