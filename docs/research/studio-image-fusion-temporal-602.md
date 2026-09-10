@@ -1351,3 +1351,140 @@ inventory (SHA-256 `8b2879d3e9c309a0c0e68f8cf3e2f0d95abc08639726bf3c3d291900a148
 Its raw adjacent-frame RGB averages include source motion and pool channels
 and trace pixels. They do not discriminate the reported flicker, establish a
 new cause or contradict the owner's verdict. No fix is selected from them.
+
+## Final CPU-visible output versus encoded movie, 2026-09-09
+
+This bounded observation returns to the accepted earlier607-second view, not
+the new612 report. Its purpose is to distinguish a stitch-consumer discrepancy
+from an effect introduced after the final output callback. It does not choose
+another production change or alter the owner's negative verdict.
+
+### Capture and the failed downstream provenance assumption
+
+The existing Studio main/exporter processes were reused without restart.
+The original360 export settings were checked:7680x3840,30000/1001, Original
+bitrate, H.265, with Anti-Flicker, Dolby Vision, APMP and Direction Lock off.
+The saved project remains SHA-256
+`043620056970fb578305399604da8862bb5fad62469fc836dd1227fb6a1f9ef6`
+before and after. The normal Software Update dialog was closed without
+installing an update. An optional screen-capture helper was denied by macOS
+privacy; it was not retried or bypassed. Granted Accessibility controls and
+the native export path remained separate. No playback audio was started and
+the owner's system volume was not changed.
+
+The hash-pinned worker observer retains exact type11 IdxTimed/map pairs for
+sources18214/18215 and associates each by the active RenderExporter frame
+and thread with its final notifier at worker offset`0x8ee474`. The earlier
+`0x8ee46c` address is the argument setup, not the BLR. Both completed samples
+contain a VideoToolbox AVFrame (format158) with a CVPixelBuffer in data[3],
+7680x3840, format`420f`. The fixed accepted registration selects panorama
+ROI x2244/y2756/w442/h306, covering view region[640,738)x[250,352) and the
+existing event pixel(685,300). No registration or local warp was fitted.
+
+Both read-only CoreVideo lock/unlock pairs return0. Actual returned luma and
+chroma pitches are7680 bytes; logical ROI rows are copied verbatim twice and
+match on each duplicate read. No lock or unlock uncertainty occurred. The
+selected OffscreenRender flags at+8/+9/+0xa are[1,1,0], selecting the
+ReadableTextureReader, not the Oryol reader. Static inspection finds its
+source-draw wait before Core Image rendering, but no explicit post-Core-Image
+fence. These are CPU-visible final output pixels, not a captured Metal
+framebuffer or proof of all GPU resource coherence.
+
+The export finishes all63 frames. The observer's final hook is hit63 times,
+but `VideoWriter::AppendVideoSample` at`0xfa03a8` and the presumed encoder
+call at`0x1e29fe8` are each hit **zero** times. Both captured final AVFrames
+have AV_NOPTS_VALUE. Consequently the intended final-to-writer timestamp
+authentication failed; no successful session manifest is synthesized. The
+incomplete receipt records the exact hook counts and captures. After verifying
+both balanced snapshots and no pending lock transaction, the debugger was
+interrupted, checkpointed and detached. Studio remains running normally.
+
+The bounded static follow-up identifies a separate F-writer family:
+`FMediaFrameWriter::AppendVideoSample` at`0x8032f0`, F-input append at
+`0x867e98`, and encoder call`0x868448`. It reads the sample's metadata time,
+rescales it, and writes AVFrame PTS at`0x8033b4`/`0x803424`. These are
+prospective observation sites, **not runtime-authenticated selected hooks**.
+Any future observer must also permit the legitimate unset-to-assigned PTS
+transition and authenticate wrapper changes while tracing the underlying
+AVFrame identity. The hardware F-writer may wrap the original AVFrame in a
+new MediaSample, so sample-pointer equality cannot be assumed throughout.
+No further export
+is started to close that link at this checkpoint.
+
+A further bounded static audit finds no denoise or temporal filtering inside
+either F-writer function. The optional CVPixelBuffer conversion is a
+stride-aware plane copy through `av_image_copy`, not a filter. However, the
+earlier MediaRender worker invokes an unobserved concrete virtual target at
+`0x7edb14` (MediaRender+0x38, slot+0x10). Therefore the complete post-callback
+pixel path is still not authenticated, and the writer audit does not license
+an HEVC-only attribution. Its local `handoff-downstream-audit-01/REPORT.md`
+is SHA-256 `e098490c31713d6b2230c34fc2774b86fce59f8dd31078e58399305de649c4cb`.
+
+The durable capture root is
+`scratch/studio-seam-flicker-612-20260909-01/mac-handoff-20260909-01`,
+copied from the Mac repository with the same name. Relevant SHA-256 values:
+
+- Frozen observer: `9ed70be6a095e72c19dc9fb3955b934dfd396ba0238f682e572bebe96f621472`.
+- `run-01/session-incomplete.json`: `35225c3762a2244aff360b4a9db75c00e9673175d8ab217c08b7d19d8b79c957`.
+- New63-frame movie: `0bbfdfb8fadfc9e19435e7581404b609752da2d0dacd6f75c07c777f7f322a76`.
+
+### Pixel correspondence and same-conversion control
+
+The local CPU-only `handoff-pixel-match-01` compares each captured Y/UV patch
+against all63 decoded movie frames at the unchanged location, and a separate
+vertically flipped candidate. Both luma and chroma independently select
+movie6 for captured18214 and movie7 for captured18215. Combined NV12 mean
+absolute differences are4.194/4.236 codes; the respective runner-up frames
+are7/6 at6.527/6.787. Vertical-flip candidates exceed60 codes. Visual
+inspection shows the same slanted ground/foliage structure and orientation,
+with noticeably more high-frequency noise in the captured patch. This is
+strong **inferred pixel correspondence**, not encoder-PTS authentication.
+The crop streams retain every FFmpeg-returned NV12 byte; no color conversion
+is used to rank them. Pixel-match receipt SHA-256:
+`0beaad2ee2726b953ea011794b4358f30740c6468807639e845d305d7eb80eeb`.
+
+`handoff-temporal-02` reuses the accepted rotation, existing event pixel,
+sigma8 and17x9 patch without selecting a new favorable location. A common
+motion field is applied to both arms; zero-motion and same-export-motion
+controls are also retained. Its crucial conversion control runs the captured
+and decoded NV12 through the **same** crop dimensions, full-range BT.709
+conversion, and projection. A direct-Y arm bypasses RGB/chroma conversion.
+The BT.709 interpretation comes from movie metadata; native CV attachments
+were not captured, so it remains an explicit assumption for native RGB.
+
+Using the exact-native Kjerag diagnostic's common motion field:
+
+| Local signed event residual, codes | Studio captured output | Same export, decoded | Kjerag exact-native ratios |
+| --- | ---: | ---: | ---: |
+| Green, identical NV12 conversion | 1.273177 | 0.405090 | 1.384912 |
+| Direct full-range luma | 1.222739 | 0.416803 | not compared |
+
+The exported-minus-captured green delta remains about-0.87 codes with the
+same-export motion field and-0.88 with zero motion. Thus neither a choice
+of optical flow nor the different OpenCV/FFmpeg RGB conversions accounts for
+this reduction. This comparison uses two different source pictures and still
+includes motion residual; it is not a same-source correction counterfactual.
+It also cannot identify which downstream export operation attenuates the
+signal. The earlier ordinary-production arm has a different update history
+and a lower residual at this particular event; do not present this one bin as
+an explanation of all its owner-visible flicker.
+
+Temporal receipt SHA-256:
+`f91c44bccf70ed05ad1f9f00b24855b5f9dfd2ea1ec2024440e791982e913814`.
+The preceding `handoff-temporal-01` retains the full-panorama OpenCV conversion
+comparison;02 adds the controlled identical-conversion and direct-luma checks.
+All analysis, raw patches and rendered context are worktree scratch, not/tmp.
+
+### Decision boundary
+
+For this localized event, attenuation occurs between captured CPU-visible
+output and the exported movie. Calling it specifically HEVC suppression would
+be premature while the selected downstream processing and writer identity are
+unobserved. The accepted compressed movie remains the owner's visible target;
+it is not by itself evidence that Studio's stitcher interpolates these color
+updates. Do not assume missing stitch arithmetic explains a difference now
+observed downstream of the final callback.
+
+The new612 report, broader temporal behavior, actual installed playback and
+owner acceptance remain unresolved. No smoother, codec round-trip, production
+change, installation, merge or release follows from this two-frame finding.

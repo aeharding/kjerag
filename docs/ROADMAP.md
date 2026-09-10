@@ -14,6 +14,27 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Studio output versus export boundary, 2026-09-09:** a bounded follow-up
+captures two CPU-visible final-output patches at the earlier confirmed607
+view, before and after native color update18215. Independent luma/chroma
+matching supports correspondence to frames6/7 of the same new export, not a
+timestamp-authenticated handoff: both presumed downstream writer hooks had
+zero hits and final AVFrame PTS was unset. The observer detached safely;
+the accepted project hash stayed unchanged.
+
+At the previously selected event patch, a shared-motion green residual is
+1.273 codes in Studio's captured output and0.405 in the exported movie using
+identical NV12-to-RGB conversion, versus1.385 in the exact-native-coefficient
+Kjerag diagnostic. Direct luma independently decreases1.223 to0.417. This
+locates attenuation between CPU-visible output and the movie for one event;
+it does not yet identify compression versus other export processing, establish
+overall flicker parity, or cover the new612 report. The compressed oracle
+remains the owner's visual target, but its lower residual is no longer valid
+evidence by itself for a missing stitch-time interpolation rule. Do not add
+another solver equation or invented smoother on that premise. The installed
+`f5be77cd` build remains rejected and unchanged. No new candidate or merge is
+selected. Receipts and remaining gaps are in the temporal research note.
+
 **Owner rejects the installed coordinate candidate, 2026-09-09:** the verdict
 on `f5be77cd` is "Yes still flicker", with a new exact April004 example at
 612.078/yaw-80.71/pitch-48.46/fov95.45/lock1. The two arithmetic corrections
