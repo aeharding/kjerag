@@ -14,6 +14,27 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Selected pulse isolated to Studio's BlockDenois stage, 2026-09-09:** a
+same-source intermediate capture separates the two post-stitch filters in the
+unchanged earlier607 comparison. Defringe leaves both selected luma patches
+byte-identical; green residual changes1.273177 to1.287654, not attenuation.
+After BlockDenois it is0.392611, with direct luma1.222739 to0.423762. The
+state1 callback path skips end-of-chain materialization. Runtime selects the
+Metal denoiser and its seven-frame queue threshold; recovered kernel source
+describes motion-aligned current/reference pixel fusion, not gradual lens-color
+coefficients. Exact reference selection, ISO-derived parameters and optional
+filter branches remain unclosed. This identifies a relevant output mechanism,
+not a complete implementation or an owner-visible flicker pass.
+
+All six final/middle/post ROI snapshots are associated and safely unlocked;
+the63-frame diagnostic export finished and the debugger detached with the
+project unchanged. New post pixels differ from the preceding capture, so the
+analysis uses only this run's three stages; no cause for that repeat variation
+is assigned. No player arithmetic, installation or merge changes. The owner's
+"no gradual unless it matches studio" rule remains binding. The612.078 view
+still lacks Studio coverage and a tested fix. Receipts and next unknowns are
+in `studio-image-fusion-temporal-602.md`.
+
 **Selected pulse attenuates in Studio's post-filter stage, 2026-09-09:** the
 follow-up now authenticates both selected sources from final stitch output
 through the image-chain input to AlgoFrameEnd and captures all four post-filter
@@ -31,9 +52,10 @@ admissions and27 bit-exact held GPU outputs; maximum reference discrepancy is
 opt-in checks remain ignored in that filtered suite, with the new warm test run
 separately and passing. This is implementation consistency, not flicker
 acceptance. No production arithmetic or installed app changes. The owner has
-been asked whether to test a Kjerag-specific gradual color-correction update
-with roughly0.1s catch-up instead of full-picture filtering. That possible
-tradeoff is not yet accepted and no such policy is implemented.
+rejected the proposed Kjerag-specific gradual color-correction update:
+"no gradual unless it matches studio". No such policy is implemented. The
+next relevant RE question is which observed post-filter behavior attenuates
+the event and how it works, not choosing an invented color catch-up constant.
 
 **Post-stitch filter chain observed, 2026-09-09:** the existing follow-up
 export selects `MediaRender -> ImageAlgoNode`, whose instantiated internal

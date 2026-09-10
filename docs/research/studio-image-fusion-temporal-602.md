@@ -1684,3 +1684,114 @@ a possible Kjerag design choice, not a recovered Studio constant or approved
 tradeoff. No such policy is implemented or installed at this checkpoint.
 The exact612.078 report still has no Studio output coverage or owner-accepted
 fix; the full flicker-free objective remains unmet.
+
+### Owner rejects an invented gradual-update policy, 2026-09-09
+
+The subsequent owner answer is "no gradual unless it matches studio". This
+supersedes the pending-choice status above. The roughly0.1s proposal was an
+alternative Kjerag policy, not a recovered Studio behavior, and is not selected.
+The X4 Air publication observations still show admitted updates and exact holds,
+not gradual coefficient interpolation. The authenticated final-to-post-filter
+attenuation identifies the combined processing stage only. Separating the
+responsible filter and recovering its relevant behavior remains unfinished;
+it must not be described as an already-understood temporal filter or a fix for
+the later612.078 report. No production code or installed build changed.
+
+### Defringe / BlockDenois split on the selected event, 2026-09-09
+
+One further export of the same63-frame project captures the intermediate
+surface at `BlockDenoisAlgoFilter::Process` entry `0x7968c0`. The frozen final
+observer and head/post bridge are unchanged. A separate reviewed supplement
+requires exact selected AlgoFrameInfo/control, FramePosition, original
+VideoFrameInfo, MediaSample/control and AVFrame/control/CV identity from the
+head, plus state1 and the existing7680x3840/420f/ROI guards. Its CPU-only
+validator rejects Mat/unknown state and every retained object/control/surface
+mismatch. All six final/middle/post snapshots use balanced read-only CoreVideo
+transactions and duplicate logical-row reads; all complete successfully.
+
+The static Defringe audit establishes the selected route: the asynchronous
+worker calls `RunDefringe(CV,CV)` at `0x7a9b7c`, waits for its Metal completion,
+and forwards the same state1 AlgoFrameInfo to the next filter. Thus this
+intermediate snapshot is after Defringe and before any BlockDenois work.
+Defringe includes current-frame detection/inference and color postprocessing;
+its detector has a retained status and it has a configurable bypass gate.
+Neither fact establishes gradual color coefficients or cross-frame pixel
+averaging. Its full model and exact pixel semantics remain unread and are not
+needed to label the measured intermediate boundary.
+
+The current final ROI bytes reproduce the original final capture exactly.
+Defringe changes13,150/12,398 UV bytes for18214/18215, but **zero luma bytes**
+in both selected patches. The unchanged fixed607 event, rotation, sigma8,
+9x17 patch at view pixel(685,300), shared motion and conversion give:
+
+| Selected signed event residual, codes | Final stitch | After Defringe | After BlockDenois |
+| --- | ---: | ---: | ---: |
+| Green, common texture motion | 1.273177 | 1.287654 | 0.392611 |
+| Direct luma, common texture motion | 1.222739 | 1.222739 | 0.423762 |
+| Green, zero-motion control | 1.207120 | 1.221195 | 0.316699 |
+| Direct luma, zero-motion control | 1.145891 | 1.145891 | 0.334562 |
+
+Defringe therefore does not attenuate this selected pulse; attenuation occurs
+in the following BlockDenois interval. This remains a local event attribution,
+not a general perceptual flicker detector or a claim about the newer612 view.
+
+The post callback is not necessarily a conversion boundary. Both selected
+post states are1, and their stacks traverse the CV-buffer result overload at
+`0x797b20`. `SetMediaSample` writes state1 at `0x771d8c..90`; End tests that
+state at `0x772624` and branches directly to `0x772900`, skipping all Mat
+materialization. The initial static audit's unqualified concern that the End
+callback must include conversion was corrected after reading this branch.
+For18215, the still-active result overload's callee-saved x20 recovers the
+unchanged first CV result in its nonempty vector. It equals the post AVFrame's
+data[3] exactly. That explicitly closes the adapter backing for18215; a direct
+vector alias was not captured for18214. No extra export was made to obtain it.
+
+The saved project explicitly requests `enableMultiFrameDenoise=true`, with
+single-frame denoise and motion blur false. A runtime pointer chain from
+Block+0x248 through Algo+0x10 and facade+8 authenticates the Metal backend
+vptr at slid`0x480e690`. Backend+0x138/+0x139 are0/1, +0x140 is8, and +0x35c
+is7; a later stop also records +0x354=2 and +0x358=3. The NAP code compares
+its queued-frame count with +0x35c. This is a seven-frame window/admission
+setting, not proof of seven additional neighbors or specific source indices.
+
+The pinned worker contains readable Metal source for the temporal fusion.
+It aligns reference pixels using block motion, combines them with a current
+sample of weight256, bounds reference weights by pixel difference and noise
+level, performs rounded normalization, and clamps the result against
+luma/chroma-dependent limits. Specializations take one through six references;
+optional guided chroma processing follows. This is actual pixel-history
+filtering, not a100 ms recurrence over lens-color coefficients. Static source
+and the observed backend narrow the relevant implementation work, but do not
+close the exact selected reference arrangement, per-source ISO/noise/limit
+mapping, active shader variant, optional branches or full flow semantics.
+No replacement algorithm is selected from incomplete parameters.
+
+The post pixels differ from run03: luma differs at35,296/51,927 bytes and UV
+at3,776/6,736 bytes. The analysis deliberately compares only this new run's
+three stages, not its middle against old post pixels. The reason for this
+run-to-run variation is unassigned. The measured attenuation reproduces in
+direction and approximate size, not as byte-identical post output.
+
+Durable root is `scratch/studio-seam-flicker-612-20260909-01/`:
+
+- `mac-filter-split-20260909-01/run-01/session-filter-split.json`, SHA
+  `0c985b7d7c194329d18475ac1d05a7fd2dc8d2c450d87ccff4e892d9680eb6cd`.
+- Detached event log, SHA
+  `9356be4af386e67ff58eabed40da56deb53150b31ffcc00d0ea4e8ef2342cb75`.
+- `filter-split-analysis-01/receipt.json`, SHA
+  `61f80f4b39fc671c76cff457159a70da37ff0006930f5841eae5de5268c0aa82`.
+- `analyze-filter-split.py`, SHA
+  `f28524f23bef2078bc6268f99361fd8ac730028a1832245757b6ad7a74ae21a0`.
+- New movie SHA
+  `705c507b6821a31dd33871a764faf0f9a5eb6bfc7e5abb85af6e76e6161d600c`.
+- `defringe-audit-01/` and `blockdenoise-audit-01/` retain the static ranges,
+  kernel excerpts and corrected boundary interpretation.
+
+Local and Mac ffprobe confirm63 frames,7680x3840 and2.102100s. The original
+project hash is unchanged. The observer deleted its breakpoints, detached and
+quit; a separate process check finds no LLDB and the original exporter still
+running. No encoder observation/PTS link is claimed. The coordinator viewed
+the saved post patch to check image content, not as a moving-video verdict.
+No production arithmetic, installed app, merge or acceptance status changes.
+The next relevant RE is the selected denoiser's remaining operating semantics;
+the newer612 Studio comparison and an actual tested implementation remain due.

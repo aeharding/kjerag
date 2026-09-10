@@ -18,6 +18,17 @@ sequences, the reported riser defect and the owner's eye remain the quality gate
 Keep the readable reference implementation and existing evidence for comparison.
 Broader optimization reverse engineering remains frozen.
 
+### Color-update behavior, owner clarification 2026-09-09
+
+The owner rejected the proposed Kjerag-specific gradual color update:
+"no gradual unless it matches studio". Do not add the proposed roughly100 ms
+catch-up policy or another invented color-update smoother. Establish Studio's
+applicable behavior before selecting a gradual-update implementation. The
+observed attenuation across Studio's combined Defringe/BlockDenois post-filter
+chain is not evidence that its X4 Air color coefficients update gradually.
+Identifying the responsible filtering behavior remains unfinished work; the
+612.078 report is not fixed or covered by the earlier607 Studio capture.
+
 ### Shared product direction, owner approval 2026-09-05
 
 The owner approved taking product ownership and generalizing the stitcher:
