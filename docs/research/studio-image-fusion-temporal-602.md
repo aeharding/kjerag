@@ -2354,3 +2354,61 @@ and `temporal-panorama-01`. The latter holds the moving candidate, exact source
 window CSV, same-arm repeat, qualified logs and pending integration boundaries.
 No new Studio export/native session or gradual color coefficient policy was
 added. Moving owner acceptance and production integration remain unfinished.
+
+### Existing-Studio moving comparison, 2026-09-10
+
+The same qualified binary now runs the earlier April 607.574 view with 35 inputs
+18208..18242, producing 29 complete centered outputs 18211..18239. It uses the
+unchanged captured-ISO100 offline implementation, not a new parameter choice.
+The actual-Scene run passes on AMD760M/RADV in 36.92s. Each filtered output keeps
+its center's source/map/color/view and exact six-reference source/time receipt.
+The independently retained unfiltered NV12 panorama is the representation
+control. CPU execution remains offline and no production path is selected.
+
+The direct Studio comparison reuses the corrected 31-frame
+`april-temporal-studio-raw-02` cache. Its receipt SHA256 is
+`7fef48595b747ecce204fdac55dcf6156e7e9fc2bafd2b46dac934c8a3231f62`; all 31 current
+PPM hashes match it. The selected labels 18211..18239 are decoded movie frames
+3..31 under the retained index-derived offset, **not independently authenticated
+camera-source identities**. The original Direction-Lock-off Studio movie SHA256
+is `c544cb559bc80e306b97ea02af68eb6593471cd9e70b6e3ea4abf5c2a8e2787b`.
+Its existing fixed whole-panorama display registration and 108.79-degree HFOV
+are unchanged. This avoids another export, projection run or registration fit;
+it does not remove Studio's original HEVC/decode differences or authenticate
+equal internal history. The invalid duplicate-bearing raw-01 is not used.
+
+Two one-cycle 29-frame movies put Studio left and either the temporal candidate
+or its unfiltered control right. Both use lossless RGB ultrafast coding at
+2560x720/30000-over-1001 fps, with no audio or spatial scaling. All 116 decoded
+frame-body hashes match their source PPMs below the intentionally overwritten
+38-pixel labels. Software four-thread decode is 0.322/0.326s, approximately
+90/89fps, which qualifies delivery files, not player capacity. The launcher
+loops the one-second interval; the loop cut is expected.
+
+Root inspected the decoded 18215 preview for labels and corresponding field
+boundaries. That is not a moving-flicker or smearing verdict. The owner has
+been asked to compare the filtered side with Studio; this 607 review and the
+prior 612 candidate remain unaccepted. There is no 612 Studio oracle, invented
+gradual color update, new native/export session, installation, push or merge.
+No full workspace/UI tests were rerun for this artifact-only checkpoint.
+
+Durable root: `scratch/studio-seam-flicker-612-20260909-01/temporal-studio-607-01`.
+It retains the render log, source windows, compose/verify/loop scripts, two
+movies, body hashes, decode/probe receipts and caveats. Filtered-movie SHA256:
+`f183393800234ce88e022b7ce2091c2080b38943519a6a8fb543925e177ed513`.
+
+The earlier fixed event at view pixel (685,300), sigma 8 and patch 9x17 is
+also evaluated on sources 18214/18215 without a new location or threshold.
+One motion field from the current unfiltered control is shared by all arms.
+The signed green residuals are 0.180343 codes unfiltered, 0.000161 filtered
+and 0.401656 in the cached Studio images. The zero-motion control gives
+0.086815, -0.096701 and 0.300952 respectively. These signed local averages
+can cancel and are not a flicker or quality ranking. In particular, the
+unfiltered event is already much weaker than the earlier native-coefficient
+diagnostic. The fresh seek root, representation and shared-motion inputs differ;
+this cannot establish numerical parity with the prior filter-split capture.
+Both current coefficient arrays do change at 18215, confirmed by their saved
+hashes. Direct Y and spatial-null results are not invented from missing inputs.
+The moving owner gate remains required. Root independently reproduces the
+complete event-analysis receipt SHA256
+`0be7f16d7cbc6f8f79f7a57e60f43c95d196c916ada7d40f945ee0277bc53ccd`.

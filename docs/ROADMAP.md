@@ -14,6 +14,18 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Existing-Studio temporal-filter comparison, 2026-09-10:** the unchanged
+offline candidate now has a direct moving comparison with the retained 607-second
+Studio export, without another export or registration fit. Thirty-five Scene
+inputs 18208..18242 yield 29 complete centered outputs 18211..18239. Separate
+Studio-versus-filtered and Studio-versus-unfiltered movies preserve every
+picture pixel below their labels through lossless encoding; both decode above
+source cadence. The existing Studio source labels remain index-derived, not
+independently authenticated. This supplies the missing direct visual comparison,
+not a flicker pass, 612-second Studio coverage or a player implementation. Both moving
+owner verdicts remain pending; no gradual color update or installed change.
+Receipts are in `scratch/studio-seam-flicker-612-20260909-01/temporal-studio-607-01`.
+
 **First actual-Kjerag temporal-filter sequence, 2026-09-10:** an offline
 candidate now runs the recovered seven-source filter over the owner's exact
 612.078 view. Thirty-seven contiguous Scene sources produce31 centered outputs
