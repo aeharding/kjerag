@@ -7,6 +7,7 @@
 
 use std::fmt;
 
+use crate::temporal_fusion::pyramid::gpu::PackedGray;
 use wgpu::util::DeviceExt;
 
 const REFERENCES: usize = 6;
@@ -35,10 +36,6 @@ impl Output {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Error {
     ForeignDevice,
-    Texture {
-        ordinal: usize,
-        message: &'static str,
-    },
     Geometry,
     SeedCount {
         ordinal: usize,
@@ -57,11 +54,9 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::ForeignDevice => formatter
-                .write_str("parallel-refine builder belongs to a different graphics device"),
-            Self::Texture { ordinal, message } => {
-                write!(formatter, "parallel-refine texture {ordinal} {message}")
-            }
+            Self::ForeignDevice => formatter.write_str(
+                "parallel-refine builder or packed image belongs to a different graphics device",
+            ),
             Self::Geometry => formatter.write_str(
                 "parallel finest refinement needs equal image dimensions from 1024 through 8191",
             ),
@@ -160,33 +155,37 @@ impl Builder {
     }
 
     /// Record one independent finest-block refinement for all six references.
+    /// Images come from `pyramid::gpu::Builder::encode_packed_base`; logical
+    /// dimensions, not packed texture width, determine search bounds. As with
+    /// the producer, all resources must belong to the same wgpu Instance.
     pub fn encode_finest(
         &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
-        current: &wgpu::Texture,
-        references: [&wgpu::Texture; REFERENCES],
+        current: &PackedGray,
+        references: [&PackedGray; REFERENCES],
         seeds: [&[[i32; 3]]; REFERENCES],
         globals: [[i32; 2]; REFERENCES],
     ) -> Result<Output, Error> {
-        if self.device != *device {
+        if self.device != *device
+            || current.device() != device
+            || references.iter().any(|image| image.device() != device)
+        {
             return Err(Error::ForeignDevice);
         }
-        validate_texture(current, 0)?;
-        let size = current.size();
-        if !(MIN_DIMENSION..MAX_DIMENSION_EXCLUSIVE).contains(&size.width)
-            || !(MIN_DIMENSION..MAX_DIMENSION_EXCLUSIVE).contains(&size.height)
+        let [width, height] = current.logical_size();
+        if !(MIN_DIMENSION..MAX_DIMENSION_EXCLUSIVE).contains(&width)
+            || !(MIN_DIMENSION..MAX_DIMENSION_EXCLUSIVE).contains(&height)
         {
             return Err(Error::Geometry);
         }
-        for (index, reference) in references.iter().enumerate() {
-            validate_texture(reference, index + 1)?;
-            if reference.size() != size {
+        for reference in references {
+            if reference.logical_size() != [width, height] {
                 return Err(Error::Geometry);
             }
         }
 
-        let blocks = [size.width / BLOCK, size.height / BLOCK];
+        let blocks = [width / BLOCK, height / BLOCK];
         let records_per_reference = usize::try_from(u64::from(blocks[0]) * u64::from(blocks[1]))
             .map_err(|_| Error::Geometry)?;
         for ordinal in 0..REFERENCES {
@@ -233,7 +232,7 @@ impl Builder {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        let parameter_bytes: Vec<u8> = [size.width, size.height, blocks[0], blocks[1], 0, 0, 0, 0]
+        let parameter_bytes: Vec<u8> = [width, height, blocks[0], blocks[1], 0, 0, 0, 0]
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect();
@@ -252,8 +251,9 @@ impl Builder {
             usage: wgpu::BufferUsages::STORAGE,
         });
 
-        let current_view = current.create_view(&Default::default());
-        let reference_views = references.map(|texture| texture.create_view(&Default::default()));
+        let current_view = current.texture().create_view(&Default::default());
+        let reference_views =
+            references.map(|image| image.texture().create_view(&Default::default()));
         let mut entries = vec![wgpu::BindGroupEntry {
             binding: 0,
             resource: wgpu::BindingResource::TextureView(&current_view),
@@ -301,36 +301,6 @@ impl Builder {
             blocks,
         })
     }
-}
-
-fn validate_texture(texture: &wgpu::Texture, ordinal: usize) -> Result<(), Error> {
-    if texture.format() != wgpu::TextureFormat::R8Uint {
-        return Err(Error::Texture {
-            ordinal,
-            message: "must use R8Uint",
-        });
-    }
-    let size = texture.size();
-    if texture.dimension() != wgpu::TextureDimension::D2
-        || size.depth_or_array_layers != 1
-        || texture.mip_level_count() != 1
-        || texture.sample_count() != 1
-    {
-        return Err(Error::Texture {
-            ordinal,
-            message: "must be a single-sampled two-dimensional texture with one layer and mip",
-        });
-    }
-    if !texture
-        .usage()
-        .contains(wgpu::TextureUsages::TEXTURE_BINDING)
-    {
-        return Err(Error::Texture {
-            ordinal,
-            message: "must have sampled-texture usage",
-        });
-    }
-    Ok(())
 }
 
 fn safe_displacement(value: i32) -> bool {

@@ -270,7 +270,13 @@ impl PanoramaReview {
                 .encode_luma(device, &mut encoder, &nv12.y, 7)
                 .unwrap();
             if self.parallel_refine {
-                gpu_base = Some(pyramid.levels[0].clone());
+                // Pack this arriving source once, in the same submission as
+                // its pyramid. CPU reads still use the original R8 levels.
+                gpu_base = Some(
+                    builder
+                        .encode_packed_base(device, &mut encoder, &pyramid.levels[0])
+                        .unwrap(),
+                );
             }
             pyramid
                 .levels

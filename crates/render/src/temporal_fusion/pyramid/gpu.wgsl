@@ -40,6 +40,27 @@ fn copy_gray(@builtin(position) position: vec4<f32>) -> @location(0) u32 {
 }
 
 @fragment
+fn pack_gray(@builtin(position) position: vec4<f32>) -> @location(0) vec4<u32> {
+    let destination = output_coordinate(position);
+    let source_size = textureDimensions(gray);
+    let first_x = destination.x * 4u;
+    var packed = vec4<u32>(0u);
+    if first_x < source_size.x {
+        packed.x = load_gray(vec2<u32>(first_x, destination.y));
+    }
+    if first_x + 1u < source_size.x {
+        packed.y = load_gray(vec2<u32>(first_x + 1u, destination.y));
+    }
+    if first_x + 2u < source_size.x {
+        packed.z = load_gray(vec2<u32>(first_x + 2u, destination.y));
+    }
+    if first_x + 3u < source_size.x {
+        packed.w = load_gray(vec2<u32>(first_x + 3u, destination.y));
+    }
+    return packed;
+}
+
+@fragment
 fn reduce_vertical(@builtin(position) position: vec4<f32>) -> @location(0) u32 {
     let destination = output_coordinate(position);
     let source_size = textureDimensions(gray);

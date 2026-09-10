@@ -56,26 +56,42 @@ struct Candidate {
 @group(0) @binding(10) var<storage, read> globals: array<vec2<i32>>;
 
 const BLOCK: u32 = 16u;
+const QUADS_PER_ROW: u32 = BLOCK / 4u;
+const CURRENT_QUADS: u32 = BLOCK * QUADS_PER_ROW;
 const CANDIDATES: u32 = 8u;
 const LANES_PER_CANDIDATE: u32 = 8u;
 const WORKGROUP_LANES: u32 = CANDIDATES * LANES_PER_CANDIDATE;
 const PENALTY_NEW: u32 = 50u;
 
-var<workgroup> current_pixels: array<u32, 256>;
+var<workgroup> current_pixels: array<vec4<u32>, CURRENT_QUADS>;
 var<workgroup> partials: array<u32, WORKGROUP_LANES>;
 var<workgroup> candidates: array<Candidate, 8>;
 var<workgroup> best: RawMotion;
 var<workgroup> minimum_cost: i32;
 
-fn reference_pixel(reference: u32, coordinate: vec2<i32>) -> u32 {
+// Each texel is four consecutive horizontal bytes in explicit rgba order.
+fn reference_quad(reference: u32, coordinate: vec2<i32>) -> vec4<u32> {
     switch reference {
-        case 0u: { return textureLoad(reference_0, coordinate, 0).x; }
-        case 1u: { return textureLoad(reference_1, coordinate, 0).x; }
-        case 2u: { return textureLoad(reference_2, coordinate, 0).x; }
-        case 3u: { return textureLoad(reference_3, coordinate, 0).x; }
-        case 4u: { return textureLoad(reference_4, coordinate, 0).x; }
-        default: { return textureLoad(reference_5, coordinate, 0).x; }
+        case 0u: { return textureLoad(reference_0, coordinate, 0); }
+        case 1u: { return textureLoad(reference_1, coordinate, 0); }
+        case 2u: { return textureLoad(reference_2, coordinate, 0); }
+        case 3u: { return textureLoad(reference_3, coordinate, 0); }
+        case 4u: { return textureLoad(reference_4, coordinate, 0); }
+        default: { return textureLoad(reference_5, coordinate, 0); }
     }
+}
+
+fn align_quad(left: vec4<u32>, right: vec4<u32>, offset: u32) -> vec4<u32> {
+    switch offset {
+        case 1u: { return vec4<u32>(left.yzw, right.x); }
+        case 2u: { return vec4<u32>(left.zw, right.xy); }
+        default: { return vec4<u32>(left.w, right.xyz); }
+    }
+}
+
+fn sad_quad(current: vec4<u32>, wanted: vec4<u32>) -> u32 {
+    let difference = vec4<u32>(abs(vec4<i32>(current) - vec4<i32>(wanted)));
+    return difference.x + difference.y + difference.z + difference.w;
 }
 
 fn block_bounds(block: vec2<u32>) -> Bounds {
@@ -132,13 +148,26 @@ fn execute_batch(lane: u32, reference: u32, source: vec2<i32>) {
     let candidate = candidates[slot];
     var partial = 0u;
     if candidate.valid != 0u {
-        for (var pixel = candidate_lane; pixel < 256u; pixel += LANES_PER_CANDIDATE) {
-            let offset = vec2<i32>(i32(pixel % BLOCK), i32(pixel / BLOCK));
-            let wanted = reference_pixel(
-                reference,
-                source + vec2<i32>(candidate.dx, candidate.dy) + offset,
-            );
-            partial += u32(abs(i32(current_pixels[pixel]) - i32(wanted)));
+        // Valid landings are nonnegative and contain all16x16 logical pixels.
+        // A row needs four aligned texels or five unaligned texels. Sharing
+        // adjacent texels within this lane changes no candidate or SAD term.
+        let landing = source + vec2<i32>(candidate.dx, candidate.dy);
+        let first_x = landing.x / 4;
+        let shift = u32(landing.x) % 4u;
+        for (var row = candidate_lane; row < BLOCK; row += LANES_PER_CANDIDATE) {
+            let y = landing.y + i32(row);
+            var left = reference_quad(reference, vec2<i32>(first_x, y));
+            for (var column = 0u; column < QUADS_PER_ROW; column += 1u) {
+                var wanted = left;
+                if shift != 0u {
+                    let right = reference_quad(reference, vec2<i32>(first_x + i32(column) + 1, y));
+                    wanted = align_quad(left, right, shift);
+                    left = right;
+                } else if column + 1u < QUADS_PER_ROW {
+                    left = reference_quad(reference, vec2<i32>(first_x + i32(column) + 1, y));
+                }
+                partial += sad_quad(current_pixels[row * QUADS_PER_ROW + column], wanted);
+            }
         }
     }
     partials[lane] = partial;
@@ -205,13 +234,13 @@ fn refine_blocks(
     let index = reference * block_count + local_index;
     let source_u = block * BLOCK;
     let source = vec2<i32>(source_u);
-    for (var at = lane; at < 256u; at += WORKGROUP_LANES) {
-        let pixel = vec2<u32>(at % BLOCK, at / BLOCK);
+    for (var at = lane; at < CURRENT_QUADS; at += WORKGROUP_LANES) {
+        let pixel = vec2<u32>(at % QUADS_PER_ROW, at / QUADS_PER_ROW);
         current_pixels[at] = textureLoad(
             current_image,
-            vec2<i32>(source_u + pixel),
+            vec2<i32>(vec2<u32>(source_u.x / 4u, source_u.y) + pixel),
             0,
-        ).x;
+        );
     }
     workgroupBarrier();
 

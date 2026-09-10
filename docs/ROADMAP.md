@@ -14,6 +14,17 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Exact packed-gray motion reads verified, 2026-09-10:** one GPU packing pass
+per arriving source replaces retained scalar gray texels with four-byte groups.
+Search decisions and colour updates are unchanged. All 83 temporal tests pass;
+both full Scene sequences preserve all 60 filtered pictures and 504 controls.
+The short 612 refinement mean falls from 32.097 to 20.799 ms. Combined measured
+motion/filter means are 66.672/63.785 ms at 612/607, versus 79.419/78.540 ms;
+these exclude earlier panorama preparation and remain outside playback budgets.
+Whole diagnostic runs take 8.59/8.29 seconds, including the added source packing.
+No new visual result, owner acceptance, gradual update or installed change.
+Evidence: `scratch/studio-seam-flicker-612-20260909-01/temporal-packed-gray-01`.
+
 **Duplicate-SAD reuse rejected, 2026-09-10:** a workgroup-local raw-cost cache
 preserves all79 temporal tests and both98-artifact short comparisons, but makes
 the actual612 finest kernel slower:47.632 ms mean versus33.250 ms for the

@@ -19,7 +19,7 @@ use crate::temporal_fusion::color::{GpuColorConversion, MatrixCoefficients, Nv12
 use crate::temporal_fusion::history::History;
 use crate::temporal_fusion::motion::{self, Geometry};
 use crate::temporal_fusion::parallel_refine;
-use crate::temporal_fusion::pyramid::Level;
+use crate::temporal_fusion::pyramid::{Level, gpu::PackedGray};
 use crate::{FrameStamp, Reframe, Size};
 
 mod profile;
@@ -42,7 +42,7 @@ const LIMIT_UV: [f32; 256] = [0.5; 256];
 struct Retained {
     stamp: FrameStamp,
     levels: Vec<Level>,
-    gpu_base: Option<wgpu::Texture>,
+    gpu_base: Option<PackedGray>,
     reframe: Reframe,
 }
 
@@ -159,7 +159,7 @@ impl TemporalReview {
         prepared: &PreparedPicture,
         nv12: Nv12,
         levels: Vec<Level>,
-        gpu_base: Option<wgpu::Texture>,
+        gpu_base: Option<PackedGray>,
     ) {
         assert!(
             self.device == *device,
@@ -201,8 +201,8 @@ impl TemporalReview {
             .unwrap_or_else(|error| panic!("retain temporal source: {error}"));
         pending.host_ms += history_started.elapsed().as_secs_f64() * 1000.0;
         pending.copied_sources += 1;
-        // The encoder now retains the copy's source textures. Only stamped
-        // CPU metadata stays here; completed copies live in the shared arrays.
+        // The encoder retains the NV12 copy sources. Stamped gray levels and
+        // view metadata stay here; completed NV12 copies live in shared arrays.
         self.window.push_back(Retained {
             stamp: prepared.frame().clone(),
             levels,
@@ -539,7 +539,7 @@ fn validate_input(
     prepared: &PreparedPicture,
     nv12: &Nv12,
     levels: &[Level],
-    gpu_base: Option<&wgpu::Texture>,
+    gpu_base: Option<&PackedGray>,
     parallel_refine: bool,
 ) {
     assert!(
@@ -572,14 +572,10 @@ fn validate_input(
         "only parallel refinement retains the associated GPU pyramid base"
     );
     if let Some(base) = gpu_base {
-        assert_eq!(base.format(), wgpu::TextureFormat::R8Uint);
-        assert_eq!(base.dimension(), wgpu::TextureDimension::D2);
-        assert_eq!(base.size().width, levels[0].width as u32);
-        assert_eq!(base.size().height, levels[0].height as u32);
-        assert_eq!(base.size().depth_or_array_layers, 1);
-        assert_eq!(base.mip_level_count(), 1);
-        assert_eq!(base.sample_count(), 1);
-        assert!(base.usage().contains(wgpu::TextureUsages::TEXTURE_BINDING));
+        assert_eq!(
+            base.logical_size(),
+            [levels[0].width as u32, levels[0].height as u32]
+        );
     }
 }
 

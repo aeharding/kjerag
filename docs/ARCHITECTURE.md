@@ -110,10 +110,13 @@ neighbors, and omit the serial bad-block/UMH recovery. Its readable CPU oracle
 and GPU kernel keep the initial candidate order, SAD penalties, bounds and
 fixed radius-one ring. The GPU assigns one workgroup to each block/reference,
 with distinct immutable input and output buffers. Eight teams of eight lanes
-cover each candidate's complete 256-byte SAD; the 64-lane workgroup also loads
-the current block in four iterations per lane. Team sums remain bounded exact
-u32 arithmetic, followed by the same ordered strict-tie decision. The array
-size, load stride and workgroup attribute derive from one lane-count constant.
+cover each candidate's complete 256-byte SAD. Gray inputs use typed, immutable
+`PackedGray` textures from the pyramid producer: four horizontal bytes in rgba,
+with logical dimensions distinct from physical packed width. Each lane handles
+two rows, using four aligned or five unaligned texel reads per row and exact
+component swizzles. The current block is 64 vec4 words, loaded once per workgroup.
+Team sums remain bounded exact u32 arithmetic, followed by the same ordered
+strict-tie decision. No padded tail byte enters a legal SAD.
 This is not Studio-exact
 search or an accepted quality tradeoff. Coarser preparation still uses the
 existing CPU reference; no player scheduling or color-update rule changes.
@@ -124,6 +127,11 @@ an explicit R8Uint base can be copied without that bridge. Each later level
 uses distinct vertical and horizontal R8Uint render targets, preserving the
 intermediate byte rounding. The builder validates geometry before encoding,
 returns owned logical-level textures, and never submits, waits or reads back.
+Its separate `encode_packed_base` records R8Uint to Rgba8Uint packing with
+explicit zero tail lanes. The offline Scene packs once per arriving source in
+the existing pyramid submission, retaining that typed image instead of its R8
+base. Original R8 levels still supply CPU readbacks. This preserves source
+stamps and seven sampled bindings; it adds no history owner or queue wait.
 Frame stamps, source ownership and history remain the caller's responsibility.
 The optional offline Scene selection still reads those levels for CPU motion
 search, so it is not a GPU-resident complete temporal pipeline. Its exact

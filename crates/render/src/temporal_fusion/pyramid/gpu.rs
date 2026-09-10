@@ -12,6 +12,31 @@ pub struct Output {
     pub levels: Vec<wgpu::Texture>,
 }
 
+/// Four horizontally adjacent gray bytes stored in one `Rgba8Uint` texel.
+///
+/// The texture is immutable after its encoding pass. `logical_size` describes
+/// the unpacked image; the private texture is `ceil(width / 4)` by `height`.
+/// The caller owns the source stamp and submission ordering.
+pub struct PackedGray {
+    texture: wgpu::Texture,
+    device: wgpu::Device,
+    logical_size: [u32; 2],
+}
+
+impl PackedGray {
+    pub fn logical_size(&self) -> [u32; 2] {
+        self.logical_size
+    }
+
+    pub(crate) fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
+
+    pub(crate) fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     ForeignDevice,
@@ -58,6 +83,7 @@ pub struct Builder {
     uint_layout: wgpu::BindGroupLayout,
     half_y: wgpu::RenderPipeline,
     copy: wgpu::RenderPipeline,
+    pack: wgpu::RenderPipeline,
     vertical: wgpu::RenderPipeline,
     horizontal: wgpu::RenderPipeline,
 }
@@ -89,7 +115,7 @@ impl Builder {
             label: Some("temporal luma pyramid"),
             source: wgpu::ShaderSource::Wgsl(include_str!("gpu.wgsl").into()),
         });
-        let pipeline = |label, layout: &wgpu::BindGroupLayout, entry| {
+        let pipeline = |label, layout: &wgpu::BindGroupLayout, entry, format| {
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(label),
                 bind_group_layouts: &[layout],
@@ -109,7 +135,7 @@ impl Builder {
                     entry_point: Some(entry),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::R8Uint,
+                        format,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -121,17 +147,31 @@ impl Builder {
                 cache: None,
             })
         };
-        let half_y = pipeline("temporal half-size luma", &float_layout, "half_y");
-        let copy = pipeline("temporal pyramid base copy", &uint_layout, "copy_gray");
+        let narrow = wgpu::TextureFormat::R8Uint;
+        let half_y = pipeline("temporal half-size luma", &float_layout, "half_y", narrow);
+        let copy = pipeline(
+            "temporal pyramid base copy",
+            &uint_layout,
+            "copy_gray",
+            narrow,
+        );
+        let pack = pipeline(
+            "temporal packed gray",
+            &uint_layout,
+            "pack_gray",
+            wgpu::TextureFormat::Rgba8Uint,
+        );
         let vertical = pipeline(
             "temporal pyramid vertical reduction",
             &uint_layout,
             "reduce_vertical",
+            narrow,
         );
         let horizontal = pipeline(
             "temporal pyramid horizontal reduction",
             &uint_layout,
             "reduce_horizontal",
+            narrow,
         );
         Self {
             device: device.clone(),
@@ -139,6 +179,7 @@ impl Builder {
             uint_layout,
             half_y,
             copy,
+            pack,
             vertical,
             horizontal,
         }
@@ -188,6 +229,32 @@ impl Builder {
         );
         self.draw_uint(encoder, base, &first, &self.copy);
         self.finish_pyramid(device, encoder, first, level_count)
+    }
+
+    /// Pack one sampled `R8Uint` base into defined-order RGBA byte groups.
+    ///
+    /// This only records a render pass. Device equality can diagnose a
+    /// different device from the same wgpu instance; the caller must also
+    /// supply the source texture and encoder from this exact device and keep
+    /// source ownership and submission order authoritative. Resources from
+    /// different Instances are outside this identity check's contract.
+    pub fn encode_packed_base(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        base: &wgpu::Texture,
+    ) -> Result<PackedGray, Error> {
+        self.ensure_device(device)?;
+        validate_input(base, wgpu::TextureFormat::R8Uint)?;
+        let size = base.size();
+        let logical_size = [size.width, size.height];
+        let texture = packed_target(device, size.width.div_ceil(4), size.height);
+        self.draw_uint(encoder, base, &texture, &self.pack);
+        Ok(PackedGray {
+            texture,
+            device: device.clone(),
+            logical_size,
+        })
     }
 
     fn ensure_device(&self, device: &wgpu::Device) -> Result<(), Error> {
@@ -318,6 +385,25 @@ fn target(device: &wgpu::Device, label: &'static str, width: u32, height: u32) -
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::R8Uint,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
+}
+
+fn packed_target(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("temporal packed gray"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Uint,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_SRC,

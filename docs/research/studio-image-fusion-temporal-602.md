@@ -2964,3 +2964,59 @@ Final test binary SHA256:
 Workspace all-target Clippy, formatting, source-lock and rename checks pass.
 No full workspace tests/UI harness, installation, push or merge. The previous
 full moving reviews remain current, and there is no new flicker-fix claim.
+
+### Exact packed-gray motion reads, 2026-09-10
+
+The pyramid producer records one R8Uint-to-Rgba8Uint packing pass per arriving
+source, in the existing source encoder. Each texel contains four horizontal
+bytes in rgba order; physical width is ceil(logical width/4), with zero tail.
+Typed `PackedGray` owns its device, texture and logical geometry. Scene retains
+it beside the same source stamp instead of the old R8 base; original pyramid
+textures still supply CPU readbacks. Seven sampled bindings and three storage
+buffers are unchanged. At 3840x1920 the packed logical storage remains 7,372,800
+bytes/source; the original and packed texture overlap transiently during preparation.
+
+Eight-lane candidate teams process two rows/lane, loading four aligned or five
+unaligned texels/row and reconstructing bytes with explicit component swizzles.
+All 256 SAD terms, u32 bounds, penalties, candidate order, ties and logical landing
+bounds are unchanged. No padded byte enters a legal window. The current block
+is 64 vec4 words. This changes execution only, preserving the candidate's earlier
+disclosed serial/native-search gaps and unaccepted moving output.
+
+All 83 temporal tests pass on AMD760M/RADV. New fixtures seal raw packed lane
+order/zero tails/source preservation; full-plane widths 1025..1027 force exact
+negative and inclusive last-row/column landings; all-zero/all255 images require
+maximum SAD 65280 and strict global-before-own ties at the inclusive corner.
+Foreign packed images are rejected across two devices within one Instance.
+Packed preparation, refinement and all six motion handoffs also share one
+test submission. All 172,800 saved-input candidate vectors match the unchanged
+CPU oracle on three repeats, taking 23.503/23.548/23.525 ms for submission,
+completion and readback. Source packing is once per source, outside these repeats.
+
+Sequential 13-source actual 612 profiles give a baseline refinement mean 32.097002
+ms (28.918666..35.293498), versus 20.799365 (16.843122..23.033324) packed. Both 98
+artifacts and source associations/hashes remain exact. Full uninstrumented 612/607
+runs preserve all 290/274 artifacts: 60 filtered pictures, 504 controls and CSV
+associations/hashes. Root inspected actual centers 18344/18214 as PNGs; stills
+do not establish flicker acceptance. CPU coarse mean/max is 10.917/13.360 and
+10.246/13.915 ms. GPU/upload/filter/project/completion mean/max is 55.755/77.958
+and 53.539/78.140 ms. Combined means 66.672/63.785 ms compare with the previous
+79.419/78.540; both regions exclude earlier panorama/pyramid preparation,
+including the added source-pack pass. Whole runs take 8.59/8.29 seconds, versus
+the preceding 8.69/8.54; these are offline diagnostics, not actual-player capacity.
+
+Evidence: `scratch/studio-seam-flicker-612-20260909-01/temporal-packed-gray-01`.
+Baseline binary SHA256:
+`72553275de10c5867eca48f09133112a0c4783c90f3d4f7bc73fa248dd1e36a0`.
+Candidate binary SHA256:
+`65bc6f91db93c14b293bffd566495c9dcfd215a927899ec6b58c50ec78de0806`.
+Workspace all-target Clippy, formatting, source-lock and rename checks pass.
+No full workspace tests/UI harness, new Studio session/export, colour fade,
+installation, push, merge or owner acceptance. Existing moving reviews are
+unchanged; production performance/history/ISO work and a visual verdict remain.
+
+After qualification, 760 byte-identical generated files in this checkpoint
+were consolidated with the preceding GPU-cost evidence as hardlinks, recovering
+1.04 GiB. All paths remain and must be treated as immutable. Full sequences
+and short prefixes were verified again against the untouched CPU-SAD checkpoint.
+No source footage, unique evidence, receipt, log or binary was removed.

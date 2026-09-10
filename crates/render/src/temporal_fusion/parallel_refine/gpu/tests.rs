@@ -2,9 +2,12 @@ use super::{Builder, Error};
 use crate::temporal_fusion::{
     motion::{self, Geometry, Parameters},
     parallel_refine,
-    pyramid::Level,
+    pyramid::{
+        Level,
+        gpu::{Builder as Packer, PackedGray},
+    },
     search::{self, FinestInput},
-    tests::{copy_texture, gpu, read_copy},
+    tests::{copy_texture, gpu, gpu_pair, read_copy},
 };
 use std::time::Instant;
 use wgpu::naga::valid::{Capabilities, ValidationFlags, Validator};
@@ -51,7 +54,7 @@ fn inputs(width: usize, height: usize) -> [FinestInput; 6] {
     })
 }
 
-fn upload(device: &wgpu::Device, queue: &wgpu::Queue, level: &Level) -> wgpu::Texture {
+fn upload_gray(device: &wgpu::Device, queue: &wgpu::Queue, level: &Level) -> wgpu::Texture {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("parallel finest test luma"),
         size: wgpu::Extent3d {
@@ -77,6 +80,18 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, level: &Level) -> wgpu::Te
         texture.size(),
     );
     texture
+}
+
+fn upload(device: &wgpu::Device, queue: &wgpu::Queue, level: &Level) -> PackedGray {
+    let texture = upload_gray(device, queue, level);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    let packed = Packer::new(device)
+        .encode_packed_base(device, &mut encoder, &texture)
+        .unwrap();
+    // The source is packed once and reused across refinement repeats. Queue
+    // ordering makes it available without a host wait or per-output repack.
+    queue.submit([encoder.finish()]);
+    packed
 }
 
 fn raw_bytes(records: &[[i32; 3]]) -> Vec<u8> {
@@ -112,8 +127,8 @@ fn run(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     builder: &Builder,
-    current: &wgpu::Texture,
-    references: [&wgpu::Texture; 6],
+    current: &PackedGray,
+    references: [&PackedGray; 6],
     inputs: &[FinestInput; 6],
 ) -> Run {
     let started = Instant::now();
@@ -209,6 +224,143 @@ fn patterned_tail_geometry_matches_the_cpu_oracle() {
     );
     assert_eq!(run.blocks, [64, 64]);
     assert_outputs(&run.bytes, &expected);
+}
+
+#[test]
+fn packed_tail_lanes_and_signed_edges_match_the_cpu_oracle() {
+    let Some((device, queue)) = gpu() else {
+        return;
+    };
+    let builder = Builder::new(&device);
+    for tail in 1..=3 {
+        let width = 1024 + tail;
+        let current = patterned_level(width, width, 0x1234_5678);
+        let mut references: [Level; 6] =
+            std::array::from_fn(|ordinal| patterned_level(width, width, ordinal as u32 * 7919));
+        let mut inputs = inputs(width, width);
+        // Exact copied blocks force known unaligned negative starts and the
+        // inclusive final row/column, independently of random search winners.
+        let cases = [
+            ([32usize, 32usize], [-3i32, -2i32]),
+            ([63, 63], [tail as i32, tail as i32]),
+        ];
+        for (reference, input) in references.iter_mut().zip(&mut inputs) {
+            for (block, shift) in cases {
+                let [x, y] = block.map(|value| value * 16);
+                let rx = (x as i32 + shift[0]) as usize;
+                let ry = (y as i32 + shift[1]) as usize;
+                for row in 0..16 {
+                    reference.pixels[(ry + row) * width + rx..(ry + row) * width + rx + 16]
+                        .copy_from_slice(
+                            &current.pixels[(y + row) * width + x..(y + row) * width + x + 16],
+                        );
+                }
+                input.seeds[block[1] * 64 + block[0]] = [shift[0], shift[1], 0];
+            }
+        }
+        let expected = expected(&current, &references, &inputs);
+        for plane in &expected {
+            for (block, shift) in cases {
+                let at = (block[1] * 64 + block[0]) * 12;
+                assert_eq!(&plane[at..at + 12], raw_bytes(&[[shift[0], shift[1], 0]]));
+            }
+        }
+        let current = upload(&device, &queue, &current);
+        let references = references
+            .each_ref()
+            .map(|image| upload(&device, &queue, image));
+        let result = run(
+            &device,
+            &queue,
+            &builder,
+            &current,
+            references.each_ref(),
+            &inputs,
+        );
+        assert_outputs(&result.bytes, &expected);
+    }
+}
+
+#[test]
+fn packed_max_sad_keeps_start_order_at_the_inclusive_corner() {
+    let Some((device, queue)) = gpu() else {
+        return;
+    };
+    let width = 1025;
+    let current = Level {
+        width,
+        height: width,
+        pixels: vec![0; width * width],
+    };
+    let references = std::array::from_fn(|_| Level {
+        width,
+        height: width,
+        pixels: vec![255; width * width],
+    });
+    let inputs = std::array::from_fn(|_| FinestInput {
+        seeds: vec![[1008, 1008, 0]; 64 * 64],
+        global: [1009, 1009],
+    });
+    let expected = expected(&current, &references, &inputs);
+    for plane in &expected {
+        // Global and own have the maximum raw SAD and no start penalty.
+        // Global's earlier ordinal wins, even at the inclusive logical edge.
+        assert_eq!(&plane[..12], raw_bytes(&[[1009, 1009, 65_280]]));
+    }
+    let current = upload(&device, &queue, &current);
+    let references = references
+        .each_ref()
+        .map(|image| upload(&device, &queue, image));
+    let result = run(
+        &device,
+        &queue,
+        &Builder::new(&device),
+        &current,
+        references.each_ref(),
+        &inputs,
+    );
+    assert_outputs(&result.bytes, &expected);
+}
+
+#[test]
+fn packed_images_from_another_device_are_refused_before_encoding() {
+    let Some([(device, queue), (foreign, foreign_queue)]) = gpu_pair() else {
+        return;
+    };
+    let level = patterned_level(1024, 1024, 7);
+    let local = upload(&device, &queue, &level);
+    let other = upload(&foreign, &foreign_queue, &level);
+    let inputs = inputs(1024, 1024);
+    let builder = Builder::new(&device);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    let mut references = [&local; 6];
+    references[4] = &other;
+    for (current, references) in [(&other, [&local; 6]), (&local, references)] {
+        assert!(matches!(
+            builder.encode_finest(
+                &device,
+                &mut encoder,
+                current,
+                references,
+                inputs.each_ref().map(|input| input.seeds.as_slice()),
+                inputs.each_ref().map(|input| input.global)
+            ),
+            Err(Error::ForeignDevice)
+        ));
+    }
+    builder
+        .encode_finest(
+            &device,
+            &mut encoder,
+            &local,
+            [&local; 6],
+            inputs.each_ref().map(|input| input.seeds.as_slice()),
+            inputs.each_ref().map(|input| input.global),
+        )
+        .unwrap();
+    queue.submit([encoder.finish()]);
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    foreign.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 }
 
 #[test]
@@ -375,10 +527,10 @@ fn typed_refinement_handoff_packs_all_six_offsets_in_one_submission() {
             "synthetic reference {ordinal} must exercise a distinct raw-buffer offset"
         );
     }
-    let current = upload(&device, &queue, &current_level);
+    let current = upload_gray(&device, &queue, &current_level);
     let references = reference_levels
         .each_ref()
-        .map(|reference| upload(&device, &queue, reference));
+        .map(|reference| upload_gray(&device, &queue, reference));
     let refine = Builder::new(&device);
     let motion = motion::gpu::Builder::new(&device);
     let luma = vec![0; 128 * 128];
@@ -386,6 +538,15 @@ fn typed_refinement_handoff_packs_all_six_offsets_in_one_submission() {
     let uv = [20_000.0; 256];
     let parameters = motion_parameters([64, 64], &luma, &y, &uv);
     let mut encoder = device.create_command_encoder(&Default::default());
+    let packer = Packer::new(&device);
+    let current = packer
+        .encode_packed_base(&device, &mut encoder, &current)
+        .unwrap();
+    let references = references.each_ref().map(|image| {
+        packer
+            .encode_packed_base(&device, &mut encoder, image)
+            .unwrap()
+    });
     let refined = refine
         .encode_finest(
             &device,

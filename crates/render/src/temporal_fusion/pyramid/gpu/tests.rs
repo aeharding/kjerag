@@ -148,6 +148,75 @@ fn full_luma_to_all_levels_matches_the_readable_reference() {
 }
 
 #[test]
+fn packed_gray_preserves_lane_order_rows_maxima_and_zero_tail() {
+    let Some((device, queue)) = gpu() else { return };
+    let builder = Builder::new(&device);
+    let cases = [
+        [1, 3],
+        [2, 2],
+        [3, 3],
+        [4, 2],
+        [5, 3],
+        [7, 2],
+        [8, 3],
+        [13, 4],
+    ];
+    let mut encoder = device.create_command_encoder(&Default::default());
+    let mut pending = Vec::new();
+    for [width, height] in cases {
+        let mut bytes: Vec<u8> = (0..width * height)
+            .map(|index| ((index * 73 + index / width * 29 + 11) % 256) as u8)
+            .collect();
+        bytes[0] = 0;
+        bytes[(width * height - 1) as usize] = u8::MAX;
+        let source = upload(
+            &device,
+            &queue,
+            &bytes,
+            [width, height],
+            wgpu::TextureFormat::R8Uint,
+        );
+        let packed = builder
+            .encode_packed_base(&device, &mut encoder, &source)
+            .unwrap();
+        assert_eq!(packed.logical_size(), [width, height]);
+        assert_eq!(packed.device(), &device);
+        assert_eq!(packed.texture().format(), wgpu::TextureFormat::Rgba8Uint);
+        assert_eq!(
+            [packed.texture().width(), packed.texture().height()],
+            [width.div_ceil(4), height]
+        );
+        let packed_copy = copy_texture(
+            &device,
+            &mut encoder,
+            packed.texture(),
+            [width.div_ceil(4), height],
+            4,
+        );
+        let source_copy = copy_texture(&device, &mut encoder, &source, [width, height], 1);
+        pending.push((width, height, bytes, packed_copy, source_copy));
+    }
+    queue.submit([encoder.finish()]);
+
+    for (width, height, source, packed, source_copy) in pending {
+        assert_eq!(
+            read_copy(&device, &source_copy, [width, height], 1),
+            source,
+            "packing changed its source"
+        );
+        let actual = read_copy(&device, &packed, [width.div_ceil(4), height], 4);
+        let mut expected = Vec::with_capacity(actual.len());
+        for row in source.chunks_exact(width as usize) {
+            for group in row.chunks(4) {
+                expected.extend_from_slice(group);
+                expected.resize(expected.len() + (4 - group.len()), 0);
+            }
+        }
+        assert_eq!(actual, expected, "packed bytes differ for {width}x{height}");
+    }
+}
+
+#[test]
 fn bad_input_is_refused_without_poisoning_the_encoder() {
     let Some((device, queue)) = gpu() else { return };
     let builder = Builder::new(&device);
@@ -184,6 +253,11 @@ fn bad_input_is_refused_without_poisoning_the_encoder() {
             .encode_base(&device, &mut encoder, &unorm, 1)
             .is_err()
     );
+    assert!(
+        builder
+            .encode_packed_base(&device, &mut encoder, &unorm)
+            .is_err()
+    );
     let unsampled = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("unsampled pyramid input"),
         size: wgpu::Extent3d {
@@ -201,6 +275,11 @@ fn bad_input_is_refused_without_poisoning_the_encoder() {
     assert!(
         builder
             .encode_base(&device, &mut encoder, &unsampled, 1)
+            .is_err()
+    );
+    assert!(
+        builder
+            .encode_packed_base(&device, &mut encoder, &unsampled)
             .is_err()
     );
     let valid = builder.encode_base(&device, &mut encoder, &odd, 1).unwrap();
@@ -316,7 +395,9 @@ fn upload(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     queue.write_texture(
