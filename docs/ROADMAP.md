@@ -14,6 +14,19 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Standalone motion search runs, 2026-09-10:** saved Studio inputs now drive
+a pinned public-family CPU reference. Two native-read differences, per-block
+global-predictor refresh and inclusive seed clipping, reduce differing vectors
+from 22,169 to 4,167 of 172,800 without parameter tuning. Independent repeats
+reproduce complete outputs; all output costs are exact SADs at in-bounds
+landings. This is not a perceptual pass or a selected player path. The next
+product gate is moving output from Kjerag's own stitched pixels, not eliminating
+every numerical motion difference. Body-panorama raster and current RGB
+sampling are identified; selected native RGB-to-NV12 conversion remains
+unclosed and must not be filled from an unselected shader. Panorama preparation,
+conversion control and source-stamped history integration remain. No new Studio
+export, invented gradual color update, installed build change or 612 flicker fix.
+
 **Motion producer inputs captured, 2026-09-10:** one completed, detached
 CPU-only Studio capture now supplies all six raw/packed motion pairs, their
 actual gray pyramids, confidence tables and luma grid. It confirms the selected

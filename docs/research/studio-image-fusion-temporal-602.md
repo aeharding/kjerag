@@ -2175,3 +2175,104 @@ new private fixtures and existing GPU-fusion fixture passed in the separate
 19-test run above. Workspace all-target Clippy, formatting, name and crate-source
 checks pass. Full workspace tests and the UI harness were not run for these
 unconnected CPU references. No frame-path or UI change is being delivered.
+
+### Standalone motion-search comparison, 2026-09-10
+
+The captured inputs now drive a standalone CPU diagnostic built from the
+unmodified, pinned MVTools core at commit
+`17250aa979616ac48dfb0e18abfdcf2bd4e3afc0`. A thin harness supplies native
+gray pyramid bands directly, with their actual stride and logical sizes.
+It selects the captured search parameters above without applying the public
+wrapper's block-area scaling a second time: the direct core receives effective
+LSAD 1600 and badSAD 40000. Unselected pel-2/pel-4 and DCT entrypoints explicitly
+refuse. This is not a production import or a new playback path.
+
+Independent pixel checks establish that every native raw cost is exactly the
+16x16 sum of absolute luma differences at its supplied integer displacement:
+172,800 blocks across six references, with no out-of-bounds landing. The same
+check passes for every standalone result. This closes displacement/cost units
+and input association within this call, not source-frame identity or selection
+of the same winning vector.
+
+The unmodified baseline differs from native at 1,874, 1,728, 1,933, 2,003,
+5,839 and 8,792 of 28,800 vectors, in reference order. These are not just border
+differences; interior counts are 1,602, 1,420, 1,622, 1,707, 5,557 and 8,511.
+The independent root repeat reproduces all six complete output matrices and
+the report byte-for-byte. No parameter is adjusted to fit these counts.
+
+The selected group-level audit establishes the same coarse-to-fine contracts
+as the public core. Grids from finest to coarsest are 240x120, 120x60, 60x30,
+30x15, 15x7, 7x3 and 3x1. Interpolation preserves the 9/3/3/1 stencil and its
+separate vector/SAD rounding; global prediction uses per-axis histogram modes
+and the joint `abs(component-mode) < 6` neighborhood mean before doubling.
+Native vector
+storage is not cleared on each call, but the selected 3x1 coarsest task cannot
+read a previous call's predictors, and interpolation overwrites every finer
+array. Earlier reference-pair vector state is therefore not another missing
+input for this selected geometry. This does not equate native parallel order
+with the serial public-core order.
+
+Two concrete native per-block differences are read independently of the
+comparison numbers. Studio copies its supplied global predictor afresh for
+each block; the public core clips and retains that scalar across blocks.
+Studio also clips seeded/coarse predictors to an inclusive upper landing
+bound, whereas the public core subtracts one. Candidate validation is a
+separate rule and must not change with seed clipping: the selected Hex2/radius1
+dispatch skips the hexagon and uses ExpandingSearch/radius1, whose inspected
+side candidates retain upper-strict validity. The native smallest-plane
+forward-predictor suppression is another read difference, but is inactive
+for this one-row coarsest grid. Working-area row bounds are whole-plane
+bounds, not evidence of partition-local predictor gates.
+
+Separate native-read adapters retain the public source and baseline untouched.
+Their differing-vector counts, each out of 28,800, are:
+
+| Diagnostic | Ref 0 | Ref 1 | Ref 2 | Ref 3 | Ref 4 | Ref 5 |
+|---|---:|---:|---:|---:|---:|---:|
+| Unmodified baseline |1874|1728|1933|2003|5839|8792|
+| Fresh global only |1874|1728|1933|1187|2595|2535|
+| Inclusive seeds only |535|546|1136|1382|4226|7632|
+| Combined native-read changes |535|546|1136|512|756|682|
+
+The smallest-plane-only variant is identical to baseline, consistent with
+its inactive guard in the selected coarsest geometry. The combined variant
+also includes that guard; its total mismatch is 4,167 rather than 22,169 of
+172,800 vectors. Root independently reproduces all six combined matrices and
+its report byte-for-byte, and recomputes every output SAD exactly from the
+captured images with all landings in bounds. These results support the read
+differences, not visual equivalence. No remaining error is assigned solely
+to parallel scheduling, and no parameter tuning is selected.
+
+The next useful product gate is moving output from Kjerag's own pixels, not
+an indefinite pursuit of zero differing motion vectors. The existing type2
+mesh adapter fixes the body-equirectangular texel-center raster and the exact
+current Kjerag stitch-through-gamma-RGB calculation. An offline RGB panorama
+materializer can therefore reuse those operations. The selected native
+RGB-to-420f matrix, quantization and chroma sampling phase are still unclosed.
+The nearby BT.601 conversion source is an unselected variant, not authority
+for this path. Feeding the NV12 temporal primitive requires either a recovered
+selected conversion or an explicitly disclosed Kjerag diagnostic conversion
+with an identical unfused A/A round-trip control. No conversion or visible
+tradeoff is silently accepted here.
+
+Durable diagnostic roots under
+`scratch/studio-seam-flicker-612-20260909-01/`:
+
+- `temporal-search-reference-01/`: harness, sealed inputs, complete baseline
+  outputs, independent repeat and output-SAD verifier. Baseline report SHA256
+  `251dbf18495c726884cf575fa931c15c07bd605e4aaec8529da37efce15bba05`.
+- `temporal-search-contract-01/`: group/native/public instruction receipts and
+  the root working-area audit, including exact clipping/dispatch addresses.
+- `temporal-motion-capture-01/raw-sad-verification.json`: native raw-cost check.
+- `temporal-search-adapter-01/`: isolated patches, generated source diffs,
+  executables, six raw outputs per variant and reports. Combined report SHA256
+  `c147fe708c0df60dd8887d3f5af86287fae040dbd099a67c15bf61b2c5e1a32d`.
+- `temporal-search-contract-01/materializer-prerequisites.md`: existing raster
+  and RGB authorities, selected NV12 conversion gap and source-stamp contract.
+
+This checkpoint adds no Studio export or native session. Motion-search
+adoption, actual Kjerag panorama preparation, image-history scheduling and
+moving-video acceptance remain open. Numerical motion identity is not a
+shipping requirement. The earlier 607 capture does not cover
+the owner's 612.078 report. There is no installed-player change or invented
+gradual color update.
