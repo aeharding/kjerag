@@ -438,6 +438,7 @@ mod tests {
                 gyro_timestamp: None,
             },
             exposure: [ExposureTrack::default(), ExposureTrack::default()],
+            denoise_iso: Default::default(),
             imu: GyroTrack::default(),
             fused: OrientationTrack::default(),
             calibration_canvas: Size {
@@ -468,6 +469,7 @@ mod tests {
                 gyro_timestamp: Some(1.6),
             },
             exposure: [ExposureTrack::default(), ExposureTrack::default()],
+            denoise_iso: Default::default(),
             imu: GyroTrack::default(),
             fused: OrientationTrack::default(),
             calibration_canvas: Size {

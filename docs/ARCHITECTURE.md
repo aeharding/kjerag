@@ -21,7 +21,8 @@ crates/media    kjerag-media   ffmpeg demux, dual VA-API HEVC decoders in
                                file of the capture, which is two on the
                                cameras that write one lens per file. No UI.
 crates/meta     kjerag-meta    .insv trailer, read directly: per-lens Mei
-                               calibration, gyro track, per-frame exposure.
+                               calibration, gyro track, per-frame exposure,
+                               global ISO observations for denoising.
                                No UI, no ffmpeg, no wgpu.
 crates/spike    kjerag-spike   the headless instruments, which nothing else
                                depends on: `spike` (M0 frame-path timings)
@@ -34,6 +35,17 @@ calibration the shader runs on, and `meta` depends on nothing but `prost`.
 That last one is the point of the split: `cargo test -p kjerag-meta` passes
 on a box with no libav headers, and a CI job that installs nothing proves it
 on every push.
+
+`CalibrationSet::denoise_iso` holds the record-9 observations and summary
+decoded by the Studio-read constructor law. This is a global denoising input,
+not per-lens gain or a photometric correction. Its millisecond origin discards
+the native 40-item prefix, independently of the shutter clock, preserving the
+native signed/wrapping operations. Missing data supplies no observations;
+metadata parsing chooses no ISO100 default. Frame-time interpolation, invalid
+ISO handling and backend parameter selection belong to the temporal consumer,
+not this parser. Ordinary file opening now reads this input, but playback still
+does not select the temporal filter. `docs/research/studio-denoise-iso-602.md`
+records the binary and real-file authority.
 
 `spike` has no dependency on `app`. Its stitch instruments default to the
 factory calibration, which is the parity base. A research run may name the

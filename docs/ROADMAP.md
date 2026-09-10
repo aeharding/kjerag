@@ -14,6 +14,19 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Automatic denoiser ISO metadata verified, 2026-09-10:** normal capture opening
+now reads the global ISO observations from binary trailer record 9. The native
+producer, packed field, 40-item prefix and independent millisecond clock law are
+traced in the pinned Studio worker. The production metadata loader agrees with
+an independent reader on both real files: April X4 Air has ISO100 near 607/612,
+while the ONE X2 example has ISO365 near 212.512. All 143 ordinary metadata tests
+and its doctest pass, as does the opt-in two-file regression and workspace
+all-target Clippy. This is not per-lens gain, a colour smoother or a selected
+player filter. The temporal consumer's lookup/settings and source-window
+integration remain separate work, and the measured filter is still too slow.
+No new Studio capture, installed change or owner flicker verdict.
+Evidence: [ISO input note](research/studio-denoise-iso-602.md).
+
 **Resident GPU input for temporal integration verified, 2026-09-10:** the
 body-image producer now consumes the player's exact resident source/map/fusion
 carrier with existing draw-retirement ownership, without map readback/reupload.

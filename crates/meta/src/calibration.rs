@@ -219,6 +219,9 @@ pub struct CalibrationSet {
     /// match brightness across the seam: measured on real captures, they
     /// do not say what they look like they say.
     pub exposure: [ExposureTrack; 2],
+    /// Camera ISO observations from trailer record 9, before interpolation,
+    /// validity filtering, or denoise selection.
+    pub denoise_iso: crate::DenoiseIsoTrack,
     /// The IMU track from trailer record 3, **in the sensor's own axes**.
     /// Empty for a file that carries no gyro record.
     ///
@@ -572,6 +575,11 @@ impl CalibrationSet {
             exposure: std::array::from_fn(|lens| {
                 ExposureTrack::parse(&trailer.exposure[lens], clock)
             }),
+            denoise_iso: crate::DenoiseIsoTrack::parse(
+                &trailer.denoise_iso,
+                trailer.metadata.first_frame_timestamp,
+                trailer.metadata.is_raw_gyro,
+            ),
             imu: GyroTrack::parse(
                 &trailer.gyro,
                 set.gyro.encoding,
@@ -755,6 +763,7 @@ impl CalibrationSet {
             rolling_shutter_ms: metadata.rolling_shutter_time,
             gyro: GyroConfig::from_metadata(metadata),
             exposure: Default::default(),
+            denoise_iso: Default::default(),
             imu: GyroTrack::default(),
             fused: OrientationTrack::default(),
             calibration_canvas: canvas,

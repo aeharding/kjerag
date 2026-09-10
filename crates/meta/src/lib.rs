@@ -21,6 +21,7 @@ mod calibration;
 /// reads right qualified: `capture::resolve(path)`, rather than a bare
 /// `resolve` at the root of a crate about trailers.
 pub mod capture;
+mod denoise_iso;
 mod exposure;
 mod format;
 mod gyro;
@@ -37,6 +38,7 @@ pub use calibration::{
     CalibrationSet, Distortion, GyroConfig, GyroEncoding, Intrinsics, Lens, Model, Model6Lens,
     Pose, Readout, Size, Sweep,
 };
+pub use denoise_iso::{DenoiseIsoObservation, DenoiseIsoTrack};
 pub use exposure::{ExposureSample, ExposureTrack};
 pub use format::{Foreign, Format};
 pub use gyro::{GyroSample, GyroTrack};

@@ -20,9 +20,10 @@
 //! records tight, where the walk alone gets all of them. Measured
 //! 2026-07-31 on five captures from the two cameras.
 //!
-//! Four records are read: 1, the metadata protobuf that carries the
-//! calibration, 3, the IMU track, and 4 and 12, the two lenses' shutter
-//! tracks. The thumbnails are seeked over, never read.
+//! Five record ids are read: 1, the metadata protobuf that carries the
+//! calibration, 3, the IMU track, 4 and 12, the two lenses' shutter tracks,
+//! and 9, the camera's ISO observations. The thumbnails are seeked over,
+//! never read.
 //!
 //! Record 3 is the big one, 35 MB on a 30-minute X4 Air capture, and it is
 //! read whole at open. Reading it lazily would buy back a tenth of a second
@@ -61,6 +62,8 @@ const INDEX_ENTRY_LEN: usize = 1 + 1 + 4 + 4;
 const METADATA_RECORD: u8 = 1;
 /// The IMU: accelerometer and gyroscope, two encodings (`super::gyro`).
 const GYRO_RECORD: u8 = 3;
+/// Raw 48-byte camera observations consumed by Studio's ISO constructor.
+const DENOISE_ISO_RECORD: u8 = 9;
 /// Lens 0's shutter track and lens 1's, in lens order.
 ///
 /// They are two records and they stay two here. telemetry-parser reads
@@ -214,6 +217,8 @@ pub(crate) struct Trailer {
     pub metadata: ExtraMetadata,
     /// Record 3, the IMU. Empty where the file has no such record.
     pub gyro: Vec<u8>,
+    /// Record 9 as written. Empty where the file has no such record.
+    pub denoise_iso: Vec<u8>,
     /// Records 4 and 12 as they came, one per lens and never merged.
     /// Empty where the file has no such record, which is every camera
     /// that writes one lens per file.
@@ -247,9 +252,14 @@ fn read_trailer<S: Read + Seek>(source: &mut S) -> Result<Trailer, Error> {
         Some(record) => read(source, record)?,
         None => Vec::new(),
     };
+    let denoise_iso = match find(&records, DENOISE_ISO_RECORD, BINARY) {
+        Some(record) => read(source, record)?,
+        None => Vec::new(),
+    };
     Ok(Trailer {
         metadata,
         gyro,
+        denoise_iso,
         exposure,
     })
 }
@@ -452,6 +462,13 @@ mod tests {
             .collect()
     }
 
+    fn iso_item(timestamp: u32, shifted_iso: u32) -> Vec<u8> {
+        let mut item = vec![0; 48];
+        item[..4].copy_from_slice(&timestamp.to_le_bytes());
+        item[16..20].copy_from_slice(&(shifted_iso << 19).to_le_bytes());
+        item
+    }
+
     fn trailer_of(file: Vec<u8>) -> Result<Trailer, Error> {
         read_trailer(&mut Cursor::new(file))
     }
@@ -593,6 +610,18 @@ mod tests {
         assert_eq!(calibration.camera_model, "Insta360 X4 Air");
         assert_eq!(calibration.lenses.len(), 2);
         assert!((calibration.lenses[1].intrinsics.cx - 1935.35).abs() < 0.01);
+        assert!(calibration.denoise_iso.is_empty());
+    }
+
+    #[test]
+    fn an_unindexed_walk_reads_record_nine() {
+        let file = Capture::of(&fixture::metadata())
+            .with(DENOISE_ISO_RECORD, iso_item(1_000, 64))
+            .insv();
+        let trailer = trailer_of(file).unwrap();
+        assert_eq!(trailer.denoise_iso, iso_item(1_000, 64));
+        let calibration = CalibrationSet::from_trailer(&trailer).unwrap();
+        assert_eq!(calibration.denoise_iso.summary_iso(), Some(100));
     }
 
     /// The PII-free ONE X2 fixture takes the whole production path: JSON into
@@ -778,7 +807,8 @@ mod tests {
             ..Capture::of(&fixture::metadata())
         }
         .with(EXPOSURE_RECORDS[0], shutters(&[0.001]))
-        .with(EXPOSURE_RECORDS[1], shutters(&[0.003]));
+        .with(EXPOSURE_RECORDS[1], shutters(&[0.003]))
+        .with(DENOISE_ISO_RECORD, iso_item(1_000, 64));
 
         let calibration =
             CalibrationSet::from_trailer(&trailer_of(spaced.insv()).unwrap()).unwrap();
@@ -791,6 +821,7 @@ mod tests {
             calibration.exposure[1].shutter_at(Duration::ZERO),
             Some(0.003)
         );
+        assert_eq!(calibration.denoise_iso.summary_iso(), Some(100));
 
         let unindexed = Capture {
             indexed: false,

@@ -718,6 +718,7 @@ mod tests {
                 gyro_timestamp: None,
             },
             exposure: [ExposureTrack::default(), ExposureTrack::default()],
+            denoise_iso: Default::default(),
             imu: GyroTrack::default(),
             fused: OrientationTrack::from_samples(
                 (1_900_000..=2_100_000)

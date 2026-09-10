@@ -37,6 +37,7 @@ fn calibration() -> CalibrationSet {
             gyro_timestamp: None,
         },
         exposure: [ExposureTrack::default(), ExposureTrack::default()],
+        denoise_iso: Default::default(),
         imu: GyroTrack::default(),
         fused: OrientationTrack::default(),
         calibration_canvas: Size {

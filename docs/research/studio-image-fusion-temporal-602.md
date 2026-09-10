@@ -3079,3 +3079,22 @@ with the preceding packed-gray evidence as hardlinks, recovering 933.33 MiB.
 All paths remain immutable. Full X4 sequences and the short prefix were then
 verified against the untouched CPU-SAD checkpoint; the ONE X2 comparison also
 still passes. No source footage or unique evidence was removed.
+
+### Automatic ISO input traced, 2026-09-10
+
+The previously unresolved `GetIsoValue` call is now traced through the cached
+metadata helper, chain-authenticated video/extra-info vtables and record-9
+reader to the actual `Iso` constructor. It decodes global ISO from the packed
+word at byte 16 of each 48-byte item and, for longer tracks, skips 40 items in
+both its average and timestamped observations. Native millisecond rebasing,
+integer truncation and signed/wrapping operations are read, not borrowed from
+the shutter clock. `docs/research/studio-denoise-iso-602.md` records the exact
+law and the independently checked X4 Air/ONE X2 file inputs.
+
+All 195 April observations from 607000 through 613500 ms are ISO100, agreeing
+with the earlier native capture and supplying the same ISO near 612.078.
+The ONE X2 example instead has ISO365 around 212.512. These are automatic
+input checks, not new moving output or a flicker verdict. The narrow metadata
+implementation exposes observations before downstream zero/invalid handling;
+it does not choose filter parameters, change colour updates or select the
+filter in normal playback.

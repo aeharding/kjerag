@@ -1065,6 +1065,7 @@ fn from_record(record: &[u8]) -> Result<CalibrationSet, Error> {
             gyro_timestamp: None,
         },
         exposure: Default::default(),
+        denoise_iso: Default::default(),
         // Empty because there is no raw IMU to read: this camera writes the
         // fused answer, which lands in `fused` instead and needs no filter.
         imu: GyroTrack::default(),
