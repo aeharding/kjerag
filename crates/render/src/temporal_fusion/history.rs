@@ -12,6 +12,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::ops::Range;
 
 use crate::FrameStamp;
 
@@ -20,7 +21,6 @@ use super::{Inputs, Parameters};
 
 const LAYERS: u32 = 7;
 const CENTER: usize = 3;
-const REFERENCES: [usize; 6] = [0, 1, 2, 4, 5, 6];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -30,6 +30,8 @@ pub enum Error {
     SourceTextures,
     DecodeEpoch,
     NonContiguous,
+    IncompleteWindow,
+    WindowPosition,
 }
 
 impl fmt::Display for Error {
@@ -47,6 +49,12 @@ impl fmt::Display for Error {
             }
             Self::DecodeEpoch => "temporal history cannot cross a decode epoch",
             Self::NonContiguous => "temporal history sources must be contiguous",
+            Self::IncompleteWindow => {
+                "temporal history needs seven sources before selecting a window"
+            }
+            Self::WindowPosition => {
+                "temporal history needs a center from 0 through 6 and a radius from 0 through 3"
+            }
         })
     }
 }
@@ -137,7 +145,26 @@ impl History {
     }
 
     pub fn window(&self) -> Option<Window<'_>> {
-        (self.slots.len() == LAYERS as usize).then_some(Window { history: self })
+        self.window_at(CENTER, CENTER).ok()
+    }
+
+    /// Borrow an explicit center and clipped reference interval in a full ring.
+    ///
+    /// Studio's selected seven-source route uses centers 0 through 3 at startup,
+    /// 3 in steady state, and 4 through 6 when flushing. Its effective radius is
+    /// supplied per source. This method selects bindings, not availability or
+    /// publication: the caller still owns that scheduling and submission order.
+    /// It neither duplicates missing neighbors nor admits a shorter input ring.
+    /// A zero radius exposes no references and cannot be sent to `GpuFuse`.
+    pub fn window_at(&self, center: usize, radius: usize) -> Result<Window<'_>, Error> {
+        if self.slots.len() != LAYERS as usize {
+            return Err(Error::IncompleteWindow);
+        }
+        Ok(Window {
+            history: self,
+            center,
+            interval: reference_interval(center, radius)?,
+        })
     }
 
     fn validate_source(
@@ -170,21 +197,26 @@ impl History {
     }
 }
 
-/// One complete logical c-3 through c+3 window backed by resident arrays.
+/// An explicit center and its clipped neighbors backed by resident arrays.
 pub struct Window<'a> {
     history: &'a History,
+    center: usize,
+    interval: Range<usize>,
 }
 
 pub struct WindowStamps<'a> {
     pub center: &'a FrameStamp,
-    pub references: [&'a FrameStamp; 6],
+    pub references: Vec<&'a FrameStamp>,
 }
 
 impl Window<'_> {
     pub fn stamps(&self) -> WindowStamps<'_> {
         WindowStamps {
-            center: &self.history.slots[CENTER].stamp,
-            references: REFERENCES.map(|at| &self.history.slots[at].stamp),
+            center: &self.history.slots[self.center].stamp,
+            references: self
+                .reference_positions()
+                .map(|at| &self.history.slots[at].stamp)
+                .collect(),
         }
     }
 
@@ -209,10 +241,27 @@ impl Window<'_> {
             limit,
             y_limits,
             uv_limits,
-            current_layer: self.history.slots[CENTER].layer,
-            reference_layers: REFERENCES.map(|at| self.history.slots[at].layer).to_vec(),
+            current_layer: self.history.slots[self.center].layer,
+            reference_layers: self
+                .reference_positions()
+                .map(|at| self.history.slots[at].layer)
+                .collect(),
         }
     }
+
+    fn reference_positions(&self) -> impl Iterator<Item = usize> + '_ {
+        self.interval.clone().filter(|&at| at != self.center)
+    }
+}
+
+// ComputeFlowMetalFast 0x2c31314..0x2c31440 forms this clipped interval;
+// ConfigFuseNormEncoder binds it in ascending order, excluding the center.
+// docs/research/studio-image-fusion-temporal-602.md records the native audit.
+fn reference_interval(center: usize, radius: usize) -> Result<Range<usize>, Error> {
+    if center >= LAYERS as usize || radius > CENTER {
+        return Err(Error::WindowPosition);
+    }
+    Ok(center.saturating_sub(radius)..(center + radius + 1).min(LAYERS as usize))
 }
 
 fn array_texture(

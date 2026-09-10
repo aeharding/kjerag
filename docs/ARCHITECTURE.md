@@ -43,7 +43,12 @@ the native 40-item prefix, independently of the shutter clock, preserving the
 native signed/wrapping operations. Missing data supplies no observations;
 metadata parsing chooses no ISO100 default. Frame-time interpolation, invalid
 ISO handling and backend parameter selection belong to the temporal consumer,
-not this parser. Ordinary file opening now reads this input, but playback still
+not this parser. `temporal_fusion::iso::Lookup` now owns a single open-time
+snapshot and implements the recovered binary64 bracketing/interpolation,
+forward-zero cache and invalid-value correction. Empty or unordered input is
+refused; backward query time requires an explicit reset, which also clears the
+cache. It does not select filter parameters or invent missing ISO values.
+Ordinary file opening now reads this input, but playback still
 does not select the temporal filter. `docs/research/studio-denoise-iso-602.md`
 records the binary and real-file authority.
 
@@ -84,7 +89,13 @@ arithmetic result, not a complete temporal pipeline or performance verdict.
 The `history` child owns seven resident NV12 array layers and the exact source
 stamp occupying each slot. Arriving images are copied once; a complete borrowed
 window supplies center/reference stamps and physical layer indices in logical
-c-3,c-2,c-1,c+1,c+2,c+3 order. It records copies without submitting or waiting.
+c-3,c-2,c-1,c+1,c+2,c+3 order. An explicit `window_at(center, radius)` also
+supplies the clipped intervals needed for startup and tail frames: ascending
+logical order excluding the center, with no repeated or fabricated neighbors.
+The ring must still contain seven real sources. A zero radius has no references
+and cannot be sent to the fusion primitive. Neither accessor grants processing
+or presentation authority; the caller supplies the center and effective radius.
+It records copies without submitting or waiting.
 Its caller must submit earlier consumers before a later overwrite and create a
 fresh owner for a new decode epoch. It rejects gaps, duplicates and invalid
 storage before recording. Resources must share one wgpu Instance: the pinned

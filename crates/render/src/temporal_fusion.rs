@@ -34,6 +34,9 @@ pub mod regions;
 /// Source-stamped resident seven-image storage, with explicit caller ordering.
 pub mod history;
 
+/// Source-time ISO lookup over the camera's raw denoise observations.
+pub mod iso;
+
 /// Effective values supplied by the calibration/history producer, not defaults.
 pub struct Parameters {
     pub noise: f32,

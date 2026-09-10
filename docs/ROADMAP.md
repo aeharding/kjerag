@@ -14,6 +14,25 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Temporal ISO lookup and startup/tail bindings verified, 2026-09-10:** the
+render-side lookup now consumes the decoded ISO track with Studio's recovered
+interpolation, zero-cache and invalid-value correction. Resident GPU history
+can expose every center's clipped reference interval without padding. All 94
+temporal checks pass on AMD, including the owner-file ISO lookups and 63
+clipped-window GPU comparisons against rebuilt arrays. All 976 ordinary render
+tests also pass (37 ignored); workspace all-target Clippy passes. No playback
+policy or colour-update change is selected.
+
+The remaining integration needs non-presenting preparation of six successors
+at startup, separate from due-only filtered-frame publication; increasing the
+current two-slot lookahead alone would stall. Recovered settings also show
+ONE X2's ISO365 example has radius zero in `common`, not X4's radius three.
+Automatic X4 Air selection still needs authenticated source classification:
+the captured denoiser mode 8 must not be mistaken for selector group type 8.
+No new Studio capture, moving review, speed claim, installation or flicker pass.
+Evidence: `scratch/studio-seam-flicker-612-20260909-01/temporal-input-window-01`
+and [configuration input note](research/studio-denoise-config-602.md).
+
 **Automatic denoiser ISO metadata verified, 2026-09-10:** normal capture opening
 now reads the global ISO observations from binary trailer record 9. The native
 producer, packed field, 40-item prefix and independent millisecond clock law are

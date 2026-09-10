@@ -3098,3 +3098,38 @@ input checks, not new moving output or a flicker verdict. The narrow metadata
 implementation exposes observations before downstream zero/invalid handling;
 it does not choose filter parameters, change colour updates or select the
 filter in normal playback.
+
+### Source-time lookup and clipped GPU windows, 2026-09-10
+
+The render-side ISO consumer now applies the recovered lookup to the decoded
+global observations, with one owned open-time snapshot and no per-frame copy.
+It preserves binary64 interpolation/truncation, the native comparison tolerance,
+forward-zero cache and nearest-valid correction. Missing/unordered input is
+refused; an explicit reset clears chronology/cache before a backward time query.
+Both real-file checks return the expected ISO at the owner's exact view times.
+
+Resident history now also exposes `window_at(center, radius)`. Its seven real
+source slots supply the native clipped interval in chronological order, with
+the center excluded. Radius-3 reference counts across positions 0 through 6
+are 3, 4, 5, 6, 5, 4, 3. A smaller radius clips the same way; radius zero yields
+no references and cannot enter fusion. This changes bindings, not availability,
+startup/flush scheduling or publication authority. The original center-3
+accessor retains its output. In particular, no short-input padding is added.
+
+All 94 temporal checks pass on the real AMD GPU, including saved native inputs
+and the two owner-file ISO lookups. Every center with radii 1 through 3 is
+compared before, during and after physical ring reuse: all 63 Y/UV results
+match independently rebuilt arrays. The existing three-wrap and wrong-source/
+reference-order sensitivity tests still pass. Evidence is in
+`scratch/studio-seam-flicker-612-20260909-01/temporal-input-window-01`.
+
+Player integration remains a concrete ownership change, not a larger constant:
+its current paused landing cannot fetch the six successors needed for native
+startup, and its single unpublished raw draw stops the source worker too early.
+Preparation needs a bounded non-presenting source-ahead path and a separate
+FIFO of filtered center results, preserving exact due-stamp publication.
+Decoder-input exhaustion must be visible before all presentation lookahead is
+consumed, so the last centers can be flushed. Fewer than seven real inputs
+remain unsupported by the recovered scheduling gate; no fallback is selected.
+No new moving result, player activation, performance improvement, invented
+colour fade or owner flicker acceptance follows from this checkpoint.

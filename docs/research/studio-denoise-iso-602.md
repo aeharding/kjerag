@@ -108,6 +108,23 @@ Those are filter-input policies, not evidence that the camera's physical ISO
 is always at least 100. Adding the raw metadata observations does not select
 these policies or the temporal filter in the player.
 
+The render-side `temporal_fusion::iso::Lookup` now implements this lookup over
+one owned snapshot of the raw observations. Binary search replaces the native
+forward cursor for strictly increasing input times and nondecreasing queries;
+the native `1e-6` comparison boundary and arithmetic are retained. This is a
+Kjerag execution choice, not a changed colour-update law. Empty or unordered
+input, a nonfinite query and a backward query without `reset` are refused.
+Reset clears both query chronology and the forward-zero cache. These explicit
+validation/reset boundaries avoid carrying lookup state across a seek; the
+player must still invoke them at the correct source/epoch boundary.
+
+The real-file consumer regression looks up the reported times, not just nearby
+metadata rows: 607574 and 612078 ms return 100 for X4 Air, and 212512 ms returns
+365 for ONE X2. Synthetic tests cover interpolation/truncation, exact tolerance
+boundaries, endpoint values, zero search/cache, invalid correction/ties and
+reset. All are included in the passing 94-check temporal suite on the AMD GPU.
+Ordinary playback still does not select this lookup or the temporal filter.
+
 ## Checks on the owner's files
 
 The independent scratch reader locates record 9 through the same index/walk
@@ -148,6 +165,7 @@ chain-verified vtable targets and hashes. The latter contains the independent
 constructor audit, its file reader and `analysis-windows.json`. No native
 executable or private raw trailer payload is committed.
 
-Automatic backend parameter tables, source-window/player integration,
+The separately [recovered parameter tables](studio-denoise-config-602.md)
+still need authenticated automatic selection and consumption. Source-window/player integration,
 playback performance and the owner's moving-video acceptance remain separate
 requirements. This metadata result does not complete any of them.

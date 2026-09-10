@@ -20,6 +20,180 @@ struct Copies {
 }
 
 #[test]
+fn startup_and_tail_intervals_clip_neighbors_without_padding() {
+    let expected = [
+        vec![1, 2, 3],
+        vec![0, 2, 3, 4],
+        vec![0, 1, 3, 4, 5],
+        vec![0, 1, 2, 4, 5, 6],
+        vec![1, 2, 3, 5, 6],
+        vec![2, 3, 4, 6],
+        vec![3, 4, 5],
+    ];
+    for (center, expected) in expected.into_iter().enumerate() {
+        let actual: Vec<_> = reference_interval(center, 3)
+            .unwrap()
+            .filter(|&at| at != center)
+            .collect();
+        assert_eq!(actual, expected);
+        for radius in 0..=3 {
+            let actual: Vec<_> = reference_interval(center, radius)
+                .unwrap()
+                .filter(|&at| at != center)
+                .collect();
+            let expected: Vec<_> = (0usize..7)
+                .filter(|&at| at != center && at.abs_diff(center) <= radius)
+                .collect();
+            assert_eq!(actual, expected);
+        }
+    }
+    for (center, radius) in [(7, 3), (3, 4), (usize::MAX, 0), (0, usize::MAX)] {
+        assert_eq!(
+            reference_interval(center, radius),
+            Err(Error::WindowPosition)
+        );
+    }
+}
+
+#[test]
+fn clipped_windows_match_rebuilt_sources_before_and_after_ring_reuse() {
+    let Some((device, queue)) = gpu() else {
+        return;
+    };
+    let conversion = GpuColorConversion::new(&device);
+    let fuse = GpuFuse::new(&device);
+    let mut history = History::new(&device, Y_SIZE).unwrap();
+    let mut stamps = Vec::new();
+    let mut sources = Vec::new();
+    let mut copies = Vec::new();
+    for ordinal in 0..14_u64 {
+        assert!(ordinal >= 7 || matches!(history.window_at(0, 3), Err(Error::IncompleteWindow)));
+        let stamp = FrameStamp::for_test(
+            500 + ordinal,
+            Duration::from_millis(ordinal * 33),
+            stamps.last(),
+        );
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let source = converted_source(&device, &queue, &conversion, &mut encoder, ordinal as u8);
+        history
+            .encode_push(&device, &mut encoder, &stamp, &source)
+            .unwrap();
+        stamps.push(stamp);
+        sources.push(source);
+        if ordinal == 6 || ordinal == 10 || ordinal == 13 {
+            let start = ordinal as usize + 1 - 7;
+            let rebuilt_y = array_texture(
+                &device,
+                "clipped reference Y",
+                Y_SIZE,
+                wgpu::TextureFormat::R8Unorm,
+            );
+            let rebuilt_uv = array_texture(
+                &device,
+                "clipped reference UV",
+                UV_SIZE,
+                wgpu::TextureFormat::Rg8Unorm,
+            );
+            for (layer, source) in sources[start..start + 7].iter().enumerate() {
+                copy_layer(&mut encoder, &source.y, &rebuilt_y, layer as u32);
+                copy_layer(&mut encoder, &source.uv, &rebuilt_uv, layer as u32);
+            }
+            assert!(matches!(
+                history.window_at(7, 3),
+                Err(Error::WindowPosition)
+            ));
+            assert!(matches!(
+                history.window_at(3, 4),
+                Err(Error::WindowPosition)
+            ));
+            for center in 0usize..7 {
+                for radius in 0..=3 {
+                    let window = history.window_at(center, radius).unwrap();
+                    let expected_positions: Vec<_> = (0usize..7)
+                        .filter(|&at| at != center && at.abs_diff(center) <= radius)
+                        .collect();
+                    let actual_stamps = window.stamps();
+                    assert_eq!(actual_stamps.center, &stamps[start + center]);
+                    let expected_stamps: Vec<_> = expected_positions
+                        .iter()
+                        .map(|&at| &stamps[start + at])
+                        .collect();
+                    assert_eq!(actual_stamps.references, expected_stamps);
+                    let parameters = window.parameters(1.0, 1.0, [1.0; 256], [1.0; 256]);
+                    assert_eq!(parameters.current_layer, ((start + center) % 7) as u32);
+                    assert_eq!(
+                        parameters.reference_layers,
+                        expected_positions
+                            .iter()
+                            .map(|&at| ((start + at) % 7) as u32)
+                            .collect::<Vec<_>>()
+                    );
+                    if radius == 0 {
+                        assert!(parameters.reference_layers.is_empty());
+                        continue;
+                    }
+                    let (flow, luma) =
+                        motion_inputs_count(&device, &queue, expected_positions.len());
+                    let ring = fuse
+                        .encode(
+                            &device,
+                            &mut encoder,
+                            window.inputs(&flow, &luma),
+                            &parameters,
+                            [0, 0, Y_SIZE[0], Y_SIZE[1]],
+                        )
+                        .unwrap();
+                    let rebuilt = fuse
+                        .encode(
+                            &device,
+                            &mut encoder,
+                            Inputs {
+                                y: &rebuilt_y,
+                                uv: &rebuilt_uv,
+                                flow: &flow,
+                                luma: &luma,
+                            },
+                            &Parameters {
+                                current_layer: center as u32,
+                                reference_layers: expected_positions
+                                    .iter()
+                                    .map(|&at| at as u32)
+                                    .collect(),
+                                ..parameters
+                            },
+                            [0, 0, Y_SIZE[0], Y_SIZE[1]],
+                        )
+                        .unwrap();
+                    copies.push(Copies {
+                        center: stamps[start + center].index(),
+                        ring_y: copy_texture(&device, &mut encoder, &ring.y, Y_SIZE, 1),
+                        ring_uv: copy_texture(&device, &mut encoder, &ring.uv, UV_SIZE, 2),
+                        rebuilt_y: copy_texture(&device, &mut encoder, &rebuilt.y, Y_SIZE, 1),
+                        rebuilt_uv: copy_texture(&device, &mut encoder, &rebuilt.uv, UV_SIZE, 2),
+                    });
+                }
+            }
+        }
+        queue.submit([encoder.finish()]);
+    }
+    assert_eq!(copies.len(), 63);
+    for copy in copies {
+        assert_eq!(
+            read_copy(&device, &copy.ring_y, Y_SIZE, 1),
+            read_copy(&device, &copy.rebuilt_y, Y_SIZE, 1),
+            "clipped Y center {}",
+            copy.center
+        );
+        assert_eq!(
+            read_copy(&device, &copy.ring_uv, UV_SIZE, 2),
+            read_copy(&device, &copy.rebuilt_uv, UV_SIZE, 2),
+            "clipped UV center {}",
+            copy.center
+        );
+    }
+}
+
+#[test]
 fn resident_ring_matches_rebuilt_arrays_through_three_wraps_without_waits() {
     let Some((device, queue)) = gpu() else {
         return;
@@ -397,12 +571,29 @@ fn rebuilt_window(
 }
 
 fn motion_inputs(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::Texture, wgpu::Texture) {
-    let flow = array_texture(
-        device,
-        "resident history ordered flow",
-        [2, 1],
-        wgpu::TextureFormat::Rgba16Sint,
-    );
+    motion_inputs_count(device, queue, 6)
+}
+
+fn motion_inputs_count(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    count: usize,
+) -> (wgpu::Texture, wgpu::Texture) {
+    assert!((1..=6).contains(&count));
+    let flow = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("resident history ordered flow"),
+        size: wgpu::Extent3d {
+            width: 2,
+            height: 1,
+            depth_or_array_layers: count as u32,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Sint,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
     let luma = array_texture(
         device,
         "resident history luma",
@@ -410,7 +601,7 @@ fn motion_inputs(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::Texture, 
         wgpu::TextureFormat::R8Uint,
     );
     let confidence = [255_i16, 211, 167, 113, 71, 29];
-    for (layer, value) in confidence.into_iter().enumerate() {
+    for (layer, value) in confidence.into_iter().take(count).enumerate() {
         let texel: Vec<u8> = [layer as i16 - 2, 0, value, 255 - value]
             .into_iter()
             .flat_map(i16::to_le_bytes)
