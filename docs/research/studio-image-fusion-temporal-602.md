@@ -2467,3 +2467,76 @@ the subsequent source formatting changes no arithmetic. Both delivered review
 movies retain their prior hashes. Moving owner acceptance, GPU motion search,
 automatic parameter selection and production history/integration remain open.
 No new native session/export or gradual lens-color update is introduced.
+
+### GPU motion packing and independent-reference concurrency, 2026-09-10
+
+The next port preserves the candidate's motion expansion/confidence arithmetic.
+`motion::gpu::Builder` records one Rgba16Sint render pass per supplied raw
+field, retaining the native top-right multiply followed by TL/BL/BR FMA order,
+displacement expansion before truncation, cost truncation and image-border
+clamp. Host scalar preparation keeps the reference's wrapping i32 scale
+product, f64 phase FMA, f32 scale FMA and threshold conversion. Y/UV tables
+remain independent and indexed by the explicit luma input. No shader f64,
+submission, CPU wait, history selection or gradual color update is added.
+
+The GPU subset explicitly requires full dimensions at most32768, raw dx/dy
+within i16, costs0..65280 and each positive derived threshold at most46340.
+Negative and zero thresholds retain the signed rejection gate. Larger positive
+thresholds are rejected, not silently changed: the CPU reference still supports
+native wrapping threshold squares, including65536/cost1 yielding-256.
+These limits cover the saved capture, not automatic parameter selection for
+every ISO/camera. Raw vectors and luma are still CPU uploads.
+
+For the accepted branch1<=T<=46340 and0<=C<T, confidence is
+`floor(256*(T*T-C*C)/(T*T+C*C))`. The denominator is at most4294698521,
+within u32, although the numerator can need40 bits. Cost0 is exactly256.
+For positive cost, eight binary long-division steps avoid that wide numerator:
+start with remainder=T*T-C*C; compare it to denominator-remainder before
+doubling, subtract that gap and emit1 when greater/equal, otherwise double
+and emit0. Each step remains within u32. The pre-division values are exact
+f64 integers in the CPU reference; a nonintegral rational is at least1/denominator
+from an integer, larger than its f64 rounding error. The integer floor therefore
+preserves that reference's final truncation throughout this bounded domain.
+
+Synthetic checks exercise every possible16x16 byte SAD at thresholds0/1/2/3,
+all six captured thresholds2800/3150/3500/5600/6300/7000 and upper bound46340
+(with an independent UV threshold one lower). Other checks cover all256 luma
+indices, signed thresholds/displacement extremes, fractional interpolation,
+border clamp, scale wrap, input refusal and multiple encodes before submission.
+The native test reads the same hash-sealed inputs/expected bytes as the CPU
+test and matches all2,764,800 signed lanes exactly. The first run rejected a
+WGSL scalar/vector type composition before rendering; the explicit conversion
+was corrected. The final49-test temporal suite passes on AMD760M/RADV.
+
+Separately, `search::selected_six` runs the six independent CPU searches in
+bounded scoped workers. It prevalidates in supplied ordinal order and retains
+that same result order. Serial versus concurrent vectors match both synthetic
+inputs and all six saved combined-adapter outputs. There is no parallelism
+inside a reference: coarse-to-fine state, searched-neighbor predictors,
+row-major bad_count and strict-improvement candidate order remain unchanged.
+The previously disclosed native vector gap remains. This is not GPU search.
+
+The optional actual-Scene flags `KJERAG_PANORAMA_GPU_MOTION=1` and
+`KJERAG_PANORAMA_PARALLEL_SEARCH=1` require the existing ISO100 diagnostic.
+Neither selects ordinary playback. With both plus GPU pyramids enabled, the
+same37 inputs18341..18377 preserve all31 filtered outputs18344..18374 and259
+ordinary/map/alpha/color/panorama controls byte-for-byte. Center/reference
+indices, timestamps and output hashes also match. The diagnostic records
+which execution routes were selected and the timing scope. `pack_ms=0` means
+no separate CPU packing stage, not zero-cost GPU motion work.
+
+The15.20s offline run averages177.378ms search (max246.737) and89.174ms
+GPU preparation/upload/packing/fusion/conversion/projection/readback completion
+(max92.160) per centered output. No build/test job overlapped this run. These
+are diagnostic wall times, not shader-only timing, an A/B speedup measurement,
+real-time playback or240fps capacity. Motion search remains the dominant
+cost and this execution is not suitable for installation.
+
+Workspace all-target Clippy, formatting, crate-source and rename checks pass.
+No full workspace test or UI harness is claimed for this uninstalled primitive.
+Both moving owner verdicts remain pending and both delivered movies retain
+their hashes. Root inspected a rendered18344 preview but makes no moving
+flicker verdict from it. No native session, export, installation, push or merge.
+Evidence is in `scratch/studio-seam-flicker-612-20260909-01/temporal-gpu-motion-01`.
+The final exercised binary SHA256 is
+`95b2edec868efd7848f2b1ba758beff0fa494df97ea7a255e9aba8dc91608b7d`.

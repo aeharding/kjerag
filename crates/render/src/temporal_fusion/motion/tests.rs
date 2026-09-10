@@ -183,6 +183,56 @@ fn packed_bytes(records: &[[i16; 4]]) -> Vec<u8> {
 #[test]
 #[ignore = "requires private Studio motion capture named by KJERAG_MOTION_FIXTURE_DIR"]
 fn captured_six_reference_motion_matrices_are_exact() {
+    let fixture = native_fixture();
+    for (ordinal, reference) in fixture.references.iter().enumerate() {
+        let actual = packed_bytes(
+            &pack_motion(&reference.raw, &fixture.parameters(reference.phase)).unwrap(),
+        );
+        assert!(
+            actual == reference.expected,
+            "reference {ordinal}: lengths {} and {}, first unequal byte {:?}",
+            actual.len(),
+            reference.expected.len(),
+            actual
+                .iter()
+                .zip(&reference.expected)
+                .position(|(a, b)| a != b)
+        );
+    }
+}
+
+pub(super) struct NativeFixture {
+    geometry: Geometry,
+    luma: Vec<u8>,
+    y: [f32; 256],
+    uv: [f32; 256],
+    pub references: Vec<NativeReference>,
+}
+
+pub(super) struct NativeReference {
+    pub raw: Vec<[i32; 3]>,
+    pub expected: Vec<u8>,
+    pub phase: f64,
+}
+
+impl NativeFixture {
+    pub fn parameters(&self, phase: f64) -> Parameters<'_> {
+        Parameters {
+            geometry: self.geometry,
+            luma: &self.luma,
+            confidence_y: &self.y,
+            confidence_uv: &self.uv,
+            scale_base: 4,
+            scale_extra: 700,
+            temporal: 1.25,
+            phase,
+        }
+    }
+}
+
+/// CPU and GPU tests consume the same hash-sealed captured bytes, rather
+/// than using one implementation to manufacture the other's expectations.
+pub(super) fn native_fixture() -> NativeFixture {
     let directory = std::env::var_os("KJERAG_MOTION_FIXTURE_DIR")
         .map(std::path::PathBuf::from)
         .expect("set KJERAG_MOTION_FIXTURE_DIR to temporal-motion-capture-01/run-01");
@@ -230,29 +280,24 @@ fn captured_six_reference_motion_matrices_are_exact() {
         block: [16, 16],
     };
 
-    for ordinal in 0..6 {
-        let raw_name = format!("reference-{ordinal}-raw.bin");
-        let expected_name = format!("reference-{ordinal}-packed.bin");
-        let raw = raw_records(&read_hashed(&directory, &raw_name, raw_hashes[ordinal]));
-        let expected = read_hashed(&directory, &expected_name, packed_hashes[ordinal]);
-        let parameters = Parameters {
-            geometry,
-            luma: &luma,
-            confidence_y: &y,
-            confidence_uv: &uv,
-            scale_base: 4,
-            scale_extra: 700,
-            temporal: 1.25,
-            phase: phases[ordinal],
-        };
-        let actual = pack_motion(&raw, &parameters).unwrap();
-        let actual = packed_bytes(&actual);
-        assert!(
-            actual == expected,
-            "reference {ordinal}: lengths {} and {}, first unequal byte {:?}",
-            actual.len(),
-            expected.len(),
-            actual.iter().zip(&expected).position(|(a, b)| a != b)
-        );
+    let references = (0..6)
+        .map(|ordinal| {
+            let raw_name = format!("reference-{ordinal}-raw.bin");
+            let expected_name = format!("reference-{ordinal}-packed.bin");
+            let raw = raw_records(&read_hashed(&directory, &raw_name, raw_hashes[ordinal]));
+            let expected = read_hashed(&directory, &expected_name, packed_hashes[ordinal]);
+            NativeReference {
+                raw,
+                expected,
+                phase: phases[ordinal],
+            }
+        })
+        .collect();
+    NativeFixture {
+        geometry,
+        luma,
+        y,
+        uv,
+        references,
     }
 }

@@ -14,6 +14,17 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**GPU temporal motion packing verified, 2026-09-10:** the next optional GPU
+stage reproduces all2,764,800 signed lanes in the six native motion fields.
+The six independent CPU searches can also run concurrently without changing
+their vectors or reference order. All49 temporal checks pass on AMD. With
+both routes and GPU pyramids enabled, the exact612.078 diagnostic preserves
+all31 filtered pictures and259 controls byte-for-byte. Search averages177ms
+per output and GPU/upload/fuse/readback89ms in this offline run, still far
+outside playback budgets. No complete GPU search, automatic ISO/history
+policy, installed change or flicker acceptance is claimed. Both delivered
+moving comparisons remain unchanged; no gradual color update or new export.
+
 **GPU temporal brightness preparation verified, 2026-09-10:** the half-size
 brightness image and all subsequent pyramid levels can now be prepared by
 GPU render passes, with no submission, wait or readback inside the primitive.

@@ -192,6 +192,31 @@ pub fn selected(current: &[Level], reference: &[Level]) -> Result<Vec<[i32; 3]>,
         .collect()
 }
 
+/// Run the six independent reference searches concurrently, retaining their
+/// supplied order. Each worker still executes the unchanged serial search.
+/// This bounded CPU helper accelerates offline review, not GPU playback.
+pub fn selected_six(
+    current: &[Level],
+    references: [&[Level]; 6],
+) -> Result<[Vec<[i32; 3]>; 6], Error> {
+    for reference in references {
+        validate(current, reference)?;
+    }
+    std::thread::scope(|scope| {
+        let jobs = references.map(|reference| scope.spawn(move || selected(current, reference)));
+        let results: Result<Vec<_>, Error> = jobs
+            .into_iter()
+            .map(|job| {
+                job.join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect();
+        Ok(results?
+            .try_into()
+            .expect("six workers produce six results"))
+    })
+}
+
 fn validate(current: &[Level], reference: &[Level]) -> Result<(), Error> {
     if current.len() != LEVELS || reference.len() != LEVELS {
         return Err(Error::LevelCount {

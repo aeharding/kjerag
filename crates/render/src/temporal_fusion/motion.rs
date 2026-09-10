@@ -1,6 +1,9 @@
 //! Readable CPU reference for Studio's selected motion-grid expansion and
 //! confidence packing. This is an oracle, not the playback implementation.
 
+/// Render-pass implementation of the captured nonnegative-cost subset.
+pub mod gpu;
+
 /// Geometry of the selected two-times motion-grid expansion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Geometry {

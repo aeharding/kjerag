@@ -101,12 +101,25 @@ reported-view comparison preserves all filtered and unfiltered artifacts.
 Native captures verify the reductions from the half-size base; they still do
 not provide same-input native authority for the initial full-Y bridge.
 
+`motion::gpu` expands supplied raw search vectors and packs displacement plus
+independent Y/UV confidence into an Rgba16Sint texture. The scalar phase and
+threshold preparation remains on the CPU in the reference operation order;
+the per-pixel GPU work needs no optional wide numeric types. Its explicit
+subset requires i16 raw displacement, nonnegative 16x16 byte SADs and positive
+thresholds at most46340. Other thresholds, including the CPU reference's
+wrapping-square cases, are refused rather than approximated. Encoding submits
+and waits for nothing. Raw vectors and luma are still CPU uploads, so this is
+not GPU motion search. The offline caller may separately run the six pure CPU
+reference searches concurrently, preserving their supplied order. Searches
+within each reference retain their serial predictors and candidate order.
+
 The test-only `scene::panorama_review` path materializes each exact displayed
 source/map/fusion into a body-fixed RGB panorama, then projects it through the
 same locked view. An unfiltered NV12 round trip isolates representation changes.
 Its optional captured-ISO100 temporal arm keeps seven contiguous source-stamped
-NV12 images and their CPU gray pyramids, emits only center position three, and
-never pads either end. CPU search/packing and explicit readbacks are offline
+NV12 images and their gray pyramids, emits only center position three, and
+never pads either end. Optional GPU pyramid/packing and concurrent CPU search
+routes change execution only; CPU search and explicit readbacks remain offline
 reference execution, not the player architecture. The source image and its
 color corrections do not change between comparison arms. No ISO selection,
 startup/seek/end policy, gradual color update or performance claim follows from

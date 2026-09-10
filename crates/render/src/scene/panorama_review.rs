@@ -40,13 +40,43 @@ impl PanoramaReview {
             "source\ttime_ns\tpanorama_width\tpanorama_height\tarm\trgba_sha256\tmax_code_difference\tmean_absolute_code_difference\tp99_code_difference"
         )
         .unwrap();
-        let temporal = std::env::var_os("KJERAG_PANORAMA_TEMPORAL_ISO100").map(|value| {
-            assert_eq!(value, "1", "set the explicit ISO100 diagnostic flag to 1");
-            temporal::TemporalReview::new(device, output)
-        });
+        let temporal_enabled = std::env::var_os("KJERAG_PANORAMA_TEMPORAL_ISO100")
+            .map(|value| {
+                assert_eq!(value, "1", "set the explicit ISO100 diagnostic flag to 1");
+                true
+            })
+            .unwrap_or(false);
+        let gpu_motion = std::env::var_os("KJERAG_PANORAMA_GPU_MOTION")
+            .map(|value| {
+                assert_eq!(
+                    value, "1",
+                    "set the explicit GPU motion diagnostic flag to 1"
+                );
+                assert!(
+                    temporal_enabled,
+                    "GPU motion review needs the temporal diagnostic"
+                );
+                true
+            })
+            .unwrap_or(false);
+        let parallel_search = std::env::var_os("KJERAG_PANORAMA_PARALLEL_SEARCH")
+            .map(|value| {
+                assert_eq!(
+                    value, "1",
+                    "set the explicit parallel search diagnostic flag to 1"
+                );
+                assert!(
+                    temporal_enabled,
+                    "parallel search review needs the temporal diagnostic"
+                );
+                true
+            })
+            .unwrap_or(false);
+        let temporal = temporal_enabled
+            .then(|| temporal::TemporalReview::new(device, output, gpu_motion, parallel_search));
         let gpu_pyramid = std::env::var_os("KJERAG_PANORAMA_GPU_PYRAMID").map(|value| {
             assert_eq!(value, "1", "set the explicit GPU pyramid diagnostic flag to 1");
-            assert!(temporal.is_some(), "GPU pyramid review needs the temporal diagnostic");
+            assert!(temporal_enabled, "GPU pyramid review needs the temporal diagnostic");
             std::fs::write(
                 output.join("panorama-pyramid.txt"),
                 "GPU half-Y and separable pyramid; CPU search still reads all logical levels.\n\

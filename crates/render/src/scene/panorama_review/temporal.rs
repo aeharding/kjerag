@@ -48,12 +48,19 @@ pub(super) struct TemporalReview {
     fuse: GpuFuse,
     color: GpuColorConversion,
     projector: PanoramaProjector,
+    gpu_motion: Option<motion::gpu::Builder>,
+    parallel_search: bool,
     output: PathBuf,
     log: std::io::BufWriter<std::fs::File>,
 }
 
 impl TemporalReview {
-    pub(super) fn new(device: &wgpu::Device, output: &Path) -> Self {
+    pub(super) fn new(
+        device: &wgpu::Device,
+        output: &Path,
+        gpu_motion: bool,
+        parallel_search: bool,
+    ) -> Self {
         let frames = output.join("panorama-denoised-diagnostic");
         std::fs::create_dir(&frames).unwrap_or_else(|error| {
             panic!("create {}: {error}", frames.display());
@@ -69,13 +76,28 @@ impl TemporalReview {
         )
         .unwrap();
         let contract = output.join("panorama-denoised-diagnostic.txt");
+        let search_route = if parallel_search {
+            "Search route: CPU search::selected_six, six workers preserving supplied reference order.\n"
+        } else {
+            "Search route: serial CPU search::selected for each supplied reference.\n"
+        };
+        let motion_route = if gpu_motion {
+            "Motion route: GPU render-pass packing from explicit raw/luma CPU uploads.\n\
+             pack_ms is zero because there is no CPU packing stage; GPU+wait includes motion encode/upload/copy, fusion, conversion, projection and readback completion.\n"
+        } else {
+            "Motion route: CPU motion::pack_motion, then explicit packed-flow upload.\n\
+             pack_ms measures that CPU stage; GPU+wait begins with GPU texture preparation/upload and includes fusion, conversion, projection and readback completion.\n"
+        };
         std::fs::write(
             &contract,
-            "Experimental offline ISO100 regime only.\n\
+            format!(
+                "Experimental offline ISO100 regime only.\n\
              Seven contiguous same-epoch sources; center is position3.\n\
              References are c-3,c-2,c-1,c+1,c+2,c+3.\n\
              No startup/end padding, automatic policy, or gradual color update.\n\
-             CPU pyramid/search/packing and explicit GPU completion are diagnostic, not playback performance.\n",
+             CPU preparation and explicit GPU completion are diagnostic, not playback performance.\n\
+             {search_route}{motion_route}"
+            ),
         )
         .unwrap_or_else(|error| panic!("write {}: {error}", contract.display()));
         Self {
@@ -84,6 +106,8 @@ impl TemporalReview {
             fuse: GpuFuse::new(device),
             color: GpuColorConversion::new(device),
             projector: PanoramaProjector::new(device),
+            gpu_motion: gpu_motion.then(|| motion::gpu::Builder::new(device)),
+            parallel_search,
             output: frames,
             log,
         }
@@ -137,10 +161,27 @@ impl TemporalReview {
         let center = &self.window[CENTER];
         let luma = &center.levels[3].pixels;
         let search_started = Instant::now();
-        let raw: Vec<Vec<[i32; 3]>> = REFERENCES
-            .iter()
-            .map(|&at| {
-                crate::temporal_fusion::search::selected(&center.levels, &self.window[at].levels)
+        let raw: Vec<Vec<[i32; 3]>> = if self.parallel_search {
+            crate::temporal_fusion::search::selected_six(
+                &center.levels,
+                REFERENCES.map(|at| self.window[at].levels.as_slice()),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "parallel motion search for center {}: {error}",
+                    center.stamp.index()
+                )
+            })
+            .into_iter()
+            .collect()
+        } else {
+            REFERENCES
+                .iter()
+                .map(|&at| {
+                    crate::temporal_fusion::search::selected(
+                        &center.levels,
+                        &self.window[at].levels,
+                    )
                     .unwrap_or_else(|error| {
                         panic!(
                             "motion search for center {} reference {}: {error}",
@@ -148,38 +189,41 @@ impl TemporalReview {
                             self.window[at].stamp.index()
                         )
                     })
-            })
-            .collect();
+                })
+                .collect()
+        };
         let search_ms = search_started.elapsed().as_secs_f64() * 1000.0;
 
-        let pack_started = Instant::now();
         let geometry = Geometry {
             full: FULL,
             raw_grid: RAW_GRID,
             output_grid: FLOW_GRID,
             block: [16, 16],
         };
-        let packed: Vec<Vec<[i16; 4]>> = raw
-            .iter()
-            .zip(PHASES)
-            .map(|(raw, phase)| {
-                motion::pack_motion(
-                    raw,
-                    &motion::Parameters {
-                        geometry,
-                        luma,
-                        confidence_y: &CONFIDENCE_Y,
-                        confidence_uv: &CONFIDENCE_UV,
-                        scale_base: 4,
-                        scale_extra: 700,
-                        temporal: 1.25,
-                        phase,
-                    },
-                )
-                .unwrap_or_else(|error| panic!("pack captured-regime motion: {error}"))
-            })
-            .collect();
-        let pack_ms = pack_started.elapsed().as_secs_f64() * 1000.0;
+        let motion_parameters = |phase| motion::Parameters {
+            geometry,
+            luma,
+            confidence_y: &CONFIDENCE_Y,
+            confidence_uv: &CONFIDENCE_UV,
+            scale_base: 4,
+            scale_extra: 700,
+            temporal: 1.25,
+            phase,
+        };
+        let (packed, pack_ms) = if self.gpu_motion.is_none() {
+            let pack_started = Instant::now();
+            let packed: Vec<Vec<[i16; 4]>> = raw
+                .iter()
+                .zip(PHASES)
+                .map(|(raw, phase)| {
+                    motion::pack_motion(raw, &motion_parameters(phase))
+                        .unwrap_or_else(|error| panic!("pack captured-regime motion: {error}"))
+                })
+                .collect();
+            (Some(packed), pack_started.elapsed().as_secs_f64() * 1000.0)
+        } else {
+            (None, 0.0)
+        };
 
         let gpu_started = Instant::now();
         let y = array_texture(
@@ -210,12 +254,14 @@ impl TemporalReview {
             1,
             wgpu::TextureFormat::R8Uint,
         );
-        for (layer, bytes) in packed
-            .iter()
-            .map(|records| packed_bytes(records))
-            .enumerate()
-        {
-            write_layer(queue, &flow, layer as u32, FLOW_GRID, 8, &bytes);
+        if let Some(packed) = &packed {
+            for (layer, bytes) in packed
+                .iter()
+                .map(|records| packed_bytes(records))
+                .enumerate()
+            {
+                write_layer(queue, &flow, layer as u32, FLOW_GRID, 8, &bytes);
+            }
         }
         write_layer(queue, &luma_texture, 0, FLOW_GRID, 1, luma);
 
@@ -225,6 +271,15 @@ impl TemporalReview {
         for (layer, record) in self.window.iter().enumerate() {
             copy_layer(&mut encoder, &record.nv12.y, &y, layer as u32);
             copy_layer(&mut encoder, &record.nv12.uv, &uv, layer as u32);
+        }
+        if let Some(builder) = &self.gpu_motion {
+            for (layer, (raw, phase)) in raw.iter().zip(PHASES).enumerate() {
+                let output = builder
+                    .encode(device, &mut encoder, raw, &motion_parameters(phase))
+                    .unwrap_or_else(|error| panic!("GPU-pack captured-regime motion: {error}"));
+                // The recorded copy retains its source texture until completion.
+                copy_layer(&mut encoder, &output, &flow, layer as u32);
+            }
         }
         let fused = self
             .fuse

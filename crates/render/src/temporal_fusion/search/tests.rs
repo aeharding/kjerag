@@ -41,6 +41,28 @@ fn equal_images_choose_zero_and_report_zero_sad() {
 }
 
 #[test]
+fn parallel_references_preserve_each_serial_result_and_input_order() {
+    let current = constant_levels(1024, 1024, 73);
+    let references = [10, 42, 73, 94, 121, 255].map(|value| constant_levels(1024, 1024, value));
+    let parallel = selected_six(&current, references.each_ref().map(Vec::as_slice)).unwrap();
+    for (reference, actual) in references.iter().zip(parallel) {
+        let expected = selected(&current, reference).unwrap();
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn parallel_references_validate_every_input_before_spawning() {
+    let current = constant_levels(1024, 1024, 73);
+    let mut references = std::array::from_fn::<_, 6, _>(|_| current.clone());
+    references[4].pop();
+    assert!(matches!(
+        selected_six(&current, references.each_ref().map(Vec::as_slice)),
+        Err(Error::LevelCount { .. })
+    ));
+}
+
+#[test]
 fn inclusive_seed_clip_and_strict_candidate_boundary_are_distinct() {
     let bounds = Bounds {
         min_x: -16,
@@ -267,11 +289,18 @@ fn matches_combined_adapter_for_all_six_saved_references() {
         "e79b0904de5ebd55627d678fecf9a98e77ea5818edb4853b76a44cdbee3281b4",
     ];
 
-    for ordinal in 0..6 {
+    let references: [Vec<Level>; 6] = std::array::from_fn(|ordinal| {
         let name = format!("reference-{ordinal}-super-0.bin");
-        let reference = captured_levels(&read_hashed(&capture, &name, reference_hashes[ordinal]));
-        let records = selected(&current, &reference).unwrap();
+        captured_levels(&read_hashed(&capture, &name, reference_hashes[ordinal]))
+    });
+    let parallel = selected_six(&current, references.each_ref().map(Vec::as_slice)).unwrap();
+    for ordinal in 0..6 {
+        let records = selected(&current, &references[ordinal]).unwrap();
         let actual = packed_i32x3(&records);
+        assert_eq!(
+            parallel[ordinal], records,
+            "parallel reference {ordinal} differs"
+        );
         let expected_name = format!("actual-reference-{ordinal}-raw.bin");
         let wanted = read_hashed(&expected, &expected_name, output_hashes[ordinal]);
         assert_eq!(
