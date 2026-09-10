@@ -2953,3 +2953,14 @@ checkpoint and all matched. Logs, receipts, CSVs, binaries, source footage and
 native captures were not consolidated. These generated artifacts are immutable;
 future runs must continue using fresh output directories. Dry-run, operation
 and after-check logs are retained with this checkpoint.
+
+The rejected shader is archived at `c9f35ad6` and removed from active source.
+The restored shader matches4ea4828b byte-for-byte, SHA256
+`551955d9c20f9df85a260f9304173e65a6e8d40cd87416a12f813804152fc267`.
+The two new regressions remain. All79 temporal tests pass again on the restored
+path; standalone submit/completion/readback repeats43.705/31.516/25.869 ms.
+Final test binary SHA256:
+`72553275de10c5867eca48f09133112a0c4783c90f3d4f7bc73fa248dd1e36a0`.
+Workspace all-target Clippy, formatting, source-lock and rename checks pass.
+No full workspace tests/UI harness, installation, push or merge. The previous
+full moving reviews remain current, and there is no new flicker-fix claim.

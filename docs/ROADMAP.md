@@ -17,8 +17,9 @@ shared-camera engine work.
 **Duplicate-SAD reuse rejected, 2026-09-10:** a workgroup-local raw-cost cache
 preserves all79 temporal tests and both98-artifact short comparisons, but makes
 the actual612 finest kernel slower:47.632 ms mean versus33.250 ms for the
-retained64-lane baseline. It is not selected for playback or further extension;
-archive the experiment and remove its shader bookkeeping. Two new full-plane
+retained64-lane baseline. The experiment is archived at `c9f35ad6`; its shader
+bookkeeping is removed, restoring the exact previous shader. All79 checks pass
+again on the restored path. Two new full-plane
 GPU regressions keep duplicate-candidate and ring-penalty handling explicit.
 No new visual result, colour fade or installed change. Evidence:
 `scratch/studio-seam-flicker-612-20260909-01/temporal-sad-reuse-01`.
