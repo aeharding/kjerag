@@ -7,6 +7,14 @@ const UV_SIZE: [u32; 2] = [8, 8];
 
 #[test]
 fn gpu_uses_separate_y_and_uv_motion_weights() {
+    // Nonpositive confidence contributes exactly zero for either plane,
+    // independently of the other plane's positive confidence and sample.
+    for inactive_confidence in [0, -1, i16::MIN] {
+        assert_separate_y_and_uv_motion_weights(inactive_confidence);
+    }
+}
+
+fn assert_separate_y_and_uv_motion_weights(inactive_confidence: i16) {
     let Some((device, queue)) = gpu() else {
         return;
     };
@@ -80,7 +88,7 @@ fn gpu_uses_separate_y_and_uv_motion_weights() {
         [0, 0],
         [1, 1],
         8,
-        &flow_texel(1, 0, 255, 0),
+        &flow_texel(1, 0, 255, inactive_confidence),
     );
     write_layer(
         &queue,
@@ -89,7 +97,7 @@ fn gpu_uses_separate_y_and_uv_motion_weights() {
         [0, 0],
         [1, 1],
         8,
-        &flow_texel(0, 0, 0, 255),
+        &flow_texel(0, 0, inactive_confidence, 255),
     );
     write_layer(&queue, &luma, 0, [0, 0], [1, 1], 1, &[73]);
 

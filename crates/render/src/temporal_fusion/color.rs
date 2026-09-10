@@ -226,22 +226,6 @@ impl GpuColorConversion {
         coefficients.validate()?;
         validate_rgb(rgb)?;
         let size = rgb.size();
-        let parameters = uniform(&self.device, coefficients, "diagnostic RGB to NV12 matrix");
-        let rgb_view = rgb.create_view(&Default::default());
-        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("diagnostic RGB to NV12"),
-            layout: &self.rgb_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&rgb_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: parameters.as_entire_binding(),
-                },
-            ],
-        });
         let output = Nv12 {
             y: target(
                 &self.device,
@@ -260,9 +244,50 @@ impl GpuColorConversion {
             device: self.device.clone(),
             coefficients,
         };
-        draw(encoder, &output.y, &self.y_pipeline, &group);
-        draw(encoder, &output.uv, &self.uv_pipeline, &group);
+        let y_view = output.y.create_view(&Default::default());
+        let uv_view = output.uv.create_view(&Default::default());
+        self.encode_rgb_to_views(encoder, rgb, coefficients, &y_view, &uv_view)?;
         Ok(output)
+    }
+
+    /// Record RGB conversion into caller-owned, correctly typed target views.
+    ///
+    /// The target contract is crate-private because wgpu validates attachment
+    /// format, size, layer and device while recording. Resident history uses
+    /// this to render directly into one already-reserved physical array layer.
+    pub(crate) fn encode_rgb_to_views(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        rgb: &wgpu::Texture,
+        coefficients: MatrixCoefficients,
+        y: &wgpu::TextureView,
+        uv: &wgpu::TextureView,
+    ) -> Result<(), Error> {
+        coefficients.validate()?;
+        validate_rgb(rgb)?;
+        let parameters = uniform(&self.device, coefficients, "diagnostic RGB to NV12 matrix");
+        let rgb_view = rgb.create_view(&Default::default());
+        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("diagnostic RGB to NV12"),
+            layout: &self.rgb_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&rgb_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: parameters.as_entire_binding(),
+                },
+            ],
+        });
+        draw_view(encoder, y, &self.y_pipeline, &group);
+        draw_view(encoder, uv, &self.uv_pipeline, &group);
+        Ok(())
+    }
+
+    pub(crate) fn belongs_to(&self, device: &wgpu::Device) -> bool {
+        self.device == *device
     }
 
     /// Record NV12 to gamma-RGB conversion using centred-2x2 bilinear chroma.
@@ -403,15 +428,6 @@ fn target(
     })
 }
 
-fn draw(
-    encoder: &mut wgpu::CommandEncoder,
-    target: &wgpu::Texture,
-    pipeline: &wgpu::RenderPipeline,
-    group: &wgpu::BindGroup,
-) {
-    draw_scissored(encoder, target, pipeline, group, None);
-}
-
 fn draw_scissored(
     encoder: &mut wgpu::CommandEncoder,
     target: &wgpu::Texture,
@@ -420,10 +436,29 @@ fn draw_scissored(
     rectangles: Option<&[[u32; 4]]>,
 ) {
     let view = target.create_view(&Default::default());
+    draw_view_scissored(encoder, &view, pipeline, group, rectangles);
+}
+
+fn draw_view(
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::TextureView,
+    pipeline: &wgpu::RenderPipeline,
+    group: &wgpu::BindGroup,
+) {
+    draw_view_scissored(encoder, target, pipeline, group, None);
+}
+
+fn draw_view_scissored(
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::TextureView,
+    pipeline: &wgpu::RenderPipeline,
+    group: &wgpu::BindGroup,
+    rectangles: Option<&[[u32; 4]]>,
+) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("diagnostic RGB/NV12 conversion"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &view,
+            view: target,
             resolve_target: None,
             depth_slice: None,
             ops: wgpu::Operations {

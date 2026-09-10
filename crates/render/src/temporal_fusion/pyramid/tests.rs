@@ -35,13 +35,28 @@ fn rounds_pair_average_edges_up() {
 }
 
 #[test]
-fn rejects_an_odd_level_only_when_it_must_be_reduced() {
-    assert!(build(&[0; 15], 5, 3, 1).is_ok());
+fn floor_halves_odd_axes_and_discards_the_unmatched_tail() {
+    let base = [0, 2, 4, 6, 255, 8, 10, 12, 14, 255, 255, 255, 255, 255, 255];
+    let levels = build(&base, 5, 3, 2).unwrap();
+    assert_eq!((levels[1].width, levels[1].height), (2, 1));
+    assert_eq!(levels[1].pixels, [5, 9]);
+
+    let mut one_x2_level = vec![0; 90 * 45];
+    one_x2_level[44 * 90..].fill(255);
+    let levels = build(&one_x2_level, 90, 45, 3).unwrap();
+    assert_eq!((levels[1].width, levels[1].height), (45, 22));
+    assert_eq!((levels[2].width, levels[2].height), (22, 11));
+    assert!(levels[1].pixels.iter().all(|&value| value == 0));
+    assert!(levels[2].pixels.iter().all(|&value| value == 0));
+}
+
+#[test]
+fn rejects_a_reduction_that_would_have_no_pixels() {
     assert_eq!(
-        build(&[0; 15], 5, 3, 2),
-        Err(Error::OddReduction {
+        build(&[0; 3], 1, 3, 2),
+        Err(Error::EmptyReduction {
             level: 0,
-            width: 5,
+            width: 1,
             height: 3,
         })
     );
@@ -61,7 +76,7 @@ fn rejects_invalid_shape_and_level_count() {
     assert_eq!(build(&[], usize::MAX, 2, 1), Err(Error::DimensionOverflow));
     assert!(matches!(
         build(&[0; 4], 2, 2, usize::MAX),
-        Err(Error::OddReduction { .. })
+        Err(Error::EmptyReduction { .. })
     ));
 }
 

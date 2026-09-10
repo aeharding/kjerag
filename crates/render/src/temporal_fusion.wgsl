@@ -30,11 +30,9 @@ fn layer(index: u32) -> i32 {
 
 fn contribution(confidence: f32, current: f32, neighbor: f32) -> f32 {
     let difference = abs(current - neighbor);
-    if difference < parameters.noise {
-        return confidence;
-    }
-    return clamp(1.5 * parameters.noise / max(difference, 0.000001) - 0.5,
-                 0.0, confidence);
+    let limited = clamp(1.5 * parameters.noise / max(difference, 0.000001) - 0.5,
+                        0.0, confidence);
+    return select(limited, confidence, difference < parameters.noise);
 }
 
 @fragment
@@ -50,6 +48,12 @@ fn fuse_y(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     var weight_sum = 1.0;
     for (var i = 0u; i < parameters.count; i += 1u) {
         let flow = textureLoad(motion, flow_block, i32(i), 0);
+        // Normalized source samples are finite. A nonpositive confidence
+        // gives exactly zero weight, so neither the neighbor fetch nor its
+        // difference/division can change total or weight_sum.
+        if flow.z <= 0 {
+            continue;
+        }
         let coordinate = clamp(vec2<i32>(pixel) + flow.xy, vec2<i32>(0), last);
         let neighbor = textureLoad(images_y, coordinate, layer(i), 0).x;
         let weight = contribution(clamp(f32(flow.z) * (1.0 / 255.0), 0.0, 1.0), current, neighbor);
@@ -73,6 +77,9 @@ fn fuse_uv(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     var weight_sum = vec2<f32>(1.0);
     for (var i = 0u; i < parameters.count; i += 1u) {
         let flow = textureLoad(motion, flow_block, i32(i), 0);
+        if flow.w <= 0 {
+            continue;
+        }
         let coordinate = clamp(vec2<i32>(pixel) + (flow.xy >> vec2<u32>(1u)), vec2<i32>(0), last);
         let neighbor = textureLoad(images_uv, coordinate, layer(i), 0).xy;
         let confidence = clamp(f32(flow.w) * (1.0 / 255.0), 0.0, 1.0);

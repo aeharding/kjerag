@@ -73,10 +73,10 @@ fn half_luma_preserves_every_byte_and_rounds_every_possible_sum() {
 }
 
 #[test]
-fn reductions_preserve_separate_rounding_borders_and_odd_terminal_levels() {
+fn reductions_preserve_separate_rounding_borders_and_floor_halve_odd_levels() {
     let Some((device, queue)) = gpu() else { return };
     let builder = Builder::new(&device);
-    for (width, height, count) in [(2, 2, 2), (8, 8, 4), (64, 32, 6), (5, 3, 1)] {
+    for (width, height, count) in [(2, 2, 2), (8, 8, 4), (64, 32, 6), (5, 3, 1), (90, 45, 3)] {
         let bytes: Vec<u8> = (0..height)
             .flat_map(|y| (0..width).map(move |x| ((37 * x + 61 * y + 13 * x * y) % 256) as u8))
             .collect();
@@ -88,6 +88,10 @@ fn reductions_preserve_separate_rounding_borders_and_odd_terminal_levels() {
                     53, 124, 115, 122, 124, 143, 134, 141, 131, 166, 129, 128, 138, 125, 112, 99
                 ]
             );
+        }
+        if width == 90 {
+            assert_eq!((expected[1].width, expected[1].height), (45, 22));
+            assert_eq!((expected[2].width, expected[2].height), (22, 11));
         }
         check_base(&device, &queue, &builder, &expected, "synthetic");
     }
@@ -221,6 +225,33 @@ fn bad_input_is_refused_without_poisoning_the_encoder() {
     let Some((device, queue)) = gpu() else { return };
     let builder = Builder::new(&device);
     let mut encoder = device.create_command_encoder(&Default::default());
+    let too_small = upload(
+        &device,
+        &queue,
+        &[0; 3],
+        [1, 3],
+        wgpu::TextureFormat::R8Uint,
+    );
+    assert!(
+        builder
+            .encode_base(&device, &mut encoder, &too_small, 2)
+            .is_err()
+    );
+    assert!(
+        builder
+            .encode_base(&device, &mut encoder, &too_small, 0)
+            .is_err()
+    );
+    assert!(
+        builder
+            .encode_base(&device, &mut encoder, &too_small, usize::MAX)
+            .is_err()
+    );
+    assert!(
+        builder
+            .encode_luma(&device, &mut encoder, &too_small, 1)
+            .is_err()
+    );
     let odd = upload(
         &device,
         &queue,
@@ -228,14 +259,6 @@ fn bad_input_is_refused_without_poisoning_the_encoder() {
         [5, 3],
         wgpu::TextureFormat::R8Uint,
     );
-    assert!(builder.encode_base(&device, &mut encoder, &odd, 2).is_err());
-    assert!(builder.encode_base(&device, &mut encoder, &odd, 0).is_err());
-    assert!(
-        builder
-            .encode_base(&device, &mut encoder, &odd, usize::MAX)
-            .is_err()
-    );
-    assert!(builder.encode_luma(&device, &mut encoder, &odd, 1).is_err());
     let unorm = upload(
         &device,
         &queue,

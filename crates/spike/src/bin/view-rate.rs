@@ -80,15 +80,21 @@ fn main() -> Fallible<()> {
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    // Authenticate the selected map before measurement; never time a blank or
-    // generic fallback and call it fast selected stitching.
-    let map = scene
-        .diagnostic_one_xs_displayed_map()?
-        .ok_or("view-rate requires resident stitching")?;
-    if Some(map.frame().clone()) != scene.displayed_frame_stamp() {
-        return Err("view-rate source and displayed map identities differ".into());
+    // Authenticate the exact selected output before measurement; never time
+    // a blank or generic fallback and call it fast selected stitching.
+    let filtered = scene.diagnostic_filtered_displayed_frame()?;
+    let temporal_filter = filtered.is_some();
+    let selected_frame = match filtered {
+        Some(frame) => frame,
+        None => scene
+            .diagnostic_one_xs_displayed_map()?
+            .ok_or("view-rate requires resident stitching")?
+            .frame()
+            .clone(),
+    };
+    if Some(selected_frame) != scene.displayed_frame_stamp() {
+        return Err("view-rate source and displayed stitch identities differ".into());
     }
-    drop(map);
     println!(
         "{}",
         json!({"gpu": gpu.name, "output": [width, height], "target_hz": HZ,
@@ -96,7 +102,8 @@ fn main() -> Fallible<()> {
             "view_degrees": [camera.yaw.to_degrees(), camera.pitch.to_degrees(), camera.fov.to_degrees()],
             "measurement": "offscreen CPU+GPU completed redraw, not native presentation",
             "completion": "queue-prefix callback, nonblocking poll, 100 us timeout",
-            "start": scene.displayed_frame(), "sampling": "selected type-2 box filter"})
+            "start": scene.displayed_frame(), "sampling": "selected type-2 box filter",
+            "temporal_filter": temporal_filter})
     );
     measure(&scene, &mut pipeline, &gpu, &target, camera, false)?;
     scene.play();

@@ -73,7 +73,12 @@ struct Vector {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Error {
+    ReferenceCount(usize),
     LevelCount {
+        current: usize,
+        reference: usize,
+    },
+    CoarseLevelCount {
         current: usize,
         reference: usize,
     },
@@ -93,9 +98,17 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ReferenceCount(count) => write!(
+                formatter,
+                "concurrent finest preparation needs 1 through 6 references, got {count}"
+            ),
             Self::LevelCount { current, reference } => write!(
                 formatter,
                 "selected motion search requires seven levels, got {current} current and {reference} reference"
+            ),
+            Self::CoarseLevelCount { current, reference } => write!(
+                formatter,
+                "selected coarse motion search requires levels one through six, got {current} current and {reference} reference"
             ),
             Self::Geometry { level, message } => {
                 write!(formatter, "motion pyramid level {level} {message}")
@@ -167,6 +180,76 @@ pub fn prepare_finest(current: &[Level], reference: &[Level]) -> Result<FinestIn
     })
 }
 
+/// Prepare one through six independent references concurrently, preserving
+/// their supplied order. Each worker runs [`prepare_finest`] unchanged; this
+/// wrapper owns no pool and creates no more than six scoped threads.
+///
+/// Every pyramid is validated before any worker starts. A worker error is
+/// returned in reference order, and a worker panic is resumed on the caller.
+pub fn prepare_finest_ordered(
+    current: &[Level],
+    references: &[&[Level]],
+) -> Result<Vec<FinestInput>, Error> {
+    if !(1..=6).contains(&references.len()) {
+        return Err(Error::ReferenceCount(references.len()));
+    }
+    for reference in references {
+        validate(current, reference)?;
+    }
+    run_ordered(references.len(), |index| {
+        prepare_finest(current, references[index])
+    })
+}
+
+/// Prepare finest-level inputs from CPU copies of selected pyramid levels one
+/// through six. `finest` is the explicit geometry of GPU-resident level zero;
+/// its pixels are neither required nor represented by this coarse-only API.
+pub fn prepare_finest_ordered_coarse(
+    finest: [usize; 2],
+    current: &[Level],
+    references: &[&[Level]],
+) -> Result<Vec<FinestInput>, Error> {
+    if !(1..=6).contains(&references.len()) {
+        return Err(Error::ReferenceCount(references.len()));
+    }
+    for reference in references {
+        validate_coarse(finest, current, reference)?;
+    }
+    run_ordered(references.len(), |index| {
+        let coarse = search_levels(current, references[index], 1)?;
+        let global = estimate_global_doubled(&coarse)?;
+        let seeds = interpolate(
+            &coarse,
+            [current[0].width / BLOCK, current[0].height / BLOCK],
+            [finest[0] / BLOCK, finest[1] / BLOCK],
+        )?;
+        Ok(FinestInput {
+            seeds: raw_records(seeds)?,
+            global: [global.x, global.y],
+        })
+    })
+}
+
+fn run_ordered<T: Send, F: Fn(usize) -> Result<T, Error> + Sync>(
+    count: usize,
+    worker: F,
+) -> Result<Vec<T>, Error> {
+    std::thread::scope(|scope| {
+        let worker = &worker;
+        let jobs: Vec<_> = (0..count)
+            .map(|index| scope.spawn(move || worker(index)))
+            .collect();
+        let results: Vec<_> = jobs
+            .into_iter()
+            .map(|job| {
+                job.join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect();
+        results.into_iter().collect()
+    })
+}
+
 fn raw_records(vectors: Vec<Vector>) -> Result<Vec<[i32; 3]>, Error> {
     vectors
         .into_iter()
@@ -186,6 +269,14 @@ fn search_through_level(
     last_level: usize,
 ) -> Result<Vec<Vector>, Error> {
     validate(current, reference)?;
+    search_levels(&current[last_level..], &reference[last_level..], last_level)
+}
+
+fn search_levels(
+    current: &[Level],
+    reference: &[Level],
+    first_level: usize,
+) -> Result<Vec<Vector>, Error> {
     let mut previous: Option<Vec<Vector>> = None;
     let mut previous_shape = [0, 0];
     let mut global = Vector {
@@ -194,9 +285,10 @@ fn search_through_level(
         sad: -1,
     };
 
-    for level_index in (last_level..LEVELS).rev() {
-        let current_level = &current[level_index];
-        let reference_level = &reference[level_index];
+    for relative_level in (0..current.len()).rev() {
+        let level_index = first_level + relative_level;
+        let current_level = &current[relative_level];
+        let reference_level = &reference[relative_level];
         let blocks_x = current_level.width / BLOCK;
         let blocks_y = current_level.height / BLOCK;
         let smallest = level_index == LEVELS - 1;
@@ -261,7 +353,31 @@ fn validate(current: &[Level], reference: &[Level]) -> Result<(), Error> {
         });
     }
     let base = [current[0].width, current[0].height];
-    if base
+    validate_levels(base, current, reference, 0)
+}
+
+fn validate_coarse(
+    finest: [usize; 2],
+    current: &[Level],
+    reference: &[Level],
+) -> Result<(), Error> {
+    const COARSE_LEVELS: usize = LEVELS - 1;
+    if current.len() != COARSE_LEVELS || reference.len() != COARSE_LEVELS {
+        return Err(Error::CoarseLevelCount {
+            current: current.len(),
+            reference: reference.len(),
+        });
+    }
+    validate_levels(finest, current, reference, 1)
+}
+
+fn validate_levels(
+    finest: [usize; 2],
+    current: &[Level],
+    reference: &[Level],
+    first_level: usize,
+) -> Result<(), Error> {
+    if finest
         .into_iter()
         .any(|dimension| dimension >= FREQUENCY_SIZE / 2)
     {
@@ -270,15 +386,16 @@ fn validate(current: &[Level], reference: &[Level]) -> Result<(), Error> {
             message: "exceeds the selected predictor histogram range",
         });
     }
-    if base[0] < BLOCK << (LEVELS - 1) || base[1] < BLOCK << (LEVELS - 1) {
+    if finest[0] < BLOCK << (LEVELS - 1) || finest[1] < BLOCK << (LEVELS - 1) {
         return Err(Error::Geometry {
             level: 0,
             message: "is too small for seven 16x16 search grids",
         });
     }
-    for level in 0..LEVELS {
-        let expected_dimensions = [base[0] >> level, base[1] >> level];
-        for candidate in [&current[level], &reference[level]] {
+    for relative_level in 0..current.len() {
+        let level = first_level + relative_level;
+        let expected_dimensions = [finest[0] >> level, finest[1] >> level];
+        for candidate in [&current[relative_level], &reference[relative_level]] {
             if [candidate.width, candidate.height] != expected_dimensions {
                 return Err(Error::Geometry {
                     level,

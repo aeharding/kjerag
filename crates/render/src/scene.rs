@@ -1282,7 +1282,12 @@ impl Scene {
         // the reader put first is the difference between a capture that opens
         // either way round and one that opens only if it was picked in the
         // camera's own order (issue #123).
-        let calibrated = calibrated(&files[0], player.size(), player.lenses())?;
+        let calibrated = calibrated(
+            &files[0],
+            player.size(),
+            player.lenses(),
+            Some(player.timing().fps() as f32),
+        )?;
         let selected_stitch = calibrated.one_xs.is_some();
         let selected_playback = one_xs_playback_selected(ONE_XS_PLAYBACK_ENABLED, selected_stitch);
         println!(
@@ -1338,9 +1343,7 @@ impl Scene {
         })
     }
 
-    /// Select the complete-picture path in real Scene tests before the first
-    /// delivery. Ordinary playback remains unchanged until moving-output and
-    /// capacity qualification. No full calibration snapshot is retained here.
+    /// Require that ordinary live opening selected the complete-picture path.
     #[cfg(test)]
     fn enable_temporal_for_review(&mut self) -> Fallible<()> {
         let show = self
@@ -1351,22 +1354,29 @@ impl Scene {
         if playing.frames.is_some() {
             return Err("temporal review must be selected before the first delivery".into());
         }
-        let Source::Live(player) = &playing.source else {
+        let Source::Live(_) = &playing.source else {
             return Err("temporal review requires live decoding".into());
         };
-        let capture = show
-            .one_xs
+        show.filtered
             .as_ref()
-            .ok_or("temporal review needs a resident camera")?;
-        let provider = super::temporal_fusion::settings::Provider::new(
-            capture.diagnostic_calibration(),
-            player.timing().fps() as f32,
-        )?;
-        show.filtered = Some(FilteredCaptureFacade::new(
-            capture.camera_profile(),
-            show.held.orientation.clone(),
-            provider,
-        )?);
+            .ok_or("ordinary live opening did not select temporal filtering")?;
+        Ok(())
+    }
+
+    /// Keep an existing real-source regression on the spatial resident path.
+    /// This is test-only and must run before the first decoded delivery.
+    #[cfg(test)]
+    fn disable_temporal_for_review(&mut self) -> Fallible<()> {
+        let show = self
+            .show
+            .as_mut()
+            .ok_or("spatial review has no open capture")?;
+        if show.playing.get_mut().frames.is_some() {
+            return Err("spatial review must be selected before the first delivery".into());
+        }
+        show.filtered
+            .take()
+            .ok_or("ordinary live opening did not select temporal filtering")?;
         Ok(())
     }
 
@@ -1393,7 +1403,7 @@ impl Scene {
 
     fn still_from_reader(mut reader: Reader, at: Cue) -> Fallible<Self> {
         let files: Arc<[PathBuf]> = reader.paths().into();
-        let calibrated = calibrated(&files[0], reader.size(), reader.lenses())?;
+        let calibrated = calibrated(&files[0], reader.size(), reader.lenses(), None)?;
         let frame = reader.size();
         let frames = reader.frame(at)?;
         println!(
@@ -1604,6 +1614,26 @@ impl Scene {
             return Ok(None);
         };
         capture.diagnostic_installed_map(&shown.frames.stamp())
+    }
+
+    /// Return the exact displayed frame only when it is backed by an
+    /// installed filtered panorama from the same retained capture owner.
+    /// This reads identity only and performs no GPU work or pixel readback.
+    pub fn diagnostic_filtered_displayed_frame(&self) -> Fallible<Option<FrameStamp>> {
+        let Some(shown) = self.shown.get() else {
+            return Ok(None);
+        };
+        let Some(capture) = shown.filtered.as_ref() else {
+            return Ok(None);
+        };
+        let Some(installed) = capture.installed()? else {
+            return Ok(None);
+        };
+        let shown_stamp = shown.frames.stamp();
+        if installed.frame() != &shown_stamp {
+            return Err("filtered panorama differs from the displayed Scene frame".into());
+        }
+        Ok(Some(shown_stamp))
     }
 
     /// Takes whichever frame belongs on screen at `now`, and says when to
@@ -2211,6 +2241,9 @@ impl Show {
         let one_xs = matches!(&source, Source::Live(_))
             .then(|| calibrated.one_xs.clone())
             .flatten();
+        let filtered = matches!(&source, Source::Live(_))
+            .then(|| calibrated.filtered.clone())
+            .flatten();
         let one_xs_profile = calibrated
             .one_xs
             .as_ref()
@@ -2224,7 +2257,7 @@ impl Show {
             camera: calibrated.camera,
             held: calibrated.held,
             one_xs,
-            filtered: None,
+            filtered,
             one_xs_profile,
             replay: RefCell::new(None),
             playing: RefCell::new(Playing { frames, source }),
@@ -2288,10 +2321,10 @@ impl Show {
         }
     }
 
-    /// Start stitching on the decoder's seek landing. The estimator's cold
-    /// calculation uses that frame's real geometry, timestamp and pixels;
-    /// no old temporal state crosses the new decoder epoch. This deliberately
-    /// trades uninterrupted-from-zero history for responsive user seeking.
+    /// Start stitching in a fresh decoder epoch. The optional complete-picture
+    /// route uses only the minimum real pre-roll needed to make seven sources
+    /// available at the file tail; the requested target remains the only
+    /// picture which may replace the retained display.
     fn seek_to(&mut self, to: Cue, accuracy: Accuracy) -> Fallible<bool> {
         let Some(capture) = self.one_xs.clone() else {
             return Ok(false);
@@ -2328,7 +2361,18 @@ impl Show {
             playing,
         }));
         player.pause(Instant::now());
-        player.seek(Cue::Index(target), accuracy);
+        let last = player.timing().frames.saturating_sub(1);
+        if self.filtered.is_some()
+            && accuracy == Accuracy::Exact
+            && let Some(first) = filtered_preroll_start(target, last)
+        {
+            // Seven real pictures, ending at EOF. Sources before `target` are
+            // acknowledged only to advance this paused replay; `resident_target`
+            // prevents them from becoming Shown.
+            player.replay_window(Cue::Index(first), Cue::Index(target))?;
+        } else {
+            player.seek(Cue::Index(target), accuracy);
+        }
         Ok(true)
     }
 
@@ -2458,6 +2502,11 @@ impl Show {
     }
 }
 
+fn filtered_preroll_start(target: u64, last: u64) -> Option<u64> {
+    last.checked_sub(6)
+        .filter(|_| target.saturating_add(6) > last)
+}
+
 /// How wide a camera with these lenses hands the picture over, in degrees, or
 /// `None` where there is no seam to hand over at.
 ///
@@ -2520,7 +2569,12 @@ fn ours(path: &Path) -> Fallible<()> {
     }
 }
 
-fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<Calibrated> {
+fn calibrated(
+    path: &Path,
+    size: Size,
+    streams: usize,
+    source_fps: Option<f32>,
+) -> Fallible<Calibrated> {
     let calibration = CalibrationSet::from_capture(path)?;
     // The calibration's pixel numbers are already in delivered-frame
     // coordinates, so they describe this texture only if the stream is the
@@ -2596,20 +2650,38 @@ fn calibrated(path: &Path, size: Size, streams: usize) -> Fallible<Calibrated> {
         readout: calibration.readout(),
     };
     let camera = calibration.camera_key();
-    let one_xs = if ONE_XS_PLAYBACK_ENABLED
+    let profile = if ONE_XS_PLAYBACK_ENABLED
         && !orientation.is_empty()
         && lenses.len() == calibration.lenses.len()
     {
-        ResidentCameraProfile::from_calibration(&calibration)?
-            .map(|profile| ResidentCaptureFacade::new(Arc::new(profile), orientation))
+        ResidentCameraProfile::from_calibration(&calibration)?.map(Arc::new)
     } else {
         None
     };
+    let filtered = match (profile.as_ref(), source_fps) {
+        (Some(profile), Some(source_fps)) => {
+            match super::temporal_fusion::settings::Provider::new(&calibration, source_fps) {
+                Ok(provider) => Some(FilteredCaptureFacade::new(
+                    Arc::clone(profile),
+                    orientation.clone(),
+                    provider,
+                )?),
+                Err(error @ super::temporal_fusion::settings::Error::UnsupportedSource { .. }) => {
+                    println!("temporal: {error}; using the spatial stitch");
+                    None
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        _ => None,
+    };
+    let one_xs = profile.map(|profile| ResidentCaptureFacade::new(profile, orientation));
     Ok(Calibrated {
         lenses: lenses.into(),
         camera,
         held: Arc::new(held),
         one_xs,
+        filtered,
     })
 }
 
@@ -2620,6 +2692,7 @@ struct Calibrated {
     camera: u64,
     held: Arc<Motion>,
     one_xs: Option<ResidentCaptureFacade>,
+    filtered: Option<FilteredCaptureFacade>,
 }
 
 /// What the shell hands the renderer for one frame.
@@ -8211,6 +8284,7 @@ mod tests {
             cosmic::iced::widget::shader::Primitive::schedules_retry(primitive, pipeline)
         };
         let mut scene = Scene::open(path).unwrap();
+        scene.disable_temporal_for_review().unwrap();
         scene.set_muted(true);
         let frame = wait_for_new_scene_frame(&scene, None);
         let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
@@ -8284,7 +8358,8 @@ mod tests {
             return;
         };
         let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
-        let scene = Scene::open(&path).unwrap();
+        let mut scene = Scene::open(&path).unwrap();
+        scene.disable_temporal_for_review().unwrap();
         scene.set_muted(true);
         assert!(scene.is_playing(), "selected open lost autoplay intent");
 
@@ -8330,6 +8405,7 @@ mod tests {
         };
         let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
         let mut scene = Scene::open(&path).unwrap();
+        scene.disable_temporal_for_review().unwrap();
         scene.set_muted(true);
         let frame = wait_for_new_scene_frame(&scene, None);
         assert_eq!(frame.index(), 0);
@@ -8374,6 +8450,7 @@ mod tests {
     fn assert_scene_submits_actual_cold_and_warm_l1_work(path: &Path) {
         let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
         let mut scene = Scene::open(path).unwrap();
+        scene.disable_temporal_for_review().unwrap();
         scene.set_muted(true);
         scene.pause(Instant::now());
         assert!(scene.primitive(Camera::default()).resident_next.is_none());
@@ -8688,6 +8765,7 @@ mod tests {
         };
         let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
         let mut scene = Scene::open(&path).unwrap();
+        scene.disable_temporal_for_review().unwrap();
         scene.set_muted(true);
         scene.pause(Instant::now());
         let (last, previous_time) = scene
@@ -8766,6 +8844,7 @@ mod tests {
     fn assert_selected_overlap_is_bounded_and_survives_renderer_recreation(path: &Path) {
         let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
         let mut scene = Scene::open(path).unwrap();
+        scene.disable_temporal_for_review().unwrap();
         scene.set_muted(true);
         scene.pause(Instant::now());
         let first = wait_for_new_scene_frame(&scene, None);
@@ -8915,6 +8994,7 @@ mod tests {
             .expect("overlapped future has no installed diagnostic map");
 
         let mut control = Scene::open(path).unwrap();
+        control.disable_temporal_for_review().unwrap();
         control.set_muted(true);
         control.pause(Instant::now());
         let mut control_pipeline =
@@ -8977,6 +9057,7 @@ mod tests {
     fn assert_seek_retires_a_prefetched_ready_without_publishing_it(path: &Path) {
         let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
         let mut scene = Scene::open(path).unwrap();
+        scene.disable_temporal_for_review().unwrap();
         scene.set_muted(true);
         scene.pause(Instant::now());
         let first = wait_for_new_scene_frame(&scene, None);
@@ -9110,6 +9191,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("could not open target dmabuf Vulkan device: {error}"));
         let mut scene = Scene::open(&path)
             .unwrap_or_else(|error| panic!("could not open ONE X2 test capture: {error}"));
+        scene.disable_temporal_for_review().unwrap();
         scene.set_muted(true);
         let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
 
@@ -9148,6 +9230,7 @@ mod tests {
         };
         let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
         let mut scene = Scene::open(&path).unwrap();
+        scene.disable_temporal_for_review().unwrap();
         scene.set_muted(true);
         let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
         let first = wait_for_new_scene_frame(&scene, None);
@@ -9464,6 +9547,7 @@ mod tests {
         std::fs::create_dir(output).expect("review output must be a new directory");
         let ((device, queue), _) = test_import_gpu_and_foreign().unwrap();
         let mut scene = Scene::open(path).unwrap();
+        scene.disable_temporal_for_review().unwrap();
         assert!(scene.show.as_ref().unwrap().one_xs.is_some());
         assert!(!scene.supports_optical_flow());
         scene.set_muted(true);
@@ -10707,6 +10791,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("could not open target dmabuf Vulkan device: {error}"));
         let mut scene = Scene::open(&path)
             .unwrap_or_else(|error| panic!("could not open ONE X2 test capture: {error}"));
+        scene.disable_temporal_for_review().unwrap();
         scene.set_muted(true);
         let exact = wait_for_new_scene_frame(&scene, None);
         assert_eq!(

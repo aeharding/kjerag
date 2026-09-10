@@ -55,7 +55,11 @@ for the authenticated X4 Air and ONE X2 selector routes. It returns per-source
 radius, motion-confidence inputs and fusion settings using the recovered native
 table interpolation. Unsupported sources or missing ISO are errors, not guessed
 defaults. Reset clears the ISO lookup's chronology/cache. Ordinary file opening
-now reads these inputs, but playback still does not select the temporal filter.
+selects this provider once during live opening, before dropping the full
+calibration. Authenticated supported sources select the temporal stream below;
+unsupported selectors explicitly retain the existing spatial stitch. Invalid
+ISO on a supported source is an error, not a silent fallback. Stepped stills do
+not construct a temporal provider.
 `docs/research/studio-denoise-iso-602.md`
 records the binary and real-file authority.
 
@@ -82,8 +86,8 @@ The shell is libcosmic, which pins wgpu 28, so `render` is written against
 28 and owns the one module that wgpu 30 would delete
 (`crates/render/src/dmabuf.rs`).
 
-`render::temporal_fusion` supplies a post-stitch primitive, not an ordinarily
-selected player path. It consumes explicit full-range NV12 image arrays,
+`render::temporal_fusion` supplies the selected stream's post-stitch primitive.
+It consumes explicit full-range NV12 image arrays,
 current-to-reference displacement/confidence grids, a luma-index grid and
 effective fusion parameters. Two render passes produce GPU-owned R8/RG8
 planes without queue submission, CPU waits or readback. Studio's selected
@@ -93,14 +97,25 @@ history, seek epochs and completion. None of that scheduling is supplied by
 this primitive. Saved native input/output tests establish its bounded
 arithmetic result, not a complete temporal pipeline or performance verdict.
 
-Its `stream` child now supplies worker-owned full-picture execution, selected
-only by actual Scene tests until qualification. Seven real sources emit startup
+Its `stream` child supplies worker-owned full-picture execution, automatically
+selected for supported live captures. Seven real sources emit startup
 centers0..3, steady center3 and flush4..6. The source's matrix and retained
 automatic settings travel with its exact stamp. Full RGB/NV12 conversion,
 GPU pyramid/finest refinement/fusion and temporary CPU coarse search reuse the
 existing candidate. Readback and completion waits use callbacks with nonblocking
 device polls on the existing stitch worker, never a blocking fence wait. These
 CPU steps are still a performance limitation, not a GPU-residency claim.
+Independent coarse reference searches use at most six scoped threads with
+unchanged per-reference serial arithmetic and ordered results. Only levels one
+through six return to the CPU; the finest level remains a packed GPU image.
+The coarse-only API takes explicit finest geometry without dummy CPU pixels.
+RGB conversion writes directly into the arriving source's resident history
+layer, using the same R8/RG8 targets and quantization. Its typed single-layer
+luma view supplies the pyramid without allocating and copying another NV12 pair.
+A radius-zero
+source initially needs no motion inputs, but a later center may reference it.
+Missing inputs are then reconstructed once from its exact retained unfiltered
+NV12 layer; no lens sampling or colour-coefficient update runs again.
 
 `FilteredCaptureFacade` separates processing from presentation. One admitted
 worker job, at most four independent ready panoramas and one installed panorama
@@ -117,14 +132,18 @@ The live panorama projector renders that typed completed texture into the
 existing surface pass with the same gamma/linear convention as direct drawing.
 Changing view only changes its projection binding, not filtering or colour
 history. Screenshots use the exact installed panorama and surface format. EOF
-flush waits until all real prepared inputs have been accepted. Fewer than seven
-real sources produce an explicit unavailable-output error in this candidate;
-near-EOF seek pre-roll remains necessary before ordinary activation. Full X4
-geometry is supported; ONE X2 currently supports radius zero only. This is not
-an accepted visible tradeoff or a complete zero-config filter selection.
+flush waits until all real prepared inputs have been accepted. Near-EOF exact
+seeks decode the last seven real sources, holding picture/audio time at the
+requested target and preventing pre-target outputs from replacing Shown. Whole
+captures shorter than seven sources still produce an explicit unavailable-output
+error. Full X4 and ONE X2 geometry use seven nonempty 16x16 search grids; odd
+pyramid dimensions floor-halve and discard the unmatched tail. Different native
+level-count routes remain unsupported. Automatic selection is not a playback
+capacity or installed-quality verdict.
 
 The `history` child owns seven resident NV12 array layers and the exact source
-stamp occupying each slot. Arriving images are copied once; a complete borrowed
+stamp occupying each slot. Arriving NV12 images can be copied once; the selected
+RGB producer instead converts directly into the same validated slot. A complete borrowed
 window supplies center/reference stamps and physical layer indices in logical
 c-3,c-2,c-1,c+1,c+2,c+3 order. An explicit `window_at(center, radius)` also
 supplies the clipped intervals needed for startup and tail frames: ascending
@@ -143,16 +162,16 @@ native device equality only diagnoses different devices within that Instance,
 not separate Instances with colliding local IDs. This is storage ownership,
 not player startup, seeking, padding or scheduling policy.
 
-Its `pyramid` and `motion` children are readable CPU references, also
-unconnected to playback. `pyramid` takes an explicit gray base image and level
+Its `pyramid` and `motion` children retain readable CPU references.
+`pyramid` takes an explicit gray base image and level
 count, retaining Studio's two separately rounded reduction passes. `motion`
 takes explicit raw displacement/cost, luma, geometry, tables and reference
 phase; it implements the verified16x16-block,2x expansion/confidence path.
 Unsupported geometry is rejected, not assigned new semantics. Neither is a
 motion search, calibration policy, image-history owner or player scheduling
 component. Hash-sealed native tests cover seven pyramids and six packed
-motion grids. Keeping these CPU references does not put CPU readback into the
-player's frame path.
+motion grids. The selected worker uses GPU pyramid preparation plus the
+explicit CPU coarse-search readbacks described above; view redraw does neither.
 
 The `search` child is a readable serial CPU implementation of the selected
 seven-level, gray, pel-1 motion search. Its GPL-3.0-or-later adaptation preserves
@@ -174,8 +193,9 @@ and GPU kernel keep the initial candidate order, SAD penalties, bounds and
 fixed radius-one ring. The GPU assigns one workgroup to each block/reference,
 with distinct immutable input and output buffers. Runtime slices accept one
 through six matching references/seeds/globals; allocation and dispatch use that
-actual count. Inactive shader-required texture slots bind current, but no
-inactive ordinal is dispatched or sampled. Typed output carries its reference
+actual count. Each reference has one dispatch with a directly bound reference
+texture, removing the six-way texture switch inside each SAD load. The dispatch
+uniform selects its original contiguous seed/output slice. Typed output carries its reference
 count into motion packing. Eight teams of eight lanes
 cover each candidate's complete 256-byte SAD. Gray inputs use typed, immutable
 `PackedGray` textures from the pyramid producer: four horizontal bytes in rgba,
@@ -234,7 +254,8 @@ abandoned command buffers retain the same fail-closed ownership. Linearized
 output is refused before arming. The shared body pipeline is lazily cached.
 `KJERAG_PANORAMA_RESIDENT_INPUT=1` selects this route only in the offline review;
 its first source checks the entire panorama against the uploaded-map oracle.
-Normal playback still draws its direct map and has no selected temporal filter.
+Supported live playback consumes the same upstream resident stitch through the
+filtered panorama owner; explicit spatial controls retain the direct-map draw.
 The separate `ResidentPanoramaIngest` is the non-presenting source producer for
 that integration. It owns a fresh resident session and cannot share a root with
 the display facade. A typed job on the existing bounded stitch-worker channel
@@ -255,9 +276,8 @@ and decoder failures remain errors. `is_input_exhausted` distinguishes decoder
 EOF from presentation EOF; if six slots are full, the trailing EOF note is read
 after a slot frees. The ordinary two-frame lookahead, reader depth, presentation
 clock and startup acknowledgement policy remain unchanged. These preparation
-interfaces do not themselves publish filtered frames. The test-selected facade
-and Scene route above now supply that separate publication boundary; ordinary
-playback still does not select the temporal filter.
+interfaces do not themselves publish filtered frames. The selected facade and
+Scene route above supply that separate publication boundary.
 
 The offline temporal review keeps seven contiguous source-stamped NV12 images
 and gray pyramids. Settings are either the explicit captured ISO100 regime or,
@@ -276,8 +296,8 @@ CPU search and explicit readbacks remain offline
 reference execution, not the player architecture. The source image and its
 color corrections do not change between comparison arms. This diagnostic does
 not select a player seek/publication policy or gradual color update, and its
-explicit CPU waits are not a performance path. Production playback still selects
-none of these stages.
+explicit CPU waits are not a performance path. Production playback instead
+selects the separate worker-owned stream above, not this offline controller.
 The additional explicit parallel-refinement diagnostic is different: it selects
 the changed spatial algorithm described above, retaining each GPU base beside
 its exact source stamp and NV12 image. Refinement, packing and fusion share one

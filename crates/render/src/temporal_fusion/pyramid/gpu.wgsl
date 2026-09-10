@@ -69,9 +69,10 @@ fn reduce_vertical(@builtin(position) position: vec4<f32>) -> @location(0) u32 {
         return rounded_half(load_gray(destination), load_gray(destination + vec2<u32>(0u, 1u)));
     }
     if destination.y + 1u == destination_height {
+        let used_height = destination_height * 2u;
         return rounded_half(
-            load_gray(vec2<u32>(destination.x, source_size.y - 2u)),
-            load_gray(vec2<u32>(destination.x, source_size.y - 1u)),
+            load_gray(vec2<u32>(destination.x, used_height - 2u)),
+            load_gray(vec2<u32>(destination.x, used_height - 1u)),
         );
     }
     let center = 2u * destination.y;
@@ -92,9 +93,10 @@ fn reduce_horizontal(@builtin(position) position: vec4<f32>) -> @location(0) u32
         return rounded_half(load_gray(destination), load_gray(destination + vec2<u32>(1u, 0u)));
     }
     if destination.x + 1u == destination_width {
+        let used_width = destination_width * 2u;
         return rounded_half(
-            load_gray(vec2<u32>(source_size.x - 2u, destination.y)),
-            load_gray(vec2<u32>(source_size.x - 1u, destination.y)),
+            load_gray(vec2<u32>(used_width - 2u, destination.y)),
+            load_gray(vec2<u32>(used_width - 1u, destination.y)),
         );
     }
     let center = 2u * destination.x;

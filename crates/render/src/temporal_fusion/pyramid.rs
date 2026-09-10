@@ -25,7 +25,7 @@ pub enum Error {
         expected: usize,
         actual: usize,
     },
-    OddReduction {
+    EmptyReduction {
         level: usize,
         width: usize,
         height: usize,
@@ -42,13 +42,13 @@ impl fmt::Display for Error {
                 formatter,
                 "base plane has {actual} bytes but its dimensions require {expected}"
             ),
-            Self::OddReduction {
+            Self::EmptyReduction {
                 level,
                 width,
                 height,
             } => write!(
                 formatter,
-                "pyramid level {level} is {width}x{height}; both dimensions must be even to reduce it"
+                "pyramid level {level} is {width}x{height}; reduction would produce an empty level"
             ),
         }
     }
@@ -59,8 +59,9 @@ impl std::error::Error for Error {}
 /// Construct logical levels with Studio's selected separable reduction.
 ///
 /// Each axis uses `[1, 3, 3, 1] / 8` in the interior and a two-sample average
-/// at its first and last output. The vertical result is rounded to `u8` before
-/// the horizontal pass, matching the native in-place implementation.
+/// at its first and last output. An unmatched final sample on an odd axis is
+/// discarded. The vertical result is rounded to `u8` before the horizontal
+/// pass, matching the native in-place implementation.
 pub fn build(
     base: &[u8],
     base_width: usize,
@@ -93,8 +94,8 @@ pub fn build(
     });
     while levels.len() < level_count {
         let source = levels.last().expect("the base level was inserted");
-        if !source.width.is_multiple_of(2) || !source.height.is_multiple_of(2) {
-            return Err(Error::OddReduction {
+        if source.width / 2 == 0 || source.height / 2 == 0 {
+            return Err(Error::EmptyReduction {
                 level: levels.len() - 1,
                 width: source.width,
                 height: source.height,
@@ -121,9 +122,10 @@ fn reduce(source: &Level) -> Level {
             );
         }
         if destination_height > 1 {
+            let source_y = 2 * (destination_height - 1);
             vertical[(destination_height - 1) * source.width + x] = rounded_half(
-                source.pixels[(source.height - 2) * source.width + x],
-                source.pixels[(source.height - 1) * source.width + x],
+                source.pixels[source_y * source.width + x],
+                source.pixels[(source_y + 1) * source.width + x],
             );
         }
     }
@@ -142,8 +144,9 @@ fn reduce(source: &Level) -> Level {
             );
         }
         if destination_width > 1 {
+            let source_x = 2 * (destination_width - 1);
             destination_row[destination_width - 1] =
-                rounded_half(source_row[source.width - 2], source_row[source.width - 1]);
+                rounded_half(source_row[source_x], source_row[source_x + 1]);
         }
     }
 

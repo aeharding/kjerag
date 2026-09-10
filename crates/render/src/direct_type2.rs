@@ -1246,7 +1246,8 @@ fn type2_box(a: texture_2d<f32>, b: texture_2d<f32>, uv: vec2<f32>, logical: vec
     }
     y += 2.0;
   }
-  return select(type2_atlas_linear(a, b, uv), sum / area, area > 0.0010000000474974513);
+  if area > 0.0010000000474974513 { return sum / area; }
+  return type2_atlas_linear(a, b, uv);
 }
 
 fn type2_ycbcr(uv: vec2<f32>) -> vec3<f32> {

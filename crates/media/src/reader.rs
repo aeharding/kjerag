@@ -805,8 +805,15 @@ impl Reader {
     /// no such estimator state; filling its bounded ring from frame zero
     /// would leave stale sound waiting when the target finally completed.
     pub(crate) fn replay_from_zero(&mut self, audio_at: Cue) -> Fallible<()> {
+        self.replay_from(Cue::Index(0), audio_at)
+    }
+
+    /// Start a causal video replay at `video_at` while positioning the
+    /// independent sound demuxer at the eventual presented target.
+    pub(crate) fn replay_from(&mut self, video_at: Cue, audio_at: Cue) -> Fallible<()> {
         self.decode_epoch = DecodeEpoch::new();
-        let video_target = self.timing.time_of(0).as_micros() as i64;
+        let video_index = video_at.index(self.timing);
+        let video_target = self.timing.time_of(video_index).as_micros() as i64;
         for source in &mut self.sources {
             source.input.seek(video_target, ..video_target)?;
             source.drained = false;
@@ -819,7 +826,7 @@ impl Reader {
             let target = self.timing.time_of(audio_at.index(self.timing)).as_micros() as i64;
             track.seek(target)?;
         }
-        self.skip_before = 0;
+        self.skip_before = video_index;
         self.landing = true;
         Ok(())
     }

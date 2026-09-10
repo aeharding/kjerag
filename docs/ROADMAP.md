@@ -14,6 +14,69 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Exact execution savings; playback still too slow, 2026-09-10:** the automatic
+filter now keeps its finest image on the GPU, reading only the six smaller
+pyramid levels for unchanged CPU coarse search. RGB conversion writes straight
+into the resident history layer. This removes a 7.37 MB CPU readback and a
+44.24 MB GPU copy per X4 source without changing source cadence. Finest search
+binds one reference per dispatch; zero-confidence fusion skips unused neighbors;
+the existing box sampler only fetches its fallback when that branch is selected.
+
+The final branch build passes 1009 render tests, seven explicit real X4/ONE X2
+Scene checks, the two saved Studio denoiser packets' existing one-code gate,
+workspace all-target Clippy, formatting, source-lock and rename checks. All 31
+actual 612-second view frames remain byte-identical to the preceding player
+output. The first two GPU shortcuts reduced the short full-picture timed stage
+mean from 31.67 to 29.10 ms; this excludes source preparation and CPU work.
+
+Actual 2256x1504 sRGB playback capacity rises only from 8.83 to 10.16 distinct
+video frames/s, with 581.8 completed redraws/s, 25.02 ms p99 redraw time and
+7.97 s maximum display age. This still fails 29.970 fps video and the active
+4.17 ms frame budget. Worker traces show roughly 32 ms for panorama completion,
+conversion and pyramid preparation, 23 ms CPU coarse search and 25 ms final
+GPU submission/completion, plus map preparation and encoding overhead. These
+are wall intervals under concurrent drawing, not isolated GPU timestamps.
+Next investigate caching static body-panorama mesh geometry and overlapping
+independent processing stages. No new RE or invented color fade.
+
+The installed Flatpak is unchanged. The owner was asked whether a temporarily
+slow visual-test build is useful; no new accepted tradeoff is assumed. Native UI
+and installed qualification, full workspace tests, deployment and owner player
+acceptance remain undone. Evidence stays in
+`scratch/studio-seam-flicker-612-20260909-01/temporal-usable-window-01`.
+
+**Moving blotch preview accepted; automatic player activation, 2026-09-10:**
+the owner watched `temporal-parallel-refine-01/review-607.mkv` and reported
+"looks like this fixes the blotches", requesting Kjerag for testing. This is
+acceptance of that specific offline moving result, not installed-player
+behavior, the exact612 view or performance. No invented colour fade is added.
+
+Supported live opening now constructs the temporal provider once from source
+metadata/fps and automatically selects the full-picture filter. Unsupported
+selectors explicitly keep the existing spatial path; bad ISO on a supported
+source is an error. Stills remain spatial. Near-tail exact seeks prepare the
+last seven real sources without showing pre-roll or moving the requested clock.
+ONE X2 now uses floor-halved odd pyramid levels; its nonzero-radius source at
+frame6953/time231.998433333 passes a real Scene transition/history-wrap test.
+Radius-zero sources needed by later centers recover motion inputs once from
+their exact retained NV12. Concurrent coarse reference preparation preserves
+serial results; the saved fixture measures43.318 ms serial versus9.953..14.187 ms
+concurrent, not a complete playback-rate result.
+
+All seven automatic Scene checks pass, including both cameras' last-frame seeks.
+The31-frame actual612 sequence remains byte-identical to the preceding player
+integration. Before automatic activation,1006 render and84 media tests passed;
+the native app and existing `view-rate` diagnostic now compile. The first
+2256x1504 sRGB active-playback capacity run advances only8.826 distinct source
+frames/s on the29.970 fps April clip. Its535.5 completed redraws/s repeats stale
+pictures and does not meet the target: display lateness grows to8.51s and p99
+redraw time is26.04ms. The owner was told this result; the installed app remains
+unchanged. Existing full-picture GPU timestamps identify steady fusion at
+14.73..16.95ms and finest search at10.67..13.38ms before source preparation and
+CPU coarse search. Exact execution optimizations are being measured, not a
+different color-update policy. No installation, merge or capacity claim yet. Evidence:
+`scratch/studio-seam-flicker-612-20260909-01/temporal-usable-window-01`.
+
 **Filtered-picture publication reaches real Scene, 2026-09-10:** a test-selected
 route now feeds exact decoded sources through the shared stitch worker, full
 body panoramas and the seven-source temporal stream. Only a completed filtered

@@ -16,7 +16,7 @@ use std::ops::Range;
 
 use crate::FrameStamp;
 
-use super::color::Nv12;
+use super::color::{GpuColorConversion, MatrixCoefficients, Nv12};
 use super::{Inputs, Parameters};
 
 const LAYERS: u32 = 7;
@@ -28,6 +28,8 @@ pub enum Error {
     UnsupportedSize,
     ForeignDevice,
     SourceTextures,
+    SourceRgb,
+    Color(super::color::Error),
     DecodeEpoch,
     NonContiguous,
     IncompleteWindow,
@@ -36,7 +38,7 @@ pub enum Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
+        let message = match self {
             Self::InvalidSize => "temporal history needs positive even NV12 dimensions",
             Self::UnsupportedSize => {
                 "temporal history dimensions or seven array layers exceed graphics limits"
@@ -47,6 +49,10 @@ impl fmt::Display for Error {
             Self::SourceTextures => {
                 "temporal history needs matching sampled copyable single-layer NV12 textures"
             }
+            Self::SourceRgb => {
+                "temporal history needs a matching sampled single-layer Rgba8Unorm texture"
+            }
+            Self::Color(error) => return error.fmt(formatter),
             Self::DecodeEpoch => "temporal history cannot cross a decode epoch",
             Self::NonContiguous => "temporal history sources must be contiguous",
             Self::IncompleteWindow => {
@@ -55,11 +61,18 @@ impl fmt::Display for Error {
             Self::WindowPosition => {
                 "temporal history needs a center from 0 through 6 and a radius from 0 through 3"
             }
-        })
+        };
+        formatter.write_str(message)
     }
 }
 
 impl std::error::Error for Error {}
+
+impl From<super::color::Error> for Error {
+    fn from(error: super::color::Error) -> Self {
+        Self::Color(error)
+    }
+}
 
 struct Slot {
     stamp: FrameStamp,
@@ -73,6 +86,32 @@ pub struct History {
     y: wgpu::Texture,
     uv: wgpu::Texture,
     slots: VecDeque<Slot>,
+}
+
+/// The full-resolution luma view written by one direct RGB history push.
+///
+/// It owns the view handle independently of the mutable history borrow so a
+/// caller can immediately record luma-pyramid work from the same array layer.
+/// A later history push may overwrite this physical layer, so consumers must
+/// be submitted before the layer is reused.
+pub(crate) struct PushedLuma {
+    view: wgpu::TextureView,
+    size: [u32; 2],
+    device: wgpu::Device,
+}
+
+impl PushedLuma {
+    pub(crate) fn view(&self) -> &wgpu::TextureView {
+        &self.view
+    }
+
+    pub(crate) fn size(&self) -> [u32; 2] {
+        self.size
+    }
+
+    pub(crate) fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
 }
 
 impl History {
@@ -126,14 +165,56 @@ impl History {
     ) -> Result<(), Error> {
         self.validate_source(device, stamp, nv12)?;
 
-        let layer = self
-            .slots
-            .front()
-            .filter(|_| self.slots.len() == LAYERS as usize)
-            .map_or(self.slots.len() as u32, |slot| slot.layer);
+        let layer = self.next_layer();
         copy_layer(encoder, &nv12.y, &self.y, layer);
         copy_layer(encoder, &nv12.uv, &self.uv, layer);
 
+        self.push_slot(stamp, layer);
+        Ok(())
+    }
+
+    /// Convert one arriving RGB source directly into its resident NV12 layer.
+    ///
+    /// Validation and render-pass recording precede history mutation. The
+    /// returned luma view names exactly the newly written physical layer.
+    pub(crate) fn encode_push_rgb(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        color: &GpuColorConversion,
+        stamp: &FrameStamp,
+        rgb: &wgpu::Texture,
+        coefficients: MatrixCoefficients,
+    ) -> Result<PushedLuma, Error> {
+        self.validate_push(device, stamp)?;
+        if !color.belongs_to(device) {
+            return Err(Error::ForeignDevice);
+        }
+        if !source_rgb(rgb, self.full) {
+            return Err(Error::SourceRgb);
+        }
+
+        let layer = self.next_layer();
+        let y_view = layer_view(&self.y, layer);
+        let uv_view = layer_view(&self.uv, layer);
+        color.encode_rgb_to_views(encoder, rgb, coefficients, &y_view, &uv_view)?;
+
+        self.push_slot(stamp, layer);
+        Ok(PushedLuma {
+            view: y_view,
+            size: self.full,
+            device: self.device.clone(),
+        })
+    }
+
+    fn next_layer(&self) -> u32 {
+        self.slots
+            .front()
+            .filter(|_| self.slots.len() == LAYERS as usize)
+            .map_or(self.slots.len() as u32, |slot| slot.layer)
+    }
+
+    fn push_slot(&mut self, stamp: &FrameStamp, layer: u32) {
         if self.slots.len() == LAYERS as usize {
             self.slots.pop_front();
         }
@@ -141,7 +222,6 @@ impl History {
             stamp: stamp.clone(),
             layer,
         });
-        Ok(())
     }
 
     pub fn window(&self) -> Option<Window<'_>> {
@@ -173,16 +253,9 @@ impl History {
         stamp: &FrameStamp,
         nv12: &Nv12,
     ) -> Result<(), Error> {
-        if self.device != *device || !nv12.belongs_to(device) {
+        self.validate_push(device, stamp)?;
+        if !nv12.belongs_to(device) {
             return Err(Error::ForeignDevice);
-        }
-        if let Some(previous) = self.slots.back() {
-            if !previous.stamp.same_decode_epoch(stamp) {
-                return Err(Error::DecodeEpoch);
-            }
-            if previous.stamp.index().checked_add(1) != Some(stamp.index()) {
-                return Err(Error::NonContiguous);
-            }
         }
         if !source_texture(&nv12.y, self.full, wgpu::TextureFormat::R8Unorm)
             || !source_texture(
@@ -192,6 +265,21 @@ impl History {
             )
         {
             return Err(Error::SourceTextures);
+        }
+        Ok(())
+    }
+
+    fn validate_push(&self, device: &wgpu::Device, stamp: &FrameStamp) -> Result<(), Error> {
+        if self.device != *device {
+            return Err(Error::ForeignDevice);
+        }
+        if let Some(previous) = self.slots.back() {
+            if !previous.stamp.same_decode_epoch(stamp) {
+                return Err(Error::DecodeEpoch);
+            }
+            if previous.stamp.index().checked_add(1) != Some(stamp.index()) {
+                return Err(Error::NonContiguous);
+            }
         }
         Ok(())
     }
@@ -346,9 +434,24 @@ fn array_texture(
         dimension: wgpu::TextureDimension::D2,
         format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::COPY_SRC
             | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
+    })
+}
+
+fn layer_view(texture: &wgpu::Texture, layer: u32) -> wgpu::TextureView {
+    texture.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("resident temporal history layer"),
+        format: None,
+        dimension: Some(wgpu::TextureViewDimension::D2),
+        usage: Some(wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT),
+        aspect: wgpu::TextureAspect::All,
+        base_mip_level: 0,
+        mip_level_count: Some(1),
+        base_array_layer: layer,
+        array_layer_count: Some(1),
     })
 }
 
@@ -387,6 +490,19 @@ fn source_texture(texture: &wgpu::Texture, size: [u32; 2], format: wgpu::Texture
         && texture
             .usage()
             .contains(wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC)
+}
+
+fn source_rgb(texture: &wgpu::Texture, size: [u32; 2]) -> bool {
+    texture.format() == wgpu::TextureFormat::Rgba8Unorm
+        && texture.dimension() == wgpu::TextureDimension::D2
+        && texture.width() == size[0]
+        && texture.height() == size[1]
+        && texture.depth_or_array_layers() == 1
+        && texture.mip_level_count() == 1
+        && texture.sample_count() == 1
+        && texture
+            .usage()
+            .contains(wgpu::TextureUsages::TEXTURE_BINDING)
 }
 
 fn copy_layer(

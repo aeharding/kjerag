@@ -1,7 +1,7 @@
-//! Opt-in real-source coverage for the complete filtered Scene route.
+//! Real-source coverage for the automatic filtered Scene route.
 //!
-//! These tests select the route explicitly before the first delivery. Ordinary
-//! playback remains unchanged. They deliberately drive the real decoder,
+//! These tests require automatic selection before the first delivery. They
+//! deliberately drive the real decoder,
 //! resident panorama worker, temporal stream, Scene acknowledgement gate and
 //! final draw rather than constructing a `Stream` in isolation.
 
@@ -9,6 +9,69 @@ use super::*;
 use std::io::Write;
 
 const DEADLINE: Duration = Duration::from_secs(60);
+
+#[test]
+fn one_x2_real_iso_transition_filters_exact_sources() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let mut scene = Scene::open(Path::new(&path)).unwrap();
+    scene.set_muted(true);
+    let timing = scene.player(Player::timing).unwrap();
+    let capture = scene.show.as_ref().unwrap().one_xs.as_ref().unwrap();
+    let mut provider = crate::temporal_fusion::settings::Provider::new(
+        capture.diagnostic_calibration(),
+        timing.fps() as f32,
+    )
+    .unwrap();
+    let transition = (0..timing.frames)
+        .find(|&index| {
+            provider
+                .parameters_at(timing.time_of(index).as_secs_f64() * 1_000.0)
+                .unwrap()
+                .radius
+                > 0
+        })
+        .expect("the selected ONE X2 fixture has no nonzero-radius source");
+    assert!(transition >= 3 && transition + 12 < timing.frames);
+    eprintln!(
+        "real ONE X2 first nonzero radius: frame {transition}, time {:.9}s",
+        timing.time_of(transition).as_secs_f64()
+    );
+    scene.enable_temporal_for_review().unwrap();
+    scene.pause(Instant::now());
+    scene.seek(timing.time_of(transition - 3), Accuracy::Exact);
+    let mut current = super::tests::wait_for_new_scene_frame(&scene, None);
+    assert_eq!(current.index(), transition - 3);
+    let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    for offset in 0..12 {
+        assert_eq!(current.index(), transition - 3 + offset);
+        settle_filtered(
+            &scene,
+            &mut pipeline,
+            &device,
+            &queue,
+            &current,
+            Camera::default(),
+            None,
+        );
+        assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&current));
+        if offset < 11 {
+            scene.pump(Instant::now());
+            scene.step(Instant::now(), 1);
+            current = super::tests::wait_for_new_scene_frame(&scene, Some(&current));
+        }
+    }
+}
+
+#[test]
+fn tail_preroll_requires_seven_real_sources_and_only_fills_the_deficit() {
+    assert_eq!(filtered_preroll_start(93, 99), None);
+    assert_eq!(filtered_preroll_start(94, 99), Some(93));
+    assert_eq!(filtered_preroll_start(99, 99), Some(93));
+    assert_eq!(filtered_preroll_start(4, 4), None);
+}
 
 #[test]
 fn x4_filtered_scene_preserves_exact_source_ownership() {
@@ -352,49 +415,86 @@ fn capture_shown(
 }
 
 #[test]
-fn x4_short_tail_refuses_an_unavailable_filtered_output() {
+fn x4_near_eof_seek_uses_real_preroll_without_publishing_it() {
     let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
         return;
     };
+    assert_near_eof_preroll(Path::new(&path), &[3, 0]);
+}
+
+#[test]
+fn one_x2_last_frame_seek_uses_real_preroll_without_publishing_it() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    assert_near_eof_preroll(Path::new(&path), &[0]);
+}
+
+fn assert_near_eof_preroll(path: &Path, offsets_from_last: &[u64]) {
     let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
-    let mut scene = Scene::open(Path::new(&path)).unwrap();
+    let mut scene = Scene::open(path).unwrap();
     scene.set_muted(true);
     scene.enable_temporal_for_review().unwrap();
     scene.pause(Instant::now());
-    scene.seek(scene.duration(), Accuracy::Exact);
-    let landing = super::tests::wait_for_new_scene_frame(&scene, None);
-    let (send, receive) = std::sync::mpsc::sync_channel(1);
-    scene.capture(Request {
-        width: 64,
-        then: Box::new(move |shot| {
-            let _ = send.send(shot);
-        }),
-    });
+    let first = super::tests::wait_for_new_scene_frame(&scene, None);
     let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
-    let deadline = Instant::now() + DEADLINE;
-    let failure = loop {
-        pipeline.prepare(&scene.primitive(Camera::default()), &device, &queue, 1.0);
-        if let Next::Stopped(error) = scene.pump(Instant::now()) {
-            break error.to_string();
-        }
-        assert_eq!(scene.frame_stamp().as_ref(), Some(&landing));
-        assert!(
-            Instant::now() < deadline,
-            "short filtered tail did not terminate"
-        );
-        device.poll(wgpu::PollType::Poll).unwrap();
-        std::thread::yield_now();
-    };
-    assert!(
-        failure.contains("finished without an output"),
-        "short-tail failure lost its raw cause: {failure}"
+    settle_filtered(
+        &scene,
+        &mut pipeline,
+        &device,
+        &queue,
+        &first,
+        Camera::default(),
+        None,
     );
-    let shutter = match receive.recv_timeout(DEADLINE).unwrap() {
-        Ok(_) => panic!("short filtered tail unexpectedly captured a picture"),
-        Err(error) => error.to_string(),
-    };
-    assert_eq!(shutter, failure);
-    assert!(scene.displayed_frame_stamp().is_none());
+    let timing = scene.player(Player::timing).unwrap();
+    let last = timing.frames - 1;
+    let mut previous_epoch = first;
+    for &offset in offsets_from_last {
+        let target = last - offset;
+        let old_shown = scene.displayed_frame_stamp().unwrap();
+        let old_pixels = capture_shown(&scene, &mut pipeline, &device, &queue, Camera::default());
+        scene.seek(timing.time_of(target), Accuracy::Exact);
+        assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&old_shown));
+        assert_eq!(scene.position(Instant::now()), timing.time_of(target));
+
+        let mut current = super::tests::wait_for_new_scene_frame(&scene, Some(&previous_epoch));
+        assert!(!current.same_decode_epoch(&previous_epoch));
+        assert_eq!(current.index(), last.saturating_sub(6));
+        let mut checked_retained_pixels = false;
+        loop {
+            let before_target = current.index() != target;
+            settle_filtered(
+                &scene,
+                &mut pipeline,
+                &device,
+                &queue,
+                &current,
+                Camera::default(),
+                before_target.then_some(&old_shown),
+            );
+            assert_eq!(scene.position(Instant::now()), timing.time_of(target));
+            if before_target && !checked_retained_pixels {
+                let retained =
+                    capture_shown(&scene, &mut pipeline, &device, &queue, Camera::default());
+                assert_eq!(retained.index, old_pixels.index);
+                assert_eq!(retained.time, old_pixels.time);
+                assert_eq!(retained.rgba, old_pixels.rgba);
+                checked_retained_pixels = true;
+            }
+            if !before_target {
+                break;
+            }
+            assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&old_shown));
+            scene.pump(Instant::now());
+            current = super::tests::wait_for_new_scene_frame(&scene, Some(&current));
+        }
+        assert_eq!(current.index(), target);
+        assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&current));
+        assert_ne!(current, old_shown);
+        assert!(checked_retained_pixels);
+        previous_epoch = current;
+    }
 }
 
 #[test]

@@ -12,7 +12,10 @@ use kjerag_media::{FrameStamp, Frames};
 use kjerag_meta::OrientationTrack;
 
 use super::panorama_ingest::{prepare_panorama, validate_reframe};
-use super::{ResidentCameraProfile, ResidentCaptureSession};
+use super::{
+    ResidentCameraProfile, ResidentCaptureSession, native_lifecycle_event,
+    native_lifecycle_probe_enabled,
+};
 use crate::draw_retirement::{DrawPermit, DrawRetirementError};
 use crate::flow::one_xs::gpu_context::OneXsGpuContext;
 use crate::ready_wake::ReadyWake;
@@ -111,8 +114,6 @@ pub(crate) struct FilteredCaptureFacade {
 
 impl FilteredCaptureFacade {
     /// Construct the CPU owner. GPU resources remain lazy until [`Self::attach`].
-    /// Selection remains in real-Scene tests until the complete path is qualified.
-    #[cfg(test)]
     pub(crate) fn new(
         profile: Arc<ResidentCameraProfile>,
         orientation: OrientationTrack,
@@ -575,6 +576,8 @@ pub(super) fn service_filtered(job: FilteredJob) -> Fallible<()> {
     match job {
         FilteredJob::Push(job) => {
             job.owner.ensure_pending_source(&job.stamp)?;
+            let started = native_lifecycle_probe_enabled().then(std::time::Instant::now);
+            native_lifecycle_event("filtered-worker-start", &job.stamp, None);
             let panorama = prepare_panorama(
                 &job.session.resident,
                 job.frames,
@@ -583,12 +586,27 @@ pub(super) fn service_filtered(job: FilteredJob) -> Fallible<()> {
                 job.size,
                 job.permit,
             )?;
+            if let Some(started) = started {
+                // This ends at panorama submission, not GPU completion.
+                native_lifecycle_event(
+                    "filtered-panorama-submitted",
+                    &job.stamp,
+                    Some(started.elapsed()),
+                );
+            }
             let outputs = job
                 .session
                 .stream
                 .lock()
                 .map_err(|_| "filtered temporal stream is poisoned")?
                 .push(panorama, job.matrix)?;
+            if let Some(started) = started {
+                native_lifecycle_event(
+                    "filtered-worker-complete",
+                    &job.stamp,
+                    Some(started.elapsed()),
+                );
+            }
             job.owner.complete(PendingKind::Source(&job.stamp), outputs)
         }
         FilteredJob::Finish { owner, session } => {

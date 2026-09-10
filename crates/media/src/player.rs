@@ -158,6 +158,7 @@ enum Command {
     },
     Replay {
         epoch: u64,
+        video_at: Cue,
         audio_at: Cue,
     },
 }
@@ -187,6 +188,9 @@ pub struct Player {
     /// presentation frames. Selected causal consumers use this after an
     /// exact frame-zero decoder seek instead of jumping over estimator input.
     replay_target: Option<u64>,
+    /// A bounded replay whose intermediate video sources must not move the
+    /// requested media/audio position.
+    replay_clock_held: bool,
 }
 
 /// What the picture is waiting for, which is what decides which frames may
@@ -342,6 +346,7 @@ impl Player {
             ended: false,
             epochs: Epochs::default(),
             replay_target: None,
+            replay_clock_held: false,
         })
     }
 
@@ -626,6 +631,7 @@ impl Player {
     /// [`Player::is_seeking`] is true until its first frame arrives.
     pub fn seek(&mut self, to: Cue, accuracy: Accuracy) {
         self.replay_target = None;
+        self.replay_clock_held = false;
         let epoch = self.epochs.ask();
         self.ended = false;
         self.hush();
@@ -656,19 +662,19 @@ impl Player {
         let target = to.index(self.timing).min(self.last_index());
         if !restart_from_zero && self.index() == Some(target) {
             self.replay_target = None;
+            self.replay_clock_held = false;
             self.pause(Instant::now());
             return Ok(());
         }
 
         self.replay_target = Some(target);
+        self.replay_clock_held = false;
         // Intermediate frames are estimator input, not timed playback. Keep
         // the real clock and Beat stopped until the target map is acknowledged
         // by the outer Scene; that owner restores the requested play intent.
         self.pause(Instant::now());
         if restart_from_zero {
-            // A new epoch can produce more input. A forward replay in the same
-            // epoch cannot: its queued tail may already have carried the only
-            // EOF notification.
+            self.replay_clock_held = false;
             self.ended = false;
             let epoch = self.epochs.ask();
             self.hush();
@@ -677,6 +683,7 @@ impl Player {
                 .commands
                 .send(Command::Replay {
                     epoch,
+                    video_at: Cue::Index(0),
                     audio_at: Cue::Index(target),
                 })
                 .is_err()
@@ -689,6 +696,54 @@ impl Player {
         } else {
             self.epochs.owe();
         }
+        Ok(())
+    }
+
+    /// Decode a real, contiguous video window beginning at `video_at` while
+    /// retaining `target` as the only requested presentation/audio position.
+    ///
+    /// This is an explicit causal-consumer operation. Intermediate pictures
+    /// pass through the normal exact-source acknowledgement gate with the
+    /// clock paused; the outer consumer decides whether any may be published.
+    pub fn replay_window(&mut self, video_at: Cue, target: Cue) -> Fallible<()> {
+        let first = video_at.index(self.timing).min(self.last_index());
+        let target = target.index(self.timing).min(self.last_index());
+        if first > target {
+            return Err(format!(
+                "source replay window begins at frame {first} after target frame {target}"
+            )
+            .into());
+        }
+        self.replay_target = Some(target);
+        self.replay_clock_held = true;
+        self.pause(Instant::now());
+        self.ended = false;
+        let epoch = self.epochs.ask();
+        self.hush();
+        // The media clock and independent sound track name the requested
+        // target, never the non-presenting video pre-roll.
+        let now = Instant::now();
+        self.presenter.reseek(self.timing.time_of(target));
+        self.presenter
+            .clock
+            .anchor(now, self.timing.time_of(target));
+        if self
+            .commands
+            .send(Command::Replay {
+                epoch,
+                video_at: Cue::Index(first),
+                audio_at: Cue::Index(target),
+            })
+            .is_err()
+        {
+            self.replay_target = None;
+            self.replay_clock_held = false;
+            self.epochs.give_up();
+            return Err(
+                format!("source replay decoder stopped before accepting frame {first}").into(),
+            );
+        }
+        while self.notes.try_recv().is_ok() {}
         Ok(())
     }
 
@@ -806,7 +861,11 @@ impl Player {
                 }
             }
         };
-        let shown = self.presenter.advance(now, owed, &mut next);
+        let shown = if self.replay_clock_held {
+            self.presenter.advance_held(now, owed, &mut next)
+        } else {
+            self.presenter.advance(now, owed, &mut next)
+        };
         if prefetch_successor && self.presenter.current.is_some() {
             while self.presenter.peeked.len() < DECODED_AHEAD {
                 let Some(frames) = next() else {
@@ -829,7 +888,11 @@ impl Player {
                 epochs.owe();
             } else {
                 *replay_target = None;
+                self.replay_clock_held = false;
             }
+        }
+        if replay_target.is_none() {
+            self.replay_clock_held = false;
         }
         match self.failure.take() {
             Some(e) => {
@@ -847,7 +910,7 @@ impl Player {
 /// 38 GB of footage.
 trait Source {
     fn seek(&mut self, to: Cue, accuracy: Accuracy) -> Fallible<()>;
-    fn replay_from_zero(&mut self, audio_at: Cue) -> Fallible<()>;
+    fn replay_from(&mut self, video_at: Cue, audio_at: Cue) -> Fallible<()>;
     fn read_until(&mut self, interrupted: &mut dyn FnMut() -> bool) -> Fallible<Read>;
 }
 
@@ -856,8 +919,12 @@ impl Source for Reader {
         Reader::seek(self, to, accuracy)
     }
 
-    fn replay_from_zero(&mut self, audio_at: Cue) -> Fallible<()> {
-        Reader::replay_from_zero(self, audio_at)
+    fn replay_from(&mut self, video_at: Cue, audio_at: Cue) -> Fallible<()> {
+        if video_at.index(self.timing()) == 0 {
+            Reader::replay_from_zero(self, audio_at)
+        } else {
+            Reader::replay_from(self, video_at, audio_at)
+        }
     }
 
     fn read_until(&mut self, interrupted: &mut dyn FnMut() -> bool) -> Fallible<Read> {
@@ -907,10 +974,11 @@ fn decode_ahead(mut reader: impl Source, notes: &SyncSender<Note>, commands: &Re
                 }
                 Command::Replay {
                     epoch: to,
+                    video_at,
                     audio_at,
                 } => {
                     epoch = to;
-                    reader.replay_from_zero(audio_at)
+                    reader.replay_from(video_at, audio_at)
                 }
             };
             ended = false;
@@ -1006,7 +1074,26 @@ impl Presenter {
     fn advance(
         &mut self,
         now: Instant,
+        owed: bool,
+        next: impl FnMut() -> Option<Frames>,
+    ) -> Option<Arc<Frames>> {
+        self.advance_inner(now, owed, true, next)
+    }
+
+    fn advance_held(
+        &mut self,
+        now: Instant,
+        owed: bool,
+        next: impl FnMut() -> Option<Frames>,
+    ) -> Option<Arc<Frames>> {
+        self.advance_inner(now, owed, false, next)
+    }
+
+    fn advance_inner(
+        &mut self,
+        now: Instant,
         mut owed: bool,
+        reanchor_landing: bool,
         mut next: impl FnMut() -> Option<Frames>,
     ) -> Option<Arc<Frames>> {
         self.stats.redraws += 1;
@@ -1024,7 +1111,9 @@ impl Presenter {
                 // decode lineage. A same-epoch forward replay reaches here
                 // with its following decoded frame still valid, so anchoring
                 // this landing must not throw that successor away.
-                self.reanchor(frames.timestamp);
+                if reanchor_landing {
+                    self.reanchor(frames.timestamp);
+                }
             }
             if !self.claim(now, &frames) {
                 self.peeked.push_front(frames);
@@ -1486,7 +1575,7 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     enum Did {
         Seek(u64, Accuracy),
-        Replay(u64),
+        Replay(u64, u64),
         Read(u64),
         Gave(u64),
     }
@@ -1525,12 +1614,12 @@ mod tests {
             Ok(())
         }
 
-        fn replay_from_zero(&mut self, audio_at: Cue) -> Fallible<()> {
-            let Cue::Index(target) = audio_at else {
+        fn replay_from(&mut self, video_at: Cue, audio_at: Cue) -> Fallible<()> {
+            let (Cue::Index(first), Cue::Index(target)) = (video_at, audio_at) else {
                 return Err("the fake source replays by index".into());
             };
-            self.at = 0;
-            self.note(Did::Replay(target));
+            self.at = first;
+            self.note(Did::Replay(first, target));
             Ok(())
         }
 
@@ -1604,13 +1693,29 @@ mod tests {
         let (shown, did) = decode(
             vec![Command::Replay {
                 epoch: 4,
+                video_at: Cue::Index(0),
                 audio_at: Cue::Index(317),
             }],
             vec![None, None],
         );
 
         assert_eq!(shown, [(4, 0), (4, 1)]);
-        assert_eq!(did, [Did::Replay(317), Did::Read(0), Did::Read(1)]);
+        assert_eq!(did, [Did::Replay(0, 317), Did::Read(0), Did::Read(1)]);
+    }
+
+    #[test]
+    fn replay_window_separates_real_video_preroll_from_audio_target() {
+        let (shown, did) = decode(
+            vec![Command::Replay {
+                epoch: 9,
+                video_at: Cue::Index(993),
+                audio_at: Cue::Index(999),
+            }],
+            vec![None, None],
+        );
+
+        assert_eq!(shown, [(9, 993), (9, 994)]);
+        assert_eq!(did, [Did::Replay(993, 999), Did::Read(993), Did::Read(994)]);
     }
 
     /// The refill after a landing is three pair decodes for a position the
@@ -1814,6 +1919,7 @@ mod tests {
                     ended: false,
                     epochs: Epochs::default(),
                     replay_target: None,
+                    replay_clock_held: false,
                 },
                 notes: sender,
                 commands: orders,
@@ -1848,9 +1954,9 @@ mod tests {
             self.commands
                 .try_iter()
                 .filter_map(|command| match command {
-                    Command::Replay { epoch, audio_at } => {
-                        Some((epoch, audio_at.index(self.player.timing)))
-                    }
+                    Command::Replay {
+                        epoch, audio_at, ..
+                    } => Some((epoch, audio_at.index(self.player.timing))),
                     Command::Seek { .. } => None,
                 })
                 .collect()
@@ -2227,6 +2333,86 @@ mod tests {
         assert!(bench.player.decoded_ahead(1).is_none());
         assert!(bench.player.is_seeking());
         assert!(!bench.player.is_playing());
+    }
+
+    #[test]
+    fn replay_window_keeps_preroll_paused_and_refuses_stale_epoch_sources() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        let now = Instant::now();
+        bench.decoded(0, 40);
+        assert_eq!(bench.redraw(now), Some(40));
+
+        bench
+            .player
+            .replay_window(Cue::Index(93), Cue::Index(99))
+            .unwrap();
+        assert!(!bench.player.is_playing());
+        assert_eq!(bench.player.position(now), bench.player.timing.time_of(99));
+        assert!(bench.player.presenter.current.is_none());
+        match bench.commands.try_recv().unwrap() {
+            Command::Replay {
+                epoch,
+                video_at,
+                audio_at,
+            } => {
+                assert_eq!(epoch, 1);
+                assert_eq!(video_at.index(bench.player.timing), 93);
+                assert_eq!(audio_at.index(bench.player.timing), 99);
+            }
+            Command::Seek { .. } => panic!("replay window emitted an ordinary seek"),
+        }
+        bench.decoded(0, 41);
+        bench.decoded(1, 93);
+        assert_eq!(bench.redraw(now), Some(93));
+        assert_eq!(bench.player.replay_target, Some(99));
+        assert!(bench.player.is_seeking());
+    }
+
+    #[test]
+    fn newer_replay_window_supersedes_its_unlanded_predecessor() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench
+            .player
+            .replay_window(Cue::Index(93), Cue::Index(99))
+            .unwrap();
+        bench
+            .player
+            .replay_window(Cue::Index(193), Cue::Index(199))
+            .unwrap();
+        assert_eq!(bench.player.replay_target, Some(199));
+        assert_eq!(bench.player.epochs.asked, 2);
+        bench.decoded(1, 93);
+        bench.decoded(2, 193);
+        assert_eq!(bench.redraw(Instant::now()), Some(193));
+        assert_eq!(bench.player.replay_target, Some(199));
+    }
+
+    #[test]
+    fn invalid_replay_window_does_not_mutate_player_state() {
+        let mut bench = Bench::new();
+        let epochs = bench.player.epochs;
+        let error = bench
+            .player
+            .replay_window(Cue::Index(100), Cue::Index(99))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "source replay window begins at frame 100 after target frame 99"
+        );
+        assert_eq!(bench.player.epochs, epochs);
+        assert!(bench.player.replay_target.is_none());
+        assert!(bench.commands.try_recv().is_err());
     }
 
     #[test]

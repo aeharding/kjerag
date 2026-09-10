@@ -120,6 +120,7 @@ impl Stream {
         body: BodyPanorama,
         matrix: MatrixCoefficients,
     ) -> Fallible<Vec<FilteredPanorama>> {
+        let started = trace_start();
         self.ensure_active()?;
         validate_body(&body, &self.device, self.full)?;
         let stamp = body.frame().clone();
@@ -162,25 +163,21 @@ impl Stream {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("streaming temporal source preparation"),
             });
-        let nv12 = self
-            .color
-            .encode_rgb_to_nv12(&mut encoder, body.texture(), matrix)?;
-        self.history
-            .encode_push(&self.device, &mut encoder, &stamp, &nv12)?;
+        let luma = self.history.encode_push_rgb(
+            &self.device,
+            &mut encoder,
+            &self.color,
+            &stamp,
+            body.texture(),
+            matrix,
+        )?;
         let (gpu_base, reads) = if effective.radius == 0 {
             (None, Vec::new())
         } else {
-            let pyramid = self
-                .pyramid
-                .encode_luma(&self.device, &mut encoder, &nv12.y, LEVELS)?;
-            let packed =
+            let pyramid =
                 self.pyramid
-                    .encode_packed_base(&self.device, &mut encoder, &pyramid.levels[0])?;
-            let reads = pyramid
-                .levels
-                .iter()
-                .map(|level| PendingLevel::encode(&self.device, &mut encoder, level))
-                .collect();
+                    .encode_history_luma(&self.device, &mut encoder, &luma, LEVELS)?;
+            let (packed, reads) = self.prepare_motion_inputs(&mut encoder, &pyramid)?;
             (Some(packed), reads)
         };
         self.queue.submit([encoder.finish()]);
@@ -190,6 +187,7 @@ impl Stream {
         } else {
             Some(read_levels(&self.device, reads)?)
         };
+        trace_elapsed("prepare", &stamp, started);
         self.window.push_back(Retained {
             stamp,
             effective,
@@ -223,7 +221,8 @@ impl Stream {
         Ok(output)
     }
 
-    fn process(&self, center: usize) -> Fallible<FilteredPanorama> {
+    fn process(&mut self, center: usize) -> Fallible<FilteredPanorama> {
+        self.prepare_references(center)?;
         let retained = &self.window[center];
         let history = self
             .history
@@ -259,13 +258,85 @@ impl Stream {
             self.matrix
                 .ok_or("temporal stream has no source color matrix")?,
         )?;
+        let started = trace_start();
         self.queue.submit([encoder.finish()]);
         wait_for_queue(&self.device, &self.queue)?;
+        trace_elapsed("filter-submit-complete", &retained.stamp, started);
         Ok(FilteredPanorama {
             texture,
             frame: retained.stamp.clone(),
             device: self.device.clone(),
         })
+    }
+
+    fn prepare_pyramid(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        luma: &wgpu::Texture,
+    ) -> Fallible<(pyramid_gpu::PackedGray, Vec<PendingLevel>)> {
+        let pyramid = self
+            .pyramid
+            .encode_luma(&self.device, encoder, luma, LEVELS)?;
+        self.prepare_motion_inputs(encoder, &pyramid)
+    }
+
+    fn prepare_motion_inputs(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        pyramid: &pyramid_gpu::Output,
+    ) -> Fallible<(pyramid_gpu::PackedGray, Vec<PendingLevel>)> {
+        let packed = self
+            .pyramid
+            .encode_packed_base(&self.device, encoder, &pyramid.levels[0])?;
+        let reads = pyramid
+            .levels
+            .iter()
+            .skip(1)
+            .map(|level| PendingLevel::encode(&self.device, encoder, level))
+            .collect();
+        Ok((packed, reads))
+    }
+
+    /// A source with radius zero needs no motion for its own output, but a
+    /// neighbouring center may still reference it. Rebuild any missing motion
+    /// inputs once from that exact source's retained NV12, never from a filtered
+    /// picture or a source sampled again with different colour coefficients.
+    fn prepare_references(&mut self, center: usize) -> Fallible<()> {
+        let radius = self.window[center].effective.radius as usize;
+        if radius == 0 {
+            return Ok(());
+        }
+        let history = self.history.window_at(center, radius)?;
+        let needed: Vec<_> = std::iter::once(center)
+            .chain(history.reference_positions())
+            .filter(|&at| self.window[at].levels.is_none())
+            .collect();
+        if needed.is_empty() {
+            return Ok(());
+        }
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("temporal radius transition reference preparation"),
+            });
+        let mut pending = Vec::with_capacity(needed.len());
+        for at in needed {
+            let history = self.history.window_at(at, 0)?;
+            if history.stamps().center != &self.window[at].stamp {
+                return Err(
+                    "temporal reference preparation differs from its retained source".into(),
+                );
+            }
+            let source = history.encode_copy_current(&self.device, &mut encoder)?;
+            let (packed, reads) = self.prepare_pyramid(&mut encoder, &source.y)?;
+            pending.push((at, packed, reads));
+        }
+        self.queue.submit([encoder.finish()]);
+        for (at, packed, reads) in pending {
+            self.window[at].levels = Some(read_levels(&self.device, reads)?);
+            self.window[at].gpu_base = Some(packed);
+        }
+        Ok(())
     }
 
     fn encode_fusion(
@@ -296,10 +367,11 @@ impl Stream {
                     .ok_or("temporal stream nonzero radius has a missing reference pyramid")
             })
             .collect::<Result<_, _>>()?;
-        let coarse: Vec<_> = reference_levels
-            .iter()
-            .map(|reference| super::search::prepare_finest(center_levels, reference))
-            .collect::<Result<_, _>>()?;
+        let finest = current.logical_size().map(|value| value as usize);
+        let started = trace_start();
+        let coarse =
+            super::search::prepare_finest_ordered_coarse(finest, center_levels, &reference_levels)?;
+        trace_elapsed("coarse", &center.stamp, started);
         let reference_bases: Vec<_> = references
             .iter()
             .map(|&at| {
@@ -320,7 +392,7 @@ impl Stream {
             &globals,
         )?;
 
-        let geometry = geometry(self.full, center_levels)?;
+        let geometry = geometry(self.full, current.logical_size(), center_levels)?;
         let flow = array_texture(
             &self.device,
             "streaming temporal packed motion",
@@ -341,12 +413,12 @@ impl Stream {
             0,
             geometry.output_grid,
             1,
-            &center_levels[3].pixels,
+            &center_levels[2].pixels,
         );
         for (ordinal, &phase) in phases.iter().enumerate() {
             let parameters = motion::Parameters {
                 geometry,
-                luma: &center_levels[3].pixels,
+                luma: &center_levels[2].pixels,
                 confidence_y: &center.effective.confidence_y,
                 confidence_uv: &center.effective.confidence_uv,
                 scale_base: SCALE_BASE,
@@ -404,6 +476,23 @@ impl Stream {
     }
 }
 
+fn trace_start() -> Option<std::time::Instant> {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    ENABLED
+        .get_or_init(|| std::env::var_os("KJERAG_NATIVE_LIFECYCLE_PROBE").is_some())
+        .then(std::time::Instant::now)
+}
+
+fn trace_elapsed(stage: &str, stamp: &FrameStamp, started: Option<std::time::Instant>) {
+    if let Some(started) = started {
+        eprintln!(
+            "temporal-stream: source={} stage={stage} elapsed_ms={:.6}",
+            stamp.index(),
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+}
+
 fn validate_full(full: [u32; 2]) -> Fallible<()> {
     if full[0] == 0
         || full[1] == 0
@@ -445,9 +534,18 @@ fn validate_body(body: &BodyPanorama, device: &wgpu::Device, full: [u32; 2]) -> 
 
 fn validate_motion_full(full: [u32; 2]) -> Fallible<()> {
     let base = [full[0] / 2, full[1] / 2];
-    if base
-        .into_iter()
-        .any(|value| !(1_024..8_192).contains(&value) || !value.is_multiple_of(64))
+    // Both supported camera sizes have seven nonempty 16x16 search grids.
+    // Successive dimensions floor-halve; an odd intermediate dimension does
+    // not remove a usable level. Larger/smaller native level-count routes are
+    // not implemented by this selected search.
+    let mut shortest = base[0].min(base[1]);
+    let mut levels = 0;
+    while shortest >= BLOCK {
+        levels += 1;
+        shortest /= 2;
+    }
+    if base.into_iter().any(|value| value >= 8_192)
+        || levels != LEVELS
         || full.into_iter().any(|value| !value.is_multiple_of(32))
     {
         return Err(format!(
@@ -459,14 +557,15 @@ fn validate_motion_full(full: [u32; 2]) -> Fallible<()> {
     Ok(())
 }
 
-fn geometry(full: [u32; 2], levels: &[Level]) -> Fallible<Geometry> {
-    if levels.len() != LEVELS
+fn geometry(full: [u32; 2], finest: [u32; 2], levels: &[Level]) -> Fallible<Geometry> {
+    if levels.len() != LEVELS - 1
         || full.into_iter().any(|value| !value.is_multiple_of(32))
-        || levels[0].width != full[0] as usize / 2
-        || levels[0].height != full[1] as usize / 2
-        || levels[3].width != full[0] as usize / 16
-        || levels[3].height != full[1] as usize / 16
-        || levels[3].pixels.len() != (full[0] as usize / 16) * (full[1] as usize / 16)
+        || finest != [full[0] / 2, full[1] / 2]
+        || levels[0].width != full[0] as usize / 4
+        || levels[0].height != full[1] as usize / 4
+        || levels[2].width != full[0] as usize / 16
+        || levels[2].height != full[1] as usize / 16
+        || levels[2].pixels.len() != (full[0] as usize / 16) * (full[1] as usize / 16)
     {
         return Err("temporal stream geometry is unsupported by the selected motion path".into());
     }
@@ -668,15 +767,21 @@ fn copy_layer(
 }
 
 #[cfg(test)]
-mod tests {
+mod tests;
+
+#[cfg(test)]
+mod geometry_tests {
     use super::*;
 
     #[test]
-    fn geometry_gate_distinguishes_full_filter_from_radius_zero_only_sizes() {
+    fn geometry_gate_accepts_both_cameras_with_seven_search_grids() {
         assert!(validate_full([7_680, 3_840]).is_ok());
         assert!(validate_motion_full([7_680, 3_840]).is_ok());
         assert!(validate_full([5_760, 2_880]).is_ok());
-        assert!(validate_motion_full([5_760, 2_880]).is_err());
+        assert!(validate_motion_full([5_760, 2_880]).is_ok());
+        assert!(validate_motion_full([4_096, 2_048]).is_ok());
+        assert!(validate_motion_full([2_048, 1_024]).is_err());
+        assert!(validate_motion_full([8_192, 4_096]).is_err());
     }
 
     #[test]

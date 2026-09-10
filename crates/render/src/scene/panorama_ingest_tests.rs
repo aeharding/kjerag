@@ -27,6 +27,7 @@ fn x2_panorama_preparation_keeps_the_player_paused_and_matches_displayed_sources
 fn assert_preparation(path: &Path, seek: Duration) {
     let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
     let mut scene = Scene::open(path).unwrap();
+    scene.disable_temporal_for_review().unwrap();
     scene.set_muted(true);
     scene.pause(Instant::now());
     let mut previous_epoch: Option<FrameStamp> = None;

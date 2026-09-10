@@ -62,6 +62,16 @@ pub struct Provider {
 }
 
 impl Provider {
+    #[cfg(test)]
+    pub(super) fn for_test_common(
+        observations: &[kjerag_meta::DenoiseIsoObservation],
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            table: Table::Common,
+            lookup: iso::Lookup::from_observations(observations)?,
+        })
+    }
+
     /// Select the native table from source metadata. Only routes whose inputs
     /// and control flow have been authenticated are accepted.
     pub fn new(calibration: &CalibrationSet, source_fps: f32) -> Result<Self, Error> {

@@ -57,6 +57,119 @@ fn finest_preparation_preserves_the_complete_reference_search() {
     );
 }
 
+#[test]
+fn concurrent_finest_preparation_matches_serial_and_preserves_order() {
+    let bytes: Vec<_> = (0..1024usize * 1024)
+        .map(|at| ((at.wrapping_mul(37) ^ (at >> 6).wrapping_mul(173)) >> 3) as u8)
+        .collect();
+    let current = super::super::pyramid::build(&bytes, 1024, 1024, LEVELS).unwrap();
+    let references: Vec<_> = [7usize, 19, 43, 79, 131, 211]
+        .map(|shift| {
+            let shifted: Vec<_> = (0..bytes.len())
+                .map(|at| bytes[(at + shift) % bytes.len()])
+                .collect();
+            super::super::pyramid::build(&shifted, 1024, 1024, LEVELS).unwrap()
+        })
+        .into();
+    let serial: Vec<_> = references
+        .iter()
+        .map(|reference| prepare_finest(&current, reference).unwrap())
+        .collect();
+
+    for count in [1, 3, 6] {
+        let borrowed: Vec<_> = references[..count].iter().map(Vec::as_slice).collect();
+        let concurrent = prepare_finest_ordered(&current, &borrowed).unwrap();
+        let coarse_borrowed: Vec<_> = references[..count]
+            .iter()
+            .map(|reference| &reference[1..])
+            .collect();
+        let coarse = prepare_finest_ordered_coarse(
+            [current[0].width, current[0].height],
+            &current[1..],
+            &coarse_borrowed,
+        )
+        .unwrap();
+        assert_eq!(concurrent.len(), count);
+        assert_eq!(coarse.len(), count);
+        for ((actual, coarse), expected) in concurrent.iter().zip(&coarse).zip(&serial[..count]) {
+            assert_eq!(actual.global, expected.global);
+            assert_eq!(actual.seeds, expected.seeds);
+            assert_eq!(coarse.global, expected.global);
+            assert_eq!(coarse.seeds, expected.seeds);
+        }
+    }
+    assert!(serial.windows(2).any(|pair| pair[0].seeds != pair[1].seeds));
+}
+
+#[test]
+fn coarse_only_preparation_needs_no_level_zero_pixels_and_keeps_odd_halving() {
+    let finest = [2880, 1440];
+    let current = constant_levels(finest[0], finest[1], 73);
+    let reference = constant_levels(finest[0], finest[1], 94);
+    let expected = prepare_finest(&current, &reference).unwrap();
+    let actual = prepare_finest_ordered_coarse(finest, &current[1..], &[&reference[1..]])
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(actual.global, expected.global);
+    assert_eq!(actual.seeds, expected.seeds);
+}
+
+#[test]
+fn concurrent_finest_preparation_rejects_count_and_inputs_before_work() {
+    let current = constant_levels(1024, 1024, 73);
+    assert!(matches!(
+        prepare_finest_ordered(&current, &[]),
+        Err(Error::ReferenceCount(0))
+    ));
+    let seven: Vec<_> = (0..7).map(|_| current.as_slice()).collect();
+    assert!(matches!(
+        prepare_finest_ordered(&current, &seven),
+        Err(Error::ReferenceCount(7))
+    ));
+
+    let valid = current.clone();
+    let mut invalid = current.clone();
+    invalid.pop();
+    assert!(matches!(
+        prepare_finest_ordered(&current, &[valid.as_slice(), invalid.as_slice()]),
+        Err(Error::LevelCount { reference: 6, .. })
+    ));
+
+    assert!(matches!(
+        prepare_finest_ordered_coarse(
+            [current[0].width, current[0].height],
+            &current[1..],
+            &[&invalid[1..]],
+        ),
+        Err(Error::CoarseLevelCount { reference: 5, .. })
+    ));
+    assert!(matches!(
+        prepare_finest_ordered_coarse([2048, 1024], &current[1..], &[&valid[1..]]),
+        Err(Error::Geometry { level: 1, .. })
+    ));
+}
+
+#[test]
+fn ordered_workers_return_the_first_error_and_resume_panics() {
+    let error: Result<Vec<usize>, Error> = run_ordered(4, |index| match index {
+        1 => Err(Error::OutputCostOverflow(11)),
+        2 => Err(Error::OutputCostOverflow(22)),
+        _ => Ok(index),
+    });
+    assert_eq!(error, Err(Error::OutputCostOverflow(11)));
+
+    let panic = std::panic::catch_unwind(|| {
+        let _: Result<Vec<usize>, Error> = run_ordered(3, |index| {
+            if index == 1 {
+                panic!("bounded worker panic");
+            }
+            Ok(index)
+        });
+    });
+    assert!(panic.is_err());
+}
+
 /// The same serial finest-level controller, exposed only to GPU tests so
 /// adversarial seeds can exercise bounds, ties and the adaptive UMH branch.
 pub(super) fn finish_finest(
@@ -374,16 +487,8 @@ fn six_worker_coarse_preparation_is_exact_and_timed() {
     }
     for repeat in 1..=5 {
         let started = std::time::Instant::now();
-        let parallel: [FinestInput; 6] = std::thread::scope(|scope| {
-            let jobs = fixture.references.each_ref().map(|reference| {
-                let current = &fixture.current;
-                scope.spawn(move || prepare_finest(current, reference).unwrap())
-            });
-            jobs.map(|job| {
-                job.join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            })
-        });
+        let references: Vec<_> = fixture.references.iter().map(Vec::as_slice).collect();
+        let parallel = prepare_finest_ordered(&fixture.current, &references).unwrap();
         let elapsed = started.elapsed();
         for (actual, expected) in parallel.iter().zip(&serial) {
             assert_eq!(actual.global, expected.global);

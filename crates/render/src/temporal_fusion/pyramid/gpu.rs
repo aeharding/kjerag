@@ -43,7 +43,7 @@ pub enum Error {
     InputTexture,
     EmptyPyramid,
     OddLumaDimensions,
-    OddReduction {
+    EmptyReduction {
         level: usize,
         width: u32,
         height: u32,
@@ -62,13 +62,13 @@ impl fmt::Display for Error {
             Self::OddLumaDimensions => formatter.write_str(
                 "full-resolution luma dimensions must be even for the half-size gray base",
             ),
-            Self::OddReduction {
+            Self::EmptyReduction {
                 level,
                 width,
                 height,
             } => write!(
                 formatter,
-                "pyramid level {level} is {width}x{height}; both dimensions must be even to reduce it"
+                "pyramid level {level} is {width}x{height}; reduction would produce an empty level"
             ),
         }
     }
@@ -197,10 +197,44 @@ impl Builder {
         self.ensure_device(device)?;
         validate_input(luma, wgpu::TextureFormat::R8Unorm)?;
         let size = luma.size();
-        if !size.width.is_multiple_of(2) || !size.height.is_multiple_of(2) {
+        self.encode_luma_view(
+            device,
+            encoder,
+            &luma.create_view(&Default::default()),
+            [size.width, size.height],
+            level_count,
+        )
+    }
+
+    /// Consume the exact single history layer just written by RGB conversion.
+    /// The typed layer supplies its device and size; callers cannot pair an
+    /// arbitrary view with unrelated geometry or sample the whole array.
+    pub(crate) fn encode_history_luma(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        luma: &crate::temporal_fusion::history::PushedLuma,
+        level_count: usize,
+    ) -> Result<Output, Error> {
+        self.ensure_device(device)?;
+        if luma.device() != device {
+            return Err(Error::ForeignDevice);
+        }
+        self.encode_luma_view(device, encoder, luma.view(), luma.size(), level_count)
+    }
+
+    fn encode_luma_view(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        luma: &wgpu::TextureView,
+        size: [u32; 2],
+        level_count: usize,
+    ) -> Result<Output, Error> {
+        if !size[0].is_multiple_of(2) || !size[1].is_multiple_of(2) {
             return Err(Error::OddLumaDimensions);
         }
-        let base = [size.width / 2, size.height / 2];
+        let base = [size[0] / 2, size[1] / 2];
         validate_geometry(base, level_count)?;
 
         let first = target(device, "temporal half-size gray", base[0], base[1]);
@@ -299,17 +333,16 @@ impl Builder {
     fn draw_float(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        source: &wgpu::Texture,
+        source: &wgpu::TextureView,
         destination: &wgpu::Texture,
         pipeline: &wgpu::RenderPipeline,
     ) {
-        let source_view = source.create_view(&Default::default());
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("temporal pyramid full luma"),
             layout: &self.float_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&source_view),
+                resource: wgpu::BindingResource::TextureView(source),
             }],
         });
         draw(encoder, destination, pipeline, &group);
@@ -360,8 +393,8 @@ fn validate_geometry(base: [u32; 2], level_count: usize) -> Result<(), Error> {
     }
     let [mut width, mut height] = base;
     for level in 0..level_count - 1 {
-        if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
-            return Err(Error::OddReduction {
+        if width / 2 == 0 || height / 2 == 0 {
+            return Err(Error::EmptyReduction {
                 level,
                 width,
                 height,

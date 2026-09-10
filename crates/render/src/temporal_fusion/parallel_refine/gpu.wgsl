@@ -22,7 +22,7 @@ struct Params {
     height: u32,
     blocks_x: u32,
     blocks_y: u32,
-    _padding0: u32,
+    reference: u32,
     _padding1: u32,
     _padding2: u32,
     _padding3: u32,
@@ -44,16 +44,11 @@ struct Candidate {
 }
 
 @group(0) @binding(0) var current_image: texture_2d<u32>;
-@group(0) @binding(1) var reference_0: texture_2d<u32>;
-@group(0) @binding(2) var reference_1: texture_2d<u32>;
-@group(0) @binding(3) var reference_2: texture_2d<u32>;
-@group(0) @binding(4) var reference_3: texture_2d<u32>;
-@group(0) @binding(5) var reference_4: texture_2d<u32>;
-@group(0) @binding(6) var reference_5: texture_2d<u32>;
-@group(0) @binding(7) var<storage, read> seeds: array<RawMotion>;
-@group(0) @binding(8) var<storage, read_write> output: array<RawMotion>;
-@group(0) @binding(9) var<uniform> params: Params;
-@group(0) @binding(10) var<storage, read> globals: array<vec2<i32>>;
+@group(0) @binding(1) var reference_image: texture_2d<u32>;
+@group(0) @binding(2) var<storage, read> seeds: array<RawMotion>;
+@group(0) @binding(3) var<storage, read_write> output: array<RawMotion>;
+@group(0) @binding(4) var<uniform> params: Params;
+@group(0) @binding(5) var<storage, read> globals: array<vec2<i32>>;
 
 const BLOCK: u32 = 16u;
 const QUADS_PER_ROW: u32 = BLOCK / 4u;
@@ -70,15 +65,8 @@ var<workgroup> best: RawMotion;
 var<workgroup> minimum_cost: i32;
 
 // Each texel is four consecutive horizontal bytes in explicit rgba order.
-fn reference_quad(reference: u32, coordinate: vec2<i32>) -> vec4<u32> {
-    switch reference {
-        case 0u: { return textureLoad(reference_0, coordinate, 0); }
-        case 1u: { return textureLoad(reference_1, coordinate, 0); }
-        case 2u: { return textureLoad(reference_2, coordinate, 0); }
-        case 3u: { return textureLoad(reference_3, coordinate, 0); }
-        case 4u: { return textureLoad(reference_4, coordinate, 0); }
-        default: { return textureLoad(reference_5, coordinate, 0); }
-    }
+fn reference_quad(coordinate: vec2<i32>) -> vec4<u32> {
+    return textureLoad(reference_image, coordinate, 0);
 }
 
 fn align_quad(left: vec4<u32>, right: vec4<u32>, offset: u32) -> vec4<u32> {
@@ -141,7 +129,7 @@ fn put_candidate(slot: u32, value: vec2<i32>, valid: bool, penalize: bool) {
 // Eight teams evaluate eight candidates without candidate-dependent
 // barriers. Team leaders make exact integer sums, then lane zero applies the
 // CPU reference's strict ordinal tie rule.
-fn execute_batch(lane: u32, reference: u32, source: vec2<i32>) {
+fn execute_batch(lane: u32, source: vec2<i32>) {
     workgroupBarrier();
     let slot = lane / LANES_PER_CANDIDATE;
     let candidate_lane = lane % LANES_PER_CANDIDATE;
@@ -156,15 +144,15 @@ fn execute_batch(lane: u32, reference: u32, source: vec2<i32>) {
         let shift = u32(landing.x) % 4u;
         for (var row = candidate_lane; row < BLOCK; row += LANES_PER_CANDIDATE) {
             let y = landing.y + i32(row);
-            var left = reference_quad(reference, vec2<i32>(first_x, y));
+            var left = reference_quad(vec2<i32>(first_x, y));
             for (var column = 0u; column < QUADS_PER_ROW; column += 1u) {
                 var wanted = left;
                 if shift != 0u {
-                    let right = reference_quad(reference, vec2<i32>(first_x + i32(column) + 1, y));
+                    let right = reference_quad(vec2<i32>(first_x + i32(column) + 1, y));
                     wanted = align_quad(left, right, shift);
                     left = right;
                 } else if column + 1u < QUADS_PER_ROW {
-                    left = reference_quad(reference, vec2<i32>(first_x + i32(column) + 1, y));
+                    left = reference_quad(vec2<i32>(first_x + i32(column) + 1, y));
                 }
                 partial += sad_quad(current_pixels[row * QUADS_PER_ROW + column], wanted);
             }
@@ -228,10 +216,9 @@ fn refine_blocks(
     @builtin(local_invocation_index) lane: u32,
 ) {
     let block = group.xy;
-    let reference = group.z;
     let block_count = params.blocks_x * params.blocks_y;
     let local_index = block.y * params.blocks_x + block.x;
-    let index = reference * block_count + local_index;
+    let index = params.reference * block_count + local_index;
     let source_u = block * BLOCK;
     let source = vec2<i32>(source_u);
     for (var at = lane; at < CURRENT_QUADS; at += WORKGROUP_LANES) {
@@ -281,19 +268,19 @@ fn refine_blocks(
         minimum_cost = 0x7fffffffi;
         clear_candidates();
         put_candidate(0u, vec2<i32>(0, 0), true, true);
-        put_candidate(1u, clipped(globals[reference], bounds), true, false);
+        put_candidate(1u, clipped(globals[params.reference], bounds), true, false);
         put_candidate(2u, own, true, false);
         put_candidate(3u, median, is_candidate(median, bounds), false);
         put_candidate(4u, left, is_candidate(left, bounds), false);
         put_candidate(5u, up, is_candidate(up, bounds), false);
         put_candidate(6u, diagonal, is_candidate(diagonal, bounds), false);
     }
-    execute_batch(lane, reference, source);
+    execute_batch(lane, source);
 
     if lane == 0u {
         put_ring(vec2<i32>(best.dx, best.dy), bounds);
     }
-    execute_batch(lane, reference, source);
+    execute_batch(lane, source);
 
     if lane == 0u {
         output[index] = best;

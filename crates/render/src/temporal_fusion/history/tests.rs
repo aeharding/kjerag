@@ -3,6 +3,7 @@ use std::time::Duration;
 use super::*;
 use crate::temporal_fusion::GpuFuse;
 use crate::temporal_fusion::color::{GpuColorConversion, MatrixCoefficients};
+use crate::temporal_fusion::pyramid::gpu::Builder as Pyramid;
 use crate::temporal_fusion::tests::{Copy, copy_texture, gpu, gpu_pair, read_copy};
 
 const Y_SIZE: [u32; 2] = [32, 16];
@@ -17,6 +18,97 @@ struct Copies {
     ring_uv: Copy,
     rebuilt_y: Copy,
     rebuilt_uv: Copy,
+}
+
+#[test]
+fn direct_rgb_push_matches_allocated_conversion_and_copy_through_wrap() {
+    let Some((device, queue)) = gpu() else {
+        return;
+    };
+    let conversion = GpuColorConversion::new(&device);
+    let pyramid = Pyramid::new(&device);
+    let mut direct = History::new(&device, Y_SIZE).unwrap();
+    let mut copied = History::new(&device, Y_SIZE).unwrap();
+    let mut stamps = Vec::new();
+    let mut pyramid_copies = Vec::new();
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("direct resident history RGB regression"),
+    });
+    for ordinal in 0..14_u64 {
+        let stamp = FrameStamp::for_test(
+            700 + ordinal,
+            Duration::from_millis(ordinal * 33),
+            stamps.last(),
+        );
+        let rgb = patterned_rgb(&device, &queue, ordinal as u8);
+        let nv12 = conversion
+            .encode_rgb_to_nv12(&mut encoder, &rgb, MATRIX)
+            .unwrap();
+        copied
+            .encode_push(&device, &mut encoder, &stamp, &nv12)
+            .unwrap();
+        let pushed = direct
+            .encode_push_rgb(&device, &mut encoder, &conversion, &stamp, &rgb, MATRIX)
+            .unwrap();
+        assert_eq!(pushed.size(), Y_SIZE);
+        assert_eq!(pushed.device(), &device);
+        let direct_pyramid = pyramid
+            .encode_history_luma(&device, &mut encoder, &pushed, 3)
+            .unwrap();
+        let copied_pyramid = pyramid
+            .encode_luma(&device, &mut encoder, &nv12.y, 3)
+            .unwrap();
+        for (level, (direct_level, copied_level)) in direct_pyramid
+            .levels
+            .iter()
+            .zip(&copied_pyramid.levels)
+            .enumerate()
+        {
+            let size = [Y_SIZE[0] >> (level + 1), Y_SIZE[1] >> (level + 1)];
+            pyramid_copies.push((
+                size,
+                copy_texture(&device, &mut encoder, direct_level, size, 1),
+                copy_texture(&device, &mut encoder, copied_level, size, 1),
+            ));
+        }
+        stamps.push(stamp);
+    }
+
+    let mut copies = Vec::new();
+    for center in 0..7 {
+        let direct_window = direct.window_at(center, 0).unwrap();
+        let copied_window = copied.window_at(center, 0).unwrap();
+        assert_eq!(direct_window.stamps().center, copied_window.stamps().center);
+        let direct_output = direct_window
+            .encode_copy_current(&device, &mut encoder)
+            .unwrap();
+        let copied_output = copied_window
+            .encode_copy_current(&device, &mut encoder)
+            .unwrap();
+        copies.push((
+            copy_texture(&device, &mut encoder, &direct_output.y, Y_SIZE, 1),
+            copy_texture(&device, &mut encoder, &copied_output.y, Y_SIZE, 1),
+            copy_texture(&device, &mut encoder, &direct_output.uv, UV_SIZE, 2),
+            copy_texture(&device, &mut encoder, &copied_output.uv, UV_SIZE, 2),
+        ));
+    }
+    queue.submit([encoder.finish()]);
+    for (size, direct_level, copied_level) in pyramid_copies {
+        assert_eq!(
+            read_copy(&device, &direct_level, size, 1),
+            read_copy(&device, &copied_level, size, 1)
+        );
+    }
+    for (direct_y, copied_y, direct_uv, copied_uv) in copies {
+        assert_eq!(
+            read_copy(&device, &direct_y, Y_SIZE, 1),
+            read_copy(&device, &copied_y, Y_SIZE, 1)
+        );
+        assert_eq!(
+            read_copy(&device, &direct_uv, UV_SIZE, 2),
+            read_copy(&device, &copied_uv, UV_SIZE, 2)
+        );
+    }
 }
 
 #[test]
@@ -399,6 +491,50 @@ fn rejected_sources_record_no_copy_and_leave_the_window_unchanged() {
         Err(Error::SourceTextures)
     );
 
+    let rgb = patterned_rgb(&device, &queue, 248);
+    assert!(matches!(
+        history.encode_push_rgb(&device, &mut encoder, &conversion, &gap, &rgb, MATRIX,),
+        Err(Error::NonContiguous)
+    ));
+    assert!(matches!(
+        history.encode_push_rgb(
+            &device,
+            &mut encoder,
+            &conversion,
+            &valid_next,
+            &rgb,
+            MatrixCoefficients::from_source_rgb([f32::NAN, 0.0, 0.0, 1.0]),
+        ),
+        Err(Error::Color(
+            crate::temporal_fusion::color::Error::Coefficients
+        ))
+    ));
+    let wrong_rgb = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("invalid resident history RGB dimensions"),
+        size: wgpu::Extent3d {
+            width: Y_SIZE[0] / 2,
+            height: Y_SIZE[1],
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    assert!(matches!(
+        history.encode_push_rgb(
+            &device,
+            &mut encoder,
+            &conversion,
+            &valid_next,
+            &wrong_rgb,
+            MATRIX,
+        ),
+        Err(Error::SourceRgb)
+    ));
+
     let foreign_conversion = GpuColorConversion::new(&foreign_device);
     let mut foreign_encoder = foreign_device.create_command_encoder(&Default::default());
     let foreign_nv12 = converted_source(
@@ -416,6 +552,17 @@ fn rejected_sources_record_no_copy_and_leave_the_window_unchanged() {
         history.encode_push(&foreign_device, &mut encoder, &valid_next, &sentinel),
         Err(Error::ForeignDevice)
     );
+    assert!(matches!(
+        history.encode_push_rgb(
+            &device,
+            &mut encoder,
+            &foreign_conversion,
+            &valid_next,
+            &rgb,
+            MATRIX,
+        ),
+        Err(Error::ForeignDevice)
+    ));
 
     let window = history.window().unwrap();
     assert_window_stamps(&window, &stamps);
@@ -499,6 +646,13 @@ fn converted_source(
     encoder: &mut wgpu::CommandEncoder,
     source: u8,
 ) -> Nv12 {
+    let rgb = patterned_rgb(device, queue, source);
+    conversion
+        .encode_rgb_to_nv12(encoder, &rgb, MATRIX)
+        .unwrap()
+}
+
+fn patterned_rgb(device: &wgpu::Device, queue: &wgpu::Queue, source: u8) -> wgpu::Texture {
     let rgb = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("resident history patterned RGB source"),
         size: wgpu::Extent3d {
@@ -535,9 +689,7 @@ fn converted_source(
         },
         rgb.size(),
     );
-    conversion
-        .encode_rgb_to_nv12(encoder, &rgb, MATRIX)
-        .unwrap()
+    rgb
 }
 
 fn rebuilt_window(

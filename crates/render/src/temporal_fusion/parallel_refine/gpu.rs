@@ -128,12 +128,12 @@ impl Builder {
             },
             count: None,
         };
-        let mut entries: Vec<_> = (0..=6).map(texture).collect();
+        let mut entries: Vec<_> = (0..=1).map(texture).collect();
         entries.extend([
-            storage(7, true),
-            storage(8, false),
+            storage(2, true),
+            storage(3, false),
             wgpu::BindGroupLayoutEntry {
-                binding: 9,
+                binding: 4,
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
@@ -142,7 +142,7 @@ impl Builder {
                 },
                 count: None,
             },
-            storage(10, true),
+            storage(5, true),
         ]);
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("parallel finest temporal refinement"),
@@ -252,15 +252,6 @@ impl Builder {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        let parameter_bytes: Vec<u8> = [width, height, blocks[0], blocks[1], 0, 0, 0, 0]
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect();
-        let parameter_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("parallel finest temporal geometry"),
-            contents: &parameter_bytes,
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
         let global_bytes: Vec<u8> = globals
             .iter()
             .flat_map(|global| global.iter().flat_map(|value| value.to_le_bytes()))
@@ -272,56 +263,69 @@ impl Builder {
         });
 
         let current_view = current.texture().create_view(&Default::default());
-        // The fixed shader layout has six reference bindings. Inactive slots
-        // bind the current texture solely to satisfy wgpu layout completeness;
-        // dispatch z=N makes them unreachable and they have no seed/output
-        // slice.
-        let reference_views: [_; MAX_REFERENCES] = std::array::from_fn(|ordinal| {
-            references
-                .get(ordinal)
-                .map_or(current.texture(), |image| image.texture())
-                .create_view(&Default::default())
-        });
-        let mut entries = vec![wgpu::BindGroupEntry {
-            binding: 0,
-            resource: wgpu::BindingResource::TextureView(&current_view),
-        }];
-        entries.extend(reference_views.iter().enumerate().map(|(index, view)| {
-            wgpu::BindGroupEntry {
-                binding: index as u32 + 1,
-                resource: wgpu::BindingResource::TextureView(view),
-            }
-        }));
-        entries.extend([
-            wgpu::BindGroupEntry {
-                binding: 7,
-                resource: seed_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 8,
-                resource: raw.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 9,
-                resource: parameter_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 10,
-                resource: global_buffer.as_entire_binding(),
-            },
-        ]);
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("parallel finest temporal refinement"),
-            layout: &self.layout,
-            entries: &entries,
-        });
+        let reference_views: Vec<_> = references
+            .iter()
+            .map(|image| image.texture().create_view(&Default::default()))
+            .collect();
+        let parameter_buffers: Vec<_> = (0..reference_count)
+            .map(|ordinal| {
+                let parameter_bytes: Vec<u8> =
+                    [width, height, blocks[0], blocks[1], ordinal as u32, 0, 0, 0]
+                        .iter()
+                        .flat_map(|value| value.to_le_bytes())
+                        .collect();
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("parallel finest temporal geometry and reference"),
+                    contents: &parameter_bytes,
+                    usage: wgpu::BufferUsages::UNIFORM,
+                })
+            })
+            .collect();
+        let groups: Vec<_> = reference_views
+            .iter()
+            .zip(&parameter_buffers)
+            .map(|(reference_view, parameter_buffer)| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("parallel finest temporal refinement"),
+                    layout: &self.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&current_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(reference_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: seed_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: raw.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: parameter_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: global_buffer.as_entire_binding(),
+                        },
+                    ],
+                })
+            })
+            .collect();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("parallel finest temporal refinement"),
             timestamp_writes: None,
         });
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &group, &[]);
-        pass.dispatch_workgroups(blocks[0], blocks[1], reference_count as u32);
+        for group in &groups {
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(blocks[0], blocks[1], 1);
+        }
 
         Ok(Output {
             raw,

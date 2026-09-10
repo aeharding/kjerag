@@ -22,6 +22,14 @@ fn hardware_atlas_sampling_keeps_join_and_clamp_edges() {
         .split_once("fn type2_ycbcr(")
         .unwrap()
         .0;
+    // Keep the previous eager select in the oracle. The optimized path only
+    // fetches the fallback sample if the box has no usable area.
+    let lazy_return = "if area > 0.0010000000474974513 { return sum / area; }\n  return type2_atlas_linear(a, b, uv);";
+    assert!(reference_box.contains(lazy_return));
+    let reference_box = reference_box.replace(
+        lazy_return,
+        "return select(type2_atlas_linear(a, b, uv), sum / area, area > 0.0010000000474974513);",
+    );
     let source = format!(
         "{}\nfn reference_box({}\n{}",
         draw_wgsl(),
