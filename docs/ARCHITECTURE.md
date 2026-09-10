@@ -82,7 +82,7 @@ The shell is libcosmic, which pins wgpu 28, so `render` is written against
 28 and owns the one module that wgpu 30 would delete
 (`crates/render/src/dmabuf.rs`).
 
-`render::temporal_fusion` is an unconnected post-stitch primitive, not a
+`render::temporal_fusion` supplies a post-stitch primitive, not an ordinarily
 selected player path. It consumes explicit full-range NV12 image arrays,
 current-to-reference displacement/confidence grids, a luma-index grid and
 effective fusion parameters. Two render passes produce GPU-owned R8/RG8
@@ -92,6 +92,36 @@ choice. The caller must supply prepared images and own source association,
 history, seek epochs and completion. None of that scheduling is supplied by
 this primitive. Saved native input/output tests establish its bounded
 arithmetic result, not a complete temporal pipeline or performance verdict.
+
+Its `stream` child now supplies worker-owned full-picture execution, selected
+only by actual Scene tests until qualification. Seven real sources emit startup
+centers0..3, steady center3 and flush4..6. The source's matrix and retained
+automatic settings travel with its exact stamp. Full RGB/NV12 conversion,
+GPU pyramid/finest refinement/fusion and temporary CPU coarse search reuse the
+existing candidate. Readback and completion waits use callbacks with nonblocking
+device polls on the existing stitch worker, never a blocking fence wait. These
+CPU steps are still a performance limitation, not a GPU-residency claim.
+
+`FilteredCaptureFacade` separates processing from presentation. One admitted
+worker job, at most four independent ready panoramas and one installed panorama
+form its bounded state. Source leases retire after panorama preparation;
+filtered outputs own their pixels independently of decoder surfaces. Only the
+exact due FIFO front may install and acknowledge Player's current delivery.
+Scene drains six prepared successors even during paused startup/seeks, never
+advancing picture/audio time merely to satisfy the filter. A completed panorama
+and its acknowledgement survive renderer recreation together; a seek replaces
+the facade while the old shown facade retains its last picture. ISO restarts
+share immutable observations but reset lookup chronology and zero-cache state.
+
+The live panorama projector renders that typed completed texture into the
+existing surface pass with the same gamma/linear convention as direct drawing.
+Changing view only changes its projection binding, not filtering or colour
+history. Screenshots use the exact installed panorama and surface format. EOF
+flush waits until all real prepared inputs have been accepted. Fewer than seven
+real sources produce an explicit unavailable-output error in this candidate;
+near-EOF seek pre-roll remains necessary before ordinary activation. Full X4
+geometry is supported; ONE X2 currently supports radius zero only. This is not
+an accepted visible tradeoff or a complete zero-config filter selection.
 
 The `history` child owns seven resident NV12 array layers and the exact source
 stamp occupying each slot. Arriving images are copied once; a complete borrowed
@@ -224,9 +254,10 @@ Every accepted successor must be adjacent. Stale notes are discarded, while gaps
 and decoder failures remain errors. `is_input_exhausted` distinguishes decoder
 EOF from presentation EOF; if six slots are full, the trailing EOF note is read
 after a slot frees. The ordinary two-frame lookahead, reader depth, presentation
-clock and startup acknowledgement policy remain unchanged. This API and producer
-do not yet supply filtered-frame publication, automatic filter selection or an
-end-to-end temporal playback path.
+clock and startup acknowledgement policy remain unchanged. These preparation
+interfaces do not themselves publish filtered frames. The test-selected facade
+and Scene route above now supply that separate publication boundary; ordinary
+playback still does not select the temporal filter.
 
 The offline temporal review keeps seven contiguous source-stamped NV12 images
 and gray pyramids. Settings are either the explicit captured ISO100 regime or,

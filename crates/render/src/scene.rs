@@ -45,6 +45,7 @@ use super::band::{self, Table};
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::chroma;
 use super::direct_type2::DirectMapDraw;
+use super::direct_type2::panorama::{PanoramaProjector, PreparedPanoramaDraw};
 use super::flow::one_xs::gpu_context::OneXsGpuContext;
 use super::flow::one_xs::pis::gpu::{
     GpuPisFlight, GpuPisPipeline, GpuPisStageOutput, GpuPisStageReceipt,
@@ -57,8 +58,9 @@ use super::flow::one_xs::scalar::{
 };
 use super::flow::one_xs::temporal::BlurredBelts;
 use super::flow::one_xs_belt_gpu::{
-    PendingBlurredBelts, ResidentCameraProfile, ResidentCaptureFacade, ResidentDrain,
-    ResidentPrepare, ResidentRetry, ResidentSceneFacade, ResidentScreenshotPrepare, ResidentSubmit,
+    FilteredCaptureFacade, PendingBlurredBelts, ResidentCameraProfile, ResidentCaptureFacade,
+    ResidentDrain, ResidentPrepare, ResidentRetry, ResidentSceneFacade, ResidentScreenshotPrepare,
+    ResidentSubmit,
 };
 use super::flow::{Cadence, Estimate};
 use super::image_fusion::PendingOneXsFusionInputs;
@@ -90,6 +92,9 @@ const RETAINED: usize = 3;
 /// host scheduling interval, not a Studio timing or solver semantic.
 const DRAW_RETIREMENT_RETRY: Duration = Duration::from_millis(1);
 
+mod filtered;
+#[cfg(test)]
+mod filtered_tests;
 #[cfg(test)]
 mod panorama_ingest_tests;
 #[cfg(test)]
@@ -427,6 +432,9 @@ struct Show {
     /// Sequential selected ONE X2 state for ordinary live playback only. Its
     /// camera profile is also the factory input for a fresh restart lineage.
     one_xs: Option<ResidentCaptureFacade>,
+    /// Optional complete-picture filter. Its processing and display acknowledgements
+    /// are separate from the upstream stitch transaction.
+    filtered: Option<FilteredCaptureFacade>,
     /// Immutable camera input survives in stepped diagnostics without enabling
     /// a live stitch transaction there.
     one_xs_profile: Option<Arc<ResidentCameraProfile>>,
@@ -1330,6 +1338,38 @@ impl Scene {
         })
     }
 
+    /// Select the complete-picture path in real Scene tests before the first
+    /// delivery. Ordinary playback remains unchanged until moving-output and
+    /// capacity qualification. No full calibration snapshot is retained here.
+    #[cfg(test)]
+    fn enable_temporal_for_review(&mut self) -> Fallible<()> {
+        let show = self
+            .show
+            .as_mut()
+            .ok_or("temporal review has no open capture")?;
+        let playing = show.playing.get_mut();
+        if playing.frames.is_some() {
+            return Err("temporal review must be selected before the first delivery".into());
+        }
+        let Source::Live(player) = &playing.source else {
+            return Err("temporal review requires live decoding".into());
+        };
+        let capture = show
+            .one_xs
+            .as_ref()
+            .ok_or("temporal review needs a resident camera")?;
+        let provider = super::temporal_fusion::settings::Provider::new(
+            capture.diagnostic_calibration(),
+            player.timing().fps() as f32,
+        )?;
+        show.filtered = Some(FilteredCaptureFacade::new(
+            capture.camera_profile(),
+            show.held.orientation.clone(),
+            provider,
+        )?);
+        Ok(())
+    }
+
     /// One frame of a file, decoded on this thread. The headless
     /// instruments render with this, and it takes a [`Cue`] rather than
     /// always giving frame 0 because #8's Studio-diff harness needs to name
@@ -1576,13 +1616,14 @@ impl Scene {
             && !full
             && self.resident_waiting.load(AtomicOrdering::Acquire)
             && let Some(show) = self.show.as_ref()
-            && let Some(capture) = show.one_xs.as_ref()
             && let Some(frame) = show.playing.borrow().frames.as_ref()
             // A failed registration retains the redraw so ordinary prepare
             // can surface the underlying error. Never sleep on a failed owner.
-            && capture
-                .wait_for_frame(&frame.stamp(), &self.ready_wake)
-                .unwrap_or(false)
+            && match &show.filtered {
+                Some(filtered) => filtered.wait_for_frame(&frame.stamp(), &self.ready_wake).unwrap_or(false),
+                None => show.one_xs.as_ref().is_some_and(|capture| capture
+                    .wait_for_frame(&frame.stamp(), &self.ready_wake).unwrap_or(false)),
+            }
         {
             return Next::Never;
         }
@@ -1624,6 +1665,18 @@ impl Scene {
                 Next::Never
             };
         };
+        // A held landing needs its six real successors before any filtered
+        // output can exist. Preparation drains decode, never presentation or
+        // the audio clock, and must run before the unacknowledged-current gate.
+        if show.filtered.is_some()
+            && let Err(error) = player.prepare_ahead(6)
+        {
+            retire_replay(&show.replay);
+            self.stalled.fail_now(&error);
+            player.pause(now);
+            self.fail_terminal_shutter_without_display();
+            return self.stalled.take().map_or(Next::Never, Next::Stopped);
+        }
         // Sequential playback never drops a pair. Decode lookahead is separate
         // from promotion, which must finish the current installed display.
         // Gate on the exact offered delivery, never a frame index or `Shown`.
@@ -1631,7 +1684,11 @@ impl Scene {
         let capture_owned = show.one_xs.is_some();
         let current_ready = match (show.one_xs.as_ref(), frames.as_ref()) {
             (Some(capture), Some(frame)) => {
-                match capture.acknowledged(&frame.stamp()) {
+                let acknowledged = match &show.filtered {
+                    Some(filtered) => filtered.acknowledged(&frame.stamp()),
+                    None => capture.acknowledged(&frame.stamp()),
+                };
+                match acknowledged {
                     Ok(ready) => Some(ready),
                     Err(error) => {
                         // Capture-state loss is deterministic. Stop immediately
@@ -1693,6 +1750,17 @@ impl Scene {
                 return self.stalled.take().map_or(Next::Never, Next::Stopped);
             }
         };
+        // The initial call above had no current source. Once Player offers
+        // one, make its prepared horizon available to this same render pass.
+        if show.filtered.is_some()
+            && let Err(error) = player.prepare_ahead(6)
+        {
+            retire_replay(&show.replay);
+            self.stalled.fail_now(&error);
+            player.pause(now);
+            self.fail_terminal_shutter_without_display();
+            return self.stalled.take().map_or(Next::Never, Next::Stopped);
+        }
         // The end of the file stops the clock rather than leaving it running
         // against frames that will never arrive.
         if player.is_ended() {
@@ -2100,6 +2168,14 @@ impl Scene {
             resident_next: self.show.as_ref().and_then(|show| show.next_view(held, 0)),
             resident_next_after: self.show.as_ref().and_then(|show| show.next_view(held, 1)),
             resident_capture: self.show.as_ref().and_then(|show| show.one_xs.clone()),
+            filtered_capture: self.show.as_ref().and_then(|show| show.filtered.clone()),
+            filtered_ahead: self.show.as_ref().map_or_else(Vec::new, |show| {
+                (0..6).filter_map(|ahead| show.prepared_view(held, ahead)).collect()
+            }),
+            filtered_eof: self.show.as_ref().is_some_and(|show| {
+                show.filtered.is_some()
+                    && matches!(&show.playing.borrow().source, Source::Live(player) if player.is_input_exhausted())
+            }),
             resident_target: self.show.as_ref().and_then(|show| {
                 show.replay
                     .borrow()
@@ -2148,6 +2224,7 @@ impl Show {
             camera: calibrated.camera,
             held: calibrated.held,
             one_xs,
+            filtered: None,
             one_xs_profile,
             replay: RefCell::new(None),
             playing: RefCell::new(Playing { frames, source }),
@@ -2176,6 +2253,15 @@ impl Show {
         Some(self.view_for(frames, held))
     }
 
+    fn prepared_view(&self, held: Holding, ahead: usize) -> Option<View> {
+        self.filtered.as_ref()?;
+        let frames = match &self.playing.borrow().source {
+            Source::Live(player) => player.prepared_ahead(ahead)?,
+            Source::Stepped(_) => return None,
+        };
+        Some(self.view_for(frames, held))
+    }
+
     fn view_for(&self, frames: Arc<Frames>, held: Holding) -> View {
         let at = self.held.instant(&frames, held.clock);
         let world_from_body = held.forced.unwrap_or_else(|| self.held.orientation.at(at));
@@ -2197,6 +2283,7 @@ impl Show {
             frames,
             one_xs: None,
             resident_one_xs: self.one_xs.clone(),
+            filtered: self.filtered.clone(),
             one_xs_profile: self.one_xs_profile.clone(),
         }
     }
@@ -2228,6 +2315,11 @@ impl Show {
             .borrow()
             .map_or_else(|| player.is_playing(), |seek| seek.playing);
         self.one_xs = Some(capture.restarted()?);
+        self.filtered = self
+            .filtered
+            .as_ref()
+            .map(FilteredCaptureFacade::restart)
+            .transpose()?;
         *frames = None;
         self.replay.replace(Some(OneXsReplay {
             accuracy,
@@ -2266,7 +2358,10 @@ impl Show {
             .borrow()
             .map_or_else(|| player.is_playing(), |replay| replay.playing);
         let offered = frames.as_ref().map(|frames| frames.stamp());
-        let installed = capture.installed_stamp()?;
+        let installed = match &self.filtered {
+            Some(filtered) => filtered.installed_stamp()?,
+            None => capture.installed_stamp()?,
+        };
         let proposed = one_xs_replay_start(
             installed.as_ref().map(FrameStamp::index),
             offered.as_ref().map(FrameStamp::index),
@@ -2295,6 +2390,11 @@ impl Show {
             // old completed capture and can never submit its nonzero frame to
             // this fresh frame-zero owner.
             self.one_xs = Some(capture.restarted()?);
+            self.filtered = self
+                .filtered
+                .as_ref()
+                .map(FilteredCaptureFacade::restart)
+                .transpose()?;
             // Do not let the acknowledgement gate wait for a surface from
             // the lineage just retired. The last complete display remains in
             // `Shown` and may be restored until new frame zero completes.
@@ -2323,11 +2423,13 @@ impl Show {
         };
         player.pause(now);
         let completed_landing = if let Some(frame) = frames.as_ref() {
-            capture.acknowledged(&frame.stamp())?
-                && self
-                    .replay
-                    .borrow()
-                    .is_some_and(|replay| replay.landed(frame.index))
+            (match &self.filtered {
+                Some(filtered) => filtered.acknowledged(&frame.stamp())?,
+                None => capture.acknowledged(&frame.stamp())?,
+            }) && self
+                .replay
+                .borrow()
+                .is_some_and(|replay| replay.landed(frame.index))
         } else {
             false
         };
@@ -2531,6 +2633,9 @@ pub struct ScenePrimitive {
     resident_next_after: Option<View>,
     /// Current live lineage even while replay has cleared its offered frame.
     resident_capture: Option<ResidentCaptureFacade>,
+    filtered_capture: Option<FilteredCaptureFacade>,
+    filtered_ahead: Vec<View>,
+    filtered_eof: bool,
     /// Replay input is not a new displayed position until this target lands.
     resident_target: Option<u64>,
     /// How the pass samples a magnified picture, which is a property of the
@@ -2577,6 +2682,7 @@ struct View {
     /// and for stepped diagnostic scenes.
     one_xs: Option<Arc<OneXsCapture>>,
     resident_one_xs: Option<ResidentCaptureFacade>,
+    filtered: Option<FilteredCaptureFacade>,
     one_xs_profile: Option<Arc<ResidentCameraProfile>>,
 }
 
@@ -2638,6 +2744,8 @@ pub struct ScenePipeline {
     resident_completed_view: Option<View>,
     retired_one_xs: Vec<(ResidentCaptureFacade, ResidentSceneFacade)>,
     resident_draw: ResidentDrawSelection,
+    panorama_projector: Option<PanoramaProjector>,
+    filtered_draw: Option<PreparedPanoramaDraw>,
     /// Set by this exact window preparation only when the offered due source is
     /// neither the exact shown delivery nor acknowledged by its capture map.
     redraw_after_prepare: bool,
@@ -3039,6 +3147,8 @@ impl ScenePipeline {
             resident_completed_view: None,
             retired_one_xs: Vec::new(),
             resident_draw: ResidentDrawSelection::None,
+            panorama_projector: None,
+            filtered_draw: None,
             redraw_after_prepare: false,
             pipeline,
             flow_pipeline,
@@ -3164,6 +3274,7 @@ impl ScenePipeline {
         aspect: f32,
     ) {
         self.redraw_after_prepare = false;
+        self.filtered_draw = None;
         self.report_device(device);
         primitive
             .resident_refresh
@@ -3236,7 +3347,17 @@ impl ScenePipeline {
                 primitive.stalled.fail_now(error);
                 return;
             }
-            if let Err(error) = self.prepare_resident_one_xs(primitive, aspect) {
+            let filtered = primitive.filtered_capture.is_some()
+                || primitive
+                    .shown
+                    .get()
+                    .is_some_and(|view| view.filtered.is_some());
+            let prepared = if filtered {
+                self.prepare_filtered(primitive, aspect)
+            } else {
+                self.prepare_resident_one_xs(primitive, aspect)
+            };
+            if let Err(error) = prepared {
                 self.redraw_after_prepare = false;
                 self.resident_draw = ResidentDrawSelection::None;
                 primitive.shutter.fail(&error);
@@ -3289,7 +3410,8 @@ impl ScenePipeline {
     /// draw yet. Startup and error UI must still be allowed to paint, including
     /// when there is no completed video to preserve.
     pub(crate) fn is_presentable(&self, primitive: &ScenePrimitive) -> bool {
-        self.resident_draw != ResidentDrawSelection::None
+        self.filtered_draw.is_some()
+            || self.resident_draw != ResidentDrawSelection::None
             || primitive.stalled.stopped()
             || primitive
                 .shown
@@ -4237,6 +4359,10 @@ impl ScenePipeline {
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if let Some(draw) = &self.filtered_draw {
+            draw.draw(pass);
+            return;
+        }
         match self.resident_draw {
             ResidentDrawSelection::Active => {
                 if let Some((_, attachment)) = &self.resident_one_xs {

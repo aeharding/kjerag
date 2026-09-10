@@ -83,6 +83,15 @@ impl Provider {
         self.lookup.reset();
     }
 
+    /// Start an independent source-time run with the same authenticated table
+    /// and immutable ISO observations.
+    pub fn restarted(&self) -> Self {
+        Self {
+            table: self.table,
+            lookup: self.lookup.restarted(),
+        }
+    }
+
     pub fn parameters_at(&mut self, source_time_ms: f64) -> Result<EffParams, Error> {
         let iso = self.lookup.iso_at(source_time_ms)?;
         Ok(self.table.parameters(iso))
@@ -231,6 +240,7 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kjerag_meta::DenoiseIsoObservation;
 
     #[test]
     fn x4_air_interpolation_uses_f32_fma_rounding_and_endpoint_clamps() {
@@ -265,6 +275,46 @@ mod tests {
         assert!(value.confidence_uv.iter().all(|&entry| entry == 2.0));
         assert!(value.fusion.y_limits.iter().all(|&entry| entry == 1.0));
         assert!(value.fusion.uv_limits.iter().all(|&entry| entry == 0.5));
+    }
+
+    #[test]
+    fn restarted_provider_preserves_table_but_not_lookup_state() {
+        let observations = [
+            DenoiseIsoObservation {
+                offset_ms: 0,
+                iso: 0,
+            },
+            DenoiseIsoObservation {
+                offset_ms: 10,
+                iso: 0,
+            },
+            DenoiseIsoObservation {
+                offset_ms: 20,
+                iso: 240,
+            },
+            DenoiseIsoObservation {
+                offset_ms: 30,
+                iso: 0,
+            },
+        ];
+        let mut original = Provider {
+            table: Table::Common,
+            lookup: iso::Lookup::from_observations(&observations).unwrap(),
+        };
+        assert_eq!(original.parameters_at(5.0).unwrap().iso, 240);
+        assert_eq!(original.parameters_at(30.0).unwrap().iso, 240);
+
+        let mut restarted = original.restarted();
+        let fresh = restarted.parameters_at(30.0).unwrap();
+        assert_eq!(fresh.iso, 100);
+        assert_eq!(
+            fresh.noise_integer,
+            Table::Common.parameters(100).noise_integer
+        );
+        assert_eq!(
+            original.parameters_at(5.0),
+            Err(Error::Iso(iso::Error::TimeReversed))
+        );
     }
 
     #[test]
@@ -334,6 +384,15 @@ mod tests {
                 assert_eq!(parameters.noise_integer, noise, "{variable} at {time}");
                 assert_eq!(parameters.radius, radius, "{variable} at {time}");
             }
+            let mut restarted = provider.restarted();
+            let &(time, iso, noise, radius) = expected.first().unwrap();
+            let parameters = restarted.parameters_at(time).unwrap();
+            assert_eq!(parameters.iso, iso, "restarted {variable} at {time}");
+            assert_eq!(
+                parameters.noise_integer, noise,
+                "restarted {variable} at {time}"
+            );
+            assert_eq!(parameters.radius, radius, "restarted {variable} at {time}");
         }
     }
 }

@@ -31,8 +31,11 @@ use crate::stitch_camera::StitchCamera;
 use kjerag_media::{FrameStamp, Frames};
 use kjerag_meta::{CalibrationSet, OrientationTrack, Readout};
 
+#[path = "one_xs/filtered_capture.rs"]
+mod filtered_capture;
 #[path = "one_xs/panorama_ingest.rs"]
 mod panorama_ingest;
+pub(crate) use filtered_capture::FilteredCaptureFacade;
 #[path = "one_xs/resident_worker.rs"]
 mod resident_worker;
 // The real-Scene regression consumes this preparation boundary; ordinary

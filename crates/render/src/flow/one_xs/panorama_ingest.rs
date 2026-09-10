@@ -158,20 +158,44 @@ impl ResidentPanoramaIngest {
 pub(super) fn service_panorama(job: Box<PanoramaJob>) -> Fallible<()> {
     job.ingest.ensure_pending(&job.stamp)?;
     let session = Arc::clone(&job.ingest.session);
-    let source = session.capture.import_picture(job.frames)?;
-    if source.resident_frame() != job.stamp {
+    let stamp = job.stamp;
+    let output = prepare_panorama(
+        &session,
+        job.frames,
+        job.reframe,
+        &stamp,
+        job.size,
+        job.permit,
+    )?;
+    job.ingest.complete(stamp, output)
+}
+
+/// Prepare one exact decoded source through the established resident
+/// stitch/map/colour transaction and materialize its body panorama. The
+/// caller owns admission and publication; this helper submits no raw future
+/// or display-ready map.
+pub(super) fn prepare_panorama(
+    session: &Arc<ResidentCaptureSession>,
+    frames: Arc<Frames>,
+    reframe: Reframe,
+    stamp: &FrameStamp,
+    size: Size,
+    permit: crate::draw_retirement::DrawPermit,
+) -> Fallible<BodyPanorama> {
+    let source = session.capture.import_picture(frames)?;
+    if source.resident_frame() != *stamp {
         return Err("ONE X2 panorama import differs from its decoded source delivery".into());
     }
-    let ready = super::resident_worker::finish_pending(&session, session.submit(source)?)?;
-    if ready.frame() != &job.stamp {
+    let ready = super::resident_worker::finish_pending(session, session.submit(source)?)?;
+    if ready.frame() != stamp {
         return Err("ONE X2 panorama map differs from its decoded source delivery".into());
     }
     let bound = match ready {
         ResidentReadyMap::Cold(map) => prepare_resident_bound(*map, Arc::clone(&session.direct)),
         ResidentReadyMap::Warm(map) => prepare_resident_bound(*map, Arc::clone(&session.direct)),
     }?;
-    let mut draw = bound.commit_processing(job.permit)?;
-    draw.write_reframe(&job.reframe);
+    let mut draw = bound.commit_processing(permit)?;
+    draw.write_reframe(&reframe);
     let mut encoder =
         session
             .context
@@ -183,10 +207,10 @@ pub(super) fn service_panorama(job: Box<PanoramaJob>) -> Fallible<()> {
         &session.retirements,
         session.context.device(),
         &mut encoder,
-        job.size,
+        size,
     )?;
     session.context.queue().submit(Some(encoder.finish()));
-    job.ingest.complete(job.stamp, output)
+    Ok(output)
 }
 
 impl ResidentPanoramaIngestInner {
@@ -256,7 +280,7 @@ fn validate_panorama_size(size: Size) -> Fallible<()> {
     Ok(())
 }
 
-fn validate_reframe(frames: &Frames, reframe: &Reframe) -> Fallible<()> {
+pub(super) fn validate_reframe(frames: &Frames, reframe: &Reframe) -> Fallible<()> {
     let expected = [frames.size.width as f32, frames.size.height as f32];
     if reframe.frame_size() != expected {
         let actual = reframe.frame_size();

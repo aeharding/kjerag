@@ -2,8 +2,10 @@
 //!
 //! This is only the metadata consumer. It does not select temporal filtering,
 //! provide an ISO when the track is empty, or decide how a player resets on a
-//! seek. Callers must explicitly [`Lookup::reset`] before looking up an earlier
-//! source time.
+//! seek. Callers must explicitly [`Lookup::reset`] or start a
+//! [`Lookup::restarted`] run before looking up an earlier source time.
+
+use std::sync::Arc;
 
 use kjerag_meta::{DenoiseIsoObservation, DenoiseIsoTrack};
 
@@ -49,7 +51,7 @@ impl std::error::Error for Error {}
 pub struct Lookup {
     /// One open-time snapshot keeps session lookup state independent of the
     /// profile or calibration owner. No observation is copied per frame.
-    observations: Box<[DenoiseIsoObservation]>,
+    observations: Arc<[DenoiseIsoObservation]>,
     last_query_ms: Option<f64>,
     next_nonzero_iso: f64,
 }
@@ -59,7 +61,7 @@ impl Lookup {
         Self::from_observations(track.observations())
     }
 
-    fn from_observations(observations: &[DenoiseIsoObservation]) -> Result<Self, Error> {
+    pub(super) fn from_observations(observations: &[DenoiseIsoObservation]) -> Result<Self, Error> {
         if observations.is_empty() {
             return Err(Error::Empty);
         }
@@ -72,10 +74,21 @@ impl Lookup {
             }
         }
         Ok(Self {
-            observations: observations.into(),
+            observations: Arc::from(observations),
             last_query_ms: None,
             next_nonzero_iso: -1.0,
         })
+    }
+
+    /// Start an independent forward run over the same immutable observations.
+    /// This shares the open-time snapshot but not chronology or zero-cache
+    /// state, so a replaced decode epoch cannot affect its predecessor.
+    pub fn restarted(&self) -> Self {
+        Self {
+            observations: Arc::clone(&self.observations),
+            last_query_ms: None,
+            next_nonzero_iso: -1.0,
+        }
     }
 
     /// Begin a new forward source-time run. This resets both chronology and
@@ -275,6 +288,23 @@ mod tests {
         let source = observations(&[(0, 50), (10, 150)]);
         let mut lookup = Lookup::from_observations(&source).unwrap();
         assert_eq!(lookup.iso_at(1.0).unwrap(), 100);
+    }
+
+    #[test]
+    fn restarted_lookup_shares_observations_but_not_run_state() {
+        let source = observations(&[(0, 0), (10, 0), (20, 240), (30, 0)]);
+        let mut original = Lookup::from_observations(&source).unwrap();
+        assert_eq!(original.iso_at(5.0).unwrap(), 240);
+        assert_eq!(original.iso_at(30.0).unwrap(), 240);
+
+        let mut restarted = original.restarted();
+        assert!(Arc::ptr_eq(&original.observations, &restarted.observations));
+        // The restarted run has neither the original's chronology nor its
+        // successful forward-nonzero cache.
+        assert_eq!(restarted.iso_at(30.0).unwrap(), 100);
+        assert_eq!(original.iso_at(5.0), Err(Error::TimeReversed));
+        restarted.reset();
+        assert_eq!(restarted.iso_at(5.0).unwrap(), 240);
     }
 
     #[test]

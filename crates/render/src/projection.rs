@@ -1766,9 +1766,8 @@ impl Reframe {
         [self.frame_width, self.frame_height]
     }
 
-    /// Exact source decode coefficients for an offline representation control.
+    /// Exact source decode coefficients for the prepared picture's representation.
     /// This exposes the prepared picture's metadata, not a camera-name default.
-    #[cfg(test)]
     pub(crate) const fn source_color_matrix(&self) -> [f32; 4] {
         self.source_matrix
     }

@@ -14,6 +14,36 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Filtered-picture publication reaches real Scene, 2026-09-10:** a test-selected
+route now feeds exact decoded sources through the shared stitch worker, full
+body panoramas and the seven-source temporal stream. Only a completed filtered
+picture acknowledges the current delivery; upstream processing may advance
+without moving presentation or audio. Four independent ready pictures bound the
+queue. View redraw and screenshots consume the retained full panorama, and a
+fresh seek root shares immutable inputs without old filter history.
+
+Real X4 and ONE X2 checks pass for paused startup, ordered steps/history wrap,
+view changes, renderer recreation and the reported exact seeks. Both cameras'
+screenshots are nonblack and byte-identical across renderer recreation. The
+shared panorama helper still matches all 28 original displayed-source pictures.
+A one-source EOF landing explicitly reports unavailable output instead of
+hanging. A complete seven-source EOF interval presents every output without
+spinning a paused window on a full ready FIFO. All four real-source checks and
+999 ordinary render tests pass (38 ignored). Workspace all-target Clippy,
+formatting, source-lock and name checks also pass. The 31-frame X4 sequence at
+612.078133..613.079133 now comes from the
+actual filtered Scene/screenshot path, not the separate offline consumer.
+Its lossless movie preserves every decoded RGB byte. This uses a fresh history
+at source 18344, unlike the older offline sequence starting at 18341.
+
+No invented colour fade is present. This route is still test-selected: CPU
+coarse search/readback remains on the bounded worker, nonzero ONE X2 temporal
+geometry is unsupported, short-tail seek pre-roll needs a usable policy, and
+playback capacity is unqualified. The installed app is unchanged and the owner
+has not accepted the moving filter candidate. The earlier 607 Studio comparison
+remains available; no authenticated Studio movie covers 612.078. Evidence:
+`scratch/studio-seam-flicker-612-20260909-01/temporal-live-publication-01`.
+
 **Automatic filter inputs and complete offline sequences, 2026-09-10:** the
 source-group metadata field and source-time ISO provider now select the recovered
 X4 Air/ONE X2 parameter tables without a fallback ISO. Runtime GPU motion accepts

@@ -9,6 +9,7 @@
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
+use super::filtered_capture::{FilteredJob, service_filtered};
 use super::panorama_ingest::{ResidentPanoramaIngestInner, service_panorama};
 use super::{
     ResidentCaptureFacadeInner, ResidentPendingMap, ResidentPoll, ResidentReadyMap,
@@ -28,6 +29,7 @@ pub(super) struct PanoramaJob {
 enum Job {
     Capture(Arc<ResidentCaptureFacadeInner>),
     Panorama(Box<PanoramaJob>),
+    Filtered(FilteredJob),
 }
 
 pub(super) struct ResidentStitchWorker {
@@ -54,6 +56,12 @@ impl ResidentStitchWorker {
                             let owner = Arc::clone(&job.ingest);
                             if let Err(error) = catch_capture_panic(|| service_panorama(job)) {
                                 owner.fail(&error.to_string());
+                            }
+                        }
+                        Job::Filtered(job) => {
+                            let owner = job.owner();
+                            if let Err(error) = catch_capture_panic(|| service_filtered(job)) {
+                                owner.fail_worker(&error.to_string());
                             }
                         }
                     }
@@ -96,6 +104,20 @@ impl ResidentStitchWorker {
                 Err(mpsc::TrySendError::Disconnected(job))
             }
             Err(_) => unreachable!("panorama kick returned another worker job"),
+        }
+    }
+
+    pub(super) fn try_kick_filtered(
+        &self,
+        job: FilteredJob,
+    ) -> Result<(), mpsc::TrySendError<FilteredJob>> {
+        match self.jobs.try_send(Job::Filtered(job)) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Full(Job::Filtered(job))) => Err(mpsc::TrySendError::Full(job)),
+            Err(mpsc::TrySendError::Disconnected(Job::Filtered(job))) => {
+                Err(mpsc::TrySendError::Disconnected(job))
+            }
+            Err(_) => unreachable!("filtered kick returned another worker job"),
         }
     }
 }
