@@ -84,7 +84,12 @@ The `search` child is a readable serial CPU implementation of the selected
 seven-level, gray, pel-1 motion search. Its GPL-3.0-or-later adaptation preserves
 the pinned MVTools attribution and the separately read native changes. It
 reproduces the standalone combined adapter, not every native vector. It owns
-neither source history nor player policy. The `color` child supplies an explicit
+neither source history nor player policy. Its 16x16 SAD leaf uses checked row
+slices, byte absolute differences and an exact u32 sum, converted back to the
+existing i64 penalty arithmetic. This exposes automatic compiler vectorization
+without unsafe code, CPU-feature dispatch or changed search decisions. The
+original scalar leaf remains a test oracle; the separate parallel-refinement
+CPU oracle is unchanged. The `color` child supplies an explicit
 diagnostic gamma-RGB/full-range-NV12 conversion; it is not a claim that Studio
 uses that matrix inverse, quantization or centered chroma footprint.
 

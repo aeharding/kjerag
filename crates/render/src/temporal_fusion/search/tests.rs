@@ -350,6 +350,52 @@ pub(in crate::temporal_fusion) struct NativeFixture {
     pub expected: [Vec<u8>; 6],
 }
 
+#[test]
+#[ignore = "requires sealed private motion inputs and an idle CPU for timing"]
+fn six_worker_coarse_preparation_is_exact_and_timed() {
+    let fixture = native_fixture();
+    let serial_started = std::time::Instant::now();
+    let serial = fixture
+        .references
+        .each_ref()
+        .map(|reference| prepare_finest(&fixture.current, reference).unwrap());
+    eprintln!(
+        "coarse benchmark serial six: {:.3}ms",
+        serial_started.elapsed().as_secs_f64() * 1000.0
+    );
+    // Verify complete-search output against the already sealed independent
+    // adapter, not just another invocation of this build's coarse function.
+    for (ordinal, input) in serial.iter().enumerate() {
+        let finished = finish_finest(&fixture.current[0], &fixture.references[ordinal][0], input);
+        assert_eq!(packed_i32x3(&finished), fixture.expected[ordinal]);
+        let mut bytes = packed_i32x3(&input.seeds);
+        bytes.extend(input.global.into_iter().flat_map(i32::to_le_bytes));
+        eprintln!("coarse benchmark reference {ordinal}: {}", sha256(&bytes));
+    }
+    for repeat in 1..=5 {
+        let started = std::time::Instant::now();
+        let parallel: [FinestInput; 6] = std::thread::scope(|scope| {
+            let jobs = fixture.references.each_ref().map(|reference| {
+                let current = &fixture.current;
+                scope.spawn(move || prepare_finest(current, reference).unwrap())
+            });
+            jobs.map(|job| {
+                job.join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+        });
+        let elapsed = started.elapsed();
+        for (actual, expected) in parallel.iter().zip(&serial) {
+            assert_eq!(actual.global, expected.global);
+            assert_eq!(actual.seeds, expected.seeds);
+        }
+        eprintln!(
+            "coarse benchmark parallel repeat {repeat}: {:.3}ms",
+            elapsed.as_secs_f64() * 1000.0
+        );
+    }
+}
+
 pub(in crate::temporal_fusion) fn native_fixture() -> NativeFixture {
     let capture = std::env::var_os("KJERAG_SEARCH_FIXTURE_DIR")
         .map(std::path::PathBuf::from)

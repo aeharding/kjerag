@@ -14,6 +14,20 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Exact CPU coarse-search optimization verified, 2026-09-10:** a portable
+row-slice byte-SAD reduction preserves every search decision and avoids explicit
+SIMD/unsafe code. Saved-input six-worker coarse preparation falls from a
+63.8–96.2 ms range to 6.9–12.7 ms across repeated runs; all six predictor hashes
+and sealed complete-search outputs remain exact. All 75 temporal tests pass.
+On the actual 612/607 Scene sequences, coarse search averages 11.318/11.030 ms
+instead of 72.736/79.017 ms. All 60 filtered pictures and 504 controls remain
+byte-exact, so existing moving reviews are unchanged and still await acceptance.
+The combined measured motion/filter portion is now 129.125/127.980 ms, still
+excluding panorama preparation and far outside playback budgets. Next remove
+the diagnostic's recurring seven-frame NV12 array allocation/copies through
+resident, source-stamped history; no filter or gradual color-update change.
+Evidence: `scratch/studio-seam-flicker-612-20260909-01/temporal-cpu-sad-01`.
+
 **View-scissored temporal candidate verified, 2026-09-10:** full-sized targets
 now permit conservative per-view fusion/conversion execution without changing
 their coordinates, shader arithmetic, quantization or final projector. All

@@ -2741,3 +2741,57 @@ The exercised render binary SHA256 is
 Workspace all-target Clippy, formatting, source-lock and rename checks pass.
 Full workspace tests and the UI harness were not run for this uninstalled
 offline optimization.
+
+### Exact portable CPU SAD optimization, 2026-09-10
+
+The selected CPU search now exposes each complete 16-byte row as a bounded
+slice, sums `u8::abs_diff` into u32, and converts the complete block sum back
+to i64 before the existing penalties. The maximum is 65,280. Checked row
+offsets and slice bounds retain memory safety without architecture-specific
+intrinsics. Search order, bounds, predictors, global estimation, strict ties,
+bad-block recovery and stored unpenalized costs do not change. The original
+scalar leaf remains testable, and the separate parallel-refinement CPU oracle
+is untouched. The briefly evaluated explicit SSE2 leaf was not selected and
+is absent from active source. The portable leaf's emitted x86-64 code already
+contains `movdqu` and `psadbw`; this observation is specific to the named build,
+not a promise about every compiler/target.
+
+An ignored saved-input regression times six serial and five six-worker coarse
+preparations. It verifies all complete outputs against the hash-sealed combined
+adapter and compares every coarse seed/global result. Baseline serial runs
+take 349.245/344.563 ms; parallel runs span 63.812 to 96.207 ms. Portable serial
+runs take 41.642/41.734 ms; parallel runs span 6.940 to 12.698 ms. The two
+baseline/candidate pairs run sequentially without overlapping compilation or
+GPU work. All six coarse seed/global SHA256 values match across binaries.
+This preserves the reference's existing disclosed native-vector gap; it does
+not make motion search Studio-exact or accept the changed finest algorithm.
+
+After removing the unselected intrinsics helper, all 75 temporal tests pass
+on AMD760M/RADV, including the native fixtures and four new SAD fixtures for
+maximum values, equal images, independently misaligned/strided patterns and
+last legal rows. That final build times serial coarse work at 40.868 ms and
+five six-worker runs at 8.530 to 12.354 ms. Its SHA256 is
+`b10b344b7b72cbfd8fa1f71eff7e592761d40c77d15677e9074bead64f618bc4`.
+
+Actual Scene qualification repeats the same scissored 37-source 612 and
+35-source 607 runs. All 290 plus 274 artifacts match the preceding candidate
+byte-for-byte, including all 60 filtered pictures, 504 controls and CSV source
+associations/RGBA hashes. Root inspected the actual rendered PNG previews;
+no new movies or moving acceptance follow. At 612/607, CPU coarse means are
+11.318/11.030 ms and maxima 13.666/13.582 ms, versus the previous
+72.736/79.017 ms means. GPU/upload/filter/project/completion means remain
+117.807/116.951 ms (max 128.858/128.437). Combined means are
+129.125/127.980 ms, excluding earlier panorama preparation and controls.
+Whole diagnostic runs take 10.57/10.14 seconds. This is not actual-player
+capacity; the candidate still is not selected playback or a confirmed flicker fix.
+
+Evidence is in
+`scratch/studio-seam-flicker-612-20260909-01/temporal-cpu-sad-01`: preserved
+baseline/candidate binaries, benchmark and AMD test logs, emitted portable
+leaf assembly, actual Scene outputs and byte-comparison logs. Workspace
+all-target Clippy, formatting, source-lock and rename checks pass. No full
+workspace tests/UI harness, new Studio session/export, installation, push,
+merge or gradual color update. The next concrete execution target is the
+309,657,600-byte seven-frame NV12 array currently allocated and copied at
+every diagnostic center; source-stamped resident history can avoid six of
+those seven repeated copies without choosing a different temporal window.

@@ -21,6 +21,8 @@
 use super::pyramid::Level;
 use std::fmt;
 
+mod sad;
+
 const LEVELS: usize = 7;
 const BLOCK: usize = 16;
 const PENALTY_NEW: i64 = 50;
@@ -479,17 +481,14 @@ impl BlockSearch<'_> {
             .map_err(|_| Error::ArithmeticOverflow)?;
         let reference_y = usize::try_from(self.source[1] as i64 + i64::from(y))
             .map_err(|_| Error::ArithmeticOverflow)?;
-        let mut sad = 0_i64;
-        for row in 0..BLOCK {
-            let current_start = (self.source[1] + row) * self.current.width + self.source[0];
-            let reference_start = (reference_y + row) * self.reference.width + reference_x;
-            for column in 0..BLOCK {
-                sad += (i64::from(self.current.pixels[current_start + column])
-                    - i64::from(self.reference.pixels[reference_start + column]))
-                .abs();
-            }
-        }
-        Ok(sad)
+        Ok(i64::from(sad::portable(
+            &self.current.pixels,
+            self.current.width,
+            self.source[1] * self.current.width + self.source[0],
+            &self.reference.pixels,
+            self.reference.width,
+            reference_y * self.reference.width + reference_x,
+        )))
     }
 
     fn expanding(
