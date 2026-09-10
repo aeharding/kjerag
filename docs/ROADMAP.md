@@ -14,6 +14,21 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Motion producer inputs captured, 2026-09-10:** one completed, detached
+CPU-only Studio capture now supplies all six raw/packed motion pairs, their
+actual gray pyramids, confidence tables and luma grid. It confirms the selected
+Analyse path, seven pyramid levels, zero overlap and half-resolution search;
+the alternate Recalculate settings are not applicable. Raw motion is240x120
+and is resampled into480x240 packed motion. Independent luma reconstruction
+matches all115,200 bytes; confidence/resampling matches all2,764,800 packed
+lanes; recursive pyramid reduction matches every coarser logical level in all
+seven images. Readable Rust pyramid and motion-packing references now pass
+the native comparisons too; all19 temporal tests pass with the existing GPU
+fusion checks on AMD. These references are not selected in playback. Motion
+search and player integration remain unfinished. The unchanged earlier607 project
+exported63 frames; invocation6 is not a source-frame identity. No invented
+gradual color update, installed-player change or612 flicker fix.
+
 **GPU temporal-fusion primitive, 2026-09-10:** the recovered normalized
 pixel fusion now runs on the AMD GPU with explicit image history, motion,
 luma grids and parameters. Both saved native input packets pass a maximum

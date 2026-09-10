@@ -2036,3 +2036,142 @@ the native packets with identical difference counts. Workspace all-target
 Clippy, formatting, name and crate-source checks pass. Full workspace tests
 and the UI harness were not run for this unconnected primitive; this is not
 a player delivery qualification.
+
+### Selected motion producer inputs, 2026-09-10
+
+The bounded constructor-to-consumer audit corrects the earlier scratch
+Recalculate interpretation. Base Init passes both BlockFlow booleans false;
+the selected constructor installs Analyse at+0x58 and leaves Recalculate
+at+0x68 null. ComputeFlow therefore calls Analyse::GetFrameSuper, then
+GroupOfPlanes::SearchMVs and the selected PseudoEPZ TBB worker. MVTools
+lineage remains supported, but the alternate Recalculate constants are not
+selected-path evidence.
+
+One further export of the unchanged earlier607 project captures complete
+current/reference super images, raw and packed motion, confidence tables and
+luma for ComputeFlowFast invocation6. This is an invocation ordinal, **not
+an authenticated source-frame number**. The observer associates all six
+references by thread, caller CFA, backend and retained input/output owners.
+It uses duplicate-equal bounded CPU memory reads only, with no target
+expressions, CV locks, Metal calls or source-buffer writes. The loaded worker
+slice and five hook instructions are verified before selection.
+
+The receipt confirms original7680x3840, fast shift1, zero overlap,16x16
+blocks, one gray super plane3840x3810 and seven pyramid levels. Raw motion
+is240x120 CV_32SC3; packed motion is480x240 CV_16SC4. Thus this run selects
+the resampling weight producer, not the earlier described direct-grid body.
+The ordinary-init overlap constant and constructor shift are now independently
+confirmed at runtime. Analyse is present and Recalculate is null.
+
+| Selected search parameter | Observed value |
+|---|---:|
+| Hex2 internal flag |16|
+| Non-finest / finest radius |2 /1|
+| Lambda |0|
+| Effective LSAD |1600|
+| New / zero / global penalties |50 /50 /0|
+| Pyramid lambda scaling |0|
+| Global predictor |enabled|
+| Effective badSAD / badrange |40000 /24|
+
+These agree with the selected constructor and consumer trace. Every
+non-finest plane uses exhaustive/radius2 search; the finest uses Hex2/radius1.
+This is a hybrid of public MVTools defaults, not a stock preset. The pinned
+source comparison also finds native predictor-boundary and parallel-loop
+differences; shared names do not establish a drop-in bit-identical port.
+The read-only comparison clone is vapoursynth-mvtools commit
+`17250aa979616ac48dfb0e18abfdcf2bd4e3afc0`; no upstream code is imported here.
+
+The confidence lookup override is0. Captured scale factors are4 and700,
+with temporal factor1.25. All256 Y confidence entries are1 and all256 UV
+confidence entries are2, distinct from the preceding final-fusion limit
+tables1/0.5. The six double phases are
+`(1,0.49999999999999994,0,0,0.49999999999999994,1)`.
+The static phase law is a raised cosine over reference position; this is
+pixel-reference weighting, not a gradual lens-color coefficient update.
+
+The current luma grid is independently reconstructed by the recovered
+packed-pyramid extraction: skip heights1920,960,480, then copy the480x240
+crop at row3360. No resize is selected here. All115,200 output bytes match
+the captured luma grid exactly. This tests extraction from the native pyramid,
+not production of that pyramid from stitched pixels.
+
+The selected Super path is also reconstructed independently. GetFrame calls
+GroupOfFrames::Reduce, whose selected Plane::Reduce directly calls the
+MVTools-family RB2BilinearFiltered function. It has no runtime filter-choice
+dispatch here. Reduction is vertical then horizontal, each into8-bit storage:
+interior taps `(1,3,3,1)` with bias4 and division8; first/last outputs use
+pair averaging with bias1 and division2. Independent rounding of both axes
+is required; one combined two-dimensional convolution is not this law.
+Starting from each captured base image, all17,199,000 coarser logical pixels
+across the seven pyramids match exactly. The separate diagnostic also
+reproduces retained vertical-pass workspace and zero slack, so complete
+allocation hashes match. The copied base pixels are not newly reconstructed
+evidence. `temporal-pyramid-check-01/` preserves source lineage, native call
+sites and the independently repeated comparison.
+
+The confidence/resampling reference now reproduces all six packed matrices
+exactly,2,764,800 signed-short lanes. Selected coordinates are `(x/2,y/2)`
+without a half-pixel offset, with right/bottom neighbor clamping. Bilinear
+sampling retains native f32 operation order. Displacement is divided by the
+ratio, truncated and landing-clamped to full-image block bounds; interpolated
+match cost is truncated without ratio scaling. Thresholds use the captured
+lookup tables and reference phases. Their squares wrap as signed32-bit
+integers before f64 conversion, whereas match cost is squared in f64.
+The rational confidence result is truncated into packed lanes. No smoothing
+constant is fitted. `temporal-confidence-law-01/` records exact FMA/conversion
+boundaries and the selected-path verifier. Root's independent repeat matches
+the saved zero-difference receipt.
+
+The capture closes normally with six complete reference records, disabled
+hooks, successful detach and LLDB exit0. All22 payloads (110,133,248 bytes)
+pass independent size/SHA checks. One earlier unselected breakpoint stop
+was continued with no active capture, pending copy or failure. The pre-arm
+review corrected an eight-byte BlockFlow metadata overread; all14 offline
+observer tests passed before use. No uncertain native resource transaction
+occurred. Detailed correction and GUI receipts remain in ignored scratch.
+
+Evidence root:
+`scratch/studio-seam-flicker-612-20260909-01/temporal-motion-capture-01/`.
+
+- Observer SHA256: `a63feeb4686da9a5aaaf2833f764ed65f2ad281d3d186edac2ebd147cd4b9882`.
+- Complete/detached events: `72d7233f89e3ff9749c33eaa405cc408787ae9299260fa15a9f1cf1fba4560c4`.
+- Native and reconstructed luma: `43968e5468fd2efde00160dc6b7ec377d1ea91a32009720b00cb34d3abcfa9ab`.
+- Pyramid verification: `c3e96456098b37d49c79d2bb09a7ecc4ed2c4ae702d42337058dc0ea18221965`.
+- Confidence/resampling verification: `097be25a5210c615dde864056dd1fd039afccb9b7fe818a57a7ee3179a5552c8`.
+- Finished movie: `13103cb18554eeb290d63bcad71ce0fe7d28a86a3b173c4688fd04365c036c26`.
+
+The movie finished63 frames,7680x3840,30000/1001 fps,2.1021s; the project
+hash remains unchanged. This is a same-call motion oracle, not source/encoder
+provenance, a new612 oracle, visible flicker acceptance or a performance
+result. Raw motion search, preparation of base images from stitched pixels
+and source-stamped player integration remain unfinished. No installed build
+or merge changes.
+
+The verified calculations now have readable Rust CPU references under
+`render::temporal_fusion::{pyramid,motion}`. They require explicit inputs,
+reject unsupported geometry/numeric conversions and own no history or
+player selection. Pyramid storage is independent logical levels, not native
+scratch bands. Motion packing preserves signed fractional displacement
+before truncation, f32 FMA order, wrapped scale/threshold multiplication and
+separate Y/UV confidence. Unit checks cover borders, per-axis rounding,
+fractional costs and motion, threshold equality, independent tables,
+overflow semantics and invalid inputs. The native tests seal inputs by hash
+and reproduce all six packed motion matrices and all coarser logical pyramid
+pixels exactly. No upstream implementation source is copied into these Rust
+modules.
+
+All19 temporal tests pass with both new private fixtures and the preceding
+GPU-fusion packets. The AMD run retains the preceding GPU result (9,152
+one-code differences, none larger), not a new perceptual verdict. The first
+combined invocation omitted the older denoise-fixture environment variable;
+its new reference tests passed, but the older fixture test correctly refused.
+That sandbox invocation selected llvmpipe. The corrected run supplied both
+fixture roots and used the actual AMD760M/RADV adapter, with no skipped tests.
+This is reference qualification, not an installed-player test.
+
+The final render suite passes900 tests with31 opt-in tests ignored; the two
+new private fixtures and existing GPU-fusion fixture passed in the separate
+19-test run above. Workspace all-target Clippy, formatting, name and crate-source
+checks pass. Full workspace tests and the UI harness were not run for these
+unconnected CPU references. No frame-path or UI change is being delivered.

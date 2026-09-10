@@ -69,6 +69,17 @@ history, seek epochs and completion. None of that scheduling is supplied by
 this primitive. Saved native input/output tests establish its bounded
 arithmetic result, not a complete temporal pipeline or performance verdict.
 
+Its `pyramid` and `motion` children are readable CPU references, also
+unconnected to playback. `pyramid` takes an explicit gray base image and level
+count, retaining Studio's two separately rounded reduction passes. `motion`
+takes explicit raw displacement/cost, luma, geometry, tables and reference
+phase; it implements the verified16x16-block,2x expansion/confidence path.
+Unsupported geometry is rejected, not assigned new semantics. Neither is a
+motion search, calibration policy, image-history owner or player scheduling
+component. Hash-sealed native tests cover seven pyramids and six packed
+motion grids. Keeping these CPU references does not put CPU readback into the
+player's frame path.
+
 The shell's pinned `iced_wgpu` renderer is locally patched to request the
 adapter's supported storage-buffer count. Its fixed default of eight caused
 the resident ONE X2 pipeline to panic at startup in the window, despite

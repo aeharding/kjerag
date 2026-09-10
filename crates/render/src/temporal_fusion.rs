@@ -13,6 +13,12 @@
 
 use wgpu::util::DeviceExt;
 
+/// Readable CPU motion-packing reference, not a selected playback path.
+pub mod motion;
+
+/// Readable CPU pyramid reference, with explicitly supplied base images.
+pub mod pyramid;
+
 /// Effective values supplied by the calibration/history producer, not defaults.
 pub struct Parameters {
     pub noise: f32,
