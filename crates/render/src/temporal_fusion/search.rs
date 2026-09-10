@@ -21,8 +21,6 @@
 use super::pyramid::Level;
 use std::fmt;
 
-pub mod gpu;
-
 const LEVELS: usize = 7;
 const BLOCK: usize = 16;
 const PENALTY_NEW: i64 = 50;

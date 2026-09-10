@@ -2583,7 +2583,7 @@ The separate 177 ms prior CPU measurement used actual Kjerag inputs and
 parallel full searches, so these are not a controlled CPU/GPU speedup ratio.
 
 Do not continue the complete serial-decision GPU port. The prototype is
-archived in branch history and retired from active source under MANDATES.
+archived at `0cff5ad1` and retired from active source under MANDATES.
 The next candidate will evaluate independent block refinement with immutable
 coarse predictors. That changes motion-search semantics and must be tested on
 filtered moving output; it is not presumed visually equivalent or accepted.
@@ -2594,3 +2594,10 @@ Evidence is in
 `scratch/studio-seam-flicker-612-20260909-01/temporal-gpu-search-01`:
 build, shader validation, 11 CPU search tests, six GPU tests and timing logs.
 Both existing moving comparisons remain the outstanding human quality gate.
+After retirement, all 50 remaining temporal checks pass on AMD, including the
+native fixtures. Workspace all-target Clippy, formatting, crate-source and
+rename checks pass. No full workspace tests or UI harness is claimed for
+this uninstalled experiment. The remaining tree keeps only the useful CPU
+finest-preparation boundary and its reference/fixture tests; no rejected GPU
+controller is linked. Its exercised test binary SHA256 is
+`48d3b4bde4c1f0a61092c406c754453d163023a0328d93a9611ce2ff3ae34d9a`.
