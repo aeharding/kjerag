@@ -1293,7 +1293,61 @@ Receipts:
 - X4 UI log: `a4de3489553d1a745c870eb3162b5aad04a52b281321b40da846b1df58e838b0`.
 - ONE X2 UI log: `cdc9a3b60f2a514698c28a5f62ec0a4b33d190d3a6f33ac2509f7b40496c2d2d`.
 
-The owner's last verdict still rejects the older ordinary/native-input
-comparison. The new coordinate-corrected movie and installed candidate have
-no owner verdict yet. No flicker-free claim, merge or release follows from
-these functional checks; the active visual objective remains incomplete.
+At this qualification checkpoint the coordinate-corrected movie and installed
+candidate had no owner verdict. The subsequent installed-candidate rejection
+is recorded below. No flicker-free claim, merge or release follows from these
+functional checks; the active visual objective remains incomplete.
+
+## Installed candidate rejected at a new April view, 2026-09-09
+
+The owner reports "Yes still flicker" on the installed `f5be77cd` candidate,
+with April004 at612.078/yaw-80.71/pitch-48.46/fov95.45/lock1. The implemented
+coordinate and periodic-edge corrections are not a fix for the reported
+visible defect. This verdict concerns production coefficients, not the
+test-only exact-native-rebased coefficient arm, which still has no motion
+verdict.
+
+`scratch/studio-seam-flicker-612-20260909-01/seek-components-01` retains31
+actual Scene sources18344..18374, source times612.078133..613.079133,
+ordinary packed maps, alpha, both published ratio textures and the ordinary,
+no-color, no-flow and individual-lens pictures. It runs the sealed renderer
+test executable from the full qualification above, SHA-256
+`efeae910f92d94daea336af0bbf7dd6d2e8d662ab3fdf7e49b3a2cd70f687b41`.
+The source/binary/installed-app guards pass and the test completes with31
+worker-ready waits. Test log SHA-256:
+`99230ec8fc741aa9696a0dbbe03bd4e510fb5ad6ae28ecb95aab8382ba53ebe3`.
+This is a fresh exact-seek history, not authenticated uninterrupted playback;
+the owner has been asked which history led to the report. No production code
+or installation changes accompany the capture.
+
+The local Studio coverage audit finds no trustworthy movie for this new
+interval. The accepted `april-studio-direction-off.mp4` has63 frames, with
+the saved trim starting at18208. Its justified index-derived interval ends
+at18270/time609.609000; source18344 is74 frames beyond that endpoint.
+Other saved April panorama exports use the same trim. The older verified
+1152..1156-second export and intermediate project states do not supply
+missing612-second output. This coverage check does not upgrade the earlier
+index-derived association into an encoder-PTS authentication.
+
+The new `seek-components-01/review/current-vs-no-color-loop-muted.mp4`
+shows current Kjerag left and identical source/geometry with color correction
+bypassed right. It preserves1280x720 per arm with labels above the footage,
+31 frames at30000/1001 repeated12 times, and no audio. It is an isolation
+control, not a candidate fix or Studio comparison. Movie SHA-256:
+`05fa6caec7a17a09a2c805f99b8efbf9daaa4e8b4cf05a8c41b57d88b7209da7`.
+The first actual frame and a computed trace anchor were inspected for
+view/context, not temporal acceptance. Owner motion feedback is pending.
+
+The saved ratio hashes identify updates at18350/18355/18358/18360/18362/
+18370/18372, with exact holds between them. Three new-view computed alpha
+trace anchors come from the retained `stitch-layers` helper and these exact
+saved maps. At row360 their marked spans are612..616,547..551 and631..635
+for18344/18359/18374 respectively. The helper's detached ray pictures are
+not accepted as exact Scene replacements:307..382 pixels exceed one code,
+with maxima19..27. Only its computed alpha trace is used for navigation;
+all temporal picture comparisons use the actual Scene/component captures.
+The bounded `analysis-01/receipt.json` records this limitation and update
+inventory (SHA-256 `8b2879d3e9c309a0c0e68f8cf3e2f0d95abc08639726bf3c3d291900a148977c`).
+Its raw adjacent-frame RGB averages include source motion and pool channels
+and trace pixels. They do not discriminate the reported flicker, establish a
+new cause or contradict the owner's verdict. No fix is selected from them.

@@ -14,6 +14,19 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Owner rejects the installed coordinate candidate, 2026-09-09:** the verdict
+on `f5be77cd` is "Yes still flicker", with a new exact April004 example at
+612.078/yaw-80.71/pitch-48.46/fov95.45/lock1. The two arithmetic corrections
+and passing functional checks do not resolve the visible defect. The retained
+qualified renderer now captures sources18344..18374 through actual Scene at
+this exact view, including no-color/no-flow/lens-only controls. This is a fresh
+seek root, not yet a reproduction of the owner's uninterrupted history. A
+current-versus-no-color moving diagnostic is retained for owner review.
+No existing authenticated Studio movie covers612.078: the accepted earlier
+April oracle ends at the index-derived source18270/time609.609. Do not reuse
+its trace/view or imply it verifies this new interval. No new smoother,
+Studio export, merge or further candidate is selected yet.
+
 **Color-coordinate candidate installed for review, 2026-09-09:** source
 `f5be77cd` is now the installed `dev.harding.Kjerag` test candidate. The exact
 native release passes50 UI checks at the reported April607.574 view. The
@@ -26,8 +39,9 @@ or starved frames on both cameras. This is functional qualification, not a
 
 Installed executable SHA-256 starts `f89d46a252658578`; OSTree commit starts
 `e0b140d99e9598ac`. The source/archive and installed executable/permissions
-are checked before and after qualification. The owner has the new moving
-comparison and has not yet given a verdict. No merge or release is selected.
+are checked before and after qualification. The later owner rejection is
+recorded above; this checkpoint establishes functional qualification only.
+No merge or release is selected.
 The earlier statements below that the installed app is unchanged describe
 their individual diagnostic checkpoints, not the current installation.
 
