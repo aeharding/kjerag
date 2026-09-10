@@ -14,6 +14,21 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Denoiser inputs captured, 2026-09-10:** the unchanged earlier607 project
+now has same-call input/output receipts for sources18214/18215. Both selected
+frames use six references around current, ISO100, effective noise/limit700/10,
+full-range output and guided-UV off. The actual Y/UV limit tables are1/0.5.
+These are observed values for this run, not constructor defaults or a policy
+for every clip. Current/reference pixels, motion and luma grids are saved;
+all four current-plane patches match independent pre-denoise CV reads exactly.
+Managed texture snapshots are explicitly CPU-shadow receipts. The independent
+Rust fuse reproduces405,723 of405,756 output component codes exactly, with
+33 one-code differences across these two patches. This verifies a bounded
+same-input calculation, not a player implementation or visible flicker pass.
+The63-frame export finished, debugger detached and project
+remained unchanged. No invented gradual color update, new612 oracle,
+installation or merge. See the temporal research note for corrections and limits.
+
 **Selected denoiser shader identified, 2026-09-10:** static tracing from the
 captured Metal mode 8 selects the normalized two-plane `nap_fuse_y_N` /
 `nap_fuse_uv_N` kernels. The previously found packed-C4 source is a different

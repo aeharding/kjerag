@@ -1852,3 +1852,110 @@ unselected evidence. No input/output equality, visible flicker pass, 612 Studio
 coverage, installation or merge follows from this static result. Per-source
 parameters, flow/luma construction and temporal boundary behavior still need
 their own evidence before a complete reproduction can be claimed.
+
+### Selected denoiser inputs and effective parameters, 2026-09-10
+
+One further export of the unchanged earlier607 project captures the inputs
+to the selected normalized fuse and the same output buffers after the filter.
+The frozen final/middle/post source observer remains the association base.
+The new observer follows each destination CV buffer through the live
+ConvertToSample/ProcessDenoiseResult call, requiring the same thread, exact
+caller CFA and selected post AVFrame data[3]. This associates packet6 with
+source18214 and packet7 with18215; it does not infer source IDs from ordinals.
+
+All eight observed parameter packets select backend mode8, override word0,
+radius3, ISO100, noise integer700 and limit integer10. The consumed first
+two UBO floats are0.04289215803146362 and0.03921568766236305, matching the
+recovered f32 scaling of700/16320 and10/255. Y's256 limit entries are all1;
+UV's are all0.5. Range flags are zero and guided-UV is false. The guided
+field is byte+0x28; interpreting its three padding bytes as a32-bit boolean
+would give a false result. The constructor's400/15 values are not effective
+values here. These observations do not provide another ISO's calibration.
+
+Packets0..3 show relative current0,1,2,3 and reference counts3,4,5,6. Later
+packets remain centered at3 with references0,1,2,4,5,6. This authenticates
+the selected seven-frame scheduling window and effective radius for this
+run, not all startup/flush cases or source identities of the unselected
+packets. In particular, six references means three earlier and three later
+frames, not seven past frames or gradual lens-color coefficient updates.
+
+The selected input snapshots contain21 textures each: current Y/UV, six
+reference Y/UV pairs, six signed-short motion grids and one luma-index grid.
+The unchanged442x306 panorama ROI is bounded by actual flow offsets for
+each reference. Full image dimensions are7680x3840 Y and3840x1920 UV;
+sample formats are R8Unorm/RG8Unorm. Motion/luma grids are480x240,
+RGBA16Sint/R8Uint. All are Metal managed storage. An explicitly named
+CPU-shadow read copies each requested region twice and requires byte equality;
+it makes no diagnostic blit, synchronization or GPU-completion claim.
+The four current-plane patches are independently byte-identical to the
+same-source middle CV snapshots. Reference and motion provenance remains
+scoped to the captured retained owners and binding order.
+
+The bounded upload read identifies an ordinary populated host-Mat upload
+via `replaceRegion`, with a separate empty-Mat error fallback. Reaching an
+upload call alone would not authenticate that populated branch. The actual
+capture records subsequent fuse configuration and output association, not a
+new runtime observation of every upload or the original motion producer.
+Do not turn this static read into an unwarranted device-coherence claim.
+
+Capture corrections are retained openly. The original observer delegated
+1068/1080-byte UBO reads to a helper limited to256 bytes; the same paused
+call was recovered using its existing duplicate-read chunker. An event-key
+collision then occurred after the first Y receipt was saved; the callback
+was corrected without resetting state or rereading that payload. The initial
+shared-only pixel reader refused managed storage before copying bytes.
+The explicit CPU-shadow option retained the remaining guards. Replacement
+command/declaration guards also refused before copying; the final helper
+reuses its checked48-byte region declaration. Offline checks now cover the
+read-size delegation and event-key collision. No uncertain pixel-copy or
+CoreVideo lock transaction occurred.
+
+All selected final/middle/post snapshots and both input sets are saved. Safe
+state assertions passed before detach. A final supplementary log line was
+corrupted by the debugger PTY and rejected with SyntaxError after both
+session files were written; the actual detach succeeded and is recorded.
+The movie finished63 frames at7680x3840,30000/1001 fps,2.1021s; the project
+hash stayed unchanged. Encoder provenance is not collected or claimed.
+
+Evidence root:
+`scratch/studio-seam-flicker-612-20260909-01/mac-denoise-inputs-20260910-01/`.
+
+- Events: `bc2d46eddae36677fc955e7474eee59023178ed6f066a9ed059591cfc5699231`.
+- Denoise session: `b4e85aa906e80fd6f6a71b40e7b0c408ddd24cd45e15abfabad7a4c28f731216`.
+- Source/post session: `9ae297defced74d33d1c917c28c79008ce45faec3f030d0024ab0643b74dc0dd`.
+- Finished movie: `ecec8a28f9abecd089a86c0acf799a5449c2f3b0f024f031930942c511b2a6d8`.
+- Sibling parameter analysis: `f319e651c5077b0e952f62138bbbde0ca8bd6a46e76093fd31fa86fcb823f3aa`.
+
+The original standalone Rust reference has eight passing algebra tests. A
+separate receipt-driven driver now connects it to these exact saved inputs
+and same-source post-filter outputs. It validates payload hashes, observed
+storage/formats, rectangles/strides, six references, range flag and guided
+gate, then applies the read Y/UV addressing and original fuse algebra. Input
+UNorm conversion is f32 byte/255. Output code comparison uses explicitly
+diagnostic ties-to-even rounding of255 times the clamped normalized result;
+this is not an authentication of Metal's exact storage conversion.
+
+| Source | Y differences / samples | U differences / samples | V differences / samples | Maximum code difference |
+|---|---:|---:|---:|---:|
+|18214|18/135252|2/33813|2/33813|1|
+|18215|9/135252|1/33813|1/33813|1|
+
+Thus405,723 of405,756 component codes are exact, and the remaining33 differ
+by one code. This supports the selected normalized fusion law and the
+captured CPU shadows for these two patches. It is not exact shader identity,
+a complete motion estimator, general camera/ISO coverage or a moving-video
+flicker verdict. No output-semantic constant was fitted to the comparison.
+
+`denoise-offline-01/` contains the independent driver, input packer and
+receipts. The initial run put reproducible executables/packed containers in
+`/tmp`; all original evidence and sources remained in durable scratch. The
+coordinator corrected the commands, preserved the original driver/packer,
+strengthened input guards and repeated both runs entirely under
+`denoise-offline-01/root-run/`. Both packed-container hashes and every
+component result reproduce the initial receipt. The original reference
+remains unchanged, SHA-256
+`550cc32a1aa97733bb4640a74e787e330202070e94f83b5a41c9c0d10a18e820`.
+The motion/confidence producer, broader ISO-dependent calibration and a
+standalone Kjerag temporal path remain unclosed, as does moving output
+verification. No player change, installation, owner retest,
+merge or612 Studio coverage is added here.
