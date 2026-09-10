@@ -1488,3 +1488,80 @@ observed downstream of the final callback.
 The new612 report, broader temporal behavior, actual installed playback and
 owner acceptance remain unresolved. No smoother, codec round-trip, production
 change, installation, merge or release follows from this two-frame finding.
+
+### Actual downstream chain and incomplete second handoff capture
+
+The same accepted project and63-source interval were used for
+`mac-handoff-20260909-02`. Unlike the first run's wrong writer family, the
+F-input hook at`0x867e98` and preencoder call at`0x868448` both received19
+calls before detachment. These counts include unrelated inputs; neither hook
+matched either selected final AVFrame. The final observer reached13 source
+calls before detachment, not the whole63-frame export. Both selected final
+Y/UV patches, sources18214/18215, are byte-identical to capture01, with
+balanced read-only CoreVideo locks and duplicate reads agreeing.
+
+Runtime vtables and Process targets identify the actual successor chain:
+
+| Node | Vtable address-point offset | Process offset |
+| --- | --- | --- |
+| ImageAlgoNode, MediaRender's successor | `0x46bb238` | `0x7d32e4` |
+| Defringe, internal head | `0x46ba968` | `0x7a7850` |
+| BlockDenois | `0x46ba398` | `0x7968c0` |
+| AlgoFrameEnd, internal tail | `0x46b9f78` | `0x7725a8` |
+
+The internal list terminates with a null successor. These are instantiated
+runtime nodes, not evidence of their per-pixel effect or temporal filtering.
+No SequenceDenois or Deflicker node appears in this observed list. The result
+rules out treating the route as an already-proven direct stitch-to-codec path;
+it does not establish denoising as the cause of the earlier event attenuation.
+
+The static ABI audit corrects two misleading interpretations. The return of
+`ImageAlgoNode::Process` is status/error, not a replacement VideoFrameInfo.
+VideoFrameInfo+`0x48` is FramePosition; its sample is at`0x80`. The retained
+AlgoFrameInfo instead holds MediaSample at`+0x8`, FramePosition at`+0x28`, and
+the original VideoFrameInfo at`+0x48`, each a shared-pointer pair. Its head call
+at`0x7d37c8` receives the AlgoFrameInfo pair through`x1=sp+0x40`.
+AlgoFrameEnd may materialize a new AVFrame and MediaSample, replacing the
+sample with `SetMediaSample` at`0x77289c`, before its callback at`0x772960`.
+Consequently original AVFrame identity cannot simply be presumed downstream.
+
+A small separate supplement was armed while source18215 remained stopped at
+the final notifier. At the image-chain head it matched that source's original
+MediaSample/control **and** AVFrame/control/CVPixelBuffer, then recorded the
+AlgoFrameInfo shared pair. Source18214's head was not captured. A later head
+reused the18214 sample/control addresses but had a different AVFrame; the
+guard stopped and rejected it. After preserving that rejection, head selection
+was disabled, retaining only the authenticated18215 record. This illustrates
+why stale sample addresses alone are insufficient source provenance.
+
+The post-filter hook received six calls but never matched the sealed18215
+AlgoFrameInfo pair. No post-filter or selected preencoder pixels were captured.
+That absence does **not** prove object replacement: static dispatch inspection
+shows retained AlgoFrameInfo shared pointers, while asynchronous execution and
+the incomplete observation window prevent counts from establishing that the
+selected source passed the callback. Do not relax the identity guard, infer
+pixel filtering from the class names, or claim a final/post/encoder comparison.
+
+The observer was interrupted and detached with all pending snapshots empty
+and no uncertain CoreVideo transaction. The existing export subsequently
+finished63 frames at7680x3840, duration2.102100s. No additional export was
+started for the supplement. The project SHA-256 remained
+`043620056970fb578305399604da8862bb5fad62469fc836dd1227fb6a1f9ef6`.
+The live debugger was exited; no debugger remains attached at this checkpoint.
+
+Durable worktree evidence root:
+`scratch/studio-seam-flicker-612-20260909-01/mac-handoff-20260909-02`.
+Frozen observer SHA-256:
+`581cd2ae9e9be4f50afa29d1f46d881f18eec4a466fbbeada5cf218504afba10`.
+Separate supplement SHA-256:
+`a9d73f3d93007cd5ab0bdd2d33bafecc749f5635b2284256aae6dcec9310d589`.
+`run-01/session-incomplete.json` SHA-256:
+`5d9b2c1e85efc940b790c3f2a1bf67507469b5f80160289e544b81a37af968f4`.
+The event log includes the raw node identities, successful18215 head link,
+rejected address reuse and explicit incomplete detachment. The frozen original
+records were not rewritten to substitute a different downstream frame.
+
+This remains an unresolved final-output-to-post-filter pixel boundary, with
+no Studio coverage for the owner's new612.078 view and no new player candidate.
+The installed build remains rejected. No invented smoother or further broad
+optimization reverse engineering is justified by this incomplete capture.

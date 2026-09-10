@@ -14,6 +14,24 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Post-stitch filter chain observed, 2026-09-09:** the existing follow-up
+export selects `MediaRender -> ImageAlgoNode`, whose instantiated internal
+chain is `Defringe -> BlockDenois -> AlgoFrameEnd`. This is a concrete reason
+not to attribute the earlier output/movie difference solely to compression;
+it does not prove either filter changes the reported seam patch. Both selected
+final-output Y/UV patches reproduce the prior capture byte-for-byte.
+
+The corrected F-input/preencoder hooks now receive calls, but do not match the
+selected final AVFrames. A supplemental observation authenticates source18215
+at the image-chain input, then fails to match its post-filter output. A later
+sample-address reuse is rejected by the AVFrame identity guard. No post-filter
+pixels were captured, so this is an incomplete diagnostic, not a causal finding
+or a fix. The debugger detached with balanced CoreVideo transactions, the
+existing export finished63 frames, and the project hash remains unchanged.
+The installed `f5be77cd` still fails the owner's612.078 test. No new production
+policy, build, installation or merge follows from this run. The temporal note
+records the exact receipts and the unresolved boundary.
+
 **Studio output versus export boundary, 2026-09-09:** a bounded follow-up
 captures two CPU-visible final-output patches at the earlier confirmed607
 view, before and after native color update18215. Independent luma/chroma
