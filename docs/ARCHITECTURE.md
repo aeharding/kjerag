@@ -117,10 +117,11 @@ and omit the row-major bad-block counter and adaptive UMH recovery. Level order,
 strict candidate ties, penalties, fixed-center radius-two search, global
 prediction and interpolation remain. Both the preceding serial CPU oracle and a
 readable CPU reference for the new independent-block candidate remain available.
-GPU/CPU candidate equality does not establish Studio-like moving output. This
-architecture is undergoing visual and playback qualification, not an accepted
-seam-quality or performance result. GPU work still has dependent levels and one
-large filter submission/completion boundary per output; GPU residency alone does
+GPU/CPU candidate equality does not establish Studio-like moving output. The
+owner accepted the current 607-second moving Studio comparison on 2026-09-10;
+the separate 612 comparison and live performance remain unqualified. GPU work
+still has dependent levels and one large filter submission/completion boundary
+per output; GPU residency alone does
 not establish smooth drawing or full-rate playback.
 RGB conversion writes directly into the arriving source's resident history
 layer, using the same R8/RG8 targets and quantization. Its typed single-layer
@@ -203,8 +204,9 @@ phase; it implements the verified16x16-block,2x expansion/confidence path.
 Unsupported geometry is rejected, not assigned new semantics. Neither is a
 motion search, calibration policy, image-history owner or player scheduling
 component. Hash-sealed native tests cover seven pyramids and six packed
-motion grids. The selected worker uses GPU pyramid preparation plus the
-explicit CPU coarse-search readbacks described above; view redraw does neither.
+motion grids. The selected worker uses resident GPU pyramid preparation and
+coarse search; CPU readbacks belong to the separate offline reference path.
+View redraw does neither.
 
 The `search` child is a readable serial CPU implementation of the selected
 seven-level, gray, pel-1 motion search. Its GPL-3.0-or-later adaptation preserves

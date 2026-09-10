@@ -14,6 +14,41 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Direct compact YUV preparation, isolated gain only, 2026-09-10:**
+a new unselected producer avoids the disposable full-size RGBA body image.
+On exact X4 source18344 at612.078133333s, repeated warm isolated preparation
+intervals are about28–29ms versus39–44ms for the RGB-then-NV12 reference.
+The compact measurement excludes later packed-Y unpack and UV history transfer;
+this is not a player-FPS result. Full source sampling count, matrix, temporal
+filter and source cadence remain unchanged.
+
+The candidate explicitly preserves an RGB8 quantization boundary but is not
+byte-identical. Reusing raster-interpolated coordinates reduces the larger Y
+outlier population from2355 to552 of29,491,200 pixels, maximum19. The exact
+reported projected still differs by at most6 codes; its framing/structure was
+inspected, not accepted as moving-video parity. The GPU Y unpack is byte-exact
+against its CPU reorder. Resident retirement/history integration is in progress
+in the isolated branch. The primary player remains the accepted607 checkpoint,
+around14fps, and the installed app is unchanged. Evidence:
+`scratch/studio-seam-flicker-612-20260909-01/temporal-direct-nv12-01`.
+
+**Block-sharing filter experiment retired, 2026-09-10:**
+the unselected compute candidate read each block's motion/luma once, then wrote
+packed YUV buffers and copied them to narrow textures. On the same initialized
+7680x3840 six-reference input, warm encode/submit/completion intervals were
+32.78–36.52ms for 64 lanes versus 18.13–23.01ms for the existing fragment filter.
+A single 256-lane, one-pixel-per-lane follow-up also lost: 37.22–38.33ms versus
+17.95–20.17ms. These are isolated host wall intervals, not actual playback or
+GPU timestamps. No useful speedup was established, so both variants were removed
+from active source, with their code and failed tests retained in scratch.
+
+The exact comparison also found one-code output differences; the half-code
+regression reproduces the normalized packing/attachment discrepancy. No tolerance
+was relaxed and neither variant entered the live path. The player remains the
+visually accepted 607 checkpoint below, still around 14fps. Next evaluate direct
+body-to-YUV preparation to remove the large disposable RGB intermediate, without
+changing source cadence or inventing a colour-update smoother.
+
 **GPU-resident temporal architecture candidate, 2026-09-10:**
 the live Stream now retains all seven motion-pyramid levels on the GPU and runs
 coarse search, inter-level prediction, finest search and luma-dependent motion

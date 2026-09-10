@@ -21,6 +21,49 @@ use crate::{Fallible, FrameStamp, MAX_LENSES, Planes};
 
 pub(crate) mod panorama;
 pub(crate) use panorama::BodyPanorama;
+#[cfg(test)]
+pub(crate) use panorama::nv12::CompactNv12Panorama;
+
+/// Test-only cached compact producer borrowing one authenticated detached draw.
+/// Pipeline compilation happens before any comparison timing interval.
+#[cfg(test)]
+pub(crate) struct DirectCompactNv12Draw<'a> {
+    draw: &'a DirectMapDraw,
+    producer: panorama::nv12::Producer,
+}
+
+#[cfg(test)]
+impl DirectCompactNv12Draw<'_> {
+    pub(crate) fn encode(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        picture: &wgpu::BindGroup,
+        prepared: &crate::PreparedPicture,
+        size: crate::Size,
+    ) -> Fallible<CompactNv12Panorama> {
+        let Some(frame) = self.draw.bound_frame() else {
+            return Err("compact NV12 panorama draw has no uploaded type-2 map".into());
+        };
+        crate::MapBindError::require_frame(frame, Some(prepared))?;
+        self.producer.encode(
+            device,
+            encoder,
+            picture,
+            &self.draw.binding.read,
+            self.draw
+                .binding
+                .fusion
+                .as_ref()
+                .map(|binding| &binding.read),
+            frame.clone(),
+            size,
+            crate::temporal_fusion::color::MatrixCoefficients::from_source_rgb(
+                prepared.reframe().source_color_matrix(),
+            ),
+        )
+    }
+}
 
 /// One exact decoded ONE X2 pair imported for resident processing and drawing.
 ///
@@ -935,6 +978,24 @@ impl DirectMapDraw {
             pipeline.draw(&mut pass, picture, &self.binding.read);
         }
         Ok(output)
+    }
+
+    /// Prepare a test-only compact producer over this authenticated detached
+    /// draw. Production ownership and retirement wiring remain unselected.
+    #[cfg(test)]
+    pub(crate) fn prepare_compact_nv12(
+        &self,
+        device: &wgpu::Device,
+    ) -> Fallible<DirectCompactNv12Draw<'_>> {
+        if self.pipeline.device != *device {
+            return Err(
+                "compact NV12 panorama pipeline belongs to a different graphics device".into(),
+            );
+        }
+        Ok(DirectCompactNv12Draw {
+            draw: self,
+            producer: panorama::nv12::Producer::new(device, &self.pipeline)?,
+        })
     }
 
     #[cfg(test)]

@@ -8,6 +8,9 @@ use wgpu::util::DeviceExt;
 use super::{DirectType2Pipeline, draw_wgsl_with_fusion_mode};
 use crate::{Extent, Fallible, FrameStamp, Size};
 
+#[allow(dead_code)]
+pub(super) mod nv12;
+
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// One gamma-RGB body panorama inseparably named by its decoded delivery.
