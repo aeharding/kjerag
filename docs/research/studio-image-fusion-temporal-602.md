@@ -3020,3 +3020,62 @@ were consolidated with the preceding GPU-cost evidence as hardlinks, recovering
 1.04 GiB. All paths remain and must be treated as immutable. Full sequences
 and short prefixes were verified again against the untouched CPU-SAD checkpoint.
 No source footage, unique evidence, receipt, log or binary was removed.
+
+### Resident source/map panorama input, 2026-09-10
+
+`ResidentScreenshotDraw::encode_panorama` consumes the existing linear draw
+permit, private source binding and exact installed source/map/fusion carrier.
+It records body-equirect materialization using a lazily cached pipeline and
+the existing retirement mechanism. The target stamp comes only from the
+sealed imported picture and must match the installed map. Device/geometry
+and gamma-output checks precede arming. No map readback/reupload is needed
+by this producer. It selects no filter, ISO, startup, seek or publication policy.
+
+The extended real resident lifecycle test encodes a panorama from an older
+installed carrier, drops its output and finished unsubmitted command buffer,
+and proves that retirement capacity and the exact pass/source owner remain
+fail-closed after caller references are gone. Existing current-source drop-order
+checks remain independent. The ordinary screenshot/window path is unchanged.
+
+The opt-in Scene input flag is `KJERAG_PANORAMA_RESIDENT_INPUT=1`. Its first
+source compares every full-panorama RGBA byte with the old uploaded-map oracle:
+117,964,800 bytes at X4 sources 18341 and 18208, and 66,355,200 at ONE X2 source
+6369. Full source stamps and hashes are recorded in `panorama-resident-input.txt`.
+The two full X4 sequences preserve all 290/274 artifacts, including 60 filtered
+frames, 504 controls and CSV source associations/hashes. The seven-source
+ONE X2 control preserves all 49 artifacts and control rows. Root inspected
+actual X4 filtered and ONE X2 panorama previews; no moving acceptance follows.
+The diagnostic deliberately retains CPU-map controls as an independent oracle.
+It is not an installed filter or an actual-player performance measurement.
+
+The final render-test binary SHA256 is
+`f0e7d5ad7f2daedf51d2534296cada352a4d4fd82ce05738a5b27c16b94d3f46`.
+All 966 ordinary render tests pass, with 36 opt-in tests ignored. All 83 temporal
+tests, including private native fixtures, pass separately. Workspace all-target
+Clippy, formatting, source-lock and rename checks pass. Full workspace tests
+and the UI harness were not run; no push, merge or installation. Evidence:
+`scratch/studio-seam-flicker-612-20260909-01/temporal-resident-panorama-01`.
+
+The integration audit rechecked two real dependencies. Player/Scene exposes
+two decoded successors and the capture admits two unpublished sources; a
+centered three-future filter needs a distinct source-ahead/presentation contract.
+The selected ISO100 row and Studio's interpolation laws are known, but Kjerag
+metadata currently exposes shutter, not Studio's global ISO input. Other table
+knots/rows are not in the captured UBOs. Applying ISO100 universally would be an
+invented default and is not selected. Existing static `denoise-window-01` reads
+do establish startup and empty-send tail intervals; a selected flush/source-ID
+receipt is missing, not the interval law itself. No new gradual update or
+unfiltered-edge fallback is chosen by this audit.
+
+The next precise semantic reads, using existing pinned binaries, are the
+`GetIsoValue` call at worker602 `0x170078` inside `ProcessDenoiseISOPairs`, and
+the JSON/config path from `GenerateDenoiseConfig` (`0x68ddd8`) through
+`SetExtConfig` into `DenoiseFile`. Trailer record9 has no established link to
+that ISO producer and must not be assumed to be its source. This is a filter
+input dependency, not reopening broad optimization reverse engineering.
+
+After qualification, 662 byte-identical generated files were consolidated
+with the preceding packed-gray evidence as hardlinks, recovering 933.33 MiB.
+All paths remain immutable. Full X4 sequences and the short prefix were then
+verified against the untouched CPU-SAD checkpoint; the ONE X2 comparison also
+still passes. No source footage or unique evidence was removed.

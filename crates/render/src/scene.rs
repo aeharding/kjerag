@@ -9584,7 +9584,37 @@ mod tests {
                     .prepare_one_xs_picture(&scene.primitive(camera), 16.0 / 9.0)
                     .expect("panorama review lost the displayed picture");
                 assert_eq!(prepared.frame(), &frame);
-                panorama.capture(&device, &queue, diagnostic, &map, &shot.rgba);
+                let resident = panorama.uses_resident_input().then(|| {
+                    // Collect the screenshot's completed retirement through
+                    // ordinary Scene preparation before reserving a new pass.
+                    pipeline.prepare(&scene.primitive(camera), &device, &queue, 16.0 / 9.0);
+                    let primitive = scene.primitive(camera);
+                    let view = primitive
+                        .shown
+                        .get()
+                        .expect("resident panorama lost its shown source");
+                    let (_, attachment) = pipeline
+                        .resident_one_xs
+                        .as_ref()
+                        .expect("resident panorama has no attachment");
+                    let draw = attachment
+                        .prepare_screenshot(&pipeline.one_xs_gpu, pipeline.format, |stamp| {
+                            assert_eq!(stamp, &frame);
+                            assert_eq!(view.frames.stamp(), frame);
+                            Ok(pipeline.resident_reframe(&primitive, &view, 16.0 / 9.0))
+                        })
+                        .unwrap();
+                    match draw {
+                        ResidentScreenshotPrepare::Ready(draw) => draw,
+                        ResidentScreenshotPrepare::RetryFull => panic!(
+                            "resident panorama retirement is full after screenshot completion"
+                        ),
+                        ResidentScreenshotPrepare::Empty => {
+                            panic!("resident panorama has no completed source")
+                        }
+                    }
+                });
+                panorama.capture(&device, &queue, diagnostic, &map, &shot.rgba, resident);
                 let installed = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
                 assert_eq!(installed.frame(), map.frame());
                 assert_eq!(installed.packed().bytes(), map.packed().bytes());

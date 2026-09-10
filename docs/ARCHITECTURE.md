@@ -158,6 +158,16 @@ at that boundary; arbitrary unvalidated GPU buffers are not accepted.
 The test-only `scene::panorama_review` path materializes each exact displayed
 source/map/fusion into a body-fixed RGB panorama, then projects it through the
 same locked view. An unfiltered NV12 round trip isolates representation changes.
+The body-image producer also accepts a linear `ResidentScreenshotDraw` from
+the selected player carrier. It draws the exact resident source, final map and
+fusion bindings without map readback/reupload, deriving the output stamp from
+the imported source and checking it against the installed map. The existing
+bounded draw retirement holds the complete source/pass until completion;
+abandoned command buffers retain the same fail-closed ownership. Linearized
+output is refused before arming. The shared body pipeline is lazily cached.
+`KJERAG_PANORAMA_RESIDENT_INPUT=1` selects this route only in the offline review;
+its first source checks the entire panorama against the uploaded-map oracle.
+Normal playback still draws its direct map and has no selected temporal filter.
 Its optional captured-ISO100 temporal arm keeps seven contiguous source-stamped
 NV12 images in resident arrays and their gray pyramids, emits only center
 position three, and never pads either end. Metadata is checked against all seven

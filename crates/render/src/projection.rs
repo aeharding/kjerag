@@ -1774,7 +1774,6 @@ impl Reframe {
     }
 
     /// Whether the final RGB shader converts gamma-coded values to linear light.
-    #[cfg(test)]
     pub(crate) const fn linearizes_output(&self) -> bool {
         self.linearize > 0.5
     }

@@ -2020,6 +2020,10 @@ mod tests {
             drop(pass);
             context.queue().submit([encoder.finish()])
         };
+        // Keep the older exact installed carrier for the route-specific
+        // abandoned-panorama check after the current-source drop-order proof.
+        // It is deliberately not the later draw carrying `witness` below.
+        let abandoned_panorama_draw = Arc::clone(&warm_installed.draw);
         iced_draw.prepare_installed(warm_installed, &reframe);
         let first_draw_uniform = iced_draw.staged_uniform_for_test();
         assert_eq!(read_uniform(&context, &first_draw_uniform), reframe.bytes());
@@ -2187,6 +2191,58 @@ mod tests {
         }));
         assert!(unwind.is_err(), "injected resident install did not unwind");
         assert_eq!(witness.load(Ordering::SeqCst), 2);
+
+        // The panorama consumer must arm the same bounded retirement before
+        // sampling. Finish and discard its command buffer without submission:
+        // no completion callback can run, so both admission and the exact
+        // installed pass must remain fail-closed even after every caller-side
+        // owner and output texture is dropped.
+        let panorama_retirements = Arc::new(crate::draw_retirement::IcedDrawRetirements::new(
+            context.device(),
+            1,
+        ));
+        let panorama_pass =
+            abandoned_panorama_draw.prepare_pass(&crate::Reframe::blank(2.0, false));
+        let retained_panorama_pass = Arc::downgrade(&panorama_pass);
+        let panorama_frame = abandoned_panorama_draw.frame();
+        let panorama = crate::flow::one_xs_belt_gpu::ResidentScreenshotDraw {
+            ready: Some(crate::flow::one_xs_belt_gpu::InstalledOneXsReady {
+                draw: Arc::clone(&abandoned_panorama_draw),
+                permit: panorama_retirements.reserve().unwrap(),
+                pass: Some(panorama_pass),
+            }),
+            retirements: Arc::clone(&panorama_retirements),
+        };
+        drop(abandoned_panorama_draw);
+        let mut panorama_encoder =
+            context
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("abandoned resident body panorama"),
+                });
+        let output = panorama
+            .encode_panorama(
+                context.device(),
+                &mut panorama_encoder,
+                crate::Size {
+                    width: 8,
+                    height: 4,
+                },
+            )
+            .unwrap();
+        assert_eq!(output.frame(), &panorama_frame);
+        drop(output);
+        drop(panorama_encoder.finish());
+        let error = match panorama_retirements.reserve() {
+            Ok(_) => panic!("abandoned panorama returned its armed draw permit"),
+            Err(error) => error,
+        };
+        assert_eq!(error, crate::draw_retirement::DrawRetirementError::Full);
+        drop(panorama_retirements);
+        assert!(
+            retained_panorama_pass.upgrade().is_some(),
+            "abandoned panorama released its exact source/map owner"
+        );
     }
 
     fn read_uniform(context: &OneXsGpuContext, source: &wgpu::Buffer) -> Vec<u8> {

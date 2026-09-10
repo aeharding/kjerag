@@ -24,6 +24,7 @@ pub(super) struct PanoramaReview {
     temporal: Option<temporal::TemporalReview>,
     gpu_pyramid: Option<crate::temporal_fusion::pyramid::gpu::Builder>,
     parallel_refine: bool,
+    resident_input: bool,
     output: PathBuf,
     log: std::io::BufWriter<std::fs::File>,
 }
@@ -138,6 +139,12 @@ impl PanoramaReview {
             ).unwrap();
             crate::temporal_fusion::pyramid::gpu::Builder::new(device)
         });
+        let resident_input = std::env::var_os("KJERAG_PANORAMA_RESIDENT_INPUT")
+            .map(|value| {
+                assert_eq!(value, "1", "set the resident panorama input flag to 1");
+                true
+            })
+            .unwrap_or(false);
         Self {
             projector: PanoramaProjector::new(device),
             conversion: GpuColorConversion::new(device),
@@ -147,9 +154,14 @@ impl PanoramaReview {
             temporal,
             gpu_pyramid,
             parallel_refine,
+            resident_input,
             output: output.to_owned(),
             log,
         }
+    }
+
+    pub(super) fn uses_resident_input(&self) -> bool {
+        self.resident_input
     }
 
     pub(super) fn capture(
@@ -159,6 +171,7 @@ impl PanoramaReview {
         pipeline: &mut ScenePipeline,
         map: &OneXsMapFrame,
         ordinary_rgba: &[u8],
+        resident: Option<crate::flow::one_xs_belt_gpu::ResidentScreenshotDraw>,
     ) {
         let prepared = pipeline.prepared_picture.clone().unwrap();
         MapBindError::require_frame(map.frame(), Some(&prepared)).unwrap();
@@ -237,10 +250,27 @@ impl PanoramaReview {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("same-source panorama representation controls"),
         });
-        let panorama = draw
-            .encode_panorama(device, &mut encoder, &pipeline.bind_group, &prepared, size)
-            .unwrap();
+        assert_eq!(resident.is_some(), self.resident_input);
+        let panorama = if let Some(resident) = resident {
+            resident
+                .encode_panorama(device, &mut encoder, size)
+                .unwrap()
+        } else {
+            draw.encode_panorama(device, &mut encoder, &pipeline.bind_group, &prepared, size)
+                .unwrap()
+        };
         assert_eq!(panorama.frame(), prepared.frame());
+        // The first source compares the full body image, not just this view.
+        // The old uploaded-map path remains an independent diagnostic oracle.
+        let resident_check = (self.resident_input && self.previous.is_none()).then(|| {
+            let reference = draw
+                .encode_panorama(device, &mut encoder, &pipeline.bind_group, &prepared, size)
+                .unwrap();
+            (
+                PendingReadback::encode(device, &mut encoder, panorama.texture()),
+                PendingReadback::encode(device, &mut encoder, reference.texture()),
+            )
+        });
         let projected = self
             .projector
             .encode(device, &mut encoder, panorama.texture(), &reframe, view)
@@ -293,6 +323,24 @@ impl PanoramaReview {
         let submission = queue.submit([encoder.finish()]);
         let rgb = rgb_read.read(device, submission.clone());
         let roundtrip = roundtrip_read.read(device, submission.clone());
+        if let Some((actual, reference)) = resident_check {
+            let actual = actual.read(device, submission.clone());
+            let reference = reference.read(device, submission.clone());
+            assert_eq!(actual.len(), reference.len());
+            assert_eq!(
+                actual.iter().zip(&reference).position(|(a, b)| a != b),
+                None,
+                "resident body panorama differs from the uploaded exact-map oracle"
+            );
+            let digest: String = Sha256::digest(&actual)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            std::fs::write(self.output.join("panorama-resident-input.txt"), format!(
+                "source={}\nsize={}x{}\nfull_rgba_bytes={}\nsha256={digest}\nall bytes equal the uploaded exact-map oracle\nresident source/map/fusion held by the existing draw retirement through submission completion\nno body-image map readback or reupload in the resident producer\n",
+                prepared.frame().index(), size.width, size.height, actual.len(),
+            )).unwrap();
+        }
         let full_luma = luma_read.map(|read| read.read(device, submission.clone()));
         let gpu_levels = pyramid_reads.map(|reads| {
             reads

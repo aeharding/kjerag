@@ -5,7 +5,7 @@
 //! current `Reframe` body ray, rather than accepting a dense output-sized map.
 
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use kjerag_media::Frames;
 
@@ -19,9 +19,7 @@ use crate::projection;
 use crate::studio_type2::{ALPHA_BYTES, MAP_HEIGHT, MAP_WIDTH, OneXsMapFrame, PACKED_BYTES};
 use crate::{Fallible, FrameStamp, MAX_LENSES, Planes};
 
-#[cfg(test)]
 pub(crate) mod panorama;
-#[cfg(test)]
 pub(crate) use panorama::BodyPanorama;
 
 /// One exact decoded ONE X2 pair imported for resident processing and drawing.
@@ -124,6 +122,7 @@ impl ImportedOneXsPicture {
             picture,
             _uniforms: uniforms,
             rectilinear: reframe.is_rectilinear(),
+            gamma_output: !reframe.linearizes_output(),
         }
     }
 
@@ -267,6 +266,7 @@ pub(crate) struct ImportedOneXsDrawBinding {
     picture: wgpu::BindGroup,
     _uniforms: wgpu::Buffer,
     rectilinear: bool,
+    gamma_output: bool,
 }
 
 /// Capture-owned source-band inputs and every binding used to encode them.
@@ -285,6 +285,12 @@ impl ResidentGpuBandInputs {
 
     pub(crate) fn invalid(&self) -> &wgpu::Buffer {
         self.inputs.invalid()
+    }
+}
+
+impl ImportedOneXsDrawBinding {
+    pub(crate) fn is_gamma_output(&self) -> bool {
+        self.gamma_output
     }
 }
 
@@ -354,6 +360,7 @@ pub(crate) struct DirectType2Pipeline {
     map_layout: wgpu::BindGroupLayout,
     fusion_layout: Option<wgpu::BindGroupLayout>,
     fusion_sampler: Option<wgpu::Sampler>,
+    panorama: OnceLock<panorama::BodyPanoramaPipeline>,
 }
 
 impl DirectType2Pipeline {
@@ -503,6 +510,7 @@ impl DirectType2Pipeline {
             map_layout,
             fusion_layout,
             fusion_sampler,
+            panorama: OnceLock::new(),
         }
     }
 
@@ -597,6 +605,41 @@ impl DirectType2Pipeline {
         } else {
             Err("ONE X2 direct type-2 pipeline belongs to a different graphics device".into())
         }
+    }
+
+    /// Allocate the sealed target for an exact resident source/map snapshot.
+    pub(crate) fn resident_panorama_target(
+        &self,
+        device: &wgpu::Device,
+        source: &ImportedOneXsPicture,
+        size: crate::Size,
+    ) -> Fallible<BodyPanorama> {
+        if self.device != *device || self.device != *source.context.device() {
+            return Err("resident body panorama belongs to a different graphics device".into());
+        }
+        BodyPanorama::new(device, source.resident_frame(), size)
+    }
+
+    /// Draw body-equirect pixels from the private source/map/fusion bindings
+    /// carried by the exact installed pass.
+    pub(crate) fn draw_resident_panorama(
+        &self,
+        binding: &ImportedOneXsDrawBinding,
+        map: &wgpu::BindGroup,
+        fusion: Option<&wgpu::BindGroup>,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        assert_eq!(
+            self.fusion_layout.is_some(),
+            fusion.is_some(),
+            "resident panorama map and photometric binding presence differ"
+        );
+        if let Some(fusion) = fusion {
+            pass.set_bind_group(2, fusion, &[]);
+        }
+        self.panorama
+            .get_or_init(|| panorama::BodyPanoramaPipeline::new(&self.device, self))
+            .draw(pass, &binding.picture, map);
     }
 
     pub(crate) fn draw(

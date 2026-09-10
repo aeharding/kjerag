@@ -14,6 +14,19 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Resident GPU input for temporal integration verified, 2026-09-10:** the
+body-image producer now consumes the player's exact resident source/map/fusion
+carrier with existing draw-retirement ownership, without map readback/reupload.
+Full panoramas match the old input exactly on X4 Air and ONE X2. Both X4 temporal
+sequences preserve all 60 filtered frames and 504 controls; the ONE X2 control
+preserves 49 artifacts. All 966 ordinary render tests and 83 temporal checks
+pass, including abandoned-panorama source retention. Ordinary playback does
+not yet select this input or the filter. The next correctness dependencies are
+automatic ISO selection and source lookahead/window integration; the player
+currently supplies two successors, but the filter needs three. No new capture,
+gradual colour update, installed change or owner flicker verdict.
+Evidence: `scratch/studio-seam-flicker-612-20260909-01/temporal-resident-panorama-01`.
+
 **Exact packed-gray motion reads verified, 2026-09-10:** one GPU packing pass
 per arriving source replaces retained scalar gray texels with four-byte groups.
 Search decisions and colour updates are unchanged. All 83 temporal tests pass;

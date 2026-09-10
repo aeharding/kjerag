@@ -1,8 +1,9 @@
-//! Detached body-equirect materialization and locked-view reprojection.
+//! Body-equirect materialization and locked-view reprojection.
 //!
-//! This diagnostic path stays RGB. It deliberately does not choose the
+//! This path stays RGB. It deliberately does not choose the
 //! still-unread RGB-to-NV12 conversion needed by the temporal filter.
 
+#[cfg(test)]
 use wgpu::util::DeviceExt;
 
 use super::{DirectType2Pipeline, draw_wgsl_with_fusion_mode};
@@ -120,6 +121,7 @@ impl BodyPanoramaPipeline {
 
 /// Reproject one gamma-RGB panorama through an exact `Reframe`. Longitude
 /// repeats and latitude clamps in the texture sampler.
+#[cfg(test)]
 pub(crate) struct PanoramaProjector {
     device: wgpu::Device,
     pipeline: wgpu::RenderPipeline,
@@ -127,6 +129,7 @@ pub(crate) struct PanoramaProjector {
     sampler: wgpu::Sampler,
 }
 
+#[cfg(test)]
 impl PanoramaProjector {
     pub(crate) fn new(device: &wgpu::Device) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -333,6 +336,7 @@ fn panorama_fs(in: Type2VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+#[cfg(test)]
 const PROJECT_WGSL: &str = r#"
 @group(0) @binding(1) var panorama: texture_2d<f32>;
 @group(0) @binding(2) var panorama_sampler: sampler;

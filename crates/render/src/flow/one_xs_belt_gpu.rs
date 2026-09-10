@@ -2123,6 +2123,21 @@ impl ResidentScreenshotDraw {
             .expect("resident screenshot draw is linear")
             .arm_and_draw(&self.retirements, pass);
     }
+
+    /// Encode one body-equirect snapshot through this exact installed source,
+    /// map and image-fusion owner. The same bounded retirement mechanism as a
+    /// screenshot holds the decoder lease through submitted GPU completion.
+    pub(crate) fn encode_panorama(
+        mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        size: crate::Size,
+    ) -> Fallible<crate::direct_type2::BodyPanorama> {
+        self.ready
+            .take()
+            .expect("resident screenshot draw is linear")
+            .arm_and_encode_panorama(&self.retirements, device, encoder, size)
+    }
 }
 
 /// One-shot callback handed only to the concrete imported-source owner after
@@ -2297,6 +2312,15 @@ impl InstalledOneXsPass {
             });
         }
     }
+
+    fn draw_panorama(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.draw.pipeline.draw_resident_panorama(
+            &self.binding,
+            self.draw.map.read(),
+            self.draw.map.fusion_read(),
+            pass,
+        );
+    }
 }
 
 /// Carrier-first whole-frame install. Declaration order is load-bearing:
@@ -2385,6 +2409,50 @@ impl InstalledOneXsReady {
             .pass
             .expect("resident draw must retain its exact private picture binding");
         retirements.arm_and_draw(self.permit, pass, draw, |draw, pass| draw.draw(pass));
+    }
+
+    fn arm_and_encode_panorama(
+        self,
+        retirements: &IcedDrawRetirements<InstalledOneXsPass>,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        size: crate::Size,
+    ) -> Fallible<crate::direct_type2::BodyPanorama> {
+        let draw = self
+            .pass
+            .expect("resident panorama must retain its exact private picture binding");
+        if !draw.binding.is_gamma_output() {
+            return Err("resident body panorama requires gamma-encoded source output".into());
+        }
+        let output =
+            draw.draw
+                .pipeline
+                .resident_panorama_target(device, &draw.draw.source, size)?;
+        if output.frame() != draw.draw.map.frame() {
+            return Err("resident body panorama source and map name different frames".into());
+        }
+        let target = output.texture().create_view(&Default::default());
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("resident body panorama snapshot"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        // Registration precedes sampling on this exact pass. The unchanged
+        // retirement owner retains submitted work until completion and keeps
+        // never-completed work as bounded backpressure or fail-closed state.
+        retirements.arm_and_draw(self.permit, &mut pass, draw, |draw, pass| {
+            draw.draw_panorama(pass);
+        });
+        drop(pass);
+        Ok(output)
     }
 
     #[cfg(test)]
