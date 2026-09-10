@@ -69,6 +69,17 @@ history, seek epochs and completion. None of that scheduling is supplied by
 this primitive. Saved native input/output tests establish its bounded
 arithmetic result, not a complete temporal pipeline or performance verdict.
 
+The `history` child owns seven resident NV12 array layers and the exact source
+stamp occupying each slot. Arriving images are copied once; a complete borrowed
+window supplies center/reference stamps and physical layer indices in logical
+c-3,c-2,c-1,c+1,c+2,c+3 order. It records copies without submitting or waiting.
+Its caller must submit earlier consumers before a later overwrite and create a
+fresh owner for a new decode epoch. It rejects gaps, duplicates and invalid
+storage before recording. Resources must share one wgpu Instance: the pinned
+native device equality only diagnoses different devices within that Instance,
+not separate Instances with colliding local IDs. This is storage ownership,
+not player startup, seeking, padding or scheduling policy.
+
 Its `pyramid` and `motion` children are readable CPU references, also
 unconnected to playback. `pyramid` takes an explicit gray base image and level
 count, retaining Studio's two separately rounded reduction passes. `motion`
@@ -135,9 +146,12 @@ The test-only `scene::panorama_review` path materializes each exact displayed
 source/map/fusion into a body-fixed RGB panorama, then projects it through the
 same locked view. An unfiltered NV12 round trip isolates representation changes.
 Its optional captured-ISO100 temporal arm keeps seven contiguous source-stamped
-NV12 images and their gray pyramids, emits only center position three, and
-never pads either end. Optional GPU pyramid/packing and concurrent CPU search
-routes change execution only; CPU search and explicit readbacks remain offline
+NV12 images in resident arrays and their gray pyramids, emits only center
+position three, and never pads either end. Metadata is checked against all seven
+history stamps. The first output records seven arriving copy pairs; subsequent
+outputs record one, before consumers in the same encoder. Optional GPU
+pyramid/packing and concurrent CPU search routes change execution only;
+CPU search and explicit readbacks remain offline
 reference execution, not the player architecture. The source image and its
 color corrections do not change between comparison arms. No ISO selection,
 startup/seek/end policy, gradual color update or performance claim follows from

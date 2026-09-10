@@ -91,6 +91,12 @@ impl Nv12 {
     pub fn size(&self) -> wgpu::Extent3d {
         self.y.size()
     }
+
+    // Device equality in pinned native wgpu is scoped to one Instance. This
+    // checks the originating converter, not arbitrary replacements of y/uv.
+    pub(crate) fn belongs_to(&self, device: &wgpu::Device) -> bool {
+        self.device == *device
+    }
 }
 
 /// Render-pass implementation of the disclosed diagnostic conversion.

@@ -31,6 +31,9 @@ pub mod parallel_refine;
 /// Conservative full-image execution regions for one exact prepared view.
 pub mod regions;
 
+/// Source-stamped resident seven-image storage, with explicit caller ordering.
+pub mod history;
+
 /// Effective values supplied by the calibration/history producer, not defaults.
 pub struct Parameters {
     pub noise: f32,

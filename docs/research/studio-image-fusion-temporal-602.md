@@ -2795,3 +2795,60 @@ merge or gradual color update. The next concrete execution target is the
 309,657,600-byte seven-frame NV12 array currently allocated and copied at
 every diagnostic center; source-stamped resident history can avoid six of
 those seven repeated copies without choosing a different temporal window.
+
+### Exact source-stamped resident history, 2026-09-10
+
+`temporal_fusion::history` now retains seven fixed R8/RG8 array layers beside
+their exact `FrameStamp`s. A complete borrowed window supplies the center and
+six ordered reference stamps and selects their physical layers in the existing
+fusion parameters. Flow/phase ordinals do not follow physical ring order.
+The owner validates contiguous indices, one decode epoch and source storage
+before recording a copy or changing slots. It never submits, waits or selects
+seek/startup/end policy. Earlier consumers must be submitted before later slot
+overwrites on the same queue; a new epoch requires a fresh owner.
+
+The offline Scene retains the same CPU levels, GPU bases and view metadata,
+checks all seven stamps against the resident window, and collects initial
+source copies in an encoder. The first center consumes seven arriving pairs;
+every later center consumes one. Those copies precede refinement/packing/fusion
+in the same submitted encoder. Their separately accumulated host encoding time
+is included in GPU+wait. Array initialization is once per owner and included
+in whole-run time, not hidden in an earlier per-frame submission.
+
+The steady logical copy count falls from14 to2 and bytes from309,657,600 to
+44,236,800 per output. Actual 612/607 receipts count37/35 copied source pairs
+for31/29 outputs: exactly the initial seven plus one for each later center.
+This traffic reduction does not imply a sevenfold GPU or player speedup.
+
+All77 temporal tests pass on AMD760M/RADV. The new ring fixture submits28
+sources without intermediate host waits and compares22 filtered Y/UV pairs
+with fresh arrays in deliberately different physical order. Swapped-reference
+and stale-source controls produce different pixels. Rejected-source tests
+verify both unchanged stamps and unchanged output from the encoder that
+received the failed operations. A broader two-Instance device-identity test
+initially failed, retained in `final-temporal-tests.log`: pinned native wgpu
+compares per-Instance IDs without context identity. Cross-Instance mixing is
+outside this API's documented contract, not falsely claimed to be rejected.
+The final test requests two distinct devices from one Instance, matching
+Scene's ownership domain. Source-plane and encoder provenance remain caller
+obligations; no unsafe or backend-specific identity workaround was introduced.
+
+The final test binary SHA256 is
+`a2c1ae0130b6702778529506245c2e4d154a64cb9b58caf2323b1c467f440ec1`.
+Actual612/607 runs preserve all290/274 artifacts, including60 filtered frames,
+504 controls, center/reference indices/times and RGBA hashes. Root inspected
+actual centers18344/18214 as PNG previews; this is not moving flicker approval.
+CPU coarse mean/max is10.915/18.130 ms and10.503/13.091 ms. GPU+wait mean/max
+is90.236/106.958 ms and88.817/108.282 ms, versus previous means117.807/116.951.
+Combined means101.151/99.320 ms exclude earlier panorama preparation and
+controls. Whole runs take9.60/9.23 seconds. No build or other GPU test overlaps
+either capture. These remain offline timing regions, not player capacity.
+
+Evidence is in
+`scratch/studio-seam-flicker-612-20260909-01/temporal-resident-history-01`.
+Workspace all-target Clippy, formatting, source-lock and rename checks pass.
+Full workspace tests and the UI harness were not run for this offline change.
+No new movie, Studio session/export, color-update rule, installation, push,
+merge or owner acceptance. Existing moving reviews remain current. The
+remaining GPU processing still dominates; this is not a player-ready flicker
+fix and does not resolve the disclosed representation/search/ISO boundaries.

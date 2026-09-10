@@ -14,11 +14,12 @@ use sha2::{Digest, Sha256};
 use super::PendingReadback;
 use crate::direct_type2::panorama::PanoramaProjector;
 use crate::studio_type2::PreparedPicture;
+use crate::temporal_fusion::GpuFuse;
 use crate::temporal_fusion::color::{GpuColorConversion, MatrixCoefficients, Nv12};
+use crate::temporal_fusion::history::History;
 use crate::temporal_fusion::motion::{self, Geometry};
 use crate::temporal_fusion::parallel_refine;
 use crate::temporal_fusion::pyramid::Level;
-use crate::temporal_fusion::{GpuFuse, Inputs, Parameters};
 use crate::{FrameStamp, Reframe, Size};
 
 const FULL: [u32; 2] = [7680, 3840];
@@ -38,15 +39,22 @@ const LIMIT_UV: [f32; 256] = [0.5; 256];
 
 struct Retained {
     stamp: FrameStamp,
-    nv12: Nv12,
     levels: Vec<Level>,
     gpu_base: Option<wgpu::Texture>,
     reframe: Reframe,
 }
 
+struct PendingHistory {
+    encoder: wgpu::CommandEncoder,
+    host_ms: f64,
+    copied_sources: u32,
+}
+
 pub(super) struct TemporalReview {
     device: wgpu::Device,
     window: VecDeque<Retained>,
+    history: History,
+    pending_history: Option<PendingHistory>,
     fuse: GpuFuse,
     color: GpuColorConversion,
     projector: PanoramaProjector,
@@ -116,6 +124,8 @@ impl TemporalReview {
              Seven contiguous same-epoch sources; center is position3.\n\
              References are c-3,c-2,c-1,c+1,c+2,c+3.\n\
              No startup/end padding, automatic policy, or gradual color update.\n\
+             Resident seven-layer NV12 history; copies only arriving sources, with unchanged logical reference order.\n\
+             History copies precede fusion in the same encoder; GPU+wait also includes their host encoding time.\n\
              CPU preparation and explicit GPU completion are diagnostic, not playback performance.\n\
              {search_route}{motion_route}{coverage_route}"
             ),
@@ -124,6 +134,9 @@ impl TemporalReview {
         Self {
             device: device.clone(),
             window: VecDeque::with_capacity(7),
+            history: History::new(device, FULL)
+                .unwrap_or_else(|error| panic!("create resident temporal history: {error}")),
+            pending_history: None,
             fuse: GpuFuse::new(device),
             color: GpuColorConversion::new(device),
             projector: PanoramaProjector::new(device),
@@ -167,9 +180,23 @@ impl TemporalReview {
                 "temporal review sources are not contiguous"
             );
         }
+        let history_started = Instant::now();
+        let pending = self.pending_history.get_or_insert_with(|| PendingHistory {
+            encoder: device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("resident seven-source temporal diagnostic"),
+            }),
+            host_ms: 0.0,
+            copied_sources: 0,
+        });
+        self.history
+            .encode_push(device, &mut pending.encoder, prepared.frame(), &nv12)
+            .unwrap_or_else(|error| panic!("retain temporal source: {error}"));
+        pending.host_ms += history_started.elapsed().as_secs_f64() * 1000.0;
+        pending.copied_sources += 1;
+        // The encoder now retains the copy's source textures. Only stamped
+        // CPU metadata stays here; completed copies live in the shared arrays.
         self.window.push_back(Retained {
             stamp: prepared.frame().clone(),
-            nv12,
             levels,
             gpu_base,
             reframe: prepared.reframe(),
@@ -189,7 +216,24 @@ impl TemporalReview {
     }
 
     fn process(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let PendingHistory {
+            mut encoder,
+            host_ms: history_host_ms,
+            copied_sources,
+        } = self
+            .pending_history
+            .take()
+            .expect("a complete temporal window has recorded source copies");
+        let history = self
+            .history
+            .window()
+            .expect("seven resident temporal sources");
+        let stamps = history.stamps();
         let center = &self.window[CENTER];
+        assert_eq!(stamps.center, &center.stamp);
+        for (stamp, index) in stamps.references.into_iter().zip(REFERENCES) {
+            assert_eq!(stamp, &self.window[index].stamp);
+        }
         let luma = &center.levels[3].pixels;
         let search_started = Instant::now();
         let reference_levels = REFERENCES.map(|at| self.window[at].levels.as_slice());
@@ -297,20 +341,6 @@ impl TemporalReview {
                 regions.fusion(),
             );
         }
-        let y = array_texture(
-            device,
-            "offline temporal Y window",
-            FULL,
-            7,
-            wgpu::TextureFormat::R8Unorm,
-        );
-        let uv = array_texture(
-            device,
-            "offline temporal UV window",
-            [FULL[0] / 2, FULL[1] / 2],
-            7,
-            wgpu::TextureFormat::Rg8Unorm,
-        );
         let flow = array_texture(
             device,
             "offline temporal packed motion",
@@ -336,13 +366,6 @@ impl TemporalReview {
         }
         write_layer(queue, &luma_texture, 0, FLOW_GRID, 1, luma);
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("offline seven-source temporal diagnostic"),
-        });
-        for (layer, record) in self.window.iter().enumerate() {
-            copy_layer(&mut encoder, &record.nv12.y, &y, layer as u32);
-            copy_layer(&mut encoder, &record.nv12.uv, &uv, layer as u32);
-        }
         if let Some(refiner) = &self.parallel_refine {
             let inputs = finest
                 .as_ref()
@@ -402,25 +425,18 @@ impl TemporalReview {
                 copy_layer(&mut encoder, &output, &flow, layer as u32);
             }
         }
-        let inputs = Inputs {
-            y: &y,
-            uv: &uv,
-            flow: &flow,
-            luma: &luma_texture,
-        };
-        let parameters = Parameters {
+        let inputs = history.inputs(&flow, &luma_texture);
+        let parameters = history.parameters(
             // Exact f32 words consumed by every selected Y/UV UBO in
             // `denoise-parameters-01/analysis.json`: noise integer
             // 700 scaled by 1/16320, and limit integer 10 by 1/255.
             // The authenticated analysis SHA-256 is
             // f319e651c5077b0e952f62138bbbde0ca8bd6a46e76093fd31fa86fcb823f3aa.
-            noise: f32::from_bits(0x3d2f_afb0),
-            limit: f32::from_bits(0x3d20_a0a1),
-            y_limits: LIMIT_Y,
-            uv_limits: LIMIT_UV,
-            current_layer: CENTER as u32,
-            reference_layers: REFERENCES.map(|value| value as u32).to_vec(),
-        };
+            f32::from_bits(0x3d2f_afb0),
+            f32::from_bits(0x3d20_a0a1),
+            LIMIT_Y,
+            LIMIT_UV,
+        );
         let fused = if let Some(regions) = &regions {
             self.fuse
                 .encode_scissored(device, &mut encoder, inputs, &parameters, regions.fusion())
@@ -456,7 +472,12 @@ impl TemporalReview {
         let readback = PendingReadback::encode(device, &mut encoder, &projected);
         let submission = queue.submit([encoder.finish()]);
         let rgba = readback.read(device, submission);
-        let gpu_ms = gpu_started.elapsed().as_secs_f64() * 1000.0;
+        let gpu_ms = gpu_started.elapsed().as_secs_f64() * 1000.0 + history_host_ms;
+        eprintln!(
+            "panorama-temporal-history: center {} copied_sources {copied_sources} logical_bytes {} host_encode {history_host_ms:.3}ms",
+            center.stamp.index(),
+            u64::from(copied_sources) * u64::from(FULL[0]) * u64::from(FULL[1]) * 3 / 2,
+        );
 
         super::super::tests::write_review_ppm_sized(
             &self.output,

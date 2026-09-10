@@ -14,6 +14,21 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Resident temporal history verified, 2026-09-10:** one source-stamped
+seven-layer NV12 owner replaces per-output allocation and recopying of the
+entire window. Steady outputs copy one arriving pair instead of seven, while
+preserving center/reference identities, filter parameters and phase order.
+All 77 temporal tests pass on AMD, including three ring wraps without host
+waits and rejected-input/no-write checks. Both actual Scene sequences preserve
+all 60 filtered frames and 504 controls exactly, so existing moving reviews
+remain current and unaccepted. GPU/upload/filter/project/completion averages
+90.236/88.817 ms at 612/607, versus 117.807/116.951 ms; the combined measured
+motion/filter portion is 101.151/99.320 ms, still excluding panorama preparation
+and far outside playback budgets. No gradual color update, new Studio export,
+installed change or flicker verdict. The remaining GPU work, not source-window
+copying or CPU coarse search, now dominates this diagnostic's measured portion.
+Evidence: `scratch/studio-seam-flicker-612-20260909-01/temporal-resident-history-01`.
+
 **Exact CPU coarse-search optimization verified, 2026-09-10:** a portable
 row-slice byte-SAD reduction preserves every search decision and avoids explicit
 SIMD/unsafe code. Saved-input six-worker coarse preparation falls from a
@@ -23,9 +38,10 @@ On the actual 612/607 Scene sequences, coarse search averages 11.318/11.030 ms
 instead of 72.736/79.017 ms. All 60 filtered pictures and 504 controls remain
 byte-exact, so existing moving reviews are unchanged and still await acceptance.
 The combined measured motion/filter portion is now 129.125/127.980 ms, still
-excluding panorama preparation and far outside playback budgets. Next remove
-the diagnostic's recurring seven-frame NV12 array allocation/copies through
-resident, source-stamped history; no filter or gradual color-update change.
+excluding panorama preparation and far outside playback budgets. Its next
+execution target was recurring seven-frame NV12 array allocation/copies;
+the resident-history checkpoint above now removes that repetition without a
+filter or gradual color-update change.
 Evidence: `scratch/studio-seam-flicker-612-20260909-01/temporal-cpu-sad-01`.
 
 **View-scissored temporal candidate verified, 2026-09-10:** full-sized targets

@@ -760,6 +760,18 @@ impl Fixture {
 }
 
 pub(super) fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
+    let (_instance, adapter) = gpu_adapter()?;
+    request_test_device(&adapter, "temporal fusion test")
+}
+
+pub(super) fn gpu_pair() -> Option<[(wgpu::Device, wgpu::Queue); 2]> {
+    let (_instance, adapter) = gpu_adapter()?;
+    let first = request_test_device(&adapter, "temporal fusion test device one")?;
+    let second = request_test_device(&adapter, "temporal fusion test device two")?;
+    Some([first, second])
+}
+
+fn gpu_adapter() -> Option<(wgpu::Instance, wgpu::Adapter)> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         ..Default::default()
@@ -784,8 +796,15 @@ pub(super) fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
         return None;
     };
     eprintln!("temporal fusion GPU adapter: {:?}", adapter.get_info());
+    Some((instance, adapter))
+}
+
+fn request_test_device(
+    adapter: &wgpu::Adapter,
+    label: &'static str,
+) -> Option<(wgpu::Device, wgpu::Queue)> {
     match block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("temporal fusion test"),
+        label: Some(label),
         required_features: wgpu::Features::empty(),
         required_limits: adapter.limits(),
         ..Default::default()
