@@ -11,7 +11,7 @@ struct Geometry {
     output_height: u32,
     full_width: u32,
     full_height: u32,
-    _padding0: u32,
+    raw_base: u32,
     _padding1: u32,
 }
 
@@ -49,10 +49,10 @@ fn interpolated(coordinate: vec2<u32>, channel: u32) -> f32 {
         fraction.y * inverse.x,
         fraction.y * fraction.x,
     );
-    let top_left = raw[low.y * geometry.raw_width + low.x];
-    let top_right = raw[low.y * geometry.raw_width + high.x];
-    let bottom_left = raw[high.y * geometry.raw_width + low.x];
-    let bottom_right = raw[high.y * geometry.raw_width + high.x];
+    let top_left = raw[geometry.raw_base + low.y * geometry.raw_width + low.x];
+    let top_right = raw[geometry.raw_base + low.y * geometry.raw_width + high.x];
+    let bottom_left = raw[geometry.raw_base + high.y * geometry.raw_width + low.x];
+    let bottom_right = raw[geometry.raw_base + high.y * geometry.raw_width + high.x];
 
     // Native order: top-right multiply, then three fused multiply-adds.
     var value = f32(raw_channel(top_right, channel)) * weights.y;

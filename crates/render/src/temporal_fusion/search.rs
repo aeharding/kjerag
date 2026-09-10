@@ -723,4 +723,4 @@ fn estimate_global_doubled(vectors: &[Vector]) -> Result<Vector, Error> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

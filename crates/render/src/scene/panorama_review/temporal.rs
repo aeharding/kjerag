@@ -16,6 +16,7 @@ use crate::direct_type2::panorama::PanoramaProjector;
 use crate::studio_type2::PreparedPicture;
 use crate::temporal_fusion::color::{GpuColorConversion, MatrixCoefficients, Nv12};
 use crate::temporal_fusion::motion::{self, Geometry};
+use crate::temporal_fusion::parallel_refine;
 use crate::temporal_fusion::pyramid::Level;
 use crate::temporal_fusion::{GpuFuse, Inputs, Parameters};
 use crate::{FrameStamp, Reframe, Size};
@@ -39,6 +40,7 @@ struct Retained {
     stamp: FrameStamp,
     nv12: Nv12,
     levels: Vec<Level>,
+    gpu_base: Option<wgpu::Texture>,
     reframe: Reframe,
 }
 
@@ -49,6 +51,7 @@ pub(super) struct TemporalReview {
     color: GpuColorConversion,
     projector: PanoramaProjector,
     gpu_motion: Option<motion::gpu::Builder>,
+    parallel_refine: Option<parallel_refine::gpu::Builder>,
     parallel_search: bool,
     output: PathBuf,
     log: std::io::BufWriter<std::fs::File>,
@@ -60,6 +63,7 @@ impl TemporalReview {
         output: &Path,
         gpu_motion: bool,
         parallel_search: bool,
+        parallel_refine: bool,
     ) -> Self {
         let frames = output.join("panorama-denoised-diagnostic");
         std::fs::create_dir(&frames).unwrap_or_else(|error| {
@@ -76,12 +80,20 @@ impl TemporalReview {
         )
         .unwrap();
         let contract = output.join("panorama-denoised-diagnostic.txt");
-        let search_route = if parallel_search {
+        let search_route = if parallel_refine && parallel_search {
+            "Search route: six scoped CPU workers run search::prepare_finest through levels6..1, preserving supplied reference order.\n"
+        } else if parallel_refine {
+            "Search route: serial CPU search::prepare_finest through levels6..1 for each supplied reference.\n"
+        } else if parallel_search {
             "Search route: CPU search::selected_six, six workers preserving supplied reference order.\n"
         } else {
             "Search route: serial CPU search::selected for each supplied reference.\n"
         };
-        let motion_route = if gpu_motion {
+        let motion_route = if parallel_refine {
+            "Motion route: Kjerag-specific parallel GPU finest refinement and direct GPU motion packing.\n\
+             This changes the spatial motion-search algorithm: finest blocks use immutable coarse neighbors and no UMH. It is not Studio-exact.\n\
+             search_ms is CPU coarse preparation only; pack_ms is zero; GPU+wait includes finest refinement, direct packing/copy, fusion, conversion, projection and readback completion.\n"
+        } else if gpu_motion {
             "Motion route: GPU render-pass packing from explicit raw/luma CPU uploads.\n\
              pack_ms is zero because there is no CPU packing stage; GPU+wait includes motion encode/upload/copy, fusion, conversion, projection and readback completion.\n"
         } else {
@@ -107,6 +119,7 @@ impl TemporalReview {
             color: GpuColorConversion::new(device),
             projector: PanoramaProjector::new(device),
             gpu_motion: gpu_motion.then(|| motion::gpu::Builder::new(device)),
+            parallel_refine: parallel_refine.then(|| parallel_refine::gpu::Builder::new(device)),
             parallel_search,
             output: frames,
             log,
@@ -120,12 +133,19 @@ impl TemporalReview {
         prepared: &PreparedPicture,
         nv12: Nv12,
         levels: Vec<Level>,
+        gpu_base: Option<wgpu::Texture>,
     ) {
         assert!(
             self.device == *device,
             "temporal review changed graphics devices"
         );
-        validate_input(prepared, &nv12, &levels);
+        validate_input(
+            prepared,
+            &nv12,
+            &levels,
+            gpu_base.as_ref(),
+            self.parallel_refine.is_some(),
+        );
         if let Some(previous) = self.window.back() {
             assert!(
                 previous.stamp.same_decode_epoch(prepared.frame()),
@@ -141,6 +161,7 @@ impl TemporalReview {
             stamp: prepared.frame().clone(),
             nv12,
             levels,
+            gpu_base,
             reframe: prepared.reframe(),
         });
         if self.window.len() < 7 {
@@ -161,21 +182,46 @@ impl TemporalReview {
         let center = &self.window[CENTER];
         let luma = &center.levels[3].pixels;
         let search_started = Instant::now();
-        let raw: Vec<Vec<[i32; 3]>> = if self.parallel_search {
-            crate::temporal_fusion::search::selected_six(
-                &center.levels,
-                REFERENCES.map(|at| self.window[at].levels.as_slice()),
-            )
-            .unwrap_or_else(|error| {
-                panic!(
-                    "parallel motion search for center {}: {error}",
-                    center.stamp.index()
-                )
-            })
-            .into_iter()
-            .collect()
+        let reference_levels = REFERENCES.map(|at| self.window[at].levels.as_slice());
+        let (raw, finest) = if self.parallel_refine.is_some() {
+            let inputs: [crate::temporal_fusion::search::FinestInput; 6] =
+                if self.parallel_search {
+                    prepare_finest_six(&center.levels, reference_levels)
+                } else {
+                    reference_levels
+                        .map(|reference| {
+                            crate::temporal_fusion::search::prepare_finest(
+                                &center.levels,
+                                reference,
+                            )
+                        })
+                        .into_iter()
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(|inputs| {
+                            inputs.try_into().unwrap_or_else(|_| {
+                                panic!("six references produce six finest inputs")
+                            })
+                        })
+                }
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "coarse motion preparation for center {}: {error}",
+                        center.stamp.index()
+                    )
+                });
+            (None, Some(inputs))
+        } else if self.parallel_search {
+            let raw =
+                crate::temporal_fusion::search::selected_six(&center.levels, reference_levels)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "parallel motion search for center {}: {error}",
+                            center.stamp.index()
+                        )
+                    });
+            (Some(raw.into_iter().collect::<Vec<_>>()), None)
         } else {
-            REFERENCES
+            let raw = REFERENCES
                 .iter()
                 .map(|&at| {
                     crate::temporal_fusion::search::selected(
@@ -190,7 +236,8 @@ impl TemporalReview {
                         )
                     })
                 })
-                .collect()
+                .collect();
+            (Some(raw), None)
         };
         let search_ms = search_started.elapsed().as_secs_f64() * 1000.0;
 
@@ -213,6 +260,8 @@ impl TemporalReview {
         let (packed, pack_ms) = if self.gpu_motion.is_none() {
             let pack_started = Instant::now();
             let packed: Vec<Vec<[i16; 4]>> = raw
+                .as_ref()
+                .expect("CPU packing has complete CPU search records")
                 .iter()
                 .zip(PHASES)
                 .map(|(raw, phase)| {
@@ -272,8 +321,58 @@ impl TemporalReview {
             copy_layer(&mut encoder, &record.nv12.y, &y, layer as u32);
             copy_layer(&mut encoder, &record.nv12.uv, &uv, layer as u32);
         }
-        if let Some(builder) = &self.gpu_motion {
-            for (layer, (raw, phase)) in raw.iter().zip(PHASES).enumerate() {
+        if let Some(refiner) = &self.parallel_refine {
+            let inputs = finest
+                .as_ref()
+                .expect("parallel refinement has coarse CPU inputs");
+            let current = center
+                .gpu_base
+                .as_ref()
+                .expect("parallel refinement retains the current GPU base");
+            let references = REFERENCES.map(|at| {
+                self.window[at]
+                    .gpu_base
+                    .as_ref()
+                    .expect("parallel refinement retains every reference GPU base")
+            });
+            let refined = refiner
+                .encode_finest(
+                    device,
+                    &mut encoder,
+                    current,
+                    references,
+                    inputs.each_ref().map(|input| input.seeds.as_slice()),
+                    inputs.each_ref().map(|input| input.global),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("parallel finest refinement for captured-regime motion: {error}")
+                });
+            let builder = self
+                .gpu_motion
+                .as_ref()
+                .expect("parallel refinement requires GPU motion packing");
+            for (layer, phase) in PHASES.into_iter().enumerate() {
+                let output = builder
+                    .encode_refined(
+                        device,
+                        &mut encoder,
+                        &refined,
+                        layer as u32,
+                        &motion_parameters(phase),
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("GPU-pack parallel-refined captured-regime motion: {error}")
+                    });
+                copy_layer(&mut encoder, &output, &flow, layer as u32);
+            }
+        } else if let Some(builder) = &self.gpu_motion {
+            for (layer, (raw, phase)) in raw
+                .as_ref()
+                .expect("GPU packing has complete CPU search records")
+                .iter()
+                .zip(PHASES)
+                .enumerate()
+            {
                 let output = builder
                     .encode(device, &mut encoder, raw, &motion_parameters(phase))
                     .unwrap_or_else(|error| panic!("GPU-pack captured-regime motion: {error}"));
@@ -357,7 +456,13 @@ impl TemporalReview {
     }
 }
 
-fn validate_input(prepared: &PreparedPicture, nv12: &Nv12, levels: &[Level]) {
+fn validate_input(
+    prepared: &PreparedPicture,
+    nv12: &Nv12,
+    levels: &[Level],
+    gpu_base: Option<&wgpu::Texture>,
+    parallel_refine: bool,
+) {
     assert!(
         !prepared.reframe().linearizes_output(),
         "temporal review needs gamma RGB preparation"
@@ -382,6 +487,43 @@ fn validate_input(prepared: &PreparedPicture, nv12: &Nv12, levels: &[Level]) {
             "pyramid level {level} length differs"
         );
     }
+    assert_eq!(
+        gpu_base.is_some(),
+        parallel_refine,
+        "only parallel refinement retains the associated GPU pyramid base"
+    );
+    if let Some(base) = gpu_base {
+        assert_eq!(base.format(), wgpu::TextureFormat::R8Uint);
+        assert_eq!(base.dimension(), wgpu::TextureDimension::D2);
+        assert_eq!(base.size().width, levels[0].width as u32);
+        assert_eq!(base.size().height, levels[0].height as u32);
+        assert_eq!(base.size().depth_or_array_layers, 1);
+        assert_eq!(base.mip_level_count(), 1);
+        assert_eq!(base.sample_count(), 1);
+        assert!(base.usage().contains(wgpu::TextureUsages::TEXTURE_BINDING));
+    }
+}
+
+fn prepare_finest_six(
+    current: &[Level],
+    references: [&[Level]; 6],
+) -> Result<[crate::temporal_fusion::search::FinestInput; 6], crate::temporal_fusion::search::Error>
+{
+    std::thread::scope(|scope| {
+        let jobs = references.map(|reference| {
+            scope.spawn(move || crate::temporal_fusion::search::prepare_finest(current, reference))
+        });
+        let results: Result<Vec<_>, _> = jobs
+            .into_iter()
+            .map(|job| {
+                job.join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect();
+        Ok(results?
+            .try_into()
+            .unwrap_or_else(|_| panic!("six workers produce six finest inputs")))
+    })
 }
 
 fn array_texture(

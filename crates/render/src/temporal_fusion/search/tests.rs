@@ -344,13 +344,13 @@ fn matches_combined_adapter_for_all_six_saved_references() {
     }
 }
 
-pub(super) struct NativeFixture {
+pub(in crate::temporal_fusion) struct NativeFixture {
     pub current: Vec<Level>,
     pub references: [Vec<Level>; 6],
     pub expected: [Vec<u8>; 6],
 }
 
-pub(super) fn native_fixture() -> NativeFixture {
+pub(in crate::temporal_fusion) fn native_fixture() -> NativeFixture {
     let capture = std::env::var_os("KJERAG_SEARCH_FIXTURE_DIR")
         .map(std::path::PathBuf::from)
         .expect("set KJERAG_SEARCH_FIXTURE_DIR to temporal-motion-capture-01/run-01");

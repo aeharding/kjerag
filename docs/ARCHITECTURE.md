@@ -88,6 +88,15 @@ neither source history nor player policy. The `color` child supplies an explicit
 diagnostic gamma-RGB/full-range-NV12 conversion; it is not a claim that Studio
 uses that matrix inverse, quantization or centered chroma footprint.
 
+The separate `parallel_refine` candidate changes the finest motion-search
+algorithm: blocks read immutable coarse seeds instead of newly searched
+neighbors, and omit the serial bad-block/UMH recovery. Its readable CPU oracle
+and GPU kernel keep the initial candidate order, SAD penalties, bounds and
+fixed radius-one ring. The GPU assigns one workgroup to each block/reference,
+with distinct immutable input and output buffers. This is not Studio-exact
+search or an accepted quality tradeoff. Coarser preparation still uses the
+existing CPU reference; no player scheduling or color-update rule changes.
+
 `pyramid::gpu` now records the matching brightness preparation on the GPU.
 An R8Unorm full-Y input is averaged into a half-size R8Uint base; alternatively,
 an explicit R8Uint base can be copied without that bridge. Each later level
@@ -112,6 +121,10 @@ and waits for nothing. Raw vectors and luma are still CPU uploads, so this is
 not GPU motion search. The offline caller may separately run the six pure CPU
 reference searches concurrently, preserving their supplied order. Searches
 within each reference retain their serial predictors and candidate order.
+An alternative typed handoff accepts the validated parallel-refinement output,
+selects one of its six reference slices and records packing without an
+intermediate readback. Geometry, device, phase and confidence validation remain
+at that boundary; arbitrary unvalidated GPU buffers are not accepted.
 
 The test-only `scene::panorama_review` path materializes each exact displayed
 source/map/fusion into a body-fixed RGB panorama, then projects it through the
@@ -124,6 +137,11 @@ reference execution, not the player architecture. The source image and its
 color corrections do not change between comparison arms. No ISO selection,
 startup/seek/end policy, gradual color update or performance claim follows from
 this diagnostic. Production playback still selects none of these stages.
+The additional explicit parallel-refinement diagnostic is different: it selects
+the changed spatial algorithm described above, retaining each GPU base beside
+its exact source stamp and NV12 image. Refinement, packing and fusion share one
+encoder. Its receipt discloses the algorithm change, and its timing separates
+CPU coarse preparation from GPU work plus completion/readback.
 
 The shell's pinned `iced_wgpu` renderer is locally patched to request the
 adapter's supported storage-buffer count. Its fixed default of eight caused

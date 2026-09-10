@@ -2601,3 +2601,83 @@ this uninstalled experiment. The remaining tree keeps only the useful CPU
 finest-preparation boundary and its reference/fixture tests; no rejected GPU
 controller is linked. Its exercised test binary SHA256 is
 `48d3b4bde4c1f0a61092c406c754453d163023a0328d93a9611ce2ff3ae34d9a`.
+
+### Independently parallel finest-refinement candidate, 2026-09-10
+
+The replacement is explicitly a changed Kjerag motion-search algorithm, not
+another exact port. Every finest block reads immutable interpolated coarse
+seeds for its spatial predictors and writes a separate record. It retains the
+ordered zero/global/own/median/left/up/diagonal candidates, inclusive start
+clipping versus strict upper bounds for checked candidates, strict-lower ties,
+SAD penalties and fixed radius-one ring. It omits serial bad-block/UMH recovery.
+The shader dispatches one 256-thread workgroup per block/reference, evaluating
+two candidate batches. The readable CPU oracle remains beside the shader.
+
+The existing packer now also accepts the typed, validated GPU result and one
+of its six reference ordinals. It selects that raw-buffer slice without a
+readback, then uses the unchanged phase/threshold preparation and integer
+confidence law. An arbitrary unchecked GPU buffer is not an input API.
+The optional Scene route retains each GPU base with its exact source stamp,
+NV12 image and CPU levels. CPU levels six through one still prepare each
+reference, optionally in six scoped workers. Refinement, six packing passes,
+fusion, conversion and projection share one encoder. This remains diagnostic
+execution with explicit waits, not selected playback or a new color policy.
+
+All 60 temporal tests pass on AMD760M/RADV. The new checks include patterned
+1031x1027 images, immutable predictor and tie/boundary CPU tests, input refusal,
+and six distinct refined-to-packed references before one submission. All
+172,800 saved-input records match the new CPU oracle on three GPU repeats.
+They differ from the old sealed serial reference at 45,789 records (per
+reference: 8058/8021/7641/6028/7836/8205). These differences can affect reference
+weights and temporal picture quality; no acceptance follows from oracle identity.
+
+The first measurement has serial CPU coarse preparation 352.069 ms, pipeline
+construction 0.881 ms, encode/upload 9.716/7.676/7.530 ms, and submit through
+completion/readback 65.809/36.918/31.144 ms. The readback is 2,073,600 bytes.
+These are diagnostic host regions, not kernel timestamps or actual-player
+capacity. No other build/GPU job overlapped the run. Even warm finest work
+alone consumes approximately one 29.97 fps source interval.
+
+The actual Scene uses the same 37 sources at 612 and 35 at 607 as the existing
+offline reviews, with the captured ISO100 regime and unchanged conversion,
+source-specific stitching and color corrections. It produces 31 and 29 centered
+outputs. All 259 plus 245 unfiltered image/map/alpha/color controls are exact;
+CSV center/reference indices and timestamps also match. The output pictures
+change as expected. At 612, CPU coarse search averages 75.672 ms (max 99.718),
+and the GPU/upload/refinement/packing/fuse/conversion/projection/readback region
+averages 134.222 ms (max 160.219). At 607 these are 82.207/112.123 ms and
+132.368/146.790 ms respectively. These regions exclude earlier panorama
+preparation and diagnostic controls; whole runs take 13.20 and 12.59 seconds.
+
+The new 612 movie places the previous offline filter left and the parallel
+candidate right. Neither arm is Studio. The 607 movie places the unchanged
+cached Studio export left and this candidate right, using the existing fixed
+registration. Existing index-derived source labels remain unauthenticated;
+this does not supply a Studio oracle for 612. Both movies are lossless RGB,
+2560x720 at 30000/1001 fps, with only the top 38 pixels replaced by labels.
+All 120 decoded frame bodies match their source pictures exactly. Four-thread
+software decoding takes 0.344/0.321 seconds for 31/29 pictures. Root inspected
+the rendered 612/607 previews for labeling and picture placement, not a moving
+flicker verdict. Owner acceptance remains required.
+
+Evidence, build/test logs, controls verifier, composition commands and movies
+are under `scratch/studio-seam-flicker-612-20260909-01/temporal-parallel-refine-01`.
+The exercised render binary SHA256 is
+`3b33205053a6d2559c141f7124ceaa89de8564d16e26cbe150910485a334e8c6`.
+Movie SHA256 values are `d55be279c4c910ef9f4668db37d854443d28df8a7e1fa614a83a0cc56efbd737`
+(612) and `ff10e50c5fe5152ca8b86f15eac4edc459e7da9f1a1169976a4e9baee9a56155` (607).
+The first test build failed on diagnostic type inference/Debug requirements;
+the corrected build ran the recorded tests and pictures. Clippy subsequently
+requested explicit parentheses in one synthetic pattern expression, without
+changing its arithmetic. Workspace all-target Clippy, formatting, source-lock
+and rename checks pass. No full workspace tests/UI harness, new Studio session,
+export, app installation, push, merge or accepted gradual update is claimed.
+
+After the test-only parenthesization correction, the final binary SHA256 is
+`4ad97650e2382c7ecdefb20f5599f599a66b52868c545f2b12f9ad5a1167fe66`.
+All 60 temporal tests pass again in `final-temporal-tests.log`; the three
+submit/completion/readback regions are 66.206/42.908/33.837 ms. Report the
+observed warm range as 31.1 to 42.9 ms across both runs, not a guaranteed
+31 ms stage. The movies above were made by the earlier named binary and are
+unchanged; the only later source edit parenthesizes the same synthetic-test
+expression for Clippy.

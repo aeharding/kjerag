@@ -25,6 +25,9 @@ pub mod color;
 /// Deterministic selected CPU motion-search reference, not a playback path.
 pub mod search;
 
+/// Kjerag-specific constant-work refinement candidate, not selected playback.
+pub mod parallel_refine;
+
 /// Effective values supplied by the calibration/history producer, not defaults.
 pub struct Parameters {
     pub noise: f32,

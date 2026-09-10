@@ -1,12 +1,13 @@
 //! GPU expansion and confidence packing for captured temporal motion grids.
 //!
-//! This implementation records one render pass. Raw search results and luma
-//! remain explicit CPU uploads at this diagnostic boundary; no GPU search,
-//! history selection, submission, wait or readback is implied.
+//! This implementation records one render pass. Raw search results are supplied
+//! as CPU records or a validated GPU refinement output. Luma remains an explicit
+//! CPU upload; no history selection, submission, wait or readback is implied.
 
 use std::fmt;
 
-use super::{Parameters, fcvtzs_i32, validate};
+use super::{Parameters, fcvtzs_i32, validate_count};
+use crate::temporal_fusion::parallel_refine;
 use wgpu::util::DeviceExt;
 
 const MAX_FULL_DIMENSION: u32 = 32_768;
@@ -21,6 +22,7 @@ pub enum Error {
     RawDisplacement,
     RawCost,
     Threshold,
+    RefinementLayout,
 }
 
 impl fmt::Display for Error {
@@ -41,6 +43,8 @@ impl fmt::Display for Error {
             Self::Threshold => formatter.write_str(
                 "GPU motion packing needs each positive confidence threshold no larger than 46340",
             ),
+            Self::RefinementLayout => formatter
+                .write_str("refined motion reference or dimensions do not match the packing grid"),
         }
     }
 }
@@ -140,6 +144,50 @@ impl Builder {
             .iter()
             .flat_map(|record| record.iter().flat_map(|value| value.to_le_bytes()))
             .collect();
+        let raw_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("temporal raw motion"),
+            contents: &raw_bytes,
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        self.encode_buffer(device, encoder, &raw_buffer, parameters, prepared)
+    }
+
+    /// Pack one reference directly from validated GPU refinement, without a
+    /// readback. Only this typed producer guarantees bounded displacement/SAD;
+    /// accepting an arbitrary raw buffer would bypass numeric validation.
+    pub fn encode_refined(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        refined: &parallel_refine::gpu::Output,
+        ordinal: u32,
+        parameters: &Parameters<'_>,
+    ) -> Result<wgpu::Texture, Error> {
+        if self.device != *device || refined.device != *device {
+            return Err(Error::ForeignDevice);
+        }
+        if ordinal >= 6 || refined.blocks != parameters.geometry.raw_grid {
+            return Err(Error::RefinementLayout);
+        }
+        let count = refined.blocks[0]
+            .checked_mul(refined.blocks[1])
+            .ok_or(Error::RefinementLayout)?;
+        if refined.raw.size() != u64::from(count) * 6 * 12 {
+            return Err(Error::RefinementLayout);
+        }
+        let mut prepared = Prepared::from_count(count as usize, parameters)?;
+        prepared.uniform[6] = ordinal * count;
+        self.encode_buffer(device, encoder, &refined.raw, parameters, prepared)
+    }
+
+    fn encode_buffer(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        raw_buffer: &wgpu::Buffer,
+        parameters: &Parameters<'_>,
+        prepared: Prepared,
+    ) -> Result<wgpu::Texture, Error> {
         let luma_bytes: Vec<u8> = parameters
             .luma
             .iter()
@@ -162,11 +210,6 @@ impl Builder {
                 usage,
             })
         };
-        let raw_buffer = buffer(
-            "temporal raw motion",
-            &raw_bytes,
-            wgpu::BufferUsages::STORAGE,
-        );
         let luma_buffer = buffer(
             "temporal motion luma indices",
             &luma_bytes,
@@ -251,15 +294,7 @@ struct Prepared {
 
 impl Prepared {
     fn new(raw: &[[i32; 3]], parameters: &Parameters<'_>) -> Result<Self, Error> {
-        validate(raw, parameters).map_err(Error::Reference)?;
-        let geometry = parameters.geometry;
-        if geometry
-            .full
-            .into_iter()
-            .any(|value| value > MAX_FULL_DIMENSION)
-        {
-            return Err(Error::FullDimensions);
-        }
+        Self::validate_count(raw.len(), parameters)?;
         if raw.iter().any(|record| {
             !(i32::from(i16::MIN)..=i32::from(i16::MAX)).contains(&record[0])
                 || !(i32::from(i16::MIN)..=i32::from(i16::MAX)).contains(&record[1])
@@ -272,6 +307,29 @@ impl Prepared {
         {
             return Err(Error::RawCost);
         }
+        Self::thresholds(parameters)
+    }
+
+    fn from_count(count: usize, parameters: &Parameters<'_>) -> Result<Self, Error> {
+        Self::validate_count(count, parameters)?;
+        Self::thresholds(parameters)
+    }
+
+    fn validate_count(count: usize, parameters: &Parameters<'_>) -> Result<(), Error> {
+        validate_count(count, parameters).map_err(Error::Reference)?;
+        if parameters
+            .geometry
+            .full
+            .into_iter()
+            .any(|value| value > MAX_FULL_DIMENSION)
+        {
+            return Err(Error::FullDimensions);
+        }
+        Ok(())
+    }
+
+    fn thresholds(parameters: &Parameters<'_>) -> Result<Self, Error> {
+        let geometry = parameters.geometry;
 
         // Keep these operations in the CPU oracle's exact scalar order. The
         // resulting thresholds are integer shader inputs, not GPU f64 work.

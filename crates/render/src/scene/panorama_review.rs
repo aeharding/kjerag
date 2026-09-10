@@ -23,6 +23,7 @@ pub(super) struct PanoramaReview {
     previous: Option<FrameStamp>,
     temporal: Option<temporal::TemporalReview>,
     gpu_pyramid: Option<crate::temporal_fusion::pyramid::gpu::Builder>,
+    parallel_refine: bool,
     output: PathBuf,
     log: std::io::BufWriter<std::fs::File>,
 }
@@ -72,11 +73,50 @@ impl PanoramaReview {
                 true
             })
             .unwrap_or(false);
-        let temporal = temporal_enabled
-            .then(|| temporal::TemporalReview::new(device, output, gpu_motion, parallel_search));
-        let gpu_pyramid = std::env::var_os("KJERAG_PANORAMA_GPU_PYRAMID").map(|value| {
-            assert_eq!(value, "1", "set the explicit GPU pyramid diagnostic flag to 1");
-            assert!(temporal_enabled, "GPU pyramid review needs the temporal diagnostic");
+        let gpu_pyramid_enabled = std::env::var_os("KJERAG_PANORAMA_GPU_PYRAMID")
+            .map(|value| {
+                assert_eq!(
+                    value, "1",
+                    "set the explicit GPU pyramid diagnostic flag to 1"
+                );
+                assert!(
+                    temporal_enabled,
+                    "GPU pyramid review needs the temporal diagnostic"
+                );
+                true
+            })
+            .unwrap_or(false);
+        let parallel_refine = std::env::var_os("KJERAG_PANORAMA_PARALLEL_REFINE")
+            .map(|value| {
+                assert_eq!(
+                    value, "1",
+                    "set the explicit parallel-refine diagnostic flag to 1"
+                );
+                assert!(
+                    temporal_enabled,
+                    "parallel refinement review needs the temporal diagnostic"
+                );
+                assert!(
+                    gpu_pyramid_enabled,
+                    "parallel refinement review needs GPU pyramids"
+                );
+                assert!(
+                    gpu_motion,
+                    "parallel refinement review needs GPU motion packing"
+                );
+                true
+            })
+            .unwrap_or(false);
+        let temporal = temporal_enabled.then(|| {
+            temporal::TemporalReview::new(
+                device,
+                output,
+                gpu_motion,
+                parallel_search,
+                parallel_refine,
+            )
+        });
+        let gpu_pyramid = gpu_pyramid_enabled.then(|| {
             std::fs::write(
                 output.join("panorama-pyramid.txt"),
                 "GPU half-Y and separable pyramid; CPU search still reads all logical levels.\n\
@@ -92,6 +132,7 @@ impl PanoramaReview {
             previous: None,
             temporal,
             gpu_pyramid,
+            parallel_refine,
             output: output.to_owned(),
             log,
         }
@@ -209,10 +250,14 @@ impl PanoramaReview {
         let roundtrip_read = PendingReadback::encode(device, &mut encoder, &roundtrip);
         let luma_read = (self.temporal.is_some() && self.gpu_pyramid.is_none())
             .then(|| PendingReadback::encode(device, &mut encoder, &nv12.y));
+        let mut gpu_base = None;
         let pyramid_reads = self.gpu_pyramid.as_ref().map(|builder| {
             let pyramid = builder
                 .encode_luma(device, &mut encoder, &nv12.y, 7)
                 .unwrap();
+            if self.parallel_refine {
+                gpu_base = Some(pyramid.levels[0].clone());
+            }
             pyramid
                 .levels
                 .iter()
@@ -295,7 +340,7 @@ impl PanoramaReview {
                 )
                 .unwrap()
             });
-            temporal.push(device, queue, &prepared, nv12, levels);
+            temporal.push(device, queue, &prepared, nv12, levels, gpu_base);
         }
         self.previous = Some(prepared.frame().clone());
     }

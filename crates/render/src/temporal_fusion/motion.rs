@@ -33,6 +33,10 @@ fn checked_area(size: [u32; 2], what: &str) -> Result<usize, String> {
 }
 
 fn validate(raw: &[[i32; 3]], parameters: &Parameters<'_>) -> Result<(), String> {
+    validate_count(raw.len(), parameters)
+}
+
+fn validate_count(raw_count: usize, parameters: &Parameters<'_>) -> Result<(), String> {
     let geometry = parameters.geometry;
     if geometry
         .full
@@ -65,7 +69,7 @@ fn validate(raw: &[[i32; 3]], parameters: &Parameters<'_>) -> Result<(), String>
     if covered != geometry.full.map(Some) {
         return Err("full image is not exactly covered by the selected block grid".into());
     }
-    if raw.len() != checked_area(geometry.raw_grid, "raw grid")? {
+    if raw_count != checked_area(geometry.raw_grid, "raw grid")? {
         return Err("raw motion length does not match its grid".into());
     }
     if parameters.luma.len() != checked_area(geometry.output_grid, "luma grid")? {

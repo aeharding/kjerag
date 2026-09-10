@@ -14,6 +14,27 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Independent GPU refinement candidate rendered, 2026-09-10:** the changed
+finest-level search matches its new readable CPU oracle on all 172,800 saved
+vectors in repeated runs. Warm submit/completion/readback takes 31.1 to 42.9 ms,
+versus about 159 ms for the retired serial-decision prototype. This changes
+45,789 vectors relative to that serial reference and is not Studio-exact or an
+accepted quality tradeoff. All 60 temporal tests pass on AMD, including direct
+GPU refinement-to-motion packing with no intervening readback.
+
+Actual Scene runs produce 31 filtered pictures at the exact 612.078 view and
+29 at the earlier 607 comparison. All 504 unfiltered/map/alpha/color controls
+and center/reference source associations remain exact. New lossless moving
+reviews compare the 612 candidate with the earlier filter and the 607 candidate
+with cached Studio footage; no new export or registration. Owner moving verdicts
+remain absent. The measured motion/filter portion averages about 210 ms per
+center, excluding panorama preparation and other diagnostic work; whole runs
+take 13.20/12.59 seconds. This is still an offline candidate, not an installable
+player implementation. Color updates and recovered fusion arithmetic are
+unchanged. Next work must address CPU coarse search and full-panorama processing
+cost without treating numerical agreement as a flicker fix. Evidence lives in
+`scratch/studio-seam-flicker-612-20260909-01/temporal-parallel-refine-01`.
+
 **Exact row-ordered GPU search rejected on speed, 2026-09-10:** a bounded
 finest-level prototype matches all 172,800 sealed reference vectors in three
 runs, including separate synthetic dependency and adaptive-search tests. It
