@@ -14,6 +14,27 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**First actual-Kjerag temporal-filter sequence, 2026-09-10:** an offline
+candidate now runs the recovered seven-source filter over the owner's exact
+612.078 view. Thirty-seven contiguous Scene sources produce31 centered outputs
+18344..18374, with three real past and three real future inputs, not padded
+history. The reference uses the captured ISO100 parameter regime and unchanged
+per-source stitching/color corrections. A repeat without filtering reproduces
+all259 ordinary/map/color and panorama-control artifacts byte-for-byte.
+The earlier31-source control also reproduces155 saved baseline artifacts.
+
+This is moving output for review, not a flicker fix or installed player path.
+CPU search/packing and explicit GPU waits are intentionally offline. Native
+RGB-to-NV12 details remain unclosed; the disclosed Kjerag round trip has its
+own unfiltered comparison. The half-luma bridge has selected/static OpenCV
+authority, not a same-input native pixel receipt. Rust motion search matches
+all six combined-adapter outputs but retains the known native vector gap.
+All34 temporal checks and921 render tests pass, with32 opt-in tests ignored in
+the latter; the seven-source ONE X2 panorama control passes too. Workspace
+all-target Clippy passes. Full workspace tests/UI harness were not run for
+this offline candidate, and it is not being pushed or installed. No gradual
+color update, new Studio export,612 Studio oracle or owner acceptance.
+
 **Standalone motion search runs, 2026-09-10:** saved Studio inputs now drive
 a pinned public-family CPU reference. Two native-read differences, per-block
 global-predictor refresh and inclusive seed clipping, reduce differing vectors

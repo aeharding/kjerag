@@ -80,6 +80,25 @@ component. Hash-sealed native tests cover seven pyramids and six packed
 motion grids. Keeping these CPU references does not put CPU readback into the
 player's frame path.
 
+The `search` child is a readable serial CPU implementation of the selected
+seven-level, gray, pel-1 motion search. Its GPL-3.0-or-later adaptation preserves
+the pinned MVTools attribution and the separately read native changes. It
+reproduces the standalone combined adapter, not every native vector. It owns
+neither source history nor player policy. The `color` child supplies an explicit
+diagnostic gamma-RGB/full-range-NV12 conversion; it is not a claim that Studio
+uses that matrix inverse, quantization or centered chroma footprint.
+
+The test-only `scene::panorama_review` path materializes each exact displayed
+source/map/fusion into a body-fixed RGB panorama, then projects it through the
+same locked view. An unfiltered NV12 round trip isolates representation changes.
+Its optional captured-ISO100 temporal arm keeps seven contiguous source-stamped
+NV12 images and their CPU gray pyramids, emits only center position three, and
+never pads either end. CPU search/packing and explicit readbacks are offline
+reference execution, not the player architecture. The source image and its
+color corrections do not change between comparison arms. No ISO selection,
+startup/seek/end policy, gradual color update or performance claim follows from
+this diagnostic. Production playback still selects none of these stages.
+
 The shell's pinned `iced_wgpu` renderer is locally patched to request the
 adapter's supported storage-buffer count. Its fixed default of eight caused
 the resident ONE X2 pipeline to panic at startup in the window, despite

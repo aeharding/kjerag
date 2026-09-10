@@ -1766,6 +1766,19 @@ impl Reframe {
         [self.frame_width, self.frame_height]
     }
 
+    /// Exact source decode coefficients for an offline representation control.
+    /// This exposes the prepared picture's metadata, not a camera-name default.
+    #[cfg(test)]
+    pub(crate) const fn source_color_matrix(&self) -> [f32; 4] {
+        self.source_matrix
+    }
+
+    /// Whether the final RGB shader converts gamma-coded values to linear light.
+    #[cfg(test)]
+    pub(crate) const fn linearizes_output(&self) -> bool {
+        self.linearize > 0.5
+    }
+
     /// One lens's Studio crop-translated static image-circle centre in
     /// delivered-frame pixels. It is intentionally not the projection
     /// principal point retained in [`LensBlock`].

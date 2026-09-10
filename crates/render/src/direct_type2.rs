@@ -19,6 +19,11 @@ use crate::projection;
 use crate::studio_type2::{ALPHA_BYTES, MAP_HEIGHT, MAP_WIDTH, OneXsMapFrame, PACKED_BYTES};
 use crate::{Fallible, FrameStamp, MAX_LENSES, Planes};
 
+#[cfg(test)]
+pub(crate) mod panorama;
+#[cfg(test)]
+pub(crate) use panorama::BodyPanorama;
+
 /// One exact decoded ONE X2 pair imported for resident processing and drawing.
 ///
 /// This is deliberately private to the selected resident path. Its only
@@ -771,6 +776,8 @@ impl DirectType2CpuBinding {
 pub(crate) struct DirectMapDraw {
     pipeline: Arc<DirectType2Pipeline>,
     binding: DirectType2CpuBinding,
+    #[cfg(test)]
+    panorama: Option<panorama::BodyPanoramaPipeline>,
 }
 
 impl DirectMapDraw {
@@ -787,7 +794,30 @@ impl DirectMapDraw {
             fusion,
         ));
         let binding = DirectType2CpuBinding::new(device, &pipeline);
-        Self { pipeline, binding }
+        Self {
+            pipeline,
+            binding,
+            #[cfg(test)]
+            panorama: None,
+        }
+    }
+
+    /// Build the detached body-panorama consumer without changing the normal
+    /// direct-map pipeline selected by playback.
+    #[cfg(test)]
+    pub(crate) fn new_panorama(
+        device: &wgpu::Device,
+        picture_layout: &wgpu::BindGroupLayout,
+        fusion: bool,
+    ) -> Fallible<Self> {
+        let mut draw = Self::new(
+            device,
+            picture_layout,
+            wgpu::TextureFormat::Rgba8Unorm,
+            fusion,
+        );
+        draw.panorama = Some(panorama::BodyPanoramaPipeline::new(device, &draw.pipeline));
+        Ok(draw)
     }
 
     pub(crate) fn upload(&mut self, queue: &wgpu::Queue, map: &OneXsMapFrame) {
@@ -807,6 +837,61 @@ impl DirectMapDraw {
             pass.set_bind_group(2, &fusion.read, &[]);
         }
         self.pipeline.draw(pass, picture, &self.binding.read);
+    }
+
+    /// Materialize the exact bound source/map pair in body-equirect space.
+    ///
+    /// The returned texture owns the map's opaque delivery stamp. The
+    /// `PreparedPicture` check ties the bound map to the caller's prepared
+    /// source delivery; the caller retains that preparation's picture binding
+    /// through submission.
+    #[cfg(test)]
+    pub(crate) fn encode_panorama(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        picture: &wgpu::BindGroup,
+        prepared: &crate::PreparedPicture,
+        size: crate::Size,
+    ) -> Fallible<BodyPanorama> {
+        let Some(frame) = self.bound_frame() else {
+            return Err("body panorama draw has no uploaded type-2 map".into());
+        };
+        crate::MapBindError::require_frame(frame, Some(prepared))?;
+        // The supplied map already owns its camera geometry. This detached
+        // materializer reads only source dimensions/color from the preparation,
+        // as the existing fusion-input sampler does. The historical
+        // uses_one_xs_type2_projection check is specifically a ONE X2 lens
+        // identity check and would incorrectly reject the shared X4 consumer.
+        if self.pipeline.device != *device {
+            return Err("body panorama pipeline belongs to a different graphics device".into());
+        }
+        let pipeline = self
+            .panorama
+            .as_ref()
+            .ok_or("direct map draw was not created for body panoramas")?;
+        let output = BodyPanorama::new(device, frame.clone(), size)?;
+        let view = output.texture().create_view(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("body panorama materialization"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            if let Some(fusion) = &self.binding.fusion {
+                pass.set_bind_group(2, &fusion.read, &[]);
+            }
+            pipeline.draw(&mut pass, picture, &self.binding.read);
+        }
+        Ok(output)
     }
 
     #[cfg(test)]
@@ -1129,7 +1214,7 @@ fn type2_ycbcr(uv: vec2<f32>) -> vec3<f32> {
   return source_rgb(luma.r, c);
 }
 
-fn type2_color(map: Type2Sample) -> vec4<f32> {
+fn type2_gamma_color(map: Type2Sample) -> vec4<f32> {
   var rgb: vec3<f32>;
   if map.alpha == 0.0 {
     rgb = type2_correct(type2_ycbcr(map.packed.zw), map.fusion_uv, 1u);
@@ -1140,12 +1225,17 @@ fn type2_color(map: Type2Sample) -> vec4<f32> {
     let a = type2_correct(type2_ycbcr(map.packed.xy), map.fusion_uv, 0u);
     rgb = mix(b, a, map.alpha);
   }
+  return vec4<f32>(rgb, 1.0);
+}
+
+fn type2_color(map: Type2Sample) -> vec4<f32> {
+  let gamma = type2_gamma_color(map);
   let linear = select(
-    rgb / 12.92,
-    pow((rgb + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)),
-    rgb > vec3<f32>(0.04045),
+    gamma.rgb / 12.92,
+    pow((gamma.rgb + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)),
+    gamma.rgb > vec3<f32>(0.04045),
   );
-  return vec4<f32>(select(rgb, linear, reframe.linearize > 0.5), 1.0);
+  return vec4<f32>(select(gamma.rgb, linear, reframe.linearize > 0.5), gamma.a);
 }
 
 @fragment
@@ -1444,7 +1534,7 @@ mod tests {
             !source.contains("@builtin(position) position: vec4<f32>,\n  @location(0) uv")
                 || source.contains("view_ray(in.uv)")
         );
-        assert!(source.contains("select(rgb, linear, reframe.linearize > 0.5)"));
+        assert!(source.contains("select(gamma.rgb, linear, reframe.linearize > 0.5)"));
         assert!(source.contains("vec2<f32>(reframe.frame_width, reframe.frame_height)"));
         assert!(source.contains("source_size * 0.5"));
         assert!(!source.contains("2880.0"));

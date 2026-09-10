@@ -2276,3 +2276,81 @@ moving-video acceptance remain open. Numerical motion identity is not a
 shipping requirement. The earlier 607 capture does not cover
 the owner's 612.078 report. There is no installed-player change or invented
 gradual color update.
+
+### Actual-Kjerag panorama and temporal candidate, 2026-09-10
+
+The test-only Scene review now materializes the exact displayed source/map/
+fusion into a body-equirectangular gamma-RGB texture. It projects that texture
+through the same prepared locked view and separately performs an unfiltered
+NV12 round trip. The latter is explicitly Kjerag's inverse source matrix,
+full-range Y, neutral128/255 UV, exact2x2 chroma footprint average and centered
+bilinear reconstruction. It is not the still-unclosed native RGB-to-420f law.
+The ordinary type2 color helper was factored without changing its arithmetic.
+
+At the exact612.078 view, all155 ordinary artifacts across sources18344..18374
+are byte-identical to the retained pre-change baseline. Panorama resampling
+itself has mean absolute RGB change1.4838 codes and maximum39; the NV12 control
+adds mean0.376268 and maximum12. These are representation diagnostics, not
+accepted visual differences or flicker metrics. Source18344 was viewed in all
+three arms; still-image similarity is not a moving-seam verdict. The first
+run's obsolete ONE-X2-only preparation guard refused X4; the corrected shared
+map/source consumer passed31 sources on AMD. Both failure and rerun are retained.
+
+The Rust serial search now matches all six complete combined-adapter arrays
+from the saved capture. The known4167/172800 differing native vectors remain.
+The implementation preserves the pinned MVTools source notices, elects its
+later-version GPL-3.0-or-later option and includes the license text. Review
+caught a component-wise global-average translation error before fixture
+qualification; its regression now requires the source's joint X/Y inlier set.
+
+The selected half-size gray input uses CPU8-bit INTER_LINEAR before Super.
+The worker imports OpenCV4.7.0; the saved407 dylib SHA256 is
+`00fdb0624c467644e9c47a5db534fdd473b33b4bfe6adb09aa806330cbd2be1e`, with custom
+version-control string `4.0.1-6877-g6285f95df2`. At exact2x reduction,
+[OpenCV4.7.0 resize.cpp](https://raw.githubusercontent.com/opencv/opencv/4.7.0/modules/imgproc/src/resize.cpp)
+dispatches INTER_LINEAR to fast-area reduction (lines3635..3665). Each gray
+output averages the nonoverlapping2x2 input footprint with upward half rounding
+(lines2730..2735). The new bridge implements that law on a tightly packed GPU
+Y readback, with no assumption about decoder pitch. It does not reuse the
+pyramid's differently rounded two-axis filter. The native motion capture
+begins after this bridge and lacks its full-size Y input, so byte equality to
+that custom binary remains unverified; this is selected/static source authority.
+The similar formula in an unselected embedded shader is corroboration only.
+
+With the explicit ISO100 diagnostic flag, the same review retains seven
+consecutive NV12 sources and their CPU pyramids in one decode epoch. It searches
+and packs the six references in chronological order around center3, uses that
+center's pyramid level3 as luma, copies source planes into GPU arrays and runs
+the previously qualified normalized fuse. The emitted panorama is converted
+and projected through the center's own Reframe. The oldest source is removed
+only after completion. No correction interpolation, source substitution,
+startup padding, end padding or ISO selection is introduced.
+
+Sources18341..18377 produce31 outputs18344..18374. This starts the diagnostic
+three sources before the reported time to provide real past inputs; it is not
+a claim about the installed player's cold-seek history. A complete second
+run without the temporal flag reproduces all259 unfiltered pictures/maps/
+fusion and panorama-control artifacts byte-for-byte. The filtered still has
+less fine grain; neither that observation nor any pooled score establishes
+that the moving flicker is resolved. The side-by-side candidate uses the
+identical unfiltered NV12 panorama on the left, filtered on the right, not a
+Studio export. No authenticated Studio oracle covers612.078.
+
+The final binary SHA256 is
+`6b4af2dcda43f8684b4c32b979380a507339f9faaa40ee57e3c41d58a59671ea`.
+All34 temporal tests, including the saved native pixel/pyramid/motion fixtures
+and combined search outputs, pass on AMD760M/RADV. The render suite passes921
+tests with32 opt-in tests ignored. Seven ONE X2 panorama-control sources at
+the reported riser view pass, without selecting the X4 temporal regime for
+that camera. Workspace all-target Clippy, format and crate-source checks pass.
+Full workspace tests and UI harness were not run; no player build is installed,
+pushed or merged by this checkpoint. CPU search averaged896ms per output and
+packing51ms; the GPU allocation/copy/fuse/projection/readback section averaged
+100ms in this diagnostic. These include deliberate offline work and shared
+machine activity and are not player-capacity measurements.
+
+Durable receipts: `scratch/studio-seam-flicker-612-20260909-01/panorama-controls-01`
+and `temporal-panorama-01`. The latter holds the moving candidate, exact source
+window CSV, same-arm repeat, qualified logs and pending integration boundaries.
+No new Studio export/native session or gradual color coefficient policy was
+added. Moving owner acceptance and production integration remain unfinished.

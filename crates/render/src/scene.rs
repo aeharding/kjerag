@@ -90,6 +90,9 @@ const RETAINED: usize = 3;
 /// host scheduling interval, not a Studio timing or solver semantic.
 const DRAW_RETIREMENT_RETRY: Duration = Duration::from_millis(1);
 
+#[cfg(test)]
+mod panorama_review;
+
 /// When the widget should come back, which is the whole of frame pacing:
 /// the shell sleeps until the instant the next frame is due rather than
 /// polling, so 29.97 fps content costs 29.97 redraws a second.
@@ -8432,7 +8435,7 @@ mod tests {
         render_direct_map_pixels_sized(device, queue, pipeline, map, 64, 64)
     }
 
-    fn render_direct_map_pixels_sized(
+    pub(super) fn render_direct_map_pixels_sized(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         pipeline: &mut ScenePipeline,
@@ -9152,6 +9155,7 @@ mod tests {
             "geometry-fields" => ReviewDiagnostic::GeometryFields,
             "fixed-color" => ReviewDiagnostic::FixedColor,
             "native-color" => ReviewDiagnostic::NativeColor,
+            "panorama" => ReviewDiagnostic::Panorama,
             _ => panic!("unknown seam review mode {mode}"),
         };
         let count = if review == ReviewDiagnostic::NativeColor {
@@ -9159,6 +9163,10 @@ mod tests {
                 .expect("native-color review needs its captured source count")
                 .parse()
                 .expect("invalid native-color source count")
+        } else if review == ReviewDiagnostic::Panorama {
+            std::env::var("KJERAG_REPORTED_SEAM_COUNT")
+                .map(|value| value.parse().expect("invalid panorama source count"))
+                .unwrap_or(31)
         } else if review == ReviewDiagnostic::SamplingSequence {
             61
         } else {
@@ -9310,6 +9318,7 @@ mod tests {
         GeometryFields,
         FixedColor,
         NativeColor,
+        Panorama,
     }
 
     fn post_seek_review_sequence(
@@ -9331,6 +9340,7 @@ mod tests {
         scene.pause(Instant::now());
         scene.set_horizon(Horizon::Locked);
         let native_color = review == ReviewDiagnostic::NativeColor;
+        let panorama_review = review == ReviewDiagnostic::Panorama;
         let native_camera = native_color.then(|| {
             scene
                 .show
@@ -9454,8 +9464,11 @@ mod tests {
             || seam_components
             || fixed_color
             || native_color
+            || panorama_review
             || fusion_input_review)
             .then(|| ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm));
+        let mut panorama =
+            panorama_review.then(|| super::panorama_review::PanoramaReview::new(&device, output));
         if fixed_color {
             std::fs::create_dir(output.join("fixed-color")).unwrap();
         }
@@ -9565,6 +9578,20 @@ mod tests {
             assert_eq!(shot.index, index);
             let map = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
             assert_eq!(map.frame(), &frame);
+            if let Some(panorama) = panorama.as_mut() {
+                let diagnostic = diagnostic.as_mut().unwrap();
+                let prepared = diagnostic
+                    .prepare_one_xs_picture(&scene.primitive(camera), 16.0 / 9.0)
+                    .expect("panorama review lost the displayed picture");
+                assert_eq!(prepared.frame(), &frame);
+                panorama.capture(&device, &queue, diagnostic, &map, &shot.rgba);
+                let installed = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
+                assert_eq!(installed.frame(), map.frame());
+                assert_eq!(installed.packed().bytes(), map.packed().bytes());
+                assert_eq!(installed.alpha().bytes(), map.alpha().bytes());
+                assert_eq!(installed.fusion(), map.fusion());
+                assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&frame));
+            }
             if fusion_input_review {
                 assert_finite_fusion(&map);
                 let pending = diagnostic
@@ -10448,7 +10475,13 @@ mod tests {
         );
     }
 
-    fn write_review_ppm_sized(output: &Path, index: u64, width: u32, height: u32, rgba: &[u8]) {
+    pub(super) fn write_review_ppm_sized(
+        output: &Path,
+        index: u64,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) {
         use std::io::Write;
         assert_eq!(rgba.len(), width as usize * height as usize * 4);
         let mut file = std::io::BufWriter::new(
@@ -10784,6 +10817,13 @@ mod tests {
             ..Default::default()
         }))
         .map_err(|error| error.to_string())?;
+        let info = adapter.get_info();
+        eprintln!("Scene import test adapter: {info:?}");
+        if std::env::var_os("KJERAG_REQUIRE_GPU").is_some()
+            && info.device_type == wgpu::DeviceType::Cpu
+        {
+            return Err("Scene import test requires a non-CPU graphics adapter".into());
+        }
         let primary = if std::env::var_os("KJERAG_STITCH_GPU_PROFILE").is_some() {
             dmabuf::open_device_for_timestamp_test(&adapter)
         } else {

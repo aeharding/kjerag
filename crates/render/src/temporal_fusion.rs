@@ -19,6 +19,12 @@ pub mod motion;
 /// Readable CPU pyramid reference, with explicitly supplied base images.
 pub mod pyramid;
 
+/// Disclosed Kjerag representation control, not Studio's selected conversion.
+pub mod color;
+
+/// Deterministic selected CPU motion-search reference, not a playback path.
+pub mod search;
+
 /// Effective values supplied by the calibration/history producer, not defaults.
 pub struct Parameters {
     pub noise: f32,
