@@ -598,7 +598,7 @@ impl BlockSearch<'_> {
             .map_err(|_| Error::ArithmeticOverflow)?;
         let reference_y = usize::try_from(self.source[1] as i64 + i64::from(y))
             .map_err(|_| Error::ArithmeticOverflow)?;
-        Ok(i64::from(sad::portable(
+        Ok(i64::from(sad::exact(
             &self.current.pixels,
             self.current.width,
             self.source[1] * self.current.width + self.source[0],

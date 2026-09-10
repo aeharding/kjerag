@@ -103,11 +103,15 @@ centers0..3, steady center3 and flush4..6. The source's matrix and retained
 automatic settings travel with its exact stamp. Full RGB/NV12 conversion,
 GPU pyramid/finest refinement/fusion and temporary CPU coarse search reuse the
 existing candidate. Readback and completion waits use callbacks with nonblocking
-device polls on the existing stitch worker, never a blocking fence wait. These
+device polls on a separate serial temporal worker, never a blocking fence wait. These
 CPU steps are still a performance limitation, not a GPU-residency claim.
 Independent coarse reference searches use at most six scoped threads with
 unchanged per-reference serial arithmetic and ordered results. Only levels one
 through six return to the CPU; the finest level remains a packed GPU image.
+On x86-64, SAD checks both complete16-row footprints before an unaligned SSE2
+leaf. It accumulates two bounded64-bit lanes and reduces once, avoiding repeated
+row arithmetic/checks while preserving every byte difference and search tie.
+The safe portable expression remains the non-x86 path and a test oracle.
 The coarse-only API takes explicit finest geometry without dummy CPU pixels.
 RGB conversion writes directly into the arriving source's resident history
 layer, using the same R8/RG8 targets and quantization. Its typed single-layer
@@ -117,9 +121,22 @@ source initially needs no motion inputs, but a later center may reference it.
 Missing inputs are then reconstructed once from its exact retained unfiltered
 NV12 layer; no lens sampling or colour-coefficient update runs again.
 
-`FilteredCaptureFacade` separates processing from presentation. One admitted
-worker job, at most four independent ready panoramas and one installed panorama
-form its bounded state. Source leases retire after panorama preparation;
+`FilteredCaptureFacade` separates processing from presentation. The resident
+stitch worker prepares source/map/color and body panoramas while a single temporal
+executor filters the preceding source. At most two sources may occupy those
+stages within an epoch. Admission reserves the four-picture ready capacity,
+including the seventh arrival's four startup outputs; EOF waits for both stages
+to drain before reserving its three tail outputs. Only completed outputs publish.
+The executor and its capacity-one channel are shared across seek restarts. Each
+epoch owns a fresh sealed Stream, and only that executor may mutate it. A full
+channel blocks the stitch worker, never the UI, bounding old work across rapid
+seeks to one executing job, one queued job, one blocked stitch handoff and one
+queued stitch job. Alongside current and last-shown owners this retains at most
+six distinct epoch histories in the product seek path. Errors stay with their
+epoch and preserve the first underlying failure. There is no per-seek worker
+thread, UI join, changed source cadence or changed filter arithmetic.
+At most four independent ready panoramas and one installed panorama remain per
+epoch. Source leases retire after panorama preparation;
 filtered outputs own their pixels independently of decoder surfaces. Only the
 exact due FIFO front may install and acknowledge Player's current delivery.
 Scene drains six prepared successors even during paused startup/seeks, never

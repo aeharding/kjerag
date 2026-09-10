@@ -14,7 +14,52 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
-**Cache and loop experiments retired; bounded overlap next, 2026-09-10:**
+**CPU search cost reduced; GPU stalls remain, 2026-09-10:**
+the selected x86-64 SAD validates both full16-row footprints once, then uses
+unaligned SSE2 loads and two64-bit accumulators. The existing portable expression
+already compiled to SIMD; the savings remove per-row checked multiplications,
+bounds branches and horizontal reductions. Scalar/portable oracles remain,
+including the non-x86 fallback. No search decision, source cadence or colour
+law changes. The saved six-reference adapter oracle passes: coarse preparation
+is22.32ms serial and3.65..4.77ms with six workers. During actual playback, mean
+coarse preparation falls from27.20ms to13.01ms in the recorded runs.
+
+The complete build passes1017 render tests (38 ignored), seven real-camera Scene
+checks and workspace all-target Clippy. Both real-camera seeks now additionally
+assert shared executor identity and distinct temporal history. All31 actual612
+frames remain byte-identical. The first2256x1504 run reaches14.64 distinct source
+fps, but a repeat is12.57fps: an overall playback gain is not yet established.
+The respective p99 redraws are27.09/36.43ms, maximum38.65/58.82ms; completed redraw
+rates170.10/134.83 per second still include repeated pictures. CPU work is cheaper,
+but neither smooth source playback nor240fps active capacity is achieved. These
+are internal implementation results, not an accepted visible tradeoff or a
+qualified test build. GPU scheduling and the remaining serial dependencies are
+next; no gradual colour update or new RE. Suffix07 receipts remain beside06 below.
+
+**Bounded stitch/filter overlap, still not a usable player, 2026-09-10:**
+the resident source/map/color worker now overlaps one successor with a separate
+serial temporal executor. Admission reserves startup/steady/EOF outputs before
+work enters the four-picture ready FIFO. Publication remains completed-only and
+exact-source ordered. A shared capacity-one executor across seek restarts avoids
+the initial prototype's unbounded per-seek threads/history retention. Its
+blocking handoff is on the stitch worker, never the UI; errors remain per epoch.
+
+The corrected build passes 1014 render tests (38 ignored), seven explicit real
+X4/ONE X2 Scene checks and the shared-executor queue regression. All31 actual612
+frames remain byte-identical to the preceding automatic integration. At
+2256x1504 sRGB, the corrected actual-Scene capacity run advances13.08 distinct
+source frames/s with307.82 completed redraws/s. The13fps result is still below
+the29.970fps source; p95/p99 redraws are24.45/25.92ms, maximum34.68ms, and maximum
+display age6.82s. Compared with the restored10.08fps serial run, source throughput
+improves but stalls are more frequent (serial p95 was4.01ms). Neither the average
+redraw count nor byte equality establishes usable playback or owner acceptance.
+Workspace all-target Clippy, formatting, source-lock and rename checks pass
+after simplifying the stopped-worker error handoff. Full workspace tests and
+UI/installed qualification remain pending. No installation, merge, invented
+colour fade or broader RE. Evidence:
+`scratch/studio-seam-flicker-612-20260909-01/temporal-static-cache-01`, suffix06.
+
+**Cache and loop experiments retired, 2026-09-10:**
 the tested automatic integration is checkpointed at`8843aef7`. A full-body
 triangle/weight cache used450MiB for X4, failed its packed/alpha/fusion bitwise
 regression and changed actual612 output pixels. Its player run remained9.98fps
@@ -26,19 +71,16 @@ was only9.25fps despite a faster short isolated fusion measurement. It too was
 removed: neither experiment established improved actual playback. Variable
 clocks mean these short runs do not establish the cause of every timing change.
 
-Selected frame code remains the preceding tested checkpoint. The current native
-binaries still contain the retired loop experiment until rebuilt; they are not
-offered as a test build. Installed Flatpak, main and public releases are unchanged.
+After removing both experiments, rebuilt app/view-rate binaries matched the
+preceding checkpoint's SHA256 hashes exactly. Its immediate restored-player
+recheck was10.08fps. Those binaries have since been replaced by the bounded
+overlap build above, not offered as an installed test build.
+Installed Flatpak, main and public releases are unchanged.
 Exact rejected patches, test failures, comparisons and binary hashes remain in
 `scratch/studio-seam-flicker-612-20260909-01/temporal-static-cache-01`.
 
-The next implementation is isolated on`perf/temporal-stage-overlap`: keep
-resident stitch/map/color work serial, move the single-owned temporal stream
-to its own worker, and bound admission to one active source plus one successor.
-Reserve the four-picture ready capacity before admission, including startup's
-four-output batch. Keep completed-only publication and exact seek/EOF stamps.
-This overlap is being implemented, not a measured speedup or a usable-player
-claim. Broad RE remains frozen.
+The overlap implementation was prepared on`perf/temporal-stage-overlap` and is
+now integrated and measured above. Broad RE remains frozen.
 
 **Exact execution savings; playback still too slow, 2026-09-10:** the automatic
 filter now keeps its finest image on the GPU, reading only the six smaller

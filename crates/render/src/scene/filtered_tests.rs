@@ -227,6 +227,7 @@ fn assert_filtered_scene(
         .clone()
         .unwrap();
     assert!(!fresh.same_capture(&old_filtered));
+    fresh.assert_restart_ownership(&old_filtered);
     assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&old_shown));
     settle_filtered(
         &scene,

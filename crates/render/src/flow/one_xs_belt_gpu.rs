@@ -38,6 +38,8 @@ mod panorama_ingest;
 pub(crate) use filtered_capture::FilteredCaptureFacade;
 #[path = "one_xs/resident_worker.rs"]
 mod resident_worker;
+#[path = "one_xs/temporal_worker.rs"]
+mod temporal_worker;
 // The real-Scene regression consumes this preparation boundary; ordinary
 // playback keeps its direct-map route until filtered publication is wired.
 #[cfg(test)]
