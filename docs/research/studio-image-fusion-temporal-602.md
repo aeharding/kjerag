@@ -1754,8 +1754,10 @@ is7; a later stop also records +0x354=2 and +0x358=3. The NAP code compares
 its queued-frame count with +0x35c. This is a seven-frame window/admission
 setting, not proof of seven additional neighbors or specific source indices.
 
-The pinned worker contains readable Metal source for the temporal fusion.
-It aligns reference pixels using block motion, combines them with a current
+The pinned worker contains readable Metal source for temporal fusion. The
+initially located packed-C4 variant (not yet authenticated as selected at this
+checkpoint) aligns reference pixels using block motion, combines them with a
+current
 sample of weight256, bounds reference weights by pixel difference and noise
 level, performs rounded normalization, and clamps the result against
 luma/chroma-dependent limits. Specializations take one through six references;
@@ -1795,3 +1797,58 @@ the saved post patch to check image content, not as a moving-video verdict.
 No production arithmetic, installed app, merge or acceptance status changes.
 The next relevant RE is the selected denoiser's remaining operating semantics;
 the newer612 Studio comparison and an actual tested implementation remain due.
+
+### Selected normalized denoiser kernel, 2026-09-10
+
+A bounded local read now distinguishes the actually selected kernel family
+from the nearby packed-C4 source summarized above. No export or native session
+was started for this step. The existing observed mode 8 selects the two-plane
+path in `ConfigFuseNormEncoder` at `0x2c24998..b8`. Its Y pipeline comes from
+map+0xa20, keyed by reference count, at `0x2c249f4..4a28`; after successful Y
+dispatch, UV comes from map+0xa38 at `0x2c25594..5c8`.
+
+`EnsureNapResources` constructs those maps at `0x2c1c5a4..740`, using names
+`nap_fuse_y_N` / `nap_fuse_uv_N`, N=1..6, library key
+`block_denoise_kernel_srcs_nap_norm_base`, and source pointer `0x4123e90`.
+The creation lambda passes that source and function name to
+`MetalContext::NewPipelineState` at `0x2c1d718`. This authenticates static
+host/source selection for the captured mode, not compiled GPU instructions.
+
+Both kernels bind the current plane first, then ascending reference-ring
+planes excluding current, then the flow-texture deque, destination and luma
+grid. Y uses constant buffer+0xbe0; UV uses+0xbf0. Selected dispatch sites are
+`0x2c2530c` and `0x2c25f7c`. Other interleaved three/four-plane blocks are not
+the selected bindings.
+
+The selected arithmetic differs materially from the packed variant:
+
+- Current sample has weight 1, with normalized floating samples. Luma/chroma
+  motion weights are respectively signed-short flow.z/255 and flow.w/255,
+  clamped to [0,1]. One thread handles one Y value or one UV pair.
+- Motion addresses 16x16 luma blocks or 8x8 chroma blocks. Reference coordinates
+  use integer flow offsets, arithmetic-halved for chroma, and clamp per pixel.
+- For absolute difference d and normalized noise level n, a reference keeps
+  its motion weight w when d<n. Otherwise the weight is
+  clamp(1.5*n/max(d,1e-6)-0.5,0,w). U and V are evaluated independently.
+- Weighted accumulation uses floating fused multiply-add and division, with
+  no explicit integer-rounded normalization. The result is limited relative
+  to current by normalized limit times the current-block luma-table entry,
+  then converted to the selected output range and clamped to [0,1]. Texture
+  storage can still quantize; exact selected storage formats remain separate.
+
+This is pixel-history filtering, not coefficient interpolation. It rules out
+using the earlier weight-256/integer-round source as the selected implementation;
+no production code was written from either source. The proprietary source
+bytes remain only in ignored scratch. Kjerag must implement the recovered
+behavior independently, not ship extracted Studio source.
+
+Evidence is under
+`scratch/studio-seam-flicker-612-20260909-01/denoise-shaders-01/`.
+`README.md` records exact bindings and limits; the hash-checked extractor
+preserves the 18,091-byte selected NUL-terminated source, SHA-256
+`f033ec64c489eebd39330821c703e972695b3f3edd8074e2bd7e713ca552cf15`.
+The initially extracted units at `0x4128600` and `0x41392d7` remain labeled
+unselected evidence. No input/output equality, visible flicker pass, 612 Studio
+coverage, installation or merge follows from this static result. Per-source
+parameters, flow/luma construction and temporal boundary behavior still need
+their own evidence before a complete reproduction can be claimed.

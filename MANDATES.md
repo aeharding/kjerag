@@ -26,8 +26,9 @@ catch-up policy or another invented color-update smoother. Establish Studio's
 applicable behavior before selecting a gradual-update implementation. The
 observed attenuation across Studio's combined Defringe/BlockDenois post-filter
 chain is not evidence that its X4 Air color coefficients update gradually.
-Identifying the responsible filtering behavior remains unfinished work; the
-612.078 report is not fixed or covered by the earlier607 Studio capture.
+The subsequent filter split locates the selected earlier 607-second pulse reduction
+inside BlockDenois. Reproducing its applicable behavior remains unfinished;
+the 612.078 report is not fixed or covered by that earlier Studio capture.
 
 ### Shared product direction, owner approval 2026-09-05
 

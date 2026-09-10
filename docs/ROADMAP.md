@@ -14,6 +14,16 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Selected denoiser shader identified, 2026-09-10:** static tracing from the
+captured Metal mode 8 selects the normalized two-plane `nap_fuse_y_N` /
+`nap_fuse_uv_N` kernels. The previously found packed-C4 source is a different
+variant: its weight-256/integer-round description must not become this path's
+implementation. The selected kernels use floating motion-weighted pixel
+fusion, independent U/V rejection and current-relative output limits. Neither
+variant implies gradual lens-color coefficient updates. Native parameters,
+motion inputs and same-input output verification remain required; there is
+no new player build, export, 612-second oracle or owner-visible fix from this read.
+
 **Selected pulse isolated to Studio's BlockDenois stage, 2026-09-09:** a
 same-source intermediate capture separates the two post-stitch filters in the
 unchanged earlier607 comparison. Defringe leaves both selected luma patches
