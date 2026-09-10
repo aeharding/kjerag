@@ -265,6 +265,74 @@ fn invalid_input_is_refused_before_a_following_valid_encode() {
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 }
 
+#[test]
+fn duplicate_initial_sads_keep_each_candidates_penalty_and_tie_order() {
+    // Zero is penalized, but its duplicate global/own starts are not. An
+    // incorrectly retained zero penalty would let the +1 ring candidate win:
+    // 2304 + floor(50*2304/256) = 2754, versus the correct unpenalized 2560.
+    duplicate_sad_case(10, 0, [0, 0, 2560]);
+}
+
+#[test]
+fn ring_sad_reuse_still_applies_the_new_candidates_penalty() {
+    // The initial +1 start costs2560 and beats penalized zero (2304+450).
+    // Ring W revisits zero: reusing its raw2304 without the ring penalty
+    // would incorrectly replace +1. Matching raw costs do not share policy.
+    duplicate_sad_case(-9, 1, [1, 0, 2560]);
+}
+
+fn duplicate_sad_case(bias: i32, seed_x: i32, center_expected: [i32; 3]) {
+    let Some((device, queue)) = gpu() else {
+        return;
+    };
+    let width = 1024;
+    let height = 1024;
+    let reference = Level {
+        width,
+        height,
+        pixels: (0..width * height)
+            .map(|at| 64 + (at % width % 64) as u8)
+            .collect(),
+    };
+    let current = Level {
+        width,
+        height,
+        pixels: reference
+            .pixels
+            .iter()
+            .map(|value| u8::try_from(i32::from(*value) + bias).unwrap())
+            .collect(),
+    };
+    let references = std::array::from_fn(|_| reference.clone());
+    let inputs = std::array::from_fn(|_| FinestInput {
+        seeds: vec![[seed_x, 0, 0]; (width / 16) * (height / 16)],
+        global: [seed_x, 0],
+    });
+    let expected = expected(&current, &references, &inputs);
+    let center_index = 32 * (width / 16) + 32;
+    let wanted = raw_bytes(&[center_expected]);
+    assert_eq!(
+        &expected[0][center_index * 12..(center_index + 1) * 12],
+        wanted,
+        "the independent oracle must exercise the intended penalty case"
+    );
+    // Compare every cell, including edges where inclusive start clipping
+    // creates duplicates but the checked predictors/ring must stay invalid.
+    let current = upload(&device, &queue, &current);
+    let references = references
+        .each_ref()
+        .map(|reference| upload(&device, &queue, reference));
+    let actual = run(
+        &device,
+        &queue,
+        &Builder::new(&device),
+        &current,
+        references.each_ref(),
+        &inputs,
+    );
+    assert_outputs(&actual.bytes, &expected);
+}
+
 fn motion_parameters<'a>(
     raw_grid: [u32; 2],
     luma: &'a [u8],

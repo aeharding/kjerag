@@ -41,6 +41,7 @@ struct Candidate {
     sad: u32,
     valid: u32,
     penalize: u32,
+    reuse: u32,
 }
 
 @group(0) @binding(0) var current_image: texture_2d<u32>;
@@ -60,10 +61,12 @@ const CANDIDATES: u32 = 8u;
 const LANES_PER_CANDIDATE: u32 = 8u;
 const WORKGROUP_LANES: u32 = CANDIDATES * LANES_PER_CANDIDATE;
 const PENALTY_NEW: u32 = 50u;
+const NO_REUSE: u32 = 0xffffffffu;
 
 var<workgroup> current_pixels: array<u32, 256>;
 var<workgroup> partials: array<u32, WORKGROUP_LANES>;
 var<workgroup> candidates: array<Candidate, 8>;
+var<workgroup> initial_candidates: array<Candidate, 8>;
 var<workgroup> best: RawMotion;
 var<workgroup> minimum_cost: i32;
 
@@ -108,7 +111,7 @@ fn median3(a: i32, b: i32, c: i32) -> i32 {
 
 fn clear_candidates() {
     for (var slot = 0u; slot < CANDIDATES; slot += 1u) {
-        candidates[slot] = Candidate(0, 0, 0u, 0u, 0u);
+        candidates[slot] = Candidate(0, 0, 0u, 0u, 0u, NO_REUSE);
     }
 }
 
@@ -119,7 +122,23 @@ fn put_candidate(slot: u32, value: vec2<i32>, valid: bool, penalize: bool) {
         0u,
         select(0u, 1u, valid),
         select(0u, 1u, penalize),
+        NO_REUSE,
     );
+}
+
+fn mark_initial_reuse() {
+    for (var slot = 1u; slot < CANDIDATES; slot += 1u) {
+        if candidates[slot].valid != 0u {
+            for (var earlier = 0u; earlier < slot; earlier += 1u) {
+                if candidates[earlier].valid != 0u &&
+                   candidates[earlier].dx == candidates[slot].dx &&
+                   candidates[earlier].dy == candidates[slot].dy {
+                    candidates[slot].reuse = earlier;
+                    break;
+                }
+            }
+        }
+    }
 }
 
 // Eight teams evaluate eight candidates without candidate-dependent
@@ -131,7 +150,7 @@ fn execute_batch(lane: u32, reference: u32, source: vec2<i32>) {
     let candidate_lane = lane % LANES_PER_CANDIDATE;
     let candidate = candidates[slot];
     var partial = 0u;
-    if candidate.valid != 0u {
+    if candidate.valid != 0u && candidate.reuse == NO_REUSE {
         for (var pixel = candidate_lane; pixel < 256u; pixel += LANES_PER_CANDIDATE) {
             let offset = vec2<i32>(i32(pixel % BLOCK), i32(pixel / BLOCK));
             let wanted = reference_pixel(
@@ -144,7 +163,7 @@ fn execute_batch(lane: u32, reference: u32, source: vec2<i32>) {
     partials[lane] = partial;
     workgroupBarrier();
 
-    if candidate_lane == 0u {
+    if candidate_lane == 0u && candidate.reuse == NO_REUSE {
         var sad = 0u;
         let first = slot * LANES_PER_CANDIDATE;
         for (var index = 0u; index < LANES_PER_CANDIDATE; index += 1u) {
@@ -155,6 +174,14 @@ fn execute_batch(lane: u32, reference: u32, source: vec2<i32>) {
     workgroupBarrier();
 
     if lane == 0u {
+        for (var ordinal = 0u; ordinal < CANDIDATES; ordinal += 1u) {
+            let reuse = candidates[ordinal].reuse;
+            if reuse < CANDIDATES {
+                candidates[ordinal].sad = candidates[reuse].sad;
+            } else if reuse < 2u * CANDIDATES {
+                candidates[ordinal].sad = initial_candidates[reuse - CANDIDATES].sad;
+            }
+        }
         for (var ordinal = 0u; ordinal < CANDIDATES; ordinal += 1u) {
             let candidate = candidates[ordinal];
             if candidate.valid != 0u {
@@ -190,6 +217,16 @@ fn put_ring(center: vec2<i32>, bounds: Bounds) {
     for (var slot = 0u; slot < CANDIDATES; slot += 1u) {
         let value = center + offsets[slot];
         put_candidate(slot, value, is_candidate(value, bounds), true);
+        if candidates[slot].valid != 0u {
+            for (var initial = 0u; initial < CANDIDATES; initial += 1u) {
+                if initial_candidates[initial].valid != 0u &&
+                   initial_candidates[initial].dx == candidates[slot].dx &&
+                   initial_candidates[initial].dy == candidates[slot].dy {
+                    candidates[slot].reuse = CANDIDATES + initial;
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -258,10 +295,14 @@ fn refine_blocks(
         put_candidate(4u, left, is_candidate(left, bounds), false);
         put_candidate(5u, up, is_candidate(up, bounds), false);
         put_candidate(6u, diagonal, is_candidate(diagonal, bounds), false);
+        mark_initial_reuse();
     }
     execute_batch(lane, reference, source);
 
     if lane == 0u {
+        for (var slot = 0u; slot < CANDIDATES; slot += 1u) {
+            initial_candidates[slot] = candidates[slot];
+        }
         put_ring(vec2<i32>(best.dx, best.dy), bounds);
     }
     execute_batch(lane, reference, source);

@@ -14,6 +14,15 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Duplicate-SAD reuse rejected, 2026-09-10:** a workgroup-local raw-cost cache
+preserves all79 temporal tests and both98-artifact short comparisons, but makes
+the actual612 finest kernel slower:47.632 ms mean versus33.250 ms for the
+retained64-lane baseline. It is not selected for playback or further extension;
+archive the experiment and remove its shader bookkeeping. Two new full-plane
+GPU regressions keep duplicate-candidate and ring-penalty handling explicit.
+No new visual result, colour fade or installed change. Evidence:
+`scratch/studio-seam-flicker-612-20260909-01/temporal-sad-reuse-01`.
+
 **Exact GPU workgroup optimisation verified, 2026-09-10:** a short actual-Scene
 timestamp run locates the remaining dominant kernel in finest motion search,
 not fusion:51.567 ms mean versus about4 ms for fusion. Eight8-lane teams replace

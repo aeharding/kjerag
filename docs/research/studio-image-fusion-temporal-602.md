@@ -2909,3 +2909,47 @@ formatting, source-lock and rename checks pass. Full workspace tests/UI harness
 were not run for this offline optimisation. No Studio session/export, colour
 fade, installation, push, merge or owner acceptance. Remaining GPU/host work,
 production history/ISO policy and moving visual acceptance are still required.
+
+### Exact duplicate-SAD memoization rejected on speed, 2026-09-10
+
+A bounded shader experiment reuses only unpenalized SAD for identical valid
+displacements within one block/reference. Initial duplicates alias an earlier
+ordinal; ring candidates may alias a completed initial snapshot. Uniform
+barriers separate unique leader writes from lane-zero alias resolution. Every
+candidate retains its validity, ordinal and penalty; no source history, search
+decision, color-update policy or CPU oracle changes.
+
+All79 temporal tests pass on AMD, including complete172,800-vector candidate
+oracle checks on three repetitions. Two new full-plane GPU regressions use
+independently calculated interior expectations: duplicate unpenalized zero
+must keep `[0,0,2560]`, and ring reuse must still penalize cached raw2304 so
+that the unpenalized `[1,0,2560]` initial candidate remains best. Full-plane
+comparisons include clipped-start duplicates and invalid checked/ring edges.
+
+Saved-input submit/completion/readback takes59.990/35.185/30.521 ms, slower
+than the prior64-lane repeats. A sequential baseline/candidate comparison on
+the exact612 view uses13 sources from18341 and produces seven outputs each.
+All98 artifacts and source associations/hashes match in both runs. GPU
+refinement averages33.249792 ms (29.798938..36.256327) for the baseline and
+47.631964 ms (41.371206..53.133194) with reuse. This is a rejected execution
+change, not a quality tradeoff. Do not extend or select this cache; archive
+the experiment in branch history, remove its shader bookkeeping and retain
+the independent penalty-sensitive tests. The actual reason for the added
+GPU cost has not been isolated beyond this kernel boundary.
+
+Baseline binary SHA256:
+`aa4e4af1de9e11727daf55df2a93f24754818b343db58f9e041416d1fa6bc60f`.
+Rejected candidate binary SHA256:
+`fc83fa94a4a8a04ae0864cf3b21e39650d554ce9d0705bed26afe6ee1630d079`.
+Evidence lives in
+`scratch/studio-seam-flicker-612-20260909-01/temporal-sad-reuse-01`.
+No new full review movie, Studio session/export, installation or owner verdict.
+
+Before these runs,1,054 exact duplicate generated `.ppm`, `.bin` and `.float4`
+files within the preceding resident-history/GPU-cost evidence were consolidated
+as hardlinks, recovering1.44 GiB. Every filename remains. The four full runs
+and five short prefixes were then compared against the untouched CPU-SAD
+checkpoint and all matched. Logs, receipts, CSVs, binaries, source footage and
+native captures were not consolidated. These generated artifacts are immutable;
+future runs must continue using fresh output directories. Dry-run, operation
+and after-check logs are retained with this checkpoint.
