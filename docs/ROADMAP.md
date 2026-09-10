@@ -25,7 +25,9 @@ is22.32ms serial and3.65..4.77ms with six workers. During actual playback, mean
 coarse preparation falls from27.20ms to13.01ms in the recorded runs.
 
 The complete build passes1017 render tests (38 ignored), seven real-camera Scene
-checks and workspace all-target Clippy. Both real-camera seeks now additionally
+checks, workspace all-target Clippy and the full release-workspace test run
+(1436 passed,47 ignored across48 suites, including documentation tests).
+Both real-camera seeks now additionally
 assert shared executor identity and distinct temporal history. All31 actual612
 frames remain byte-identical. The first2256x1504 run reaches14.64 distinct source
 fps, but a repeat is12.57fps: an overall playback gain is not yet established.
@@ -54,8 +56,9 @@ display age6.82s. Compared with the restored10.08fps serial run, source throughp
 improves but stalls are more frequent (serial p95 was4.01ms). Neither the average
 redraw count nor byte equality establishes usable playback or owner acceptance.
 Workspace all-target Clippy, formatting, source-lock and rename checks pass
-after simplifying the stopped-worker error handoff. Full workspace tests and
-UI/installed qualification remain pending. No installation, merge, invented
+after simplifying the stopped-worker error handoff. The final build's full
+release-workspace tests also pass, as recorded above. UI/installed qualification
+remain pending. No installation, merge, invented
 colour fade or broader RE. Evidence:
 `scratch/studio-seam-flicker-612-20260909-01/temporal-static-cache-01`, suffix06.
 
