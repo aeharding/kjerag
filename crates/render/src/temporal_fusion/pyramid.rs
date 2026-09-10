@@ -6,6 +6,9 @@
 
 use std::fmt;
 
+/// Render-pass preparation of the same explicit pyramid arithmetic.
+pub mod gpu;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Level {
     pub width: usize,

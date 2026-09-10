@@ -68,6 +68,23 @@ fn rejects_invalid_shape_and_level_count() {
 #[test]
 #[ignore = "requires authenticated local Studio motion captures"]
 fn matches_every_logical_pixel_in_the_native_seven_frame_capture() {
+    for (name, expected) in native_captures() {
+        let base = &expected[0];
+        let actual = build(&base.pixels, base.width, base.height, expected.len()).unwrap();
+        for (index, (a, b)) in actual.iter().zip(&expected).enumerate() {
+            assert_eq!((a.width, a.height), (b.width, b.height));
+            assert_eq!(
+                a.pixels.iter().zip(&b.pixels).position(|(a, b)| a != b),
+                None,
+                "{name} level {index} first differing pixel"
+            );
+        }
+    }
+}
+
+/// Shared CPU/GPU fixture authority: hash-sealed native pixels, not a
+/// reconstruction using either implementation under test.
+pub(super) fn native_captures() -> impl Iterator<Item = (&'static str, Vec<super::Level>)> {
     const WIDTH: usize = 3840;
     const HEIGHT: usize = 1920;
     const LEVEL_COUNT: usize = 7;
@@ -106,7 +123,7 @@ fn matches_every_logical_pixel_in_the_native_seven_frame_capture() {
     );
     let packed_height: usize = (0..LEVEL_COUNT).map(|level| HEIGHT >> level).sum();
 
-    for (name, expected_hash) in RECORDS {
+    RECORDS.into_iter().map(move |(name, expected_hash)| {
         let packed = fs::read(capture_dir.join(name)).unwrap();
         assert_eq!(
             packed.len(),
@@ -115,18 +132,26 @@ fn matches_every_logical_pixel_in_the_native_seven_frame_capture() {
         );
         assert_eq!(sha256_hex(&packed), expected_hash, "{name} SHA-256 differs");
 
-        let levels = build(&packed[..WIDTH * HEIGHT], WIDTH, HEIGHT, LEVEL_COUNT).unwrap();
+        let mut levels = Vec::new();
         let mut row_offset = 0;
-        for (index, level) in levels.iter().enumerate() {
-            for y in 0..level.height {
-                let actual =
-                    &packed[(row_offset + y) * WIDTH..(row_offset + y) * WIDTH + level.width];
-                let expected = &level.pixels[y * level.width..(y + 1) * level.width];
-                assert_eq!(actual, expected, "{name} level {index} row {y} differs");
+        for index in 0..LEVEL_COUNT {
+            let width = WIDTH >> index;
+            let height = HEIGHT >> index;
+            let mut pixels = Vec::with_capacity(width * height);
+            for y in 0..height {
+                pixels.extend_from_slice(
+                    &packed[(row_offset + y) * WIDTH..(row_offset + y) * WIDTH + width],
+                );
             }
-            row_offset += level.height;
+            levels.push(super::Level {
+                width,
+                height,
+                pixels,
+            });
+            row_offset += height;
         }
-    }
+        (name, levels)
+    })
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

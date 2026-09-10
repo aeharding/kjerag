@@ -14,6 +14,18 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**GPU temporal brightness preparation verified, 2026-09-10:** the half-size
+brightness image and all subsequent pyramid levels can now be prepared by
+GPU render passes, with no submission, wait or readback inside the primitive.
+All 68,808,600 logical pixels across seven captured Studio pyramids match
+exactly. The optional actual-Scene route also reproduces all 31 filtered
+612-second pictures and 259 unfiltered/map/color controls byte-for-byte.
+All 40 temporal tests pass on AMD, including native fixtures. Workspace
+all-target Clippy and formatting pass. The diagnostic still reads these levels
+for the unchanged CPU motion search; this is not a fast player implementation.
+Both moving owner verdicts remain pending, and the delivered movies and
+installed app are unchanged. No gradual color-update policy or new export.
+
 **Existing-Studio temporal-filter comparison, 2026-09-10:** the unchanged
 offline candidate now has a direct moving comparison with the retained 607-second
 Studio export, without another export or registration fit. Thirty-five Scene

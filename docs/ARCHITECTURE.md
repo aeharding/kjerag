@@ -88,6 +88,19 @@ neither source history nor player policy. The `color` child supplies an explicit
 diagnostic gamma-RGB/full-range-NV12 conversion; it is not a claim that Studio
 uses that matrix inverse, quantization or centered chroma footprint.
 
+`pyramid::gpu` now records the matching brightness preparation on the GPU.
+An R8Unorm full-Y input is averaged into a half-size R8Uint base; alternatively,
+an explicit R8Uint base can be copied without that bridge. Each later level
+uses distinct vertical and horizontal R8Uint render targets, preserving the
+intermediate byte rounding. The builder validates geometry before encoding,
+returns owned logical-level textures, and never submits, waits or reads back.
+Frame stamps, source ownership and history remain the caller's responsibility.
+The optional offline Scene selection still reads those levels for CPU motion
+search, so it is not a GPU-resident complete temporal pipeline. Its exact
+reported-view comparison preserves all filtered and unfiltered artifacts.
+Native captures verify the reductions from the half-size base; they still do
+not provide same-input native authority for the initial full-Y bridge.
+
 The test-only `scene::panorama_review` path materializes each exact displayed
 source/map/fusion into a body-fixed RGB panorama, then projects it through the
 same locked view. An unfiltered NV12 round trip isolates representation changes.

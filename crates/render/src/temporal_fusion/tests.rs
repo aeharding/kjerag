@@ -578,11 +578,11 @@ fn upload_rect(queue: &wgpu::Queue, texture: &wgpu::Texture, layer: u32, t: &Cap
     )
 }
 
-struct Copy {
+pub(super) struct Copy {
     buffer: wgpu::Buffer,
     padded_row: u32,
 }
-fn copy_texture(
+pub(super) fn copy_texture(
     device: &wgpu::Device,
     encoder: &mut wgpu::CommandEncoder,
     texture: &wgpu::Texture,
@@ -619,7 +619,7 @@ fn copy_texture(
         padded_row: padded,
     }
 }
-fn read_copy(device: &wgpu::Device, copy: &Copy, size: [u32; 2], bpp: u32) -> Vec<u8> {
+pub(super) fn read_copy(device: &wgpu::Device, copy: &Copy, size: [u32; 2], bpp: u32) -> Vec<u8> {
     copy.buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     let mapped = copy.buffer.slice(..).get_mapped_range();
@@ -759,18 +759,26 @@ impl Fixture {
     }
 }
 
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
+pub(super) fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         ..Default::default()
     });
-    let adapter = block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN))
-        .into_iter()
-        .next();
+    let require_gpu = std::env::var_os("KJERAG_REQUIRE_GPU").is_some();
+    let adapters = block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN));
+    let adapter = adapters
+        .iter()
+        .find(|adapter| adapter.get_info().device_type != wgpu::DeviceType::Cpu)
+        .cloned()
+        .or_else(|| {
+            (!require_gpu)
+                .then(|| adapters.into_iter().next())
+                .flatten()
+        });
     let Some(adapter) = adapter else {
         assert!(
-            std::env::var_os("KJERAG_REQUIRE_GPU").is_none(),
-            "KJERAG_REQUIRE_GPU test has no Vulkan adapter"
+            !require_gpu,
+            "KJERAG_REQUIRE_GPU test has no non-CPU Vulkan adapter"
         );
         eprintln!("skipping temporal fusion GPU test: no Vulkan adapter");
         return None;

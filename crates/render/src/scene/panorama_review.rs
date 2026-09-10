@@ -22,6 +22,7 @@ pub(super) struct PanoramaReview {
     size: Option<Size>,
     previous: Option<FrameStamp>,
     temporal: Option<temporal::TemporalReview>,
+    gpu_pyramid: Option<crate::temporal_fusion::pyramid::gpu::Builder>,
     output: PathBuf,
     log: std::io::BufWriter<std::fs::File>,
 }
@@ -43,6 +44,16 @@ impl PanoramaReview {
             assert_eq!(value, "1", "set the explicit ISO100 diagnostic flag to 1");
             temporal::TemporalReview::new(device, output)
         });
+        let gpu_pyramid = std::env::var_os("KJERAG_PANORAMA_GPU_PYRAMID").map(|value| {
+            assert_eq!(value, "1", "set the explicit GPU pyramid diagnostic flag to 1");
+            assert!(temporal.is_some(), "GPU pyramid review needs the temporal diagnostic");
+            std::fs::write(
+                output.join("panorama-pyramid.txt"),
+                "GPU half-Y and separable pyramid; CPU search still reads all logical levels.\n\
+                 This changes preparation execution only, not temporal parameters or source history.\n",
+            ).unwrap();
+            crate::temporal_fusion::pyramid::gpu::Builder::new(device)
+        });
         Self {
             projector: PanoramaProjector::new(device),
             conversion: GpuColorConversion::new(device),
@@ -50,6 +61,7 @@ impl PanoramaReview {
             size: None,
             previous: None,
             temporal,
+            gpu_pyramid,
             output: output.to_owned(),
             log,
         }
@@ -165,14 +177,40 @@ impl PanoramaReview {
             .unwrap();
         let rgb_read = PendingReadback::encode(device, &mut encoder, &projected);
         let roundtrip_read = PendingReadback::encode(device, &mut encoder, &roundtrip);
-        let luma_read = self
-            .temporal
-            .as_ref()
-            .map(|_| PendingReadback::encode(device, &mut encoder, &nv12.y));
+        let luma_read = (self.temporal.is_some() && self.gpu_pyramid.is_none())
+            .then(|| PendingReadback::encode(device, &mut encoder, &nv12.y));
+        let pyramid_reads = self.gpu_pyramid.as_ref().map(|builder| {
+            let pyramid = builder
+                .encode_luma(device, &mut encoder, &nv12.y, 7)
+                .unwrap();
+            pyramid
+                .levels
+                .iter()
+                .map(|level| {
+                    (
+                        level.width(),
+                        level.height(),
+                        PendingReadback::encode(device, &mut encoder, level),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
         let submission = queue.submit([encoder.finish()]);
         let rgb = rgb_read.read(device, submission.clone());
         let roundtrip = roundtrip_read.read(device, submission.clone());
-        let full_luma = luma_read.map(|read| read.read(device, submission));
+        let full_luma = luma_read.map(|read| read.read(device, submission.clone()));
+        let gpu_levels = pyramid_reads.map(|reads| {
+            reads
+                .into_iter()
+                .map(
+                    |(width, height, read)| crate::temporal_fusion::pyramid::Level {
+                        width: width as usize,
+                        height: height as usize,
+                        pixels: read.read(device, submission.clone()),
+                    },
+                )
+                .collect()
+        });
         // The imported decoded source is still owned by `pipeline` here.
         assert_eq!(
             pipeline.prepared_picture.as_ref().unwrap().frame(),
@@ -217,14 +255,16 @@ impl PanoramaReview {
         }
         self.log.flush().unwrap();
         if let Some(temporal) = self.temporal.as_mut() {
-            let base = half_size_luma_linear(&full_luma.unwrap(), size);
-            let levels = crate::temporal_fusion::pyramid::build(
-                &base,
-                size.width as usize / 2,
-                size.height as usize / 2,
-                7,
-            )
-            .unwrap();
+            let levels = gpu_levels.unwrap_or_else(|| {
+                let base = half_size_luma_linear(&full_luma.unwrap(), size);
+                crate::temporal_fusion::pyramid::build(
+                    &base,
+                    size.width as usize / 2,
+                    size.height as usize / 2,
+                    7,
+                )
+                .unwrap()
+            });
             temporal.push(device, queue, &prepared, nv12, levels);
         }
         self.previous = Some(prepared.frame().clone());
@@ -311,7 +351,7 @@ impl PendingReadback {
         texture: &wgpu::Texture,
     ) -> Self {
         let bytes_per_pixel = match texture.format() {
-            wgpu::TextureFormat::R8Unorm => 1,
+            wgpu::TextureFormat::R8Unorm | wgpu::TextureFormat::R8Uint => 1,
             wgpu::TextureFormat::Rgba8Unorm => 4,
             other => panic!("offline panorama readback does not support {other:?}"),
         };

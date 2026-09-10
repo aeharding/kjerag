@@ -2412,3 +2412,58 @@ hashes. Direct Y and spatial-null results are not invented from missing inputs.
 The moving owner gate remains required. Root independently reproduces the
 complete event-analysis receipt SHA256
 `0be7f16d7cbc6f8f79f7a57e60f43c95d196c916ada7d40f945ee0277bc53ccd`.
+
+### GPU brightness-pyramid preparation, 2026-09-10
+
+The already-read preparation arithmetic now has a GPU implementation beside
+the CPU reference. `pyramid::gpu::Builder` accepts full-size R8Unorm Y or an
+explicit half-size R8Uint base. The former recovers byte values, applies the
+single rounded 2x2 mean, and then uses the same reduction path as the latter.
+Vertical and horizontal render targets are distinct R8Uint textures, so the
+intermediate byte rounding cannot be fused away. Core integer render targets
+require no optional narrow storage-texture feature. Geometry and input usage
+are validated before encoding. The builder records passes only and returns
+owned levels; it selects no source history, temporal parameters or frame clock.
+
+Tests cover all 256 normalized source codes, every possible four-byte sum,
+multiple encodes before submission, explicit rounding/border discriminators,
+odd terminal levels, unsupported-input refusal and a complete synthetic
+full-Y-to-seven-level path. The shared native fixture loader retains all seven
+original SHA seals and strips only native packed-row padding. Every logical
+pixel in all 49 GPU levels matches those captures: 68,808,600 exact bytes.
+As before, native capture level zero is already half-sized. It does not
+authenticate the initial full-Y bridge, whose authority remains the selected
+OpenCV/static contract plus independent CPU/GPU arithmetic checks.
+
+The optional `KJERAG_PANORAMA_GPU_PYRAMID=1` actual-Scene diagnostic disables
+the CPU full-Y readback/reduction route, encodes the new GPU preparation, and
+reads the logical levels for the unchanged CPU search. This is still offline
+execution, not the completed GPU temporal pipeline or a playback speed claim.
+The ordinary unflagged candidate remains the readable reference. Source stamps,
+maps, color coefficients and all temporal parameters stay unchanged.
+
+At the exact 612.078 view, the same 37 inputs 18341..18377 produce all 31
+filtered outputs 18344..18374 byte-identically to the previous candidate.
+All 259 ordinary/map/alpha/color and panorama controls also match. The complete
+center/reference index and timestamp columns and output RGBA hashes agree;
+only diagnostic timing fields and the new route receipt differ. This closes
+the actual opt-in route's execution check, not the owner's flicker verdict.
+
+All 12 pyramid checks, including both native CPU and GPU fixture tests, pass
+on AMD760M/RADV. All 40 temporal checks pass with the saved motion/search/fusion
+fixtures. Workspace all-target Clippy, formatting, crate-source and name checks
+pass. Standalone rustfmt initially disagreed with Cargo's workspace formatting;
+`cargo fmt --all` resolves the formatting-only differences. No full workspace
+tests or UI harness were rerun, and nothing is pushed or installed. The Scene
+run took 38.79s while CPU Clippy work overlapped part of the run; it is not a
+controlled timing comparison or a 240fps capacity result.
+
+Durable receipts are in
+`scratch/studio-seam-flicker-612-20260909-01/temporal-gpu-pyramid-01`: build and
+test logs, optional-route source artifacts, and `verify-sequence.sh` with its
+290-artifact comparison result. The exercised binary SHA256 is
+`2c1052b0fa65a95efa525b096234d580f0cce6a4df663b1ba90a788ab67a688a`;
+the subsequent source formatting changes no arithmetic. Both delivered review
+movies retain their prior hashes. Moving owner acceptance, GPU motion search,
+automatic parameter selection and production history/integration remain open.
+No new native session/export or gradual lens-color update is introduced.
