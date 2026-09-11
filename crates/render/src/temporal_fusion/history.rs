@@ -13,19 +13,21 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::ops::Range;
+#[cfg(test)]
 use std::sync::OnceLock;
 
 use crate::FrameStamp;
+#[cfg(test)]
 use crate::direct_type2::CompactNv12Panorama;
 
 use super::color::Nv12;
-#[cfg(test)]
 use super::color::{GpuColorConversion, MatrixCoefficients};
 use super::{Inputs, Parameters};
 
 const LAYERS: u32 = 7;
 const CENTER: usize = 3;
 
+#[cfg(test)]
 mod compact;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,6 +98,7 @@ pub struct History {
     y: wgpu::Texture,
     uv: wgpu::Texture,
     slots: VecDeque<Slot>,
+    #[cfg(test)]
     compact: OnceLock<compact::Unpack>,
 }
 
@@ -158,6 +161,7 @@ impl History {
                 wgpu::TextureFormat::Rg8Unorm,
             ),
             slots: VecDeque::with_capacity(LAYERS as usize),
+            #[cfg(test)]
             compact: OnceLock::new(),
         })
     }
@@ -189,7 +193,6 @@ impl History {
     ///
     /// Validation and render-pass recording precede history mutation. The
     /// returned luma view names exactly the newly written physical layer.
-    #[cfg(test)]
     pub(crate) fn encode_push_rgb(
         &mut self,
         device: &wgpu::Device,
@@ -227,6 +230,7 @@ impl History {
     /// synchronous validation and command recording happen before the ring
     /// slot is committed. Queue ordering has the same layer-reuse contract as
     /// [`Self::encode_push`].
+    #[cfg(test)]
     pub(crate) fn encode_push_compact(
         &mut self,
         device: &wgpu::Device,
@@ -547,7 +551,6 @@ fn source_texture(texture: &wgpu::Texture, size: [u32; 2], format: wgpu::Texture
             .contains(wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC)
 }
 
-#[cfg(test)]
 fn source_rgb(texture: &wgpu::Texture, size: [u32; 2]) -> bool {
     texture.format() == wgpu::TextureFormat::Rgba8Unorm
         && texture.dimension() == wgpu::TextureDimension::D2
@@ -561,6 +564,7 @@ fn source_rgb(texture: &wgpu::Texture, size: [u32; 2]) -> bool {
             .contains(wgpu::TextureUsages::TEXTURE_BINDING)
 }
 
+#[cfg(test)]
 fn packed_y_texture(texture: &wgpu::Texture, size: [u32; 2]) -> bool {
     texture.format() == wgpu::TextureFormat::Rgba8Unorm
         && texture.dimension() == wgpu::TextureDimension::D2

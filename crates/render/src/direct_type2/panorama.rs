@@ -3,6 +3,7 @@
 //! This path stays RGB. It deliberately does not choose the
 //! still-unread RGB-to-NV12 conversion needed by the temporal filter.
 
+#[cfg(test)]
 use wgpu::util::DeviceExt;
 
 use super::{DirectType2Pipeline, draw_wgsl_with_fusion_mode};
@@ -20,7 +21,6 @@ const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// Construction is private to the exact map draw. Scene may retain this owner
 /// through a temporal window without separately pairing a texture and stamp.
 pub(crate) struct BodyPanorama {
-    #[cfg(test)]
     device: wgpu::Device,
     texture: wgpu::Texture,
     frame: FrameStamp,
@@ -48,7 +48,6 @@ impl BodyPanorama {
             view_formats: &[],
         });
         Ok(Self {
-            #[cfg(test)]
             device: device.clone(),
             texture,
             frame,
@@ -63,7 +62,6 @@ impl BodyPanorama {
         &self.frame
     }
 
-    #[cfg(test)]
     pub(crate) fn belongs_to(&self, device: &wgpu::Device) -> bool {
         self.device == *device
     }
@@ -137,6 +135,7 @@ impl BodyPanoramaPipeline {
 
 /// Reproject one gamma-RGB panorama through an exact `Reframe`. Longitude
 /// repeats and latitude clamps in the texture sampler.
+#[cfg(test)]
 pub(crate) struct PanoramaProjector {
     device: wgpu::Device,
     #[cfg(test)]
@@ -147,6 +146,7 @@ pub(crate) struct PanoramaProjector {
     draw_pipelines: std::sync::Mutex<Vec<(wgpu::TextureFormat, wgpu::RenderPipeline)>>,
 }
 
+#[cfg(test)]
 impl PanoramaProjector {
     pub(crate) fn new(device: &wgpu::Device) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -238,27 +238,6 @@ impl PanoramaProjector {
     ) -> Fallible<PreparedPanoramaDraw> {
         if !panorama.belongs_to(device) {
             return Err("body panorama belongs to a different graphics device".into());
-        }
-        self.prepare_source(
-            device,
-            panorama.texture(),
-            panorama.frame(),
-            reframe,
-            output_format,
-        )
-    }
-
-    /// Bind one completed temporal-filter output without separating its
-    /// texture from the history center that names it.
-    pub(crate) fn prepare_filtered(
-        &self,
-        device: &wgpu::Device,
-        panorama: &crate::temporal_fusion::stream::FilteredPanorama,
-        reframe: &crate::Reframe,
-        output_format: wgpu::TextureFormat,
-    ) -> Fallible<PreparedPanoramaDraw> {
-        if !panorama.belongs_to(device) {
-            return Err("filtered panorama belongs to a different graphics device".into());
         }
         self.prepare_source(
             device,
@@ -442,12 +421,14 @@ impl PanoramaProjector {
 /// One immutable view of one exact stamped body panorama. Construction stays
 /// behind [`PanoramaProjector::prepare`], so a caller cannot pair arbitrary
 /// texture bytes with a frame identity.
+#[cfg(test)]
 pub(crate) struct PreparedPanoramaDraw {
     pipeline: wgpu::RenderPipeline,
     binding: wgpu::BindGroup,
     frame: FrameStamp,
 }
 
+#[cfg(test)]
 impl PreparedPanoramaDraw {
     pub(crate) fn frame(&self) -> &FrameStamp {
         &self.frame
@@ -460,6 +441,7 @@ impl PreparedPanoramaDraw {
     }
 }
 
+#[cfg(test)]
 fn validate_panorama(panorama: &wgpu::Texture) -> Fallible<()> {
     if panorama.format() != FORMAT
         || panorama.dimension() != wgpu::TextureDimension::D2
@@ -477,6 +459,7 @@ fn validate_panorama(panorama: &wgpu::Texture) -> Fallible<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn projection_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
@@ -525,6 +508,7 @@ fn panorama_fs(in: Type2VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+#[cfg(test)]
 const PROJECT_WGSL: &str = r#"
 @group(0) @binding(1) var panorama: texture_2d<f32>;
 @group(0) @binding(2) var panorama_sampler: sampler;

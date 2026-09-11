@@ -86,23 +86,37 @@ The shell is libcosmic, which pins wgpu 28, so `render` is written against
 28 and owns the one module that wgpu 30 would delete
 (`crates/render/src/dmabuf.rs`).
 
-An explicit test-only correction review evaluates a different architecture:
-direct full-resolution source/map projection plus a half-linear full-sphere
-temporal residual. The two low-resolution terms pass through the same gamma
-RGB/NV12/RGB conversion; their signed difference is bilinearly sampled and
-added to the original direct view. There is no gradual coefficient update or
-cross-source field interpolation. The Stream's normal constructor still selects
-seven motion levels; only the review constructor selects six real levels and
-the same finest kernel with a lower geometry entry bound. Reference counts and
-logical geometries are validated before coarse traversal. Halving the field
-changes angular block support, search decisions and the visible denoising law,
-so this is not an equivalent optimization or an accepted replacement.
-The actual-Scene harness retains each direct viewport, low unfiltered control,
-Reframe and exact source stamp until both paired filtered outputs name that
-source. It retains no decoder surface for this offline correction stage.
-Its readbacks, uploaded maps and parallel full reference are diagnostic only;
-live immutable source/map snapshots and active playback capacity remain
-unimplemented and unqualified. Ordinary playback does not select this route.
+The current branch draws original full-resolution source/map samples with a
+half-linear full-sphere temporal residual. The owner accepted the607 moving
+comparison, with the exact short response/interpretation recorded in ROADMAP;
+this is not broad footage acceptance or a performance qualification. The two
+low-resolution terms pass through the same gamma RGB/NV12/RGB conversion. Their
+signed difference is bilinearly sampled, added to explicitly quantized direct
+RGB8, clamped, then transferred to the surface in one render pass. Rectilinear
+views use the existing native mesh; curved views use the existing body-ray map.
+Correction textures extend picture group0, retaining map group1 and colour
+group2 within the native three-group limit. Pipelines cache by surface format.
+
+The resident source worker encodes the half-size RGB body and exact texture-load
+copies of both original lens planes in one command buffer. Imported dmabufs are
+sampled-only, so no unsupported COPY_SRC use is invented. The first body pass
+arms submission-complete retirement before any source sampling. Its retirement
+covers the later copy passes too; a later encode rejection explicitly closes
+admission and quarantines uncertain owners while preserving the original error.
+Copies are ordinary GPU-owned R8/RG8 textures, not aliases of VA-API surfaces.
+The current copier explicitly requires8-bit planes; higher-bit-depth snapshot
+support has not been qualified. The installed map snapshot clones only immutable
+read/fusion bind groups, exact frame and context, not the heavyweight carrier.
+
+`CorrectionStream` owns the low unfiltered controls and six-level temporal
+Stream. `CorrectionSequence` retains at most seven original source/map snapshots
+and moves each into its exact completed `CorrectedFrame`. Readbacks and uploaded
+maps exist only in the older paired review harness, not this live path. Scene
+publishes and screenshots these typed frames. There is no coefficient EMA,
+skipped source refresh or interpolation between correction updates. Halving the
+field changes angular block support and motion decisions, so it is deliberately
+not claimed to be an equivalent arithmetic optimization. The full-resolution
+seven-level Stream constructor remains a test oracle.
 
 `render::temporal_fusion` supplies the stream's post-stitch primitives.
 It consumes explicit full-range NV12 image arrays,
@@ -121,13 +135,13 @@ history, seek epochs and completion. None of that scheduling is supplied by
 this primitive. Saved native input/output tests establish its bounded
 arithmetic result, not a complete temporal pipeline or performance verdict.
 
-Its `stream` child supplies worker-owned full-picture execution, automatically
-selected for supported live captures. Seven real sources emit startup
+Its `stream` child supplies worker-owned execution over the requested field.
+Seven real sources emit startup
 centers0..3, steady center3 and flush4..6. The source's matrix and retained
 automatic settings travel with its exact stamp. Full RGB/NV12 conversion,
 GPU pyramid/search/refinement/fusion now use resident images throughout. Arrival
-encodes all seven packed motion-pyramid levels and submits without waiting for
-CPU pixels. Coarse levels six through one produce GPU motion records; histogram,
+encodes the selected number of packed motion-pyramid levels and submits without
+waiting for CPU pixels. Coarse levels down through one produce GPU records; histogram,
 global prediction and seed interpolation feed the next level directly, followed
 by the finest search. Motion packing reads the retained level-three luma texture,
 not an uploaded CPU copy. Source stamps and effective settings remain in the
@@ -147,7 +161,7 @@ the separate 612 comparison and live performance remain unqualified. GPU work
 still has dependent levels and one large filter submission/completion boundary
 per output; GPU residency alone does
 not establish smooth drawing or full-rate playback.
-The live source producer now draws directly to half-size packed-Y and UV
+The preceding full-resolution reference producer draws to packed-Y and UV
 attachments, avoiding the disposable full-size RGB panorama. It samples four
 full-resolution centres per fragment, explicitly quantizes each gamma RGB
 sample to RGB8, then applies the existing full-range NV12 conversion. History
@@ -164,7 +178,7 @@ sampling is not byte-identical to full-resolution RGB rasterization and still
 requires moving-output review; the owner's preceding607 acceptance does not
 automatically cover this representation change.
 
-The compact live producer additionally caches the 51-by-101 native mesh
+That compact reference producer additionally caches the 51-by-101 native mesh
 vertices once per source/map. A164,832-byte GPU buffer retains position and
 packed-map samples, including the distinct column100 endpoint. Its compute
 prepass and panorama draw share the existing encoder and source retirement.
@@ -204,7 +218,11 @@ epoch owns a fresh sealed Stream, and only that executor may mutate it. A full
 channel blocks the stitch worker, never the UI, bounding old work across rapid
 seeks to one executing job, one queued job, one blocked stitch handoff and one
 queued stitch job. Alongside current and last-shown owners this retains at most
-six distinct epoch histories in the product seek path. Errors stay with their
+six distinct epoch owners in the product seek path. A successful restart now
+cancels its predecessor's temporal epoch and clears unpublished ready outputs.
+Idle history drops immediately through a nonblocking try-lock; executing history
+drops after its current operation. Old completed Shown remains independent.
+Errors stay with their
 epoch and preserve the first underlying failure. There is no per-seek worker
 thread, UI join, changed source cadence or changed filter arithmetic.
 Panorama source import retries only classified resource exhaustion before the
@@ -214,9 +232,10 @@ two-second import limit. The deadline is checked before another attempt after
 waiting. No successful import sleeps; invalid descriptors fail immediately.
 Exhaustion beyond the bound passes the last underlying error to the existing
 capture-terminal handoff. No later stitching or filtering failure is retried.
-At most four independent ready panoramas and one installed panorama remain per
-epoch. Source leases retire after panorama preparation;
-filtered outputs own their pixels independently of decoder surfaces. Only the
+At most four ready corrected frames and one installed frame remain per epoch.
+Original source snapshots move from temporal pending into those outputs rather
+than being duplicated. Decoder leases retire after body/plane-copy preparation;
+corrected outputs own all sampled resources independently of decoder surfaces. Only the
 exact due FIFO front may install and acknowledge Player's current delivery.
 Scene drains six prepared successors even during paused startup/seeks, never
 advancing picture/audio time merely to satisfy the filter. A completed panorama

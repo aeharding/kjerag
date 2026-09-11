@@ -689,14 +689,6 @@ impl DirectType2Pipeline {
         source.prepare_resident_draw(&self.picture_layout, &self.sampler, reframe)
     }
 
-    pub(crate) fn prepare_snapshot_picture(
-        &self,
-        source: &SourceSnapshot,
-        reframe: &crate::Reframe,
-    ) -> Fallible<ImportedOneXsDrawBinding> {
-        source.prepare_draw(self, &self.picture_layout, &self.sampler, reframe)
-    }
-
     pub(crate) fn map_layout(&self) -> &wgpu::BindGroupLayout {
         &self.map_layout
     }

@@ -12,7 +12,8 @@ use std::sync::{Arc, Mutex, mpsc};
 use kjerag_media::{FrameStamp, Frames};
 use kjerag_meta::OrientationTrack;
 
-use super::panorama_ingest::{prepare_compact_panorama, validate_reframe};
+use super::corrected::{CorrectedFrame, CorrectionSequence};
+use super::panorama_ingest::{prepare_correction_input, validate_reframe};
 use super::{
     ResidentCameraProfile, ResidentCaptureSession, native_lifecycle_event,
     native_lifecycle_probe_enabled,
@@ -21,7 +22,6 @@ use crate::draw_retirement::{DrawPermit, DrawRetirementError};
 use crate::flow::one_xs::gpu_context::OneXsGpuContext;
 use crate::ready_wake::ReadyWake;
 use crate::temporal_fusion::settings::Provider;
-use crate::temporal_fusion::stream::{FilteredPanorama, Stream};
 use crate::{Fallible, Reframe, Size};
 
 use super::temporal_worker::{TemporalEpoch, TemporalJob, TemporalWorker};
@@ -59,8 +59,9 @@ struct State {
     accepted: Option<FrameStamp>,
     accepted_sources: usize,
     expected: VecDeque<FrameStamp>,
-    ready: VecDeque<Arc<FilteredPanorama>>,
-    installed: Option<Arc<FilteredPanorama>>,
+    ready: VecDeque<Arc<CorrectedFrame>>,
+    installed: Option<Arc<CorrectedFrame>>,
+    retired: bool,
     finish_requested: bool,
     finished: bool,
     failure: Option<String>,
@@ -78,6 +79,7 @@ impl State {
             expected: VecDeque::new(),
             ready: VecDeque::with_capacity(READY_CAPACITY),
             installed: None,
+            retired: false,
             finish_requested: false,
             finished: false,
             failure: None,
@@ -117,7 +119,7 @@ pub(super) struct FilteredCaptureInner {
     profile: Arc<ResidentCameraProfile>,
     orientation: OrientationTrack,
     provider: Provider,
-    full: [u32; 2],
+    field_size: [u32; 2],
     state: Mutex<State>,
 }
 
@@ -135,13 +137,13 @@ impl FilteredCaptureFacade {
         provider: Provider,
     ) -> Fallible<Self> {
         let source = profile.source_size;
-        let width = source
-            .width
-            .checked_mul(2)
-            .ok_or("filtered panorama width overflows u32")?;
-        if source.width == 0 || source.height == 0 || source.width != source.height {
+        if source.width == 0
+            || source.height == 0
+            || source.width != source.height
+            || !source.height.is_multiple_of(2)
+        {
             return Err(format!(
-                "filtered panorama needs a square nonzero source, got {} by {}",
+                "temporal correction needs an even square nonzero source, got {} by {}",
                 source.width, source.height
             )
             .into());
@@ -151,7 +153,7 @@ impl FilteredCaptureFacade {
                 profile,
                 orientation,
                 provider,
-                full: [width, source.height],
+                field_size: [source.width, source.height / 2],
                 state: Mutex::new(State::new()),
             }),
         })
@@ -168,12 +170,13 @@ impl FilteredCaptureFacade {
             state.session.clone()
         };
         let session = old_session
+            .as_ref()
             .map(|old| {
                 let resident = Arc::new(old.resident.restarted()?);
-                let stream = Stream::new(
+                let stream = CorrectionSequence::new(
                     resident.context.device(),
                     resident.context.queue(),
-                    self.inner.full,
+                    self.inner.field_size,
                     self.inner.provider.restarted(),
                 )?;
                 let epoch = Arc::new(TemporalEpoch::new(stream));
@@ -186,12 +189,24 @@ impl FilteredCaptureFacade {
             .transpose()?;
         let mut state = State::new();
         state.session = session;
+        // The installed old picture remains usable during seeking, but no
+        // unpublished source/correction should accumulate across old epochs.
+        // Cancellation never blocks the UI behind the temporal worker.
+        {
+            let mut previous = self.state()?;
+            previous.retired = true;
+            previous.ready.clear();
+            previous.due_waiter = None;
+        }
+        if let Some(old) = old_session {
+            old.epoch.cancel();
+        }
         Ok(Self {
             inner: Arc::new(FilteredCaptureInner {
                 profile: Arc::clone(&self.inner.profile),
                 orientation: self.inner.orientation.clone(),
                 provider: self.inner.provider.restarted(),
-                full: self.inner.full,
+                field_size: self.inner.field_size,
                 state: Mutex::new(state),
             }),
         })
@@ -215,10 +230,10 @@ impl FilteredCaptureFacade {
             &self.inner.profile,
             self.inner.orientation.clone(),
         )?);
-        let stream = Stream::new(
+        let stream = CorrectionSequence::new(
             resident.context.device(),
             resident.context.queue(),
-            self.inner.full,
+            self.inner.field_size,
             self.inner.provider.restarted(),
         )?;
         let temporal = Arc::new(TemporalWorker::new()?);
@@ -293,7 +308,7 @@ impl FilteredCaptureFacade {
             frames,
             reframe,
             stamp,
-            size: Size::new(self.inner.full[0], self.inner.full[1]),
+            size: Size::new(self.inner.field_size[0], self.inner.field_size[1]),
             permit,
         }));
         match session.resident.worker.try_kick_filtered(job) {
@@ -366,10 +381,7 @@ impl FilteredCaptureFacade {
 
     /// Install only the exact FIFO-front result. A later due stamp cannot
     /// silently discard an earlier filtered picture.
-    pub(crate) fn install_due(
-        &self,
-        stamp: &FrameStamp,
-    ) -> Fallible<Option<Arc<FilteredPanorama>>> {
+    pub(crate) fn install_due(&self, stamp: &FrameStamp) -> Fallible<Option<Arc<CorrectedFrame>>> {
         let mut state = self.state()?;
         self.ensure_healthy(&state)?;
         if let Some(installed) = &state.installed
@@ -415,7 +427,7 @@ impl FilteredCaptureFacade {
     /// Preserve the last complete picture for a terminal-error screenshot.
     /// Unlike observed-state queries, this deliberately does not mask that
     /// already-installed resource with a later sticky worker failure.
-    pub(crate) fn installed(&self) -> Fallible<Option<Arc<FilteredPanorama>>> {
+    pub(crate) fn installed(&self) -> Fallible<Option<Arc<CorrectedFrame>>> {
         Ok(self.state()?.installed.clone())
     }
 
@@ -477,6 +489,7 @@ impl FilteredCaptureFacade {
         let previous = previous.attached_session().unwrap();
         assert!(Arc::ptr_eq(&current.temporal, &previous.temporal));
         assert!(!Arc::ptr_eq(&current.epoch, &previous.epoch));
+        assert!(previous.epoch.is_canceled());
     }
 
     fn attached_session(&self) -> Fallible<Arc<FilteredSession>> {
@@ -590,23 +603,28 @@ impl FilteredCaptureInner {
     pub(super) fn complete_source(
         &self,
         stamp: &FrameStamp,
-        outputs: Vec<FilteredPanorama>,
+        outputs: Vec<CorrectedFrame>,
     ) -> Fallible<()> {
         self.complete_temporal(PendingKind::Source(stamp), outputs)
     }
 
-    pub(super) fn complete_finish(&self, outputs: Vec<FilteredPanorama>) -> Fallible<()> {
+    pub(super) fn complete_finish(&self, outputs: Vec<CorrectedFrame>) -> Fallible<()> {
         self.complete_temporal(PendingKind::Finish, outputs)
     }
 
     fn complete_temporal(
         &self,
         pending: PendingKind,
-        outputs: Vec<FilteredPanorama>,
+        outputs: Vec<CorrectedFrame>,
     ) -> Fallible<()> {
         let wake = {
             let mut state = self.state()?;
             ensure_healthy_state(&state)?;
+            if state.retired {
+                // A seek won the race with completion. Drop these GPU-owned
+                // outputs without publishing them into the old ready queue.
+                return Ok(());
+            }
             let matches = match (state.temporal_pending.front(), pending) {
                 (Some(TemporalPending::Source { stamp, .. }), PendingKind::Source(done)) => {
                     stamp == done
@@ -724,7 +742,10 @@ pub(super) fn service_filtered(job: FilteredJob) -> Fallible<()> {
             job.owner.ensure_stitch_source(&job.stamp)?;
             let started = native_lifecycle_probe_enabled().then(std::time::Instant::now);
             native_lifecycle_event("filtered-worker-start", &job.stamp, None);
-            let panorama = prepare_compact_panorama(
+            if job.session.epoch.is_canceled() {
+                return Ok(());
+            }
+            let panorama = prepare_correction_input(
                 &job.session.resident,
                 job.frames,
                 job.reframe,

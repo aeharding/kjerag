@@ -31,8 +31,11 @@ use crate::stitch_camera::StitchCamera;
 use kjerag_media::{FrameStamp, Frames};
 use kjerag_meta::{CalibrationSet, OrientationTrack, Readout};
 
+#[path = "one_xs/corrected.rs"]
+mod corrected;
 #[path = "one_xs/filtered_capture.rs"]
 mod filtered_capture;
+pub(crate) use corrected::PreparedCorrectionDraw;
 #[path = "one_xs/panorama_ingest.rs"]
 mod panorama_ingest;
 pub(crate) use filtered_capture::FilteredCaptureFacade;
@@ -2499,6 +2502,44 @@ impl InstalledOneXsReady {
         });
         drop(pass);
         Ok(output)
+    }
+
+    /// Detach the exact displayed source/map while producing its reduced
+    /// temporal input. Every imported-source read is in this one encoder.
+    /// The first pass arms submission-complete retirement before sampling;
+    /// its callback therefore also covers the subsequent lens-copy passes.
+    fn arm_and_encode_correction_input(
+        self,
+        retirements: &IcedDrawRetirements<InstalledOneXsPass>,
+        context: &OneXsGpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        size: crate::Size,
+    ) -> Fallible<corrected::CorrectionInput> {
+        let installed = Arc::clone(&self.draw);
+        installed.source.ensure_resident_context(context)?;
+        let frame = installed.frame();
+        let map = installed.map.snapshot(&frame, context)?;
+        let body = self.arm_and_encode_panorama(retirements, context.device(), encoder, size)?;
+        let result = (|| {
+            let source = installed.source.encode_source_snapshot(
+                &installed.pipeline,
+                context.device(),
+                encoder,
+            )?;
+            corrected::CorrectionInput::new(
+                body,
+                source,
+                map,
+                Arc::clone(&installed.pipeline),
+                context,
+            )
+        })();
+        if result.is_err() {
+            // Preserve the original error and explicitly close admission;
+            // this is not ordinary full-retirement backpressure.
+            retirements.quarantine_after_encode_failure();
+        }
+        result
     }
 
     fn arm_and_encode_compact_panorama(

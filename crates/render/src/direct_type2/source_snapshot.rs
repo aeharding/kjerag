@@ -2,16 +2,15 @@
 //!
 //! Imported textures alias decoder surfaces and therefore cannot outlive their
 //! `Frames`. This module samples each plane once into ordinary wgpu textures.
-//! The sealed result keeps the source stamp, capture identity and graphics
+//! The sealed result keeps the exact decoded source stamp and graphics
 //! context, but no decoder owner or resident production carrier.
 
 use kjerag_media::{Samples, Size};
 
-use super::{
-    DirectType2Pipeline, ImportedOneXsDrawBinding, ImportedOneXsPicture, prepare_picture_binding,
-};
+use super::{DirectType2Pipeline, ImportedOneXsPicture};
 use crate::flow::one_xs::gpu_context::OneXsGpuContext;
-use crate::flow::one_xs::one_xs_belt_gpu::{ImportedOneXsSource, ResidentSourceIdentity};
+#[cfg(test)]
+use crate::flow::one_xs::one_xs_belt_gpu::ResidentSourceIdentity;
 use crate::{Extent, Fallible, FrameStamp, Planes};
 
 const COPY_SHADER: &str = r#"
@@ -194,7 +193,6 @@ pub(crate) struct SourceSnapshot {
     planes: [Planes; 2],
     frame: FrameStamp,
     context: OneXsGpuContext,
-    session: ResidentSourceIdentity,
     size: Size,
     samples: Samples,
     source_matrix: [f32; 4],
@@ -209,34 +207,12 @@ impl SourceSnapshot {
         self.context.ensure_same(expected)
     }
 
-    pub(crate) fn ensure_session(&self, expected: &ResidentSourceIdentity) -> Fallible<()> {
-        self.session.ensure_matches(expected)
-    }
-
     pub(crate) fn source_size(&self) -> [f32; 2] {
         [self.size.width as f32, self.size.height as f32]
     }
 
     pub(crate) fn source_matrix(&self) -> [f32; 4] {
         self.source_matrix
-    }
-
-    pub(super) fn prepare_draw(
-        &self,
-        producer: &DirectType2Pipeline,
-        layout: &wgpu::BindGroupLayout,
-        sampler: &wgpu::Sampler,
-        reframe: &crate::Reframe,
-    ) -> Fallible<ImportedOneXsDrawBinding> {
-        producer.ensure_device(&self.context)?;
-        let reframe = self.exact_reframe(reframe)?;
-        Ok(prepare_picture_binding(
-            &self.context,
-            [&self.planes[0], &self.planes[1]],
-            layout,
-            sampler,
-            &reframe,
-        ))
     }
 
     pub(crate) fn prepare_correction_picture(
@@ -273,31 +249,6 @@ impl SourceSnapshot {
         }
         let reframe = (*reframe).with_samples(self.samples);
         Ok(reframe)
-    }
-
-    pub(crate) fn draw_binding(
-        &self,
-        producer: &DirectType2Pipeline,
-        binding: &ImportedOneXsDrawBinding,
-        map: &wgpu::BindGroup,
-        fusion: Option<&wgpu::BindGroup>,
-        pass: &mut wgpu::RenderPass<'_>,
-    ) -> Fallible<()> {
-        producer.ensure_device(&self.context)?;
-        assert_eq!(
-            producer.fusion_layout().is_some(),
-            fusion.is_some(),
-            "resident source snapshot and photometric binding presence differ"
-        );
-        if let Some(fusion) = fusion {
-            pass.set_bind_group(2, fusion, &[]);
-        }
-        if binding.rectilinear {
-            producer.draw_mesh(pass, &binding.picture, map);
-        } else {
-            producer.draw(pass, &binding.picture, map);
-        }
-        Ok(())
     }
 }
 
@@ -357,7 +308,7 @@ pub(super) fn encode(
         )?;
     }
 
-    let make = |label, size, format| {
+    let make = |label, size: Size, format| {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
             size: size.extent(),
@@ -414,7 +365,6 @@ pub(super) fn encode(
         planes,
         frame: source.frames.stamp(),
         context: source.context.clone(),
-        session: source.session.clone(),
         size,
         samples: source.frames.samples,
         source_matrix: source_matrix(size, source.frames.samples),

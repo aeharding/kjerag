@@ -355,7 +355,7 @@ fn corrected_color(gamma_unquantized: vec3<f32>, body: vec3<f32>) -> vec4<f32> {
   let uv = correction_body_uv(body);
   let current = textureSample(correction_current, correction_sampler, uv).rgb;
   let filtered = textureSample(correction_filtered, correction_sampler, uv).rgb;
-  let gamma = clamp(high + filtered - current, vec3<f32>(0.0), vec3<f32>(1.0));
+  let gamma = clamp(high + (filtered - current), vec3<f32>(0.0), vec3<f32>(1.0));
   let linear = select(
     gamma / 12.92,
     pow((gamma + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)),
@@ -442,7 +442,7 @@ mod tests {
     #[test]
     fn correction_is_direct_rgb8_plus_one_uninterpolated_residual() {
         assert!(CORRECTION_WGSL.contains("unpack4x8unorm(pack4x8unorm"));
-        assert!(CORRECTION_WGSL.contains("high + filtered - current"));
+        assert!(CORRECTION_WGSL.contains("high + (filtered - current)"));
         assert_eq!(
             CORRECTION_WGSL
                 .matches("textureSample(correction_current")

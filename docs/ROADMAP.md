@@ -14,6 +14,53 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Reduced correction reaches the live player, 2026-09-11:**
+the owner answered "Yes" to the607 moving Studio/correction comparison. The
+coordinator explicitly interpreted this as acceptable/no blotches, asking for
+correction if the answer instead meant objectionable differences. This is scoped
+to that movie, not acceptance of612, all footage, performance or a merge.
+
+The working branch now uses the same half-linear RGB temporal field with
+GPU-owned copies of the original lens planes and cloned immutable map/colour
+bindings. The final source projection and residual addition share one surface
+pass, within the native three-bind-group limit. No full-resolution panorama or
+history is needed. All source updates, exact stamp pairing and seven-source
+cadence remain. Seeking cancels unpublished old history without blocking the UI;
+the last complete picture stays independently drawable. The previous full-field
+Stream and its producers remain comparison oracles.
+
+The initial integration passes the exact normalized plane-copy GPU test,
+three correction shader checks,131 temporal checks (11 ignored) and all8 real
+Scene tests across ONE X2 and X4, including seek/EOF/screenshot paths. All31
+607 and31 612 live screenshots differ from the reviewed offline half-correction
+by at most2 RGB codes, with mean absolute component differences0.0231/0.0239.
+Root inspected the actual607/612 pixels. These are integration diagnostics,
+not a new temporal-flicker verdict.
+
+The final complete release-workspace suite passes1478 tests with51 ignored
+across48 suites, with GPU checks required and both real source fixtures enabled.
+Release workspace/all-target Clippy, formatting, source-lock and rename checks
+pass. The initial native player builds needed promotion of RGB-history helpers
+previously compiled only in tests; all such build failures remain in the evidence.
+
+Native new/control/new runs at1280x720 now show a meaningful throughput change.
+The control sustains17.29 source fps. The first new run averages28.68fps with
+startup/catch-up and up to2.03s late; the repeat sustains29.9706fps over551
+contiguous shown frames, with0 drops/starvation/audio underruns and12.9ms worst
+reported lateness. Maximum observed shown-frame gaps remain66.3/65.2ms, so this
+is not a smoothness pass. At2256x1504 sRGB, the existing completed-redraw Scene
+diagnostic measures407fps paused but171fps active, active p9921.37ms and25.24
+source fps. Its per-redraw queue completion can underfeed processing and include
+queue backlog, but it does not establish the required240fps active capacity.
+Keep the target; do not present paused capacity as completion.
+
+No standard full UI harness, installation or merge is claimed. The app snapshot tested here is
+`e6245d4f2f63928ef37d769a4672165a05f46528e59946807eb3328b2ff934cb`.
+Evidence: `scratch/studio-seam-flicker-612-20260909-01/temporal-correction-live-01`;
+native runs `run.fina8OU3`, `run.AkyjQCdT`, `run.wYANkADf` under
+`scratch/controls-wake`. Native performance and actual active rendering capacity,
+not another isolated shader gain or broader RE, decide subsequent delivery.
+
 **Whole-pipeline alternative reaches a moving quality gate, 2026-09-10:**
 an unselected test path keeps the exact high-resolution direct viewport and
 adds a half-linear full-sphere temporal RGB residual. The residual is the

@@ -5,11 +5,6 @@
 //! unfiltered RGB/NV12/RGB control for its filtered source. It does not own a
 //! high-resolution source snapshot, interpolate fields, or select playback.
 
-#![allow(
-    dead_code,
-    reason = "unselected correction candidate consumed by the pending live experiment"
-)]
-
 use std::collections::VecDeque;
 
 use crate::direct_type2::BodyPanorama;
@@ -108,14 +103,13 @@ impl CorrectionStream {
         self.ensure_active()?;
         self.validate_body(&body)?;
         let frame = body.frame().clone();
-        if let Some(previous) = self.pending.back() {
-            if !previous.frame.same_decode_epoch(&frame)
-                || previous.frame.index().checked_add(1) != Some(frame.index())
-            {
-                return Err(
-                    "correction stream controls must be contiguous within one decode epoch".into(),
-                );
-            }
+        if let Some(previous) = self.pending.back()
+            && (!previous.frame.same_decode_epoch(&frame)
+                || previous.frame.index().checked_add(1) != Some(frame.index()))
+        {
+            return Err(
+                "correction stream controls must be contiguous within one decode epoch".into(),
+            );
         }
         if self.pending.len() >= SOURCES {
             return Err("correction stream exceeded its seven-source control bound".into());

@@ -1,7 +1,7 @@
 //! One bounded temporal executor shared across a capture's seek epochs.
 //!
-//! The resident stitch worker produces source-ordered compact YUV panoramas. This
-//! worker alone mutates [`Stream`], so its seven-layer history and center
+//! The stitch worker produces source-ordered original-plane snapshots and low
+//! RGB panoramas. This worker alone mutates [`CorrectionSequence`], so its seven-layer history and center
 //! ordering remain serial while the stitch worker prepares one successor.
 //!
 //! Across rapid product seeks the shared executor retains at most one active
@@ -11,19 +11,19 @@
 //! facades, that is at most six distinct epoch histories rather than one per
 //! seek. Intermediate idle restart facades have no job owner and drop.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
+use super::corrected::{CorrectionInput, CorrectionSequence};
 use super::filtered_capture::FilteredCaptureInner;
 use super::native_lifecycle_event;
 use crate::Fallible;
-use crate::direct_type2::CompactNv12Panorama;
-use crate::temporal_fusion::stream::Stream;
 
 pub(super) enum TemporalJob {
     Push {
         owner: Arc<FilteredCaptureInner>,
         epoch: Arc<TemporalEpoch>,
-        panorama: Box<CompactNv12Panorama>,
+        panorama: Box<CorrectionInput>,
         started: Option<std::time::Instant>,
     },
     Finish {
@@ -37,7 +37,8 @@ pub(super) enum TemporalJob {
 /// The mutex makes the state movable through the shared executor without
 /// granting another caller access. Only [`service`] locks it.
 pub(super) struct TemporalEpoch {
-    stream: Mutex<Stream>,
+    stream: Mutex<Option<CorrectionSequence>>,
+    canceled: AtomicBool,
 }
 
 pub(super) struct TemporalWorker {
@@ -84,9 +85,29 @@ impl TemporalWorker {
 }
 
 impl TemporalEpoch {
-    pub(super) fn new(stream: Stream) -> Self {
+    pub(super) fn new(stream: CorrectionSequence) -> Self {
         Self {
-            stream: Mutex::new(stream),
+            stream: Mutex::new(Some(stream)),
+            canceled: AtomicBool::new(false),
+        }
+    }
+
+    pub(super) fn is_canceled(&self) -> bool {
+        self.canceled.load(Ordering::Acquire)
+    }
+
+    /// Drop idle old history immediately. An executing worker drops its own
+    /// history after the current bounded operation, without a UI-side wait.
+    pub(super) fn cancel(&self) {
+        self.canceled.store(true, Ordering::Release);
+        match self.stream.try_lock() {
+            Ok(mut stream) => {
+                stream.take();
+            }
+            Err(std::sync::TryLockError::Poisoned(poison)) => {
+                poison.into_inner().take();
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {}
         }
     }
 }
@@ -116,25 +137,53 @@ fn service(job: TemporalJob) -> Fallible<()> {
             panorama,
             started,
         } => {
+            if epoch.is_canceled() {
+                return Ok(());
+            }
             let stamp = panorama.frame().clone();
             owner.ensure_temporal_source(&stamp)?;
             let mut stream = epoch
                 .stream
                 .lock()
                 .map_err(|_| "filtered temporal epoch stream is poisoned")?;
-            let outputs = stream.push(*panorama)?;
+            if epoch.is_canceled() {
+                stream.take();
+                return Ok(());
+            }
+            let outputs = stream
+                .as_mut()
+                .ok_or("filtered temporal epoch has no active stream")?
+                .push(*panorama)?;
+            if epoch.is_canceled() {
+                stream.take();
+                return Ok(());
+            }
             if let Some(started) = started {
                 native_lifecycle_event("filtered-worker-complete", &stamp, Some(started.elapsed()));
             }
             owner.complete_source(&stamp, outputs)
         }
         TemporalJob::Finish { owner, epoch } => {
+            if epoch.is_canceled() {
+                return Ok(());
+            }
             owner.ensure_temporal_finish()?;
             let mut stream = epoch
                 .stream
                 .lock()
                 .map_err(|_| "filtered temporal epoch stream is poisoned")?;
-            let outputs = stream.finish()?;
+            if epoch.is_canceled() {
+                stream.take();
+                return Ok(());
+            }
+            let outputs = stream
+                .as_mut()
+                .ok_or("filtered temporal epoch has no active stream")?
+                .finish()?;
+            if epoch.is_canceled() {
+                stream.take();
+                return Ok(());
+            }
             owner.complete_finish(outputs)
         }
     }

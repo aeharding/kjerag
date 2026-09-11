@@ -309,7 +309,6 @@ impl GpuColorConversion {
         Ok(())
     }
 
-    #[cfg(test)]
     pub(crate) fn belongs_to(&self, device: &wgpu::Device) -> bool {
         self.device == *device
     }

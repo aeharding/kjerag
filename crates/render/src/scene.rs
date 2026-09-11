@@ -45,7 +45,8 @@ use super::band::{self, Table};
 use super::capture::{self, Order, Pending, Request, Shutter, Stamp};
 use super::chroma;
 use super::direct_type2::DirectMapDraw;
-use super::direct_type2::panorama::{PanoramaProjector, PreparedPanoramaDraw};
+#[cfg(test)]
+use super::direct_type2::panorama::PanoramaProjector;
 use super::flow::one_xs::gpu_context::OneXsGpuContext;
 use super::flow::one_xs::pis::gpu::{
     GpuPisFlight, GpuPisPipeline, GpuPisStageOutput, GpuPisStageReceipt,
@@ -58,9 +59,9 @@ use super::flow::one_xs::scalar::{
 };
 use super::flow::one_xs::temporal::BlurredBelts;
 use super::flow::one_xs_belt_gpu::{
-    FilteredCaptureFacade, PendingBlurredBelts, ResidentCameraProfile, ResidentCaptureFacade,
-    ResidentDrain, ResidentPrepare, ResidentRetry, ResidentSceneFacade, ResidentScreenshotPrepare,
-    ResidentSubmit,
+    FilteredCaptureFacade, PendingBlurredBelts, PreparedCorrectionDraw, ResidentCameraProfile,
+    ResidentCaptureFacade, ResidentDrain, ResidentPrepare, ResidentRetry, ResidentSceneFacade,
+    ResidentScreenshotPrepare, ResidentSubmit,
 };
 use super::flow::{Cadence, Estimate};
 use super::image_fusion::PendingOneXsFusionInputs;
@@ -2819,8 +2820,7 @@ pub struct ScenePipeline {
     resident_completed_view: Option<View>,
     retired_one_xs: Vec<(ResidentCaptureFacade, ResidentSceneFacade)>,
     resident_draw: ResidentDrawSelection,
-    panorama_projector: Option<PanoramaProjector>,
-    filtered_draw: Option<PreparedPanoramaDraw>,
+    filtered_draw: Option<PreparedCorrectionDraw>,
     /// Set by this exact window preparation only when the offered due source is
     /// neither the exact shown delivery nor acknowledged by its capture map.
     redraw_after_prepare: bool,
@@ -3222,7 +3222,6 @@ impl ScenePipeline {
             resident_completed_view: None,
             retired_one_xs: Vec::new(),
             resident_draw: ResidentDrawSelection::None,
-            panorama_projector: None,
             filtered_draw: None,
             redraw_after_prepare: false,
             pipeline,

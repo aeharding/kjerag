@@ -22,6 +22,10 @@ use crate::{Extent, Fallible, FrameStamp, Size};
 /// The textures and stamp have no public constructor and always come from one
 /// draw of one bound source/map snapshot. `packed_y` has half the full width
 /// and height but contains four Y bytes per texel; `uv` contains one UV pair.
+#[allow(
+    dead_code,
+    reason = "full-resolution comparison producer retained as an oracle"
+)]
 pub(crate) struct CompactNv12Panorama {
     device: wgpu::Device,
     packed_y: wgpu::Texture,
@@ -31,6 +35,10 @@ pub(crate) struct CompactNv12Panorama {
     coefficients: MatrixCoefficients,
 }
 
+#[allow(
+    dead_code,
+    reason = "full-resolution comparison producer retained as an oracle"
+)]
 impl CompactNv12Panorama {
     pub(crate) fn packed_y(&self) -> &wgpu::Texture {
         &self.packed_y

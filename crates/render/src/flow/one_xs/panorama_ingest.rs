@@ -15,7 +15,7 @@ use super::{
     ImportedOneXsSource, InstalledOneXsReady, ResidentCameraProfile, ResidentCaptureSession,
     ResidentReadyMap, prepare_resident_bound,
 };
-use crate::direct_type2::{BodyPanorama, CompactNv12Panorama};
+use crate::direct_type2::BodyPanorama;
 use crate::draw_retirement::DrawRetirementError;
 use crate::flow::one_xs::gpu_context::OneXsGpuContext;
 use crate::{Fallible, Reframe, Size};
@@ -201,27 +201,28 @@ pub(super) fn prepare_panorama(
     Ok(output)
 }
 
-/// Prepare the same exact resident source/map transaction as
-/// [`prepare_panorama`], but materialize its compact YUV representation.
-pub(super) fn prepare_compact_panorama(
+/// Produce both the low-resolution temporal input and a GPU-owned copy of
+/// the original lens samples, inseparably bound to the same installed map.
+/// Decoder leases are retired by this submission, not by temporal lookahead.
+pub(super) fn prepare_correction_input(
     session: &Arc<ResidentCaptureSession>,
     frames: Arc<Frames>,
     reframe: Reframe,
     stamp: &FrameStamp,
     size: Size,
     permit: crate::draw_retirement::DrawPermit,
-) -> Fallible<CompactNv12Panorama> {
+) -> Fallible<super::corrected::CorrectionInput> {
     let draw = prepare_panorama_draw(session, frames, reframe, stamp, permit)?;
     let mut encoder =
         session
             .context
             .device()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("resident compact panorama ingestion"),
+                label: Some("resident temporal correction source"),
             });
-    let output = draw.arm_and_encode_cached_compact_panorama(
+    let output = draw.arm_and_encode_correction_input(
         &session.retirements,
-        session.context.device(),
+        &session.context,
         &mut encoder,
         size,
     )?;

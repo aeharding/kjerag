@@ -156,6 +156,13 @@ impl<P> IcedDrawRetirements<P> {
         self.lock().quarantine_all();
     }
 
+    /// A compound encoder failed after arming its first source-reading pass.
+    /// Its commands may never be submitted, so no completion callback can be
+    /// relied on. Keep the uncertain imported owners and close admission.
+    pub(crate) fn quarantine_after_encode_failure(&self) {
+        self.lock().quarantine_all();
+    }
+
     pub(crate) fn arm_and_draw<'pass>(
         &self,
         permit: DrawPermit,

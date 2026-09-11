@@ -10,6 +10,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use crate::direct_type2::BodyPanorama;
+#[cfg(test)]
 use crate::direct_type2::CompactNv12Panorama;
 use crate::{Fallible, FrameStamp};
 
@@ -77,6 +78,8 @@ pub(crate) struct Stream {
 }
 
 impl Stream {
+    /// Full-resolution reference retained for representation/quality tests.
+    #[cfg(test)]
     pub(crate) fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -139,6 +142,7 @@ impl Stream {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn push(&mut self, source: CompactNv12Panorama) -> Fallible<Vec<FilteredPanorama>> {
         let result = self.push_inner(Source::Compact(source));
         self.remember_failure(result)
@@ -163,6 +167,7 @@ impl Stream {
         let started = trace_start();
         self.ensure_active()?;
         let (stamp, matrix) = match &source {
+            #[cfg(test)]
             Source::Compact(source) => {
                 validate_compact(source, &self.device, self.full)?;
                 (source.frame().clone(), source.coefficients())
@@ -213,6 +218,7 @@ impl Stream {
                 label: Some("streaming temporal source preparation"),
             });
         let luma = match source {
+            #[cfg(test)]
             Source::Compact(source) => {
                 self.history
                     .encode_push_compact(&self.device, &mut encoder, &source)?
@@ -490,6 +496,7 @@ impl Stream {
 }
 
 enum Source {
+    #[cfg(test)]
     Compact(CompactNv12Panorama),
     Rgb {
         body: BodyPanorama,
@@ -553,6 +560,7 @@ fn validate_body(body: &BodyPanorama, device: &wgpu::Device, full: [u32; 2]) -> 
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_compact(
     source: &CompactNv12Panorama,
     device: &wgpu::Device,
@@ -583,6 +591,7 @@ fn validate_compact(
     validate_matrix(source.coefficients())
 }
 
+#[cfg(test)]
 fn sampled_single_2d(texture: &wgpu::Texture) -> bool {
     texture.dimension() == wgpu::TextureDimension::D2
         && texture.depth_or_array_layers() == 1

@@ -21,15 +21,8 @@ impl ScenePipeline {
                 && panorama.frame() == &shown.frames.stamp()
             {
                 let device = self.one_xs_gpu.device().clone();
-                if self.panorama_projector.is_none() {
-                    self.panorama_projector = Some(PanoramaProjector::new(&device));
-                }
                 let reframe = self.resident_reframe(primitive, shown, aspect);
-                let draw = self
-                    .panorama_projector
-                    .as_ref()
-                    .ok_or("filtered panorama projector was not constructed")?
-                    .prepare_filtered(&device, &panorama, &reframe, self.format)?;
+                let draw = panorama.prepare_view(&device, &reframe, self.format)?;
                 if draw.frame() != &shown.frames.stamp() {
                     return Err("filtered draw differs from the shown Scene frame".into());
                 }
@@ -107,14 +100,6 @@ impl ScenePipeline {
         }
 
         let device = self.one_xs_gpu.device().clone();
-        if self.panorama_projector.is_none() {
-            self.panorama_projector = Some(PanoramaProjector::new(&device));
-        }
-        let projector = self
-            .panorama_projector
-            .as_ref()
-            .expect("filtered panorama projector was just constructed");
-
         if let (Some(view), Some(panorama)) = (offered, installed_due.as_ref())
             && primitive
                 .resident_target
@@ -124,7 +109,7 @@ impl ScenePipeline {
                 return Err("filtered panorama differs from the offered Scene frame".into());
             }
             let reframe = self.resident_reframe(primitive, view, aspect);
-            let draw = projector.prepare_filtered(&device, panorama, &reframe, self.format)?;
+            let draw = panorama.prepare_view(&device, &reframe, self.format)?;
             if draw.frame() != &view.frames.stamp() {
                 return Err("filtered draw differs from the offered Scene frame".into());
             }
@@ -136,7 +121,7 @@ impl ScenePipeline {
             && panorama.frame() == &shown.frames.stamp()
         {
             let reframe = self.resident_reframe(primitive, shown, aspect);
-            let draw = projector.prepare_filtered(&device, &panorama, &reframe, self.format)?;
+            let draw = panorama.prepare_view(&device, &reframe, self.format)?;
             if draw.frame() != &shown.frames.stamp() {
                 return Err("filtered draw differs from the shown Scene frame".into());
             }
@@ -232,17 +217,8 @@ impl ScenePipeline {
                 .installed()?
                 .filter(|panorama| panorama.frame() == &view.frames.stamp())
                 .ok_or("filtered screenshot output differs from the shown frame")?;
-            let projector = self
-                .panorama_projector
-                .as_ref()
-                .ok_or("filtered screenshot has no panorama projector")?;
             let reframe = self.resident_reframe(primitive, &view, aspect);
-            let draw = projector.prepare_filtered(
-                self.one_xs_gpu.device(),
-                &panorama,
-                &reframe,
-                self.format,
-            )?;
+            let draw = panorama.prepare_view(self.one_xs_gpu.device(), &reframe, self.format)?;
             let at = Stamp {
                 index: view.frames.index,
                 time: view.frames.timestamp,
@@ -257,7 +233,7 @@ impl ScenePipeline {
         width: u32,
         aspect: f32,
         at: Stamp,
-        draw: PreparedPanoramaDraw,
+        draw: PreparedCorrectionDraw,
     ) -> Fallible<Pending> {
         if draw.frame().index() != at.index || draw.frame().timestamp() != at.time {
             return Err("filtered screenshot draw differs from the shown Scene frame".into());
