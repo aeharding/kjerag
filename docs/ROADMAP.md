@@ -14,6 +14,35 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Prefilter test build accepted and installed, 2026-09-11:** the owner answers
+"Looks OK I think" to the new 607 moving prefilter comparison. After the
+first-picture delay is explained as roughly 0.1 seconds of extra startup
+preparation, not slower playback, and possible extra seeking delay is explicitly
+disclosed as unmeasured, the owner answers "oh ok yeah thats fine" to test-build
+installation. These tradeoffs are accepted for this test build, not all footage,
+live smoothness or merge. The prepared source09ca503b package is installed:
+OSTree `7f86afaa2babb9063acd3854dbcfa7c8fa88b003a1611ebd5c7365a19c874f05`,
+executable SHA256
+`fca43cb5c100d57f3ded60fcfa5c44080c29a738a0f94dce96f73a33303bff7c`.
+Installed bytes and runtime/permission metadata match the package, origin
+remains `kjerag-origin`, and the previous package is retained for recovery.
+Both-camera installed qualification passes: 40 X4 and 44 ONE X2 checks,
+including exact views, pause, backward seek, real scrubber, fullscreen and
+the four ONE X2 paired-file arrival paths. Dedicated audio-enabled checks
+also pass three controls wakes per camera with no drops/starvation/audio
+underruns. The actual installed package then passes the strict full-resolution
+capacity trace checks during 40-second pans at2256x1504: 312.774 completed
+redraws/s on X4 and318.399 on ONE X2, with1198/1199 contiguous source advances
+(29.950/29.975 per second, the integer-window count at recorded29.97fps).
+Both clips keep up with playback, with maximum reported video lateness5.3/3.3ms,
+no drops/starvation/audio underruns and changing-view hashes verified. These
+are installed-package measurements, separate from the earlier native rates.
+Completion-spacing p99/max remain11.964/21.453ms on X4 and10.537/22.727ms on
+ONE X2; this meets throughput in these cohorts, not a no-spikes or broad live
+smoothness claim. All test players exit. The installed build is ready for owner
+live review, not another optimization or export. No push, merge or public
+release. The pending/blocker notes below describe earlier checkpoints.
+
 **Prefilter Flatpak prepared, not installed, 2026-09-11:** source
 `09ca503b79a4f1709c05c9cc54493507e755c312` builds offline in the 25.08 SDK
 in 2:31.78. Source hashes, Cargo.lock/source coverage, FFmpeg7 linkage,

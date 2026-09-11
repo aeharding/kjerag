@@ -86,10 +86,10 @@ The shell is libcosmic, which pins wgpu 28, so `render` is written against
 28 and owns the one module that wgpu 30 would delete
 (`crates/render/src/dmabuf.rs`).
 
-The installed test build draws original full-resolution source/map
+The branch and installed test build draw full-resolution prefiltered source/map
 samples with a reduced full-sphere temporal residual. The owner accepted the607
-quarter-field moving comparison, with the exact response recorded in ROADMAP;
-this is not broad footage acceptance or a performance qualification. The two
+quarter-field and subsequent prefilter moving comparisons, with exact responses
+recorded in ROADMAP; this is not broad footage or live smoothness acceptance. The two
 low-resolution terms pass through the same gamma RGB/NV12/RGB conversion. Their
 signed difference is bilinearly sampled, added to explicitly quantized direct
 RGB8, clamped, then transferred to the surface in one render pass. Rectilinear
@@ -97,13 +97,14 @@ views use the existing native mesh; curved views use the existing body-ray map.
 Correction textures extend picture group0, retaining map group1 and colour
 group2 within the native three-group limit. Pipelines cache by surface format.
 
-The branch's pending source-rate prefilter trial changes only the corrected
+The source-rate prefilter changes only the corrected
 display's high term: it evaluates the existing native box at every source
 texel centre in the existing snapshot passes, then uses atlas bilinear reads
 at view time. Full dimensions do not mean unchanged detail: prefilter storage
 quantization and later interpolation can soften detail or change noise. This
-requires its own moving owner approval. A private snapshot constructor and
-corrected-only shader specialization keep prefiltered storage away from raw
+was disclosed and accepted for the607 movie and test build, not all footage.
+A private snapshot constructor and corrected-only shader specialization keep
+prefiltered storage away from raw
 body/map/color/temporal inputs. Native-box reference draws default to unchanged
 sampling; both paths share the original atlas boundary and box WGSL functions.
 
@@ -118,14 +119,16 @@ original minimum. Five through seven matching nonempty pyramids are admitted,
 never padded or fabricated levels. The larger angular search support and
 changed noise/motion-edge output were disclosed before the owner accepted the
 607 moving Studio comparison ("Yes, looks acceptable"). That approval is not
-acceptance of all footage, live-player performance or a merge. This candidate's
-installed bundle passes40 X4 and44 ONE X2 UI checks; ROADMAP records its exact
-source and executable identity. The preceding package is retained for recovery.
+acceptance of all footage, live-player performance or a merge. The
+preceding quarter bundle passed40 X4 and44 ONE X2 UI checks; ROADMAP records
+the current prefilter package's separate installed qualification and exact
+source/executable identity. The preceding package is retained for recovery.
 
 The resident source worker encodes the reduced RGB body and display snapshots
-of both original lens planes in one command buffer. The installed build uses
-exact texture-load copies; the branch prefilters in the same two MRT passes,
-reading both original lens planes at the internal atlas join. Imported dmabufs are
+of both original lens planes in one command buffer. The previous quarter build
+used exact texture-load copies; the current branch and installed build prefilter
+in the same two MRT passes, reading both original lens planes at the internal
+atlas join. Imported dmabufs are
 sampled-only, so no unsupported COPY_SRC use is invented. The first body pass
 arms submission-complete retirement before any source sampling. Its retirement
 covers the later snapshot passes too; a later encode rejection explicitly closes
@@ -183,6 +186,8 @@ does not eagerly build motion images for radius-zero sources. A fresh seek
 epoch prepares its own pipelines during buffering; preparation is not free
 startup work. The measured first-source delay and narrow activation-hitch
 comparison are recorded in ROADMAP, separately from overall capacity.
+The owner accepted the roughly0.1-second first-picture delay for this test
+build after its meaning and the unmeasured extra seek delay were disclosed.
 
 This candidate deliberately changes coarse search execution semantics: blocks
 read immutable same-level predictors instead of serially updated neighbours,
