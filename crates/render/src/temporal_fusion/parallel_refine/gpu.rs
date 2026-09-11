@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 
 use super::coarse::prepare::Prepared;
 
+use crate::temporal_fusion::HorizontalBoundary;
 use crate::temporal_fusion::pyramid::gpu::PackedGray;
 use wgpu::util::DeviceExt;
 
@@ -51,6 +52,7 @@ pub enum Error {
     },
     Geometry,
     CoarseGeometry,
+    PeriodicWidth,
     ResidentSeeds,
     SeedCount {
         ordinal: usize,
@@ -86,6 +88,8 @@ impl fmt::Display for Error {
             Self::CoarseGeometry => formatter.write_str(
                 "parallel coarse search needs equal image dimensions from 16 through 4095",
             ),
+            Self::PeriodicWidth => formatter
+                .write_str("periodic temporal search needs logical image widths divisible by four"),
             Self::ResidentSeeds => formatter.write_str(
                 "resident motion seeds differ from the search geometry or reference count",
             ),
@@ -116,6 +120,7 @@ pub struct Builder {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
     coarse: OnceLock<[wgpu::ComputePipeline; 2]>,
+    boundary: HorizontalBoundary,
 }
 
 #[derive(Clone, Copy)]
@@ -133,6 +138,10 @@ struct Inputs<'a> {
 
 impl Builder {
     pub fn new(device: &wgpu::Device) -> Self {
+        Self::with_boundary(device, HorizontalBoundary::Clamp)
+    }
+
+    pub(crate) fn with_boundary(device: &wgpu::Device, boundary: HorizontalBoundary) -> Self {
         let texture = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -187,7 +196,10 @@ impl Builder {
             layout: Some(&pipeline_layout),
             module: &shader,
             entry_point: Some("refine_blocks"),
-            compilation_options: Default::default(),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: &[("PERIODIC_X", boundary.shader_value())],
+                ..Default::default()
+            },
             cache: None,
         });
         Self {
@@ -195,6 +207,7 @@ impl Builder {
             layout,
             pipeline,
             coarse: OnceLock::new(),
+            boundary,
         }
     }
 
@@ -430,6 +443,9 @@ impl Builder {
             return Err(Error::ForeignDevice);
         }
         let [width, height] = current.logical_size();
+        if self.boundary == HorizontalBoundary::Periodic && !width.is_multiple_of(4) {
+            return Err(Error::PeriodicWidth);
+        }
         let (range, error) = match mode {
             Mode::Finest => (finest_minimum..MAX_DIMENSION_EXCLUSIVE, Error::Geometry),
             Mode::Coarse => (BLOCK..MAX_DIMENSION_EXCLUSIVE / 2, Error::CoarseGeometry),
@@ -476,6 +492,7 @@ impl Builder {
                             constants: &[
                                 ("COARSE", 1.0),
                                 ("SMALLEST", if smallest { 1.0 } else { 0.0 }),
+                                ("PERIODIC_X", self.boundary.shader_value()),
                             ],
                             ..Default::default()
                         },

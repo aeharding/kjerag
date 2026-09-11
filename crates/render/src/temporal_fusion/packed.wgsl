@@ -6,6 +6,14 @@ struct PackedFusionOutput {
     @location(1) uv: vec2<f32>,
 }
 
+override PERIODIC_X: bool = false;
+
+fn bounded(coordinate: vec2<i32>, size: vec2<i32>) -> vec2<i32> {
+    let x = select(clamp(coordinate.x, 0, size.x - 1),
+                   ((coordinate.x % size.x) + size.x) % size.x, PERIODIC_X);
+    return vec2<i32>(x, clamp(coordinate.y, 0, size.y - 1));
+}
+
 @fragment
 fn fuse_packed(@builtin(position) position: vec4<f32>) -> PackedFusionOutput {
     let uv_pixel = vec2<u32>(position.xy) + parameters.roi.xy / 2u;
@@ -28,8 +36,8 @@ fn fuse_packed(@builtin(position) position: vec4<f32>) -> PackedFusionOutput {
     let current_uv = textureLoad(images_uv, vec2<i32>(uv_pixel), i32(parameters.current), 0).xy;
     let y_bound = parameters.limit * limits[luma_index];
     let uv_bound = parameters.limit * limits[256u + luma_index];
-    let y_last = vec2<i32>(textureDimensions(images_y)) - vec2<i32>(1);
-    let uv_last = vec2<i32>(textureDimensions(images_uv)) - vec2<i32>(1);
+    let y_size = vec2<i32>(textureDimensions(images_y));
+    let uv_size = vec2<i32>(textureDimensions(images_uv));
     var y_total = current_y;
     var y_weight_sum = vec4<f32>(1.0);
     var uv_total = current_uv;
@@ -40,10 +48,10 @@ fn fuse_packed(@builtin(position) position: vec4<f32>) -> PackedFusionOutput {
         let reference = layer(i);
         if flow.z > 0 {
             let neighbor_y = vec4<f32>(
-                textureLoad(images_y, clamp(y00 + flow.xy, vec2<i32>(0), y_last), reference, 0).x,
-                textureLoad(images_y, clamp(y01 + flow.xy, vec2<i32>(0), y_last), reference, 0).x,
-                textureLoad(images_y, clamp(y10 + flow.xy, vec2<i32>(0), y_last), reference, 0).x,
-                textureLoad(images_y, clamp(y11 + flow.xy, vec2<i32>(0), y_last), reference, 0).x,
+                textureLoad(images_y, bounded(y00 + flow.xy, y_size), reference, 0).x,
+                textureLoad(images_y, bounded(y01 + flow.xy, y_size), reference, 0).x,
+                textureLoad(images_y, bounded(y10 + flow.xy, y_size), reference, 0).x,
+                textureLoad(images_y, bounded(y11 + flow.xy, y_size), reference, 0).x,
             );
             let confidence = clamp(f32(flow.z) * (1.0 / 255.0), 0.0, 1.0);
             let weight = vec4<f32>(
@@ -56,8 +64,8 @@ fn fuse_packed(@builtin(position) position: vec4<f32>) -> PackedFusionOutput {
             y_weight_sum += weight;
         }
         if flow.w > 0 {
-            let coordinate = clamp(vec2<i32>(uv_pixel) + (flow.xy >> vec2<u32>(1u)),
-                                   vec2<i32>(0), uv_last);
+            let coordinate = bounded(
+                vec2<i32>(uv_pixel) + (flow.xy >> vec2<u32>(1u)), uv_size);
             let neighbor_uv = textureLoad(images_uv, coordinate, reference, 0).xy;
             let confidence = clamp(f32(flow.w) * (1.0 / 255.0), 0.0, 1.0);
             let weight = vec2<f32>(

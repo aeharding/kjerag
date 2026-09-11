@@ -60,6 +60,45 @@ fn gpu_matches_cpu_for_odd_edges_and_all_six_references() {
 }
 
 #[test]
+fn periodic_predictors_join_complete_horizontal_grids_but_not_partial_tails() {
+    let Some((device, queue)) = test_gpu() else {
+        return;
+    };
+    let records = vec![vec![
+        [0, 2, 0],
+        [4, 2, 40],
+        [8, 2, 80],
+        [20, 6, 200],
+        [24, 6, 240],
+        [28, 6, 280],
+    ]];
+    let input = input(&device, [3, 2], &records);
+    let builder = Builder::new(&device);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    assert!(matches!(
+        builder.encode_with_periodic_grid(&device, &mut encoder, &input, [7, 4], true),
+        Err(Error::Geometry { .. })
+    ));
+    let output = builder
+        .encode_with_periodic_grid(&device, &mut encoder, &input, [6, 4], true)
+        .unwrap();
+    let copy = readback(&device, &mut encoder, output.seeds());
+    queue.submit([encoder.finish()]);
+    let seeds = decode_records(&read(&device, &copy));
+    // Horizontal endpoint predictors mix 3/4 of the nearest coarse column
+    // with 1/4 from the other side. Vertical endpoints still duplicate rows.
+    assert_eq!(seeds[0], [4, 4, 20]);
+    assert_eq!(seeds[5], [12, 4, 60]);
+    assert_eq!(seeds[18], [44, 12, 220]);
+    assert_eq!(seeds[23], [52, 12, 260]);
+    // A partial physical-width grid retains the original edge rule. It must
+    // not be treated as if its shorter block lattice spans the whole circle.
+    let partial = run(&device, &queue, &builder, &input, [7, 4]);
+    let expected = coarse::prepare_next(&records[0], [3, 2], [7, 4]).unwrap();
+    assert_eq!(decode_records(&partial.seeds), expected.seeds);
+}
+
+#[test]
 fn rejects_foreign_device_bad_reference_count_raw_size_and_next_geometry() {
     let Some([(first_device, _first_queue), (second_device, _second_queue)]) = gpu_pair() else {
         return;

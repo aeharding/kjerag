@@ -1,6 +1,8 @@
 @group(0) @binding(0) var full_y: texture_2d<f32>;
 @group(0) @binding(1) var gray: texture_2d<u32>;
 
+override PERIODIC_X: bool = false;
+
 @vertex
 fn triangle(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
     let x = f32(i32(index & 1u) * 4 - 1);
@@ -22,6 +24,14 @@ fn rounded_half(a: u32, b: u32) -> u32 {
 
 fn filtered(a: u32, b: u32, c: u32, d: u32) -> u32 {
     return (a + 3u * b + 3u * c + d + 4u) >> 3u;
+}
+
+fn horizontal_index(x: i32, width: u32) -> u32 {
+    if PERIODIC_X {
+        let signed_width = i32(width);
+        return u32(((x % signed_width) + signed_width) % signed_width);
+    }
+    return u32(clamp(x, 0, i32(width) - 1));
 }
 
 @fragment
@@ -89,6 +99,15 @@ fn reduce_horizontal(@builtin(position) position: vec4<f32>) -> @location(0) u32
     let destination = output_coordinate(position);
     let source_size = textureDimensions(gray);
     let destination_width = source_size.x / 2u;
+    if PERIODIC_X {
+        let center = i32(2u * destination.x);
+        return filtered(
+            load_gray(vec2<u32>(horizontal_index(center - 1, source_size.x), destination.y)),
+            load_gray(vec2<u32>(horizontal_index(center, source_size.x), destination.y)),
+            load_gray(vec2<u32>(horizontal_index(center + 1, source_size.x), destination.y)),
+            load_gray(vec2<u32>(horizontal_index(center + 2, source_size.x), destination.y)),
+        );
+    }
     if destination.x == 0u {
         return rounded_half(load_gray(destination), load_gray(destination + vec2<u32>(1u, 0u)));
     }

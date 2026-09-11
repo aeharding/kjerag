@@ -176,6 +176,20 @@ impl Builder {
         coarse: &gpu::Output,
         next_blocks: [u32; 2],
     ) -> Result<Prepared, Error> {
+        self.encode_with_periodic_grid(device, encoder, coarse, next_blocks, false)
+    }
+
+    /// Only a coarse block grid covering its complete physical image may
+    /// treat its first and last columns as neighboring predictors. Partial
+    /// coarse tails retain the original endpoint prediction, not a false ring.
+    pub(crate) fn encode_with_periodic_grid(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        coarse: &gpu::Output,
+        next_blocks: [u32; 2],
+        periodic_grid_x: bool,
+    ) -> Result<Prepared, Error> {
         if self.device != *device || coarse.device != *device {
             return Err(Error::ForeignDevice);
         }
@@ -186,6 +200,7 @@ impl Builder {
         if coarse_blocks
             .into_iter()
             .any(|value| value == 0 || value > MAX_COARSE_BLOCKS)
+            || (periodic_grid_x && next_blocks[0] != 2 * coarse_blocks[0])
             || !coarse_blocks
                 .into_iter()
                 .zip(next_blocks)
@@ -257,7 +272,7 @@ impl Builder {
             u32::try_from(coarse_count).map_err(|_| Error::UnsupportedSize)?,
             u32::try_from(next_count).map_err(|_| Error::UnsupportedSize)?,
             coarse.references,
-            0,
+            u32::from(periodic_grid_x),
         ]
         .into_iter()
         .flat_map(u32::to_le_bytes)

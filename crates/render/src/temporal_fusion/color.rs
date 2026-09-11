@@ -9,6 +9,8 @@
 use std::fmt;
 use wgpu::util::DeviceExt;
 
+use super::HorizontalBoundary;
+
 /// The four coefficients consumed by Kjerag's `source_rgb` conversion.
 ///
 /// For centred `[Cb, Cr]`, the forward source law is
@@ -116,6 +118,10 @@ pub struct GpuColorConversion {
 
 impl GpuColorConversion {
     pub fn new(device: &wgpu::Device) -> Self {
+        Self::with_boundary(device, HorizontalBoundary::Clamp)
+    }
+
+    pub(crate) fn with_boundary(device: &wgpu::Device, boundary: HorizontalBoundary) -> Self {
         let sampled = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -157,7 +163,7 @@ impl GpuColorConversion {
                              shader: &wgpu::ShaderModule,
                              entry,
                              format,
-                             packed| {
+                             constants: &[(&str, f64)]| {
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(label),
                 bind_group_layouts: &[layout],
@@ -176,7 +182,7 @@ impl GpuColorConversion {
                     module: shader,
                     entry_point: Some(entry),
                     compilation_options: wgpu::PipelineCompilationOptions {
-                        constants: if packed { &[("PACKED_LUMA", 1.0)] } else { &[] },
+                        constants,
                         ..Default::default()
                     },
                     targets: &[Some(wgpu::ColorTargetState {
@@ -198,7 +204,7 @@ impl GpuColorConversion {
             &rgb_to_nv12,
             "rgb_to_y",
             wgpu::TextureFormat::R8Unorm,
-            false,
+            &[],
         );
         let uv_pipeline = make_pipeline(
             "diagnostic RGB to UV",
@@ -206,23 +212,28 @@ impl GpuColorConversion {
             &rgb_to_nv12,
             "rgb_to_uv",
             wgpu::TextureFormat::Rg8Unorm,
-            false,
+            &[],
         );
+        let rgb_constants = [("PERIODIC_X", boundary.shader_value())];
         let rgb_pipeline = make_pipeline(
             "diagnostic NV12 to RGB",
             &nv12_layout,
             &nv12_to_rgb,
             "nv12_to_rgb",
             wgpu::TextureFormat::Rgba8Unorm,
-            false,
+            &rgb_constants,
         );
+        let packed_rgb_constants = [
+            ("PERIODIC_X", boundary.shader_value()),
+            ("PACKED_LUMA", 1.0),
+        ];
         let packed_rgb_pipeline = make_pipeline(
             "packed YUV to RGB",
             &nv12_layout,
             &nv12_to_rgb,
             "nv12_to_rgb",
             wgpu::TextureFormat::Rgba8Unorm,
-            true,
+            &packed_rgb_constants,
         );
         Self {
             device: device.clone(),
@@ -627,6 +638,7 @@ fn convert(rgb: vec3<f32>) -> vec3<f32> {
 
 const NV12_TO_RGB_WGSL: &str = r#"
 override PACKED_LUMA: bool = false;
+override PERIODIC_X: bool = false;
 struct Matrix { value: vec4<f32>, }
 @group(0) @binding(0) var source_y: texture_2d<f32>;
 @group(0) @binding(1) var source_uv: texture_2d<f32>;
@@ -639,6 +651,13 @@ struct Vertex { @builtin(position) position: vec4<f32>, }
   return Vertex(vec4(positions[vertex], 0.0, 1.0));
 }
 
+fn chroma_x(value: i32, width: i32) -> i32 {
+  if PERIODIC_X {
+    return ((value % width) + width) % width;
+  }
+  return clamp(value, 0, width - 1);
+}
+
 fn centred_chroma(position: vec2<f32>) -> vec2<f32> {
   // A UV texel represents the centre of a 2x2 luma footprint. In UV texel
   // coordinates that centre is an integer, hence q = luma_position/2 - 1/2.
@@ -646,10 +665,15 @@ fn centred_chroma(position: vec2<f32>) -> vec2<f32> {
   let low = vec2<i32>(floor(q));
   let fraction = fract(q);
   let limit = vec2<i32>(textureDimensions(source_uv)) - vec2(1);
-  let at = clamp(low, vec2(0), limit);
-  let right = clamp(low + vec2(1, 0), vec2(0), limit);
-  let down = clamp(low + vec2(0, 1), vec2(0), limit);
-  let diagonal = clamp(low + vec2(1, 1), vec2(0), limit);
+  let width = limit.x + 1;
+  let x0 = chroma_x(low.x, width);
+  let x1 = chroma_x(low.x + 1, width);
+  let y0 = clamp(low.y, 0, limit.y);
+  let y1 = clamp(low.y + 1, 0, limit.y);
+  let at = vec2<i32>(x0, y0);
+  let right = vec2<i32>(x1, y0);
+  let down = vec2<i32>(x0, y1);
+  let diagonal = vec2<i32>(x1, y1);
   let top = mix(textureLoad(source_uv, at, 0).rg,
     textureLoad(source_uv, right, 0).rg, fraction.x);
   let bottom = mix(textureLoad(source_uv, down, 0).rg,

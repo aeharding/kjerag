@@ -14,6 +14,7 @@ use crate::direct_type2::BodyPanorama;
 use crate::direct_type2::CompactNv12Panorama;
 use crate::{Fallible, FrameStamp};
 
+use super::HorizontalBoundary;
 use super::color::{GpuColorConversion, MatrixCoefficients};
 use super::history::History;
 use super::motion::{self, Geometry};
@@ -88,7 +89,14 @@ impl Stream {
         full: [u32; 2],
         provider: Provider,
     ) -> Fallible<Self> {
-        Self::new_with_motion_levels(device, queue, full, provider, FULL_RESOLUTION_LEVELS)
+        Self::new_with_motion_levels(
+            device,
+            queue,
+            full,
+            provider,
+            FULL_RESOLUTION_LEVELS,
+            HorizontalBoundary::Clamp,
+        )
     }
 
     /// Experimental half-linear correction field. Halving both panorama axes
@@ -103,7 +111,14 @@ impl Stream {
         provider: Provider,
     ) -> Fallible<Self> {
         validate_motion_full(full, HALF_RESOLUTION_LEVELS)?;
-        Self::new_with_motion_levels(device, queue, full, provider, HALF_RESOLUTION_LEVELS)
+        Self::new_with_motion_levels(
+            device,
+            queue,
+            full,
+            provider,
+            HALF_RESOLUTION_LEVELS,
+            HorizontalBoundary::Clamp,
+        )
     }
 
     /// Performance/quality review candidate. The original source remains
@@ -116,7 +131,14 @@ impl Stream {
         provider: Provider,
     ) -> Fallible<Self> {
         validate_motion_full(full, QUARTER_RESOLUTION_LEVELS)?;
-        Self::new_with_motion_levels(device, queue, full, provider, QUARTER_RESOLUTION_LEVELS)
+        Self::new_with_motion_levels(
+            device,
+            queue,
+            full,
+            provider,
+            QUARTER_RESOLUTION_LEVELS,
+            HorizontalBoundary::Periodic,
+        )
     }
 
     /// Compatibility name for the existing real-input quality review.
@@ -136,6 +158,7 @@ impl Stream {
         full: [u32; 2],
         provider: Provider,
         motion_levels: usize,
+        boundary: HorizontalBoundary,
     ) -> Fallible<Self> {
         validate_full(full)?;
         Ok(Self {
@@ -150,11 +173,11 @@ impl Stream {
             next_center: 0,
             finished: false,
             failure: None,
-            color: GpuColorConversion::new(device),
-            pyramid: pyramid_gpu::Builder::new(device),
-            coarse: coarse_gpu::Builder::new(device),
-            motion: motion::gpu::Builder::new(device),
-            fuse: packed::Encoder::new(device),
+            color: GpuColorConversion::with_boundary(device, boundary),
+            pyramid: pyramid_gpu::Builder::with_boundary(device, boundary),
+            coarse: coarse_gpu::Builder::with_boundary(device, boundary),
+            motion: motion::gpu::Builder::with_boundary(device, boundary),
+            fuse: packed::Encoder::with_boundary(device, boundary),
         })
     }
 

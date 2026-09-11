@@ -1,4 +1,5 @@
 use super::{Builder, Error, Prepared};
+use crate::temporal_fusion::HorizontalBoundary;
 use crate::temporal_fusion::motion::{self, Geometry, Parameters, ResidentParameters};
 use crate::temporal_fusion::parallel_refine::{self, coarse::gpu::MotionPyramid};
 use crate::temporal_fusion::pyramid::{self, gpu as gpu_pyramid};
@@ -301,6 +302,41 @@ fn interpolation_truncation_clamping_and_separate_tables_match_reference() {
         &parameters([8, 8], &luma, &y, &uv),
         "all luma indices and independent signed thresholds",
     );
+}
+
+#[test]
+fn periodic_expansion_wraps_the_odd_final_column_and_preserves_both_edge_directions() {
+    let Some((device, queue)) = gpu() else { return };
+    let builder = Builder::with_boundary(&device, HorizontalBoundary::Periodic);
+    let table = [1.0; 256];
+
+    // These are the selected quarter-field X4 and X2 output widths. The odd
+    // final output column lies halfway between the final and first raw records.
+    for output_width in [120, 88] {
+        let raw_width = output_width / 2;
+        let luma = vec![0; (output_width * 2) as usize];
+        let p = parameters([raw_width, 1], &luma, &table, &table);
+        for (first, last, expected_first, expected_last) in [(1, 9, 2, 10), (-9, -1, -18, -10)] {
+            let mut raw = vec![[0, 0, 0]; raw_width as usize];
+            raw[0][0] = first;
+            raw[raw_width as usize - 1][0] = last;
+            let mut encoder = device.create_command_encoder(&Default::default());
+            let output = builder.encode(&device, &mut encoder, &raw, &p).unwrap();
+            let copy = copy_texture(&device, &mut encoder, &output, p.geometry.output_grid, 8);
+            queue.submit([encoder.finish()]);
+            let actual = read_copy(&device, &copy, p.geometry.output_grid, 8);
+            let dx = |x: u32| {
+                let at = (x * 8) as usize;
+                i16::from_le_bytes([actual[at], actual[at + 1]]) as i32
+            };
+            assert_eq!(dx(0), expected_first, "left edge at width {output_width}");
+            assert_eq!(
+                dx(output_width - 1),
+                expected_last,
+                "wrapped odd column at width {output_width}"
+            );
+        }
+    }
 }
 
 #[test]

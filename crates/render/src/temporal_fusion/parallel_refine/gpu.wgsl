@@ -59,6 +59,7 @@ const WORKGROUP_LANES: u32 = CANDIDATES * LANES_PER_CANDIDATE;
 const PENALTY_NEW: u32 = 50u;
 override COARSE: bool = false;
 override SMALLEST: bool = false;
+override PERIODIC_X: bool = false;
 
 var<workgroup> current_pixels: array<vec4<u32>, CURRENT_QUADS>;
 var<workgroup> partials: array<u32, WORKGROUP_LANES>;
@@ -69,6 +70,12 @@ var<workgroup> ring_center: vec2<i32>;
 
 // Each texel is four consecutive horizontal bytes in explicit rgba order.
 fn reference_quad(coordinate: vec2<i32>) -> vec4<u32> {
+    if PERIODIC_X {
+        // The periodic constructor requires complete four-byte texels.
+        let width = i32(params.width / 4u);
+        let x = ((coordinate.x % width) + width) % width;
+        return textureLoad(reference_image, vec2<i32>(x, coordinate.y), 0);
+    }
     return textureLoad(reference_image, coordinate, 0);
 }
 
@@ -87,6 +94,12 @@ fn sad_quad(current: vec4<u32>, wanted: vec4<u32>) -> u32 {
 
 fn block_bounds(block: vec2<u32>) -> Bounds {
     let source = vec2<i32>(block * BLOCK);
+    if PERIODIC_X {
+        // Keep the existing signed predictor safety interval. The vector is
+        // not reduced modulo a turn; only its actual image fetch wraps.
+        return Bounds(-8192, 8191, -source.y,
+            i32(params.height) - source.y - i32(BLOCK));
+    }
     return Bounds(
         -source.x,
         i32(params.width) - source.x - i32(BLOCK),
@@ -105,6 +118,10 @@ fn clipped(value: vec2<i32>, bounds: Bounds) -> vec2<i32> {
 // Checked predictors and ring candidates exclude the upper bound. The first
 // three seeds bypass this predicate after inclusive clipping, as in start_seed.
 fn is_candidate(value: vec2<i32>, bounds: Bounds) -> bool {
+    if PERIODIC_X {
+        return value.x >= -8192 && value.x < 8192 &&
+               value.y >= bounds.min_y && value.y < bounds.max_y;
+    }
     return value.x >= bounds.min_x && value.x < bounds.max_x &&
            value.y >= bounds.min_y && value.y < bounds.max_y;
 }
@@ -139,10 +156,15 @@ fn execute_batch(lane: u32, source: vec2<i32>) {
     let candidate = candidates[slot];
     var partial = 0u;
     if candidate.valid != 0u {
-        // Valid landings are nonnegative and contain all16x16 logical pixels.
+        // Flat-image landings are nonnegative and contain all16x16 pixels.
+        // For a panorama, wrap the signed pixel before dividing into quads.
         // A row needs four aligned texels or five unaligned texels. Sharing
         // adjacent texels within this lane changes no candidate or SAD term.
-        let landing = source + vec2<i32>(candidate.dx, candidate.dy);
+        var landing = source + vec2<i32>(candidate.dx, candidate.dy);
+        if PERIODIC_X {
+            let width = i32(params.width);
+            landing.x = ((landing.x % width) + width) % width;
+        }
         let first_x = landing.x / 4;
         let shift = u32(landing.x) % 4u;
         for (var row = candidate_lane; row < BLOCK; row += LANES_PER_CANDIDATE) {
@@ -265,6 +287,9 @@ fn refine_blocks(
         if block.x > 0u {
             let value = seeds[index - 1u];
             left = clipped(vec2<i32>(value.dx, value.dy), bounds);
+        } else if PERIODIC_X && params.blocks_x * BLOCK == params.width {
+            let value = seeds[index + params.blocks_x - 1u];
+            left = clipped(vec2<i32>(value.dx, value.dy), bounds);
         }
         var up = zero;
         if block.y > 0u {
@@ -272,11 +297,15 @@ fn refine_blocks(
             up = clipped(vec2<i32>(value.dx, value.dy), bounds);
         }
         var diagonal = zero;
-        if !SMALLEST && block.y + 1u < params.blocks_y && block.x + 1u < params.blocks_x {
-            let value = seeds[index + params.blocks_x + 1u];
+        let complete_ring = PERIODIC_X && params.blocks_x * BLOCK == params.width;
+        let has_right = block.x + 1u < params.blocks_x || complete_ring;
+        let right_x = (block.x + 1u) % params.blocks_x;
+        let reference_base = params.reference * block_count;
+        if !SMALLEST && block.y + 1u < params.blocks_y && has_right {
+            let value = seeds[reference_base + (block.y + 1u) * params.blocks_x + right_x];
             diagonal = clipped(vec2<i32>(value.dx, value.dy), bounds);
-        } else if block.y > 0u && block.x + 1u < params.blocks_x {
-            let value = seeds[index - params.blocks_x + 1u];
+        } else if block.y > 0u && has_right {
+            let value = seeds[reference_base + (block.y - 1u) * params.blocks_x + right_x];
             diagonal = clipped(vec2<i32>(value.dx, value.dy), bounds);
         }
 

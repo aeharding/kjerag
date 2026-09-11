@@ -10,6 +10,116 @@ use std::io::Write;
 
 const DEADLINE: Duration = Duration::from_secs(60);
 
+/// Capture the selected player's actual current/filtered fields, without
+/// rebuilding either term through an offline approximation. A reported line
+/// can then be compared with the panorama boundary and the real shown view.
+#[test]
+fn reported_filtered_correction_fields() {
+    let Some(output) = std::env::var_os("KJERAG_CORRECTION_FIELDS_DIR").map(PathBuf::from) else {
+        return;
+    };
+    let line = std::env::var("KJERAG_REPORTED_SEAM_VIEW").expect("review needs a full view line");
+    let (path, view) = crate::Framing::read_line(&line).expect("invalid review view line");
+    assert_eq!(view.horizon, Horizon::Locked);
+    std::fs::create_dir(&output).expect("review output must be a new directory");
+    for arm in ["current", "filtered", "shown"] {
+        std::fs::create_dir(output.join(arm)).unwrap();
+    }
+    std::fs::write(output.join("request.txt"), format!("{line}\n")).unwrap();
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let mut scene = Scene::open(&path).unwrap();
+    scene.set_muted(true);
+    scene.enable_temporal_for_review().unwrap();
+    scene.pause(Instant::now());
+    scene.set_horizon(Horizon::Locked);
+    let timing = scene.player(Player::timing).unwrap();
+    let first_index = timing.index_at(view.at);
+    scene.seek(view.at, Accuracy::Exact);
+    let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    let mut previous = None;
+    let mut log =
+        std::io::BufWriter::new(std::fs::File::create_new(output.join("sources.tsv")).unwrap());
+    writeln!(log, "source\ttime_ns\twidth\theight\tstamp").unwrap();
+    for ordinal in 0..31 {
+        let stamp = super::tests::wait_for_new_scene_frame(&scene, previous.as_ref());
+        assert_eq!(stamp.index(), first_index + ordinal);
+        settle_filtered(
+            &scene,
+            &mut pipeline,
+            &device,
+            &queue,
+            &stamp,
+            view.camera,
+            None,
+        );
+        let installed = scene
+            .primitive(view.camera)
+            .filtered_capture
+            .unwrap()
+            .installed()
+            .unwrap()
+            .expect("review lost the installed correction");
+        assert_eq!(installed.frame(), &stamp);
+        let correction = installed.correction_for_review();
+        assert_eq!(correction.frame(), &stamp);
+        assert!(correction.belongs_to(&device));
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let reads = [
+            ("current", correction.current_texture()),
+            ("filtered", correction.filtered_texture()),
+        ]
+        .map(|(arm, texture)| {
+            (
+                arm,
+                texture.width(),
+                texture.height(),
+                super::panorama_review::PendingReadback::encode(&device, &mut encoder, texture),
+            )
+        });
+        assert_eq!((reads[0].1, reads[0].2), (reads[1].1, reads[1].2));
+        let submission = queue.submit([encoder.finish()]);
+        for (arm, width, height, read) in reads {
+            let rgba = read.read(&device, submission.clone());
+            super::tests::write_review_ppm_sized(
+                &output.join(arm),
+                stamp.index(),
+                width,
+                height,
+                &rgba,
+            );
+        }
+        let shot = capture_shown(&scene, &mut pipeline, &device, &queue, view.camera);
+        assert_eq!(shot.index, stamp.index());
+        assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&stamp));
+        super::tests::write_review_ppm_sized(
+            &output.join("shown"),
+            stamp.index(),
+            shot.width,
+            shot.height,
+            &shot.rgba,
+        );
+        writeln!(
+            log,
+            "{}\t{}\t{}\t{}\t{stamp:?}",
+            stamp.index(),
+            stamp.timestamp().as_nanos(),
+            correction.current_texture().width(),
+            correction.current_texture().height()
+        )
+        .unwrap();
+        log.flush().unwrap();
+        eprintln!(
+            "correction-fields: source {} exact installed current/filtered/shown",
+            stamp.index()
+        );
+        previous = Some(stamp);
+        if ordinal < 30 {
+            scene.pump(Instant::now());
+            scene.step(Instant::now(), 1);
+        }
+    }
+}
+
 #[test]
 fn one_x2_real_iso_transition_filters_exact_sources() {
     let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {

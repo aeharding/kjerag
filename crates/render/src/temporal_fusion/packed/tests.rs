@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::temporal_fusion::HorizontalBoundary;
 use crate::temporal_fusion::tests::{array_texture, copy_texture, gpu, read_copy, write_layer};
 use crate::temporal_fusion::{GpuFuse, Inputs, Parameters};
 
@@ -20,6 +21,126 @@ fn packed_quartets_match_original_planes_exactly() {
         let fixture = Fixture::new(&device, &queue, SMALL_SIZE, references);
         assert_outputs_equal(&device, &queue, &original, &packed, &fixture, SMALL_ROI);
     }
+}
+
+#[test]
+fn periodic_packed_fusion_wraps_y_and_uv_at_both_horizontal_edges() {
+    let Some((device, queue)) = gpu() else {
+        return;
+    };
+    let size = [32, 4];
+    let uv_size = [16, 2];
+    let y = array_texture(
+        &device,
+        "periodic packed fusion Y",
+        size,
+        2,
+        wgpu::TextureFormat::R8Unorm,
+    );
+    let uv = array_texture(
+        &device,
+        "periodic packed fusion UV",
+        uv_size,
+        2,
+        wgpu::TextureFormat::Rg8Unorm,
+    );
+    let flow = array_texture(
+        &device,
+        "periodic packed fusion flow",
+        [2, 1],
+        1,
+        wgpu::TextureFormat::Rgba16Sint,
+    );
+    let luma = array_texture(
+        &device,
+        "periodic packed fusion luma",
+        [2, 1],
+        1,
+        wgpu::TextureFormat::R8Uint,
+    );
+
+    let reference_y: Vec<_> = (0..size[1])
+        .flat_map(|_| {
+            (0..size[0]).map(|x| {
+                if x < 2 {
+                    40
+                } else if x >= 30 {
+                    200
+                } else {
+                    100
+                }
+            })
+        })
+        .collect();
+    let current_y = vec![100; (size[0] * size[1]) as usize];
+    write_layer(&queue, &y, 0, [0, 0], size, size[0], &reference_y);
+    write_layer(&queue, &y, 1, [0, 0], size, size[0], &current_y);
+
+    let reference_uv: Vec<_> = (0..uv_size[1])
+        .flat_map(|_| {
+            (0..uv_size[0]).flat_map(|x| match x {
+                0 => [40, 60],
+                15 => [200, 220],
+                _ => [100, 120],
+            })
+        })
+        .collect();
+    let current_uv: Vec<_> = (0..uv_size[0] * uv_size[1])
+        .flat_map(|_| [100, 120])
+        .collect();
+    write_layer(
+        &queue,
+        &uv,
+        0,
+        [0, 0],
+        uv_size,
+        uv_size[0] * 2,
+        &reference_uv,
+    );
+    write_layer(&queue, &uv, 1, [0, 0], uv_size, uv_size[0] * 2, &current_uv);
+    let flow_bytes: Vec<_> = [[-2i16, 0, 255, 255], [2i16, 0, 255, 255]]
+        .into_iter()
+        .flatten()
+        .flat_map(i16::to_le_bytes)
+        .collect();
+    write_layer(&queue, &flow, 0, [0, 0], [2, 1], 16, &flow_bytes);
+    write_layer(&queue, &luma, 0, [0, 0], [2, 1], 2, &[0, 0]);
+
+    let inputs = Inputs {
+        y: &y,
+        uv: &uv,
+        flow: &flow,
+        luma: &luma,
+    };
+    let params = Parameters {
+        noise: 1.0,
+        limit: 1.0,
+        y_limits: [1.0; 256],
+        uv_limits: [1.0; 256],
+        current_layer: 1,
+        reference_layers: vec![0],
+    };
+    let packed = Encoder::with_boundary(&device, HorizontalBoundary::Periodic);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    let output = packed
+        .encode(
+            &device,
+            &mut encoder,
+            inputs,
+            &params,
+            [0, 0, size[0], size[1]],
+        )
+        .unwrap();
+    let y_copy = copy_texture(&device, &mut encoder, &output.y, [16, 2], 4);
+    let uv_copy = copy_texture(&device, &mut encoder, &output.uv, uv_size, 2);
+    queue.submit([encoder.finish()]);
+
+    let y_result = unpack_y(&read_copy(&device, &y_copy, [16, 2], 4), size);
+    assert_eq!(&y_result[0..2], &[150, 150]);
+    assert_eq!(&y_result[30..32], &[70, 70]);
+    let uv_result = read_copy(&device, &uv_copy, uv_size, 2);
+    assert_eq!(&uv_result[0..2], &[150, 170]);
+    assert_eq!(&uv_result[30..32], &[70, 90]);
 }
 
 #[test]

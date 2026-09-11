@@ -7,9 +7,83 @@ use crate::temporal_fusion::tests::{copy_texture, gpu, read_copy};
 
 const FULL: [u32; 2] = [4_096, 2_048];
 const BASE: [u32; 2] = [2_048, 1_024];
+// Five natural levels, with every horizontal grid complete. 2048x1024 would
+// naturally require six levels and is rejected by the production constructor.
+const PERIODIC_FULL: [u32; 2] = [1_536, 768];
+const PERIODIC_SHIFT: u32 = 512;
 const MATRIX: MatrixCoefficients =
     MatrixCoefficients::from_source_rgb([1.5748, 0.1873, 0.4681, 1.8556]);
 const ISO: [u32; 11] = [400, 400, 400, 401, 2_200, 300, 300, 300, 300, 300, 300];
+
+#[test]
+fn quarter_correction_is_equivariant_under_an_aligned_cyclic_horizontal_shift() {
+    let Some((device, queue)) = gpu() else {
+        return;
+    };
+    let observations: Vec<_> = (0..SOURCES)
+        .map(|at| DenoiseIsoObservation {
+            offset_ms: (at as i64) * 100,
+            iso: 2_200,
+        })
+        .collect();
+    let mut original = Stream::new_quarter_resolution_review(
+        &device,
+        &queue,
+        PERIODIC_FULL,
+        Provider::for_test_common(&observations).unwrap(),
+    )
+    .unwrap();
+    let mut shifted = Stream::new_quarter_resolution_review(
+        &device,
+        &queue,
+        PERIODIC_FULL,
+        Provider::for_test_common(&observations).unwrap(),
+    )
+    .unwrap();
+    let conversion = GpuColorConversion::new(&device);
+
+    for source in 0..SOURCES as u64 {
+        seed_periodic_pair(&mut original, &mut shifted, &conversion, source);
+    }
+
+    let expected = original.window[CENTER].stamp.clone();
+    let original_output = original.process(CENTER).unwrap();
+    let shifted_output = shifted.process(CENTER).unwrap();
+    assert_eq!(original_output.frame(), &expected);
+    assert_eq!(shifted_output.frame(), &expected);
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    let original_copy = copy_texture(
+        &device,
+        &mut encoder,
+        original_output.texture(),
+        PERIODIC_FULL,
+        4,
+    );
+    let shifted_copy = copy_texture(
+        &device,
+        &mut encoder,
+        shifted_output.texture(),
+        PERIODIC_FULL,
+        4,
+    );
+    queue.submit([encoder.finish()]);
+    let original_bytes = read_copy(&device, &original_copy, PERIODIC_FULL, 4);
+    let shifted_bytes = read_copy(&device, &shifted_copy, PERIODIC_FULL, 4);
+    let row_bytes = PERIODIC_FULL[0] as usize * 4;
+    let shift_bytes = PERIODIC_SHIFT as usize * 4;
+    for (row, (original_row, shifted_row)) in original_bytes
+        .chunks_exact(row_bytes)
+        .zip(shifted_bytes.chunks_exact(row_bytes))
+        .enumerate()
+    {
+        assert_eq!(
+            original_row,
+            [&shifted_row[shift_bytes..], &shifted_row[..shift_bytes]].concat(),
+            "quarter-correction output differs after undoing the cyclic shift on row {row}",
+        );
+    }
+}
 
 #[test]
 fn lazy_radius_transition_matches_eager_inputs_before_and_after_ring_reuse() {
@@ -181,6 +255,71 @@ fn seed_pair(lazy: &mut Stream, eager: &mut Stream, conversion: &GpuColorConvers
     eager.matrix = Some(MATRIX);
 }
 
+fn seed_periodic_pair(
+    original: &mut Stream,
+    shifted: &mut Stream,
+    conversion: &GpuColorConversion,
+    source: u64,
+) {
+    assert_eq!(original.window.len(), shifted.window.len());
+    let previous = original.window.back().map(|retained| &retained.stamp);
+    let stamp = FrameStamp::for_test(
+        20_000 + source,
+        Duration::from_millis(source * 100),
+        previous,
+    );
+    let device = original.device.clone();
+    let queue = original.queue.clone();
+    let original_rgb = synthetic_periodic_rgb(&device, &queue, source as u32, 0);
+    let shifted_rgb = synthetic_periodic_rgb(&device, &queue, source as u32, PERIODIC_SHIFT);
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("quarter-correction cyclic-shift source"),
+    });
+    let original_nv12 = conversion
+        .encode_rgb_to_nv12(&mut encoder, &original_rgb, MATRIX)
+        .unwrap();
+    let shifted_nv12 = conversion
+        .encode_rgb_to_nv12(&mut encoder, &shifted_rgb, MATRIX)
+        .unwrap();
+    original
+        .history
+        .encode_push(&device, &mut encoder, &stamp, &original_nv12)
+        .unwrap();
+    shifted
+        .history
+        .encode_push(&device, &mut encoder, &stamp, &shifted_nv12)
+        .unwrap();
+    let original_effective = original
+        .provider
+        .parameters_at(stamp.timestamp().as_secs_f64() * 1_000.0)
+        .unwrap();
+    let shifted_effective = shifted
+        .provider
+        .parameters_at(stamp.timestamp().as_secs_f64() * 1_000.0)
+        .unwrap();
+    assert_eq!(original_effective, shifted_effective);
+    assert_eq!(original_effective.radius, CENTER as u32);
+    let original_motion = original
+        .prepare_pyramid(&mut encoder, &original_nv12.y)
+        .unwrap();
+    let shifted_motion = shifted
+        .prepare_pyramid(&mut encoder, &shifted_nv12.y)
+        .unwrap();
+    queue.submit([encoder.finish()]);
+    original.window.push_back(Retained {
+        stamp: stamp.clone(),
+        effective: original_effective,
+        motion: Some(original_motion),
+    });
+    shifted.window.push_back(Retained {
+        stamp,
+        effective: shifted_effective,
+        motion: Some(shifted_motion),
+    });
+    original.matrix = Some(MATRIX);
+    shifted.matrix = Some(MATRIX);
+}
+
 fn assert_output_pair(lazy: &mut Stream, eager: &mut Stream, center: usize, expected: &FrameStamp) {
     let lazy_output = lazy.process(center).unwrap();
     let eager_output = eager.process(center).unwrap();
@@ -254,6 +393,61 @@ fn synthetic_rgb(device: &wgpu::Device, queue: &wgpu::Queue, source: u8) -> wgpu
             offset: 0,
             bytes_per_row: Some(FULL[0] * 4),
             rows_per_image: Some(FULL[1]),
+        },
+        texture.size(),
+    );
+    texture
+}
+
+fn synthetic_periodic_rgb(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    source: u32,
+    shift: u32,
+) -> wgpu::Texture {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("quarter-correction cyclic-shift synthetic RGB"),
+        size: wgpu::Extent3d {
+            width: PERIODIC_FULL[0],
+            height: PERIODIC_FULL[1],
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let pixels: Vec<u8> = (0..PERIODIC_FULL[1])
+        .flat_map(|y| {
+            (0..PERIODIC_FULL[0]).flat_map(move |x| {
+                let unshifted_x = (x + PERIODIC_FULL[0] - shift) % PERIODIC_FULL[0];
+                let moving_x = (unshifted_x + source * 16) % PERIODIC_FULL[0];
+                let detail = moving_x.wrapping_mul(37).wrapping_add(y.wrapping_mul(73))
+                    ^ (moving_x >> 3).wrapping_mul(181)
+                    ^ (y >> 2).wrapping_mul(109);
+                [
+                    detail as u8,
+                    (moving_x >> 3)
+                        .wrapping_add(y.wrapping_mul(3))
+                        .wrapping_add(source.wrapping_mul(17)) as u8,
+                    (moving_x >> 5)
+                        .wrapping_mul(29)
+                        .wrapping_add((y >> 1).wrapping_mul(11))
+                        .wrapping_add(source.wrapping_mul(23)) as u8,
+                    255,
+                ]
+            })
+        })
+        .collect();
+    queue.write_texture(
+        texture.as_image_copy(),
+        &pixels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(PERIODIC_FULL[0] * 4),
+            rows_per_image: Some(PERIODIC_FULL[1]),
         },
         texture.size(),
     );

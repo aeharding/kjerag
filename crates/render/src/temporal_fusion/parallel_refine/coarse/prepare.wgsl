@@ -20,7 +20,7 @@ struct Params {
     coarse_count: u32,
     next_count: u32,
     references: u32,
-    _padding: u32,
+    periodic_grid_x: u32,
 }
 
 @group(0) @binding(0) var<storage, read> coarse: array<RawMotion>;
@@ -172,9 +172,14 @@ fn estimate_globals(
 }
 
 fn coarse_at(reference: u32, x: i32, y: i32) -> RawMotion {
+    var column = x;
+    if params.periodic_grid_x != 0u {
+        let width = i32(params.coarse_x);
+        column = ((x % width) + width) % width;
+    }
     return coarse[
         reference * params.coarse_count +
-        u32(y) * params.coarse_x + u32(x)
+        u32(y) * params.coarse_x + u32(column)
     ];
 }
 
@@ -208,7 +213,7 @@ fn interpolate_seeds(
     var b: RawMotion;
     var c: RawMotion;
     var d: RawMotion;
-    if i == 0u || i >= 2u * params.coarse_x - 1u {
+    if params.periodic_grid_x == 0u && (i == 0u || i >= 2u * params.coarse_x - 1u) {
         if j == 0u || j >= 2u * params.coarse_y - 1u {
             let value = coarse_at(reference, base_x, base_y);
             a = value;

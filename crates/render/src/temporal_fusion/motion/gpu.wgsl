@@ -21,6 +21,8 @@ struct Geometry {
 @group(0) @binding(3) var<uniform> geometry: Geometry;
 @group(0) @binding(4) var resident_luma: texture_2d<u32>;
 
+override PERIODIC_X: bool = false;
+
 @vertex
 fn triangle(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
     let x = f32(i32(index & 1u) * 4 - 1);
@@ -41,7 +43,11 @@ fn raw_channel(record: RawMotion, channel: u32) -> i32 {
 fn interpolated(coordinate: vec2<u32>, channel: u32) -> f32 {
     let source = vec2<f32>(coordinate) * 0.5;
     let low = vec2<u32>(source);
-    let high = min(low + vec2<u32>(1u), vec2<u32>(geometry.raw_width - 1u, geometry.raw_height - 1u));
+    let high = vec2<u32>(
+        select(min(low.x + 1u, geometry.raw_width - 1u),
+               (low.x + 1u) % geometry.raw_width, PERIODIC_X),
+        min(low.y + 1u, geometry.raw_height - 1u),
+    );
     let fraction = source - vec2<f32>(low);
     let inverse = vec2<f32>(1.0) - fraction;
     let weights = vec4<f32>(
@@ -98,7 +104,9 @@ fn packed_motion(coordinate: vec2<u32>, table_index: u32) -> vec4<i32> {
     let cost = i32(interpolated(coordinate, 2u));
     let origin = vec2<i32>(coordinate * 16u);
     let maximum = vec2<i32>(vec2<u32>(geometry.full_width - 16u, geometry.full_height - 16u));
-    let displacement = clamp(origin + vec2<i32>(expanded_dx, expanded_dy), vec2<i32>(0), maximum) - origin;
+    let landing = origin + vec2<i32>(expanded_dx, expanded_dy);
+    let clamped = clamp(landing, vec2<i32>(0), maximum) - origin;
+    let displacement = vec2<i32>(select(clamped.x, expanded_dx, PERIODIC_X), clamped.y);
     let threshold_y = thresholds[table_index];
     let threshold_uv = thresholds[256u + table_index];
     return vec4<i32>(

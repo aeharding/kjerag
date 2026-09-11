@@ -1,5 +1,6 @@
 use super::{BLOCK, Builder, Error, MIN_DIMENSION, dimensions_in_range, validate_reference_count};
 use crate::temporal_fusion::{
+    HorizontalBoundary,
     motion::{self, Geometry, Parameters},
     parallel_refine,
     pyramid::{
@@ -58,6 +59,52 @@ fn patterned_level(width: usize, height: usize, salt: u32) -> Level {
         width,
         height,
         pixels,
+    }
+}
+
+#[test]
+fn periodic_search_matches_signed_motion_across_both_panorama_edges() {
+    let Some((device, queue)) = gpu() else {
+        return;
+    };
+    let width = 1024;
+    let height = 1024;
+    let current_level = patterned_level(width, height, 0x1234_5678);
+    let current = upload(&device, &queue, &current_level);
+    let periodic = Builder::with_boundary(&device, HorizontalBoundary::Periodic);
+    let clamped = Builder::new(&device);
+    for dx in [-3_i32, 3] {
+        let reference_level = Level {
+            width,
+            height,
+            pixels: (0..width * height)
+                .map(|at| {
+                    let x = ((at % width) as i32 - dx).rem_euclid(width as i32) as usize;
+                    current_level.pixels[at / width * width + x]
+                })
+                .collect(),
+        };
+        let reference = upload(&device, &queue, &reference_level);
+        let input = FinestInput {
+            seeds: vec![[dx, 0, 0]; (width / 16) * (height / 16)],
+            global: [dx, 0],
+        };
+        let actual = run(
+            &device,
+            &queue,
+            &periodic,
+            &current,
+            &[&reference],
+            std::slice::from_ref(&input),
+        );
+        let control = run(&device, &queue, &clamped, &current, &[&reference], &[input]);
+        // Use an interior row to isolate horizontal wrapping from the native
+        // vertical boundary predicate. These unaligned landings cross packed
+        // four-byte texels as well as the physical panorama edge.
+        let column = if dx < 0 { 0 } else { width / 16 - 1 };
+        let at = (17 * (width / 16) + column) * 12;
+        assert_eq!(&actual.bytes[at..at + 12], raw_bytes(&[[dx, 0, 0]]));
+        assert_ne!(&control.bytes[at..at + 12], &actual.bytes[at..at + 12]);
     }
 }
 

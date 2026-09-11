@@ -47,6 +47,23 @@ pub(crate) mod correction_stream;
 
 pub(crate) mod packed;
 
+/// A flat reference image has edges; a body panorama joins its first and last
+/// columns. Vertical sampling remains clamped in both representations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HorizontalBoundary {
+    Clamp,
+    Periodic,
+}
+
+impl HorizontalBoundary {
+    pub(crate) fn shader_value(self) -> f64 {
+        match self {
+            Self::Clamp => 0.0,
+            Self::Periodic => 1.0,
+        }
+    }
+}
+
 /// Effective values supplied by the calibration/history producer, not defaults.
 pub struct Parameters {
     pub noise: f32,

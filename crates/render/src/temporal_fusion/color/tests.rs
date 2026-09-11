@@ -224,6 +224,119 @@ fn packed_luma_conversion_matches_unpacked_planes_exactly() {
     }
 }
 
+#[test]
+fn periodic_chroma_wraps_both_edges_and_keeps_a_neutral_residual_exact() {
+    let Some((device, queue)) = gpu() else {
+        return;
+    };
+    let make_texture = |label, width, height, format| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    };
+    const WIDTH: u32 = 8;
+    const HEIGHT: u32 = 4;
+    let y_bytes = vec![128; (WIDTH * HEIGHT) as usize];
+    let packed_y_bytes = vec![128; (WIDTH * HEIGHT) as usize];
+    let uv_row = [[16, 240], [64, 192], [112, 144], [208, 32]];
+    let uv_bytes: Vec<u8> = (0..HEIGHT / 2)
+        .flat_map(|_| uv_row.into_iter().flatten())
+        .collect();
+    let y = make_texture(
+        "periodic unpacked Y",
+        WIDTH,
+        HEIGHT,
+        wgpu::TextureFormat::R8Unorm,
+    );
+    let packed_y = make_texture(
+        "periodic packed Y",
+        WIDTH / 2,
+        HEIGHT / 2,
+        wgpu::TextureFormat::Rgba8Unorm,
+    );
+    let uv = make_texture(
+        "periodic edge UV",
+        WIDTH / 2,
+        HEIGHT / 2,
+        wgpu::TextureFormat::Rg8Unorm,
+    );
+    for (texture, bytes, bytes_per_row) in [
+        (&y, y_bytes.as_slice(), WIDTH),
+        (&packed_y, packed_y_bytes.as_slice(), WIDTH * 2),
+        (&uv, uv_bytes.as_slice(), WIDTH),
+    ] {
+        queue.write_texture(
+            texture.as_image_copy(),
+            bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(texture.height()),
+            },
+            texture.size(),
+        );
+    }
+
+    let clamped = GpuColorConversion::new(&device);
+    let periodic = GpuColorConversion::with_boundary(&device, HorizontalBoundary::Periodic);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    let clamped_rgb = clamped
+        .encode_planes_to_rgb(&mut encoder, &y, &uv, X4)
+        .unwrap();
+    let periodic_current = periodic
+        .encode_planes_to_rgb(&mut encoder, &y, &uv, X4)
+        .unwrap();
+    let periodic_filtered = periodic
+        .encode_packed_planes_to_rgb(&mut encoder, &packed_y, &uv, X4)
+        .unwrap();
+    let clamped_copy = copy_texture(&device, &mut encoder, &clamped_rgb, WIDTH, HEIGHT, 4);
+    let current_copy = copy_texture(&device, &mut encoder, &periodic_current, WIDTH, HEIGHT, 4);
+    let filtered_copy = copy_texture(&device, &mut encoder, &periodic_filtered, WIDTH, HEIGHT, 4);
+    queue.submit([encoder.finish()]);
+    let clamped = read_copy(&device, clamped_copy, WIDTH, HEIGHT, 4);
+    let current = read_copy(&device, current_copy, WIDTH, HEIGHT, 4);
+    let filtered = read_copy(&device, filtered_copy, WIDTH, HEIGHT, 4);
+    let expected = reference_rgb(
+        &y_bytes,
+        &uv_bytes,
+        WIDTH as usize,
+        HEIGHT as usize,
+        X4,
+        true,
+    );
+
+    assert_codes("periodic", "RGB", &current, &expected);
+    assert_eq!(
+        filtered, current,
+        "equal current/filtered planes made a residual"
+    );
+    for x in [0, WIDTH as usize - 1] {
+        let at = x * 4;
+        assert_ne!(
+            &current[at..at + 3],
+            &clamped[at..at + 3],
+            "edge {x} did not distinguish periodic chroma from clamping"
+        );
+    }
+    // Identical UV rows make the top and bottom results independent of the
+    // vertical clamp while the two horizontal edge crossings remain active.
+    assert_eq!(
+        &current[..(WIDTH * 4) as usize],
+        &current[((HEIGHT - 1) * WIDTH * 4) as usize..]
+    );
+}
+
 fn gpu_round_trip(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -386,7 +499,7 @@ fn gpu_round_trip(
     let (expected_y, expected_uv) = reference_nv12(&source_bytes, matrix);
     assert_codes(label, "Y", &actual_y, &expected_y);
     assert_codes(label, "UV", &actual_uv, &expected_uv);
-    let expected_rgb = reference_rgb(&actual_y, &actual_uv, matrix);
+    let expected_rgb = reference_rgb(&actual_y, &actual_uv, 4, 4, matrix, false);
     assert_codes(label, "RGB", &actual_rgb, &expected_rgb);
     assert_codes(label, "external RGB", &actual_external_rgb, &expected_rgb);
     for alpha in actual_rgb.iter().skip(3).step_by(4) {
@@ -424,19 +537,32 @@ fn reference_nv12(source: &[u8], matrix: MatrixCoefficients) -> (Vec<u8>, Vec<u8
     (y, uv)
 }
 
-fn reference_rgb(y: &[u8], uv: &[u8], matrix: MatrixCoefficients) -> Vec<u8> {
+fn reference_rgb(
+    y: &[u8],
+    uv: &[u8],
+    width: usize,
+    height: usize,
+    matrix: MatrixCoefficients,
+    periodic_x: bool,
+) -> Vec<u8> {
+    let uv_width = width / 2;
+    let uv_height = height / 2;
     let chroma = |x: i32, y: i32| {
-        let x = x.clamp(0, 1) as usize;
-        let y = y.clamp(0, 1) as usize;
-        let at = 2 * (y * 2 + x);
+        let x = if periodic_x {
+            x.rem_euclid(uv_width as i32) as usize
+        } else {
+            x.clamp(0, uv_width as i32 - 1) as usize
+        };
+        let y = y.clamp(0, uv_height as i32 - 1) as usize;
+        let at = 2 * (y * uv_width + x);
         [
             uv[at] as f32 / 255.0 - 128.0 / 255.0,
             uv[at + 1] as f32 / 255.0 - 128.0 / 255.0,
         ]
     };
-    let mut rgb = Vec::with_capacity(64);
-    for row in 0..4 {
-        for column in 0..4 {
+    let mut rgb = Vec::with_capacity(width * height * 4);
+    for row in 0..height {
+        for column in 0..width {
             let qx = (column as f32 + 0.5) * 0.5 - 0.5;
             let qy = (row as f32 + 0.5) * 0.5 - 0.5;
             let low_x = qx.floor() as i32;
@@ -447,7 +573,7 @@ fn reference_rgb(y: &[u8], uv: &[u8], matrix: MatrixCoefficients) -> Vec<u8> {
             let top = mix2(chroma(low_x, low_y), chroma(low_x + 1, low_y), fx);
             let bottom = mix2(chroma(low_x, low_y + 1), chroma(low_x + 1, low_y + 1), fx);
             let [cb, cr] = mix2(top, bottom, fy);
-            let luminance = y[row * 4 + column] as f32 / 255.0;
+            let luminance = y[row * width + column] as f32 / 255.0;
             let decoded = [
                 luminance + matrix.r_cr * cr,
                 luminance - matrix.g_cb * cb - matrix.g_cr * cr,

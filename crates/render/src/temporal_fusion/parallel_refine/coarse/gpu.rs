@@ -9,6 +9,7 @@
 //! The unchanged CPU serial path remains available as a quality comparison.
 
 use crate::Fallible;
+use crate::temporal_fusion::HorizontalBoundary;
 use crate::temporal_fusion::parallel_refine::gpu as refine;
 use crate::temporal_fusion::pyramid::gpu as pyramid;
 
@@ -116,14 +117,20 @@ pub struct Builder {
     device: wgpu::Device,
     search: refine::Builder,
     prepare: prepare::Builder,
+    boundary: HorizontalBoundary,
 }
 
 impl Builder {
     pub fn new(device: &wgpu::Device) -> Self {
+        Self::with_boundary(device, HorizontalBoundary::Clamp)
+    }
+
+    pub(crate) fn with_boundary(device: &wgpu::Device, boundary: HorizontalBoundary) -> Self {
         Self {
             device: device.clone(),
-            search: refine::Builder::new(device),
+            search: refine::Builder::with_boundary(device, boundary),
             prepare: prepare::Builder::new(device),
+            boundary,
         }
     }
 
@@ -218,11 +225,14 @@ impl Builder {
                 prepared.as_ref(),
             )?;
             let next = current.levels[level - 1].logical_size();
-            prepared = Some(self.prepare.encode(
+            let complete_ring = self.boundary == HorizontalBoundary::Periodic
+                && raw.blocks()[0] * BLOCK == current.levels[level].logical_size()[0];
+            prepared = Some(self.prepare.encode_with_periodic_grid(
                 device,
                 encoder,
                 &raw,
                 [next[0] / BLOCK, next[1] / BLOCK],
+                complete_ring,
             )?);
         }
         Ok(prepared.expect("five through seven validated levels prepare the finest inputs"))

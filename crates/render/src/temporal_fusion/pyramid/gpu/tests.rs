@@ -1,4 +1,5 @@
 use super::Builder;
+use crate::temporal_fusion::HorizontalBoundary;
 use crate::temporal_fusion::pyramid::{self, Level};
 use crate::temporal_fusion::tests::{copy_texture, gpu, read_copy};
 use wgpu::naga::valid::{Capabilities, ValidationFlags, Validator};
@@ -149,6 +150,90 @@ fn full_luma_to_all_levels_matches_the_readable_reference() {
         &expected,
         "full Y bridge",
     );
+}
+
+#[test]
+fn periodic_five_level_pyramid_is_exactly_equivariant_at_block_alignment() {
+    let Some((device, queue)) = gpu() else { return };
+    const WIDTH: u32 = 2_048;
+    const HEIGHT: u32 = 1_024;
+    const SHIFT: usize = 512;
+    const LEVELS: usize = 5;
+
+    let source: Vec<u8> = (0..HEIGHT as usize)
+        .flat_map(|y| {
+            (0..WIDTH as usize).map(move |x| {
+                let value = (x as u32)
+                    .wrapping_mul(1_664_525)
+                    .wrapping_add((y as u32).wrapping_mul(1_013_904_223));
+                value.rotate_left(((x ^ y) & 15) as u32) as u8
+            })
+        })
+        .collect();
+    let shifted: Vec<u8> = source
+        .chunks_exact(WIDTH as usize)
+        .flat_map(|row| {
+            let split = row.len() - SHIFT;
+            row[split..].iter().chain(&row[..split]).copied()
+        })
+        .collect();
+    let source = upload(
+        &device,
+        &queue,
+        &source,
+        [WIDTH, HEIGHT],
+        wgpu::TextureFormat::R8Unorm,
+    );
+    let shifted = upload(
+        &device,
+        &queue,
+        &shifted,
+        [WIDTH, HEIGHT],
+        wgpu::TextureFormat::R8Unorm,
+    );
+    let builder = Builder::with_boundary(&device, HorizontalBoundary::Periodic);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    let original = builder
+        .encode_luma(&device, &mut encoder, &source, LEVELS)
+        .unwrap();
+    let rotated = builder
+        .encode_luma(&device, &mut encoder, &shifted, LEVELS)
+        .unwrap();
+    let copies: Vec<_> = original
+        .levels
+        .iter()
+        .zip(&rotated.levels)
+        .map(|(original, rotated)| {
+            let size = [original.width(), original.height()];
+            assert_eq!(rotated.size(), original.size());
+            (
+                size,
+                copy_texture(&device, &mut encoder, original, size, 1),
+                copy_texture(&device, &mut encoder, rotated, size, 1),
+            )
+        })
+        .collect();
+    queue.submit([encoder.finish()]);
+
+    for (level, (size, original, rotated)) in copies.iter().enumerate() {
+        let original = read_copy(&device, original, *size, 1);
+        let rotated = read_copy(&device, rotated, *size, 1);
+        let shift = (SHIFT / 2) >> level;
+        assert_eq!(shift % 16, 0, "level {level} shift is not block aligned");
+        for (row, actual) in rotated.chunks_exact(size[0] as usize).enumerate() {
+            let expected = &original[row * size[0] as usize..(row + 1) * size[0] as usize];
+            let split = expected.len() - shift;
+            assert_eq!(
+                actual,
+                expected[split..]
+                    .iter()
+                    .chain(&expected[..split])
+                    .copied()
+                    .collect::<Vec<_>>(),
+                "periodic pyramid level {level}, row {row}"
+            );
+        }
+    }
 }
 
 #[test]

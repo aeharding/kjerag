@@ -137,6 +137,12 @@ impl CorrectedFrame {
         self.correction.frame()
     }
 
+    /// Read-only access to the exact displayed field for real-Scene diagnostics.
+    #[cfg(test)]
+    pub(crate) fn correction_for_review(&self) -> &CorrectionFrame {
+        &self.correction
+    }
+
     pub(crate) fn prepare_view(
         &self,
         device: &wgpu::Device,

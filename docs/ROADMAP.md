@@ -14,6 +14,91 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Sky680 moving fix visually accepted, 2026-09-11:** the owner answers
+"Yeah looks good" to new Kjerag versus Studio, then "Looks fixed" to the
+source-matched old-versus-new movie. This accepts the periodic-horizontal
+correction for the reported moving sky boundary. The accepted candidate is
+`scratch/sky680/quarter-periodic-01`, with old LEFT/new RIGHT in
+`before-after.mp4`. Playback capacity, sandbox qualification and installed
+delivery of this change are next; the previous prefilter bundle is still
+installed. No broad-footage, live smoothness or merge verdict is inferred.
+Scoped release render Clippy and formatting pass; its only initial lint was
+the now-reference-only packed encoder constructor, which is marked test-only
+without changing selected production arithmetic.
+
+The native player builds in2m38, SHA256
+`303f0a75b6135bb120ef0f8953b724b44c951d3601addd59f3f8c1da2d5c6ce7`.
+Its initial40-second2256x1504 X4 capacity run fails the throughput target:
+67.075 redraws/s and roughly4 source frames/s. The byte-identical preserved
+old player also regresses to78.65 redraws/s and4.65 source frames/s under the
+same unchanged harness, versus281.475/29.975 in its historical cohort. Both
+current runs have much lower GPU voltage/power and additional host activity.
+The shared severe slowdown is not attributable solely to the periodic change;
+the changed filter also has measurable extra shader work in current timestamp
+probes. These runs do not establish a normal-condition candidate performance
+pass or isolated regression size. Installation is withheld pending performance
+qualification; no power policy, owner process or installed bundle was changed.
+Exact current/historical identities and measurements are retained with the
+accepted movie in `scratch/sky680/quarter-periodic-01/README.md`.
+The full release workspace suite subsequently passes1492 tests, with51 ignored
+across48 suites, required GPU access and both named camera fixtures. Its
+compile phase takes2m59 under the current machine conditions. This includes
+the corrected whole-stream cyclic-shift regression; the earlier invalid
+synthetic-size test failure is no longer pending. The two hash-sealed native
+motion/pyramid checks were separately enabled and passed as recorded above.
+
+After the owner's restart, loaded GPU clocks recover from roughly800MHz to
+roughly2GHz and the observed PROCHOT_CPU/GFX flags do not recur. The unchanged
+old native build measures237.875 redraws/s and29.925 consecutive source advances/s
+at2256x1504 in the same40-second stress harness. The accepted periodic build
+then measures228.100 redraws/s and28.750 source advances/s, with completion
+spacing p99/max14.629/23.286ms and accumulated video lateness up to1.602s.
+These are not240fps or smooth-playback passes. The owner requests
+"continue I want flatpak" after the restart status. Package the visually accepted
+change for actual installed-sandbox testing; do not infer a performance waiver
+or merge approval. Both native cohorts are retained under
+`scratch/installed-capacity/post-restart-{control,periodic}-x4-native-300-01`.
+The final read-only temporal diff audit finds no correctness blocker. Full
+release workspace/all-target Clippy and renewed formatting, lock/source coverage,
+name and diff checks pass. The pre-restart ordinary native UI run had49/50
+checks pass, failing the playing-picture movement check; installed UI verification
+must prove that path after the restart rather than treating that run as green.
+
+**Preparation timing explicitly accepted, 2026-09-11:** the owner answers
+"Yes, prepare before playback" to replacing the roughly0.1-second ONE X2
+activation hitch with extra first-picture waiting when opening or seeking,
+and "Yes, that startup delay is acceptable" to the next test build's
+roughly0.1-second startup preparation. This confirms the preparation tradeoff,
+not acceptance of the separately pending sky-boundary candidate or all frame
+time spikes. The existing prewarm implementation remains; no new delay,
+cadence change or coefficient smoothing is introduced by these replies.
+
+**Sky680 boundary identified; periodic candidate awaiting review, 2026-09-11:**
+the owner confirms "Red line follows the defect. Studio doesn't have the defect"
+in the actual installed-versus-Studio moving comparison. The red trace is the
+computed body-panorama longitude0/360 cut, not the lens join. The branch tests
+consistent horizontal wrapping across the selected quarter temporal pipeline:
+pyramid reduction, motion reference search, complete-grid predictors, final
+motion packing, fusion, and both current/filtered chroma reconstruction.
+Partial coarse grids retain endpoint predictors; Y stays clamped. Full/half
+and saved-input reference constructors retain their original clamped behavior.
+No invented coefficient smoothing, source skipping, history or cadence change.
+
+The new actual Scene capture passes for all31 exact sources20388..20418, and
+the new Kjerag-versus-Studio and before/after movies have been sent for owner
+review. Eleven periodic-name regression tests pass on the Radeon GPU, including
+both-edge signed motion, motion expansion, chroma, fusion and pyramid checks.
+All eight ordinary real-camera filtered Scene checks pass with both footage
+fixtures, and the separately enabled retained native motion/pyramid GPU
+oracles remain exact. The new whole-stream cyclic-shift test initially uses an
+invalid six-level synthetic size; correcting only the fixture to a valid
+five-level size yields byte-exact shift/unshift output. Production geometry
+gates and numeric tolerances remain unchanged. The larger temporal suite
+passes140 other tests, with11 ignored; only the corrected test is rerun so far.
+Candidate quality and player-performance qualification remain open. No new
+installation, commit, push or merge. The installed prefilter build below is
+unchanged. Evidence: `scratch/sky680/quarter-periodic-01/README.md`.
+
 **Prefilter test build accepted and installed, 2026-09-11:** the owner answers
 "Looks OK I think" to the new 607 moving prefilter comparison. After the
 first-picture delay is explained as roughly 0.1 seconds of extra startup

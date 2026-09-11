@@ -1,7 +1,10 @@
 //! Quartet fusion with shared motion/luma lookups and normalized YUV storage.
 //! The full-plane [`super::GpuFuse`] remains the independent comparison path.
 
-use super::{Inputs, Parameters, fusion_layout, output_texture, prepare_binding, validate};
+use super::{
+    HorizontalBoundary, Inputs, Parameters, fusion_layout, output_texture, prepare_binding,
+    validate,
+};
 
 pub(crate) struct Output {
     pub(crate) y: wgpu::Texture,
@@ -14,7 +17,12 @@ pub(crate) struct Encoder {
 }
 
 impl Encoder {
+    #[cfg(test)]
     pub(crate) fn new(device: &wgpu::Device) -> Self {
+        Self::with_boundary(device, HorizontalBoundary::Clamp)
+    }
+
+    pub(crate) fn with_boundary(device: &wgpu::Device, boundary: HorizontalBoundary) -> Self {
         let layout = fusion_layout(device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("packed temporal quartet fusion"),
@@ -42,7 +50,10 @@ impl Encoder {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fuse_packed"),
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[("PERIODIC_X", boundary.shader_value())],
+                    ..Default::default()
+                },
                 targets: &[
                     Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba8Unorm,

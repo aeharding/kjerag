@@ -11,6 +11,7 @@ use std::collections::VecDeque;
 use crate::direct_type2::BodyPanorama;
 use crate::{Fallible, FrameStamp};
 
+use super::HorizontalBoundary;
 use super::color::{GpuColorConversion, MatrixCoefficients};
 use super::settings::Provider;
 use super::stream::{FilteredPanorama, Stream};
@@ -72,7 +73,9 @@ impl CorrectionStream {
             device: device.clone(),
             queue: queue.clone(),
             size: field_size,
-            color: GpuColorConversion::new(device),
+            // The control and filtered term must reconstruct chroma with the
+            // same cylindrical boundary, including radius-zero sources.
+            color: GpuColorConversion::with_boundary(device, HorizontalBoundary::Periodic),
             stream,
             pending: VecDeque::with_capacity(SOURCES),
             finished: false,

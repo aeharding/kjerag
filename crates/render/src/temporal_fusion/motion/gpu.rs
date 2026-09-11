@@ -10,6 +10,7 @@ use std::fmt;
 use super::{
     Geometry, Parameters, ResidentParameters, fcvtzs_i32, validate_count, validate_resident_count,
 };
+use crate::temporal_fusion::HorizontalBoundary;
 use crate::temporal_fusion::parallel_refine::{self, coarse::gpu::MotionPyramid};
 use wgpu::util::DeviceExt;
 
@@ -68,6 +69,10 @@ pub struct Builder {
 
 impl Builder {
     pub fn new(device: &wgpu::Device) -> Self {
+        Self::with_boundary(device, HorizontalBoundary::Clamp)
+    }
+
+    pub(crate) fn with_boundary(device: &wgpu::Device, boundary: HorizontalBoundary) -> Self {
         let storage = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -145,7 +150,10 @@ impl Builder {
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
                     entry_point: Some(entry_point),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[("PERIODIC_X", boundary.shader_value())],
+                        ..Default::default()
+                    },
                     targets: &[Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba16Sint,
                         blend: None,

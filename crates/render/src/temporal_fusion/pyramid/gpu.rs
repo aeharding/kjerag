@@ -7,6 +7,8 @@
 
 use std::fmt;
 
+use super::super::HorizontalBoundary;
+
 /// GPU-owned logical pyramid levels, beginning with the supplied or derived base.
 pub struct Output {
     pub levels: Vec<wgpu::Texture>,
@@ -90,6 +92,10 @@ pub struct Builder {
 
 impl Builder {
     pub fn new(device: &wgpu::Device) -> Self {
+        Self::with_boundary(device, HorizontalBoundary::Clamp)
+    }
+
+    pub(crate) fn with_boundary(device: &wgpu::Device, boundary: HorizontalBoundary) -> Self {
         let texture_entry = |binding, sample_type| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -115,63 +121,79 @@ impl Builder {
             label: Some("temporal luma pyramid"),
             source: wgpu::ShaderSource::Wgsl(include_str!("gpu.wgsl").into()),
         });
-        let pipeline = |label, layout: &wgpu::BindGroupLayout, entry, format| {
-            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some(label),
-                bind_group_layouts: &[layout],
-                immediate_size: 0,
-            });
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("triangle"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some(entry),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: Default::default(),
-                depth_stencil: None,
-                multisample: Default::default(),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
+        let pipeline =
+            |label, layout: &wgpu::BindGroupLayout, entry, format, constants: &[(&str, f64)]| {
+                let pipeline_layout =
+                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some(label),
+                        bind_group_layouts: &[layout],
+                        immediate_size: 0,
+                    });
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("triangle"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some(entry),
+                        compilation_options: wgpu::PipelineCompilationOptions {
+                            constants,
+                            ..Default::default()
+                        },
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
         let narrow = wgpu::TextureFormat::R8Uint;
-        let half_y = pipeline("temporal half-size luma", &float_layout, "half_y", narrow);
+        let half_y = pipeline(
+            "temporal half-size luma",
+            &float_layout,
+            "half_y",
+            narrow,
+            &[],
+        );
         let copy = pipeline(
             "temporal pyramid base copy",
             &uint_layout,
             "copy_gray",
             narrow,
+            &[],
         );
         let pack = pipeline(
             "temporal packed gray",
             &uint_layout,
             "pack_gray",
             wgpu::TextureFormat::Rgba8Uint,
+            &[],
         );
         let vertical = pipeline(
             "temporal pyramid vertical reduction",
             &uint_layout,
             "reduce_vertical",
             narrow,
+            &[],
         );
+        let boundary_constants = [("PERIODIC_X", boundary.shader_value())];
         let horizontal = pipeline(
             "temporal pyramid horizontal reduction",
             &uint_layout,
             "reduce_horizontal",
             narrow,
+            &boundary_constants,
         );
         Self {
             device: device.clone(),
