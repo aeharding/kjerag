@@ -14,6 +14,36 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Reduced correction installed for owner testing, 2026-09-11:**
+the clean archived source `0830edcb85bf46231cf0c5b1366027871a2b1229` now
+supplies the installed `dev.harding.Kjerag` stable test build. Its SDK-built
+executable SHA256 is `3cdfba2ada4f9de1a74e88e1e2851cdcfb12bd7250b66cf91684c448b8e19dd1`;
+the installed OSTree commit is `d3ea2acdedfebd9c11b671f2cab1e74937f27bdbf6fa530ccd6f770c09875eb4`.
+Runtime/permission metadata and executable bytes match the built package before
+and after qualification. Origin remains `kjerag-origin`; the preceding exact
+package is retained for recovery. No merge or public release was performed.
+
+The native build passes50 UI checks. The actual installed bundle passes40
+applicable X4 checks at612.078 and44 ONE X2 checks at212.512, including both
+reported views, paused holds, backward seeks, the real scrubber, screenshots
+and paired-file opening on ONE X2. The main sandbox harness skips audio controls
+and injected import failures; the native run covers those paths. Separate
+audio-enabled installed controls-wake checks pass at X4 time607.574 and ONE X2
+time212.512, with48kHz stereo routed to the null sink. Steady reports reach30fps
+with zero drops, starvation and audio underruns. Startup-inclusive reports are
+15.66/18.51fps; worst reported video lateness is5.3/14.3ms, and worst audio
+clock errors are62.4/69.0ms including startup. These1280x720 short runs are not
+a full-resolution smoothness or240fps capacity gate.
+
+Root inspected both installed reported-view captures. The X4 native/installed
+viewport crops are not byte-identical:159,349 of2,150,400 RGB components differ,
+mean absolute difference0.1018, maximum24. No cause or perceptual verdict is
+inferred from that diagnostic; live moving-output acceptance remains the owner's.
+Only the named8-bit sources are qualified. The current copier's higher-bit-depth
+limitation remains open. Evidence is in `scratch/flatpak-delivery-0830edcb`,
+`scratch/controls-wake/run.IaRZfBla` and `run.D6qSpzbD`, plus the live-correction
+directory below. The player is available for review, not declared finished.
+
 **Reduced correction reaches the live player, 2026-09-11:**
 the owner answered "Yes" to the607 moving Studio/correction comparison. The
 coordinator explicitly interpreted this as acceptable/no blotches, asking for
@@ -68,12 +98,15 @@ Keep the target; do not present paused capacity as completion.
 The standard full native UI harness now passes50 checks at the exact612.078
 reported view. This covers pause/resume, backward seek, the real scrubber,
 screenshots, fullscreen, both drop transports, import-failure recovery and
-refusal surfaces. The late-content scrubber check first observed its target
-after7 seconds; passing its10-second guard is not a responsive-seeking verdict.
+refusal surfaces. The scrubber check reports7 seconds for the whole interaction,
+including deliberately paced pointer setup, key settling and held-picture
+captures (at least5.44 seconds of fixed sleeps). It does not measure a7-second
+seek. Passing its10-second guard is not a seek-latency verdict.
 The one-file X4 input skips paired-file drop cases. GPU shader/twin checks pass.
 Logs and captures are retained in `uitest-native-01.log` and
-`ui-x4-native-01` under the evidence directory below. No installation or merge
-is claimed. The app snapshot tested here is
+`ui-x4-native-01` under the evidence directory below. Installation was qualified
+separately in the newer checkpoint above; no merge is claimed. The native app
+snapshot tested here is
 `e6245d4f2f63928ef37d769a4672165a05f46528e59946807eb3328b2ff934cb`.
 Evidence: `scratch/studio-seam-flicker-612-20260909-01/temporal-correction-live-01`;
 native runs `run.fina8OU3`, `run.AkyjQCdT`, `run.wYANkADf` under
