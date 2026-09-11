@@ -11143,6 +11143,7 @@ mod tests {
         }
         let primary = if std::env::var_os("KJERAG_STITCH_GPU_PROFILE").is_some()
             || std::env::var_os("KJERAG_PANORAMA_GPU_TIMING").is_some()
+            || std::env::var_os(crate::gpu_profile::ENV).is_some()
         {
             dmabuf::open_device_for_timestamp_test(&adapter)
         } else {

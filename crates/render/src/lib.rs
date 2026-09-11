@@ -22,6 +22,8 @@ mod draw_retirement;
 pub mod field_interior;
 pub mod flow;
 mod framing;
+#[cfg(test)]
+mod gpu_profile;
 pub mod image_fusion;
 pub mod map_oracle;
 mod one_xs_luma;

@@ -220,13 +220,27 @@ pub(super) fn prepare_correction_input(
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("resident temporal correction source"),
             });
+    #[cfg(test)]
+    let mut gpu_profile = crate::gpu_profile::Profile::begin(
+        session.context.device(),
+        &mut encoder,
+        "source-snapshot",
+        &["body_panorama", "original_plane_copies"],
+        stamp.index(),
+    );
     let output = draw.arm_and_encode_correction_input(
         &session.retirements,
         &session.context,
         &mut encoder,
         size,
+        #[cfg(test)]
+        &mut gpu_profile,
     )?;
+    #[cfg(test)]
+    gpu_profile.resolve(&mut encoder);
     session.context.queue().submit(Some(encoder.finish()));
+    #[cfg(test)]
+    gpu_profile.report_after_submit(session.context.queue());
     Ok(output)
 }
 

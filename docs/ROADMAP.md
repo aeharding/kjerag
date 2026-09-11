@@ -14,6 +14,34 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Reduced-correction capacity budget and rejected motion trial, 2026-09-11:**
+the uninstrumented Scene diagnostic still misses the2256x1504 active target:
+162.91 completed changing-view redraws/s and27.33 contiguous source fps,
+p9915.124ms and maximum22.152ms. Paused482.26fps is not the active result.
+This queue-prefix completion diagnostic includes host/polling/backlog costs,
+not native presentation or intrinsic shader timing.
+
+A test-only, asynchronous encoder-timestamp probe now separates the correction
+stages without an added submission or completion wait. Across25 warm X4 sources,
+median body preparation is6.30ms, source-plane copies1.37ms, control conversion
+1.16ms, history/pyramid1.07ms, motion/refinement3.65ms, fusion1.77ms and final
+colour0.41ms. Upstream stitching and viewport rendering are outside those spans;
+summing their medians is not an end-to-end source measurement. Both real-camera
+Scene checks pass, and the31 profiled612 captures are byte-identical to the
+saved selected-player frames. The first X2 command used the wrong fixture
+variable and exercised no footage; only its corrected invocation counts.
+
+One bounded workgroup-tile trial shared reference reads across motion-search
+shells, preserving candidate order and sums. Raw-vector/shader checks pass
+(14 passed,1 existing ignored), and all31 actual612 frames remain identical.
+It nevertheless increases motion/refinement to5.03ms while the other stage
+times remain similar. The trial was removed from active code, not delivered.
+The complete patch and logs remain in
+`scratch/studio-seam-flicker-612-20260909-01/correction-capacity-01`.
+There is no new owner acceptance or240fps result. Next evaluate a further
+reduced correction field as an explicit quality/performance alternative, not
+as equivalent arithmetic or an approved change to the installed test build.
+
 **Reduced correction installed for owner testing, 2026-09-11:**
 the clean archived source `0830edcb85bf46231cf0c5b1366027871a2b1229` now
 supplies the installed `dev.harding.Kjerag` stable test build. Its SDK-built

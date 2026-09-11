@@ -120,11 +120,26 @@ impl CorrectionStream {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("half-resolution temporal correction control"),
             });
+        #[cfg(test)]
+        let mut gpu_profile = crate::gpu_profile::Profile::begin(
+            &self.device,
+            &mut encoder,
+            "control",
+            &["control_conversion"],
+            frame.index(),
+        );
         let nv12 = self
             .color
             .encode_rgb_to_nv12(&mut encoder, body.texture(), matrix)?;
         let current = self.color.encode_nv12_to_rgb(&mut encoder, &nv12, matrix)?;
+        #[cfg(test)]
+        {
+            gpu_profile.mark(&mut encoder, "control_conversion");
+            gpu_profile.resolve(&mut encoder);
+        }
         self.queue.submit([encoder.finish()]);
+        #[cfg(test)]
+        gpu_profile.report_after_submit(&self.queue);
         self.pending.push_back(Control {
             frame: frame.clone(),
             texture: current,

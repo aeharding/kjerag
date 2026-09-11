@@ -217,6 +217,14 @@ impl Stream {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("streaming temporal source preparation"),
             });
+        #[cfg(test)]
+        let mut gpu_profile = crate::gpu_profile::Profile::begin(
+            &self.device,
+            &mut encoder,
+            "history-pyramid",
+            &["history_pyramid_preparation"],
+            stamp.index(),
+        );
         let luma = match source {
             #[cfg(test)]
             Source::Compact(source) => {
@@ -243,7 +251,14 @@ impl Stream {
             )?;
             Some(self.encode_motion_pyramid(&mut encoder, &pyramid)?)
         };
+        #[cfg(test)]
+        {
+            gpu_profile.mark(&mut encoder, "history_pyramid_preparation");
+            gpu_profile.resolve(&mut encoder);
+        }
         self.queue.submit([encoder.finish()]);
+        #[cfg(test)]
+        gpu_profile.report_after_submit(&self.queue);
         // Subsequent consumers use this same queue. GPU ordering, not a CPU
         // readback fence, makes these images ready before motion search.
         // This timer now ends at submission, not preparation completion.
@@ -305,21 +320,47 @@ impl Stream {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("streaming full-panorama temporal filter"),
             });
+        #[cfg(test)]
+        let mut gpu_profile = crate::gpu_profile::Profile::begin(
+            &self.device,
+            &mut encoder,
+            "filter",
+            &["motion_refine", "fusion", "final_color"],
+            retained.stamp.index(),
+        );
         let matrix = self
             .matrix
             .ok_or("temporal stream has no source color matrix")?;
         let texture = if references.is_empty() {
+            #[cfg(test)]
+            gpu_profile.mark(&mut encoder, "motion_refine");
             let fused = history.encode_copy_current(&self.device, &mut encoder)?;
+            #[cfg(test)]
+            gpu_profile.mark(&mut encoder, "fusion");
             self.color
                 .encode_planes_to_rgb(&mut encoder, &fused.y, &fused.uv, matrix)?
         } else {
-            let fused =
-                self.encode_fusion(&mut encoder, retained, &history, &references, &phases)?;
+            let fused = self.encode_fusion(
+                &mut encoder,
+                retained,
+                &history,
+                &references,
+                &phases,
+                #[cfg(test)]
+                &mut gpu_profile,
+            )?;
             self.color
                 .encode_packed_planes_to_rgb(&mut encoder, &fused.y, &fused.uv, matrix)?
         };
+        #[cfg(test)]
+        {
+            gpu_profile.mark(&mut encoder, "final_color");
+            gpu_profile.resolve(&mut encoder);
+        }
         let started = trace_start();
         self.queue.submit([encoder.finish()]);
+        #[cfg(test)]
+        gpu_profile.report_after_submit(&self.queue);
         wait_for_queue(&self.device, &self.queue)?;
         trace_elapsed("filter-submit-complete", &retained.stamp, started);
         Ok(FilteredPanorama {
@@ -380,6 +421,14 @@ impl Stream {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("temporal radius transition reference preparation"),
             });
+        #[cfg(test)]
+        let mut gpu_profile = crate::gpu_profile::Profile::begin(
+            &self.device,
+            &mut encoder,
+            "reference-history-pyramid",
+            &["history_pyramid_preparation"],
+            self.window[center].stamp.index(),
+        );
         let mut pending = Vec::with_capacity(needed.len());
         for at in needed {
             let history = self.history.window_at(at, 0)?;
@@ -392,7 +441,14 @@ impl Stream {
             let motion = self.prepare_pyramid(&mut encoder, &source.y)?;
             pending.push((at, motion));
         }
+        #[cfg(test)]
+        {
+            gpu_profile.mark(&mut encoder, "history_pyramid_preparation");
+            gpu_profile.resolve(&mut encoder);
+        }
         self.queue.submit([encoder.finish()]);
+        #[cfg(test)]
+        gpu_profile.report_after_submit(&self.queue);
         for (at, motion) in pending {
             self.window[at].motion = Some(motion);
         }
@@ -406,6 +462,7 @@ impl Stream {
         history: &super::history::Window<'_>,
         references: &[usize],
         phases: &[f64],
+        #[cfg(test)] gpu_profile: &mut crate::gpu_profile::Profile,
     ) -> Fallible<packed::Output> {
         if phases.len() != references.len() {
             return Err("temporal stream phase count differs from its references".into());
@@ -454,6 +511,8 @@ impl Stream {
             )?;
             copy_layer(encoder, &packed, &flow, ordinal as u32);
         }
+        #[cfg(test)]
+        gpu_profile.mark(encoder, "motion_refine");
         let inputs = history.inputs(&flow, current.luma());
         let parameters = history.parameters(
             center.effective.fusion.noise,
@@ -461,13 +520,16 @@ impl Stream {
             center.effective.fusion.y_limits,
             center.effective.fusion.uv_limits,
         );
-        Ok(self.fuse.encode(
+        let fused = self.fuse.encode(
             &self.device,
             encoder,
             inputs,
             &parameters,
             [0, 0, self.full[0], self.full[1]],
-        )?)
+        )?;
+        #[cfg(test)]
+        gpu_profile.mark(encoder, "fusion");
+        Ok(fused)
     }
 
     fn ensure_healthy(&self) -> Fallible<()> {

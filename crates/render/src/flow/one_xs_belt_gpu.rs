@@ -2514,18 +2514,23 @@ impl InstalledOneXsReady {
         context: &OneXsGpuContext,
         encoder: &mut wgpu::CommandEncoder,
         size: crate::Size,
+        #[cfg(test)] gpu_profile: &mut crate::gpu_profile::Profile,
     ) -> Fallible<corrected::CorrectionInput> {
         let installed = Arc::clone(&self.draw);
         installed.source.ensure_resident_context(context)?;
         let frame = installed.frame();
         let map = installed.map.snapshot(&frame, context)?;
         let body = self.arm_and_encode_panorama(retirements, context.device(), encoder, size)?;
+        #[cfg(test)]
+        gpu_profile.mark(encoder, "body_panorama");
         let result = (|| {
             let source = installed.source.encode_source_snapshot(
                 &installed.pipeline,
                 context.device(),
                 encoder,
             )?;
+            #[cfg(test)]
+            gpu_profile.mark(encoder, "original_plane_copies");
             corrected::CorrectionInput::new(
                 body,
                 source,
