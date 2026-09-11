@@ -124,7 +124,7 @@ preceding quarter bundle passed40 X4 and44 ONE X2 UI checks; ROADMAP records
 the current prefilter package's separate installed qualification and exact
 source/executable identity. The preceding package is retained for recovery.
 
-The branch additionally evaluates a periodic-horizontal temporal specialization
+The selected quarter path uses a periodic-horizontal temporal specialization
 for the owner-confirmed680-second sky defect. The visible boundary follows the
 body panorama's0/360-degree cut, not a lens handover, and the owner confirms it
 is absent from the moving Studio comparison. Pyramid reduction, motion search,
@@ -134,8 +134,11 @@ Coarse predictor grids wrap only when their blocks cover the complete physical
 image width. Partial coarse tails retain endpoint predictors. Only the selected
 quarter constructor opts in; full/half and native saved-input reference paths
 remain clamped. The owner accepts the moving Studio comparison and calls the
-old/new result "Looks fixed" for sky680; this is not yet the installed behavior.
-History, source cadence and filter weights do
+old/new result "Looks fixed" for sky680. The installed source `dad5d709` Flatpak
+contains this same specialization;
+ROADMAP records its exact package identity, both-camera installed UI checks
+and separate capacity measurements. The owner's installed live-player verdict
+is still pending. History, source cadence and filter weights do
 not change. Evidence and moving comparisons: `scratch/sky680/quarter-periodic-01`.
 
 The resident source worker encodes the reduced RGB body and display snapshots

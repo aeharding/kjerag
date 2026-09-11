@@ -14,6 +14,41 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Sky680 test Flatpak installed, 2026-09-11:** after the owner requests
+"continue I want flatpak", the accepted periodic-horizontal fix is packaged
+from source `dad5d7092052266df6eebc82f04c43f1389f3891` and installed as
+`dev.harding.Kjerag`. Installed OSTree commit
+`4afd8b3072318b27b774d96530c4bcf320c631e727d98b47c056d4135c6ba163`
+and executable SHA256
+`4804e8c6c8dcc09c22c2e31648cad5cd743932d93f1ab3dccf44b0ef9f766af8`
+match the package. Runtime/permissions metadata matches, origin remains
+`kjerag-origin`, and the verified preceding09ca503b bundle remains available
+for rollback. The offline SDK build takes 2m43s. Installed UI checks pass
+40 X4 and 44 ONE X2 checks, including both exact reported views, moving video,
+pause, backward seek, real scrubber, fullscreen and the four paired-file
+arrival cases. Captured installed views are inspected separately from the
+already owner-approved moving comparison.
+
+The exact installed package's 40-second changing-view tests at 2256x1504
+measure 272.424 completed redraws/s on X4 and 317.824 on ONE X2, with
+1195/1199 consecutive source advances (29.875/29.975 per second). Both exceed
+the 240 redraw/s throughput target in these cohorts. Completion-spacing
+p99/max are 13.942/22.658ms and 10.847/27.034ms respectively: this is not a
+no-hitches claim. X4 maximum reported video lateness reaches 87.8ms; ONE X2
+reaches 5.8ms. No reported drops, starvation or audio underruns occur. Source
+cadence, draw throughput and callback spacing are distinct measurements.
+Installed results supersede neither the earlier native performance failures
+nor the need for the owner's live-player review. No merge is authorized by
+the prior movie acceptance. Evidence is retained under
+`scratch/flatpak-delivery-dad5d709` and
+`scratch/installed-capacity/periodic-dad5d709-{x4,x2}-installed-300-01`.
+Dedicated audio-enabled controls checks subsequently pass all three pointer
+wakes on each camera, with no reported errors. The installed commit, origin
+and executable are reverified after testing; all test players exit. The build
+is ready for the owner's live review, not merged. These audio-enabled checks
+do not convert the ordinary sandbox harness's skipped volume-popup or preload
+tests into passes.
+
 **Sky680 moving fix visually accepted, 2026-09-11:** the owner answers
 "Yeah looks good" to new Kjerag versus Studio, then "Looks fixed" to the
 source-matched old-versus-new movie. This accepts the periodic-horizontal
