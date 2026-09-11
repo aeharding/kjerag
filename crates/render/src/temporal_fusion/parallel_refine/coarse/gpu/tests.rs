@@ -101,7 +101,7 @@ fn resident_coarse_and_finest_match_the_independent_cpu_oracle() {
         let current: Vec<_> = (0..width * height)
             .map(|at| pattern(at % width, at / width))
             .collect();
-        let current = cpu_pyramid::build(&current, width, height, LEVELS).unwrap();
+        let current = cpu_pyramid::build(&current, width, height, FULL_RESOLUTION_LEVELS).unwrap();
         let references: Vec<_> = (0..6)
             .map(|ordinal| {
                 let pixels: Vec<_> = (0..width * height)
@@ -116,7 +116,7 @@ fn resident_coarse_and_finest_match_the_independent_cpu_oracle() {
                         }
                     })
                     .collect();
-                cpu_pyramid::build(&pixels, width, height, LEVELS).unwrap()
+                cpu_pyramid::build(&pixels, width, height, FULL_RESOLUTION_LEVELS).unwrap()
             })
             .collect();
         let current_gpu = upload(&device, &queue, &current);
@@ -187,7 +187,8 @@ fn resident_coarse_rejects_bad_reference_count_before_encoding() {
     let Some((device, queue)) = gpu() else {
         return;
     };
-    let levels = cpu_pyramid::build(&vec![0; 1024 * 1024], 1024, 1024, LEVELS).unwrap();
+    let levels =
+        cpu_pyramid::build(&vec![0; 1024 * 1024], 1024, 1024, FULL_RESOLUTION_LEVELS).unwrap();
     let current = upload(&device, &queue, &levels);
     let builder = Builder::new(&device);
     let mut encoder = device.create_command_encoder(&Default::default());

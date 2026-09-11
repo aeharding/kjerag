@@ -86,6 +86,24 @@ The shell is libcosmic, which pins wgpu 28, so `render` is written against
 28 and owns the one module that wgpu 30 would delete
 (`crates/render/src/dmabuf.rs`).
 
+An explicit test-only correction review evaluates a different architecture:
+direct full-resolution source/map projection plus a half-linear full-sphere
+temporal residual. The two low-resolution terms pass through the same gamma
+RGB/NV12/RGB conversion; their signed difference is bilinearly sampled and
+added to the original direct view. There is no gradual coefficient update or
+cross-source field interpolation. The Stream's normal constructor still selects
+seven motion levels; only the review constructor selects six real levels and
+the same finest kernel with a lower geometry entry bound. Reference counts and
+logical geometries are validated before coarse traversal. Halving the field
+changes angular block support, search decisions and the visible denoising law,
+so this is not an equivalent optimization or an accepted replacement.
+The actual-Scene harness retains each direct viewport, low unfiltered control,
+Reframe and exact source stamp until both paired filtered outputs name that
+source. It retains no decoder surface for this offline correction stage.
+Its readbacks, uploaded maps and parallel full reference are diagnostic only;
+live immutable source/map snapshots and active playback capacity remain
+unimplemented and unqualified. Ordinary playback does not select this route.
+
 `render::temporal_fusion` supplies the stream's post-stitch primitives.
 It consumes explicit full-range NV12 image arrays,
 current-to-reference displacement/confidence grids, a luma-index grid and

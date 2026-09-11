@@ -92,6 +92,8 @@ const RETAINED: usize = 3;
 /// host scheduling interval, not a Studio timing or solver semantic.
 const DRAW_RETIREMENT_RETRY: Duration = Duration::from_millis(1);
 
+#[cfg(test)]
+mod correction_review;
 mod filtered;
 #[cfg(test)]
 mod filtered_tests;
@@ -9369,6 +9371,7 @@ mod tests {
             "fixed-color" => ReviewDiagnostic::FixedColor,
             "native-color" => ReviewDiagnostic::NativeColor,
             "panorama" => ReviewDiagnostic::Panorama,
+            "correction" => ReviewDiagnostic::Correction,
             _ => panic!("unknown seam review mode {mode}"),
         };
         let count = if review == ReviewDiagnostic::NativeColor {
@@ -9376,7 +9379,10 @@ mod tests {
                 .expect("native-color review needs its captured source count")
                 .parse()
                 .expect("invalid native-color source count")
-        } else if review == ReviewDiagnostic::Panorama {
+        } else if matches!(
+            review,
+            ReviewDiagnostic::Panorama | ReviewDiagnostic::Correction
+        ) {
             std::env::var("KJERAG_REPORTED_SEAM_COUNT")
                 .map(|value| value.parse().expect("invalid panorama source count"))
                 .unwrap_or(31)
@@ -9532,6 +9538,7 @@ mod tests {
         FixedColor,
         NativeColor,
         Panorama,
+        Correction,
     }
 
     fn post_seek_review_sequence(
@@ -9555,6 +9562,7 @@ mod tests {
         scene.set_horizon(Horizon::Locked);
         let native_color = review == ReviewDiagnostic::NativeColor;
         let panorama_review = review == ReviewDiagnostic::Panorama;
+        let correction_review = review == ReviewDiagnostic::Correction;
         let native_camera = native_color.then(|| {
             scene
                 .show
@@ -9683,10 +9691,26 @@ mod tests {
             || fixed_color
             || native_color
             || panorama_review
+            || correction_review
             || fusion_input_review)
             .then(|| ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm));
         let mut panorama = panorama_review.then(|| {
             super::panorama_review::PanoramaReview::new(
+                &device,
+                output,
+                scene
+                    .show
+                    .as_ref()
+                    .unwrap()
+                    .one_xs
+                    .as_ref()
+                    .unwrap()
+                    .diagnostic_calibration(),
+                scene.player(|player| player.timing().fps() as f32).unwrap(),
+            )
+        });
+        let mut correction = correction_review.then(|| {
+            super::correction_review::CorrectionReview::new(
                 &device,
                 output,
                 scene
@@ -9809,6 +9833,15 @@ mod tests {
             assert_eq!(shot.index, index);
             let map = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
             assert_eq!(map.frame(), &frame);
+            if let Some(correction) = correction.as_mut() {
+                let diagnostic = diagnostic.as_mut().unwrap();
+                let prepared = diagnostic
+                    .prepare_one_xs_picture(&scene.primitive(camera), 16.0 / 9.0)
+                    .expect("correction review lost the displayed picture");
+                assert_eq!(prepared.frame(), &frame);
+                correction.capture(&device, &queue, diagnostic, &map, &shot.rgba);
+                assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&frame));
+            }
             if let Some(panorama) = panorama.as_mut() {
                 let diagnostic = diagnostic.as_mut().unwrap();
                 let prepared = diagnostic
@@ -10490,6 +10523,9 @@ mod tests {
                 };
                 assert_eq!(actual, expected, "temporal output sources after flush");
             }
+        }
+        if let Some(correction) = &mut correction {
+            correction.finish(&device, &queue);
         }
         if let Some(log) = source_log.as_mut() {
             log.flush().unwrap();

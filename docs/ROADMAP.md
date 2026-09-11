@@ -14,6 +14,37 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Whole-pipeline alternative reaches a moving quality gate, 2026-09-10:**
+an unselected test path keeps the exact high-resolution direct viewport and
+adds a half-linear full-sphere temporal RGB residual. The residual is the
+low filtered image minus its same-matrix unfiltered NV12 round trip, sampled
+periodically in longitude and clamped at the poles. It retains all seven real
+sources, automatic settings and source/output association, with no coefficient
+EMA or interpolation between updates. Six real motion-pyramid levels replace
+seven only in the explicit review constructor; changed angular block support,
+motion decisions and retained fine detail/noise are unaccepted differences.
+
+The existing actual-Scene review supplies identical source/map/color inputs to
+the full-resolution reference and candidate. With three real look-ahead frames,
+all31 reviewed full-reference frames at607 and all31 at612 are byte-identical
+to the saved selected-player output. ONE X2's212.512 riser has radius0 throughout
+this interval: the candidate's correction is exactly zero and preserves the
+direct picture. An additional231.898333 sequence exercises four nonzero-radius
+sources across the real ISO transition and returns to zero. All four34-source
+reviews pass stamp/cadence/flush checks; this is not visual acceptance.
+
+Two compositor GPU checks and131 temporal tests pass, with11 existing ignored
+temporal tests. Release workspace/all-target Clippy passes. Lossless moving
+reviews preserve their source pixels; only607's left panel is Studio, while612
+and both X2 panels use the current full filter as the left control. The owner
+has been asked to judge the607 movie. Root inspected the first607/612 frames,
+not a human temporal-flicker verdict. No candidate source-path timing, concurrent
+240fps capacity, retained-live-owner qualification, installation or merge is
+claimed. The candidate avoids full-resolution body/history/filter work by
+design; this quality harness deliberately runs both versions and is not a
+performance benchmark. Evidence:
+`scratch/studio-seam-flicker-612-20260909-01/temporal-correction-field-01`.
+
 **Delivery strategy reset after owner escalation, 2026-09-10:**
 the owner rejected the15.1-to17.4fps gain below as an inadequate use of effort.
 It remains a measured implementation improvement, not a usable-player milestone.
