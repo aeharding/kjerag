@@ -9,7 +9,6 @@ use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::time::Duration;
 
-#[cfg(test)]
 use crate::direct_type2::BodyPanorama;
 use crate::direct_type2::CompactNv12Panorama;
 use crate::{Fallible, FrameStamp};
@@ -25,7 +24,6 @@ use super::settings::{EffParams, Provider};
 const SOURCES: usize = 7;
 const CENTER: usize = 3;
 const FULL_RESOLUTION_LEVELS: usize = 7;
-#[cfg(test)]
 const HALF_RESOLUTION_LEVELS: usize = 6;
 const BLOCK: u32 = 16;
 const SCALE_BASE: i32 = 4;
@@ -90,14 +88,9 @@ impl Stream {
 
     /// Experimental half-linear correction field. Halving both panorama axes
     /// doubles the angle represented by each correction pixel, so this is an
-    /// output-changing diagnostic whose moving result is not accepted merely
+    /// output-changing candidate whose moving result is not accepted merely
     /// because its temporal/source/settings laws remain otherwise unchanged.
-    #[cfg(test)]
-    #[allow(
-        dead_code,
-        reason = "selected by the real-input half-resolution review"
-    )]
-    pub(crate) fn new_half_resolution_review(
+    pub(crate) fn new_half_resolution_correction(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         full: [u32; 2],
@@ -105,6 +98,17 @@ impl Stream {
     ) -> Fallible<Self> {
         validate_motion_full(full, HALF_RESOLUTION_LEVELS)?;
         Self::new_with_motion_levels(device, queue, full, provider, HALF_RESOLUTION_LEVELS)
+    }
+
+    /// Compatibility name for the existing real-input quality review.
+    #[cfg(test)]
+    pub(crate) fn new_half_resolution_review(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        full: [u32; 2],
+        provider: Provider,
+    ) -> Fallible<Self> {
+        Self::new_half_resolution_correction(device, queue, full, provider)
     }
 
     fn new_with_motion_levels(
@@ -140,9 +144,7 @@ impl Stream {
         self.remember_failure(result)
     }
 
-    /// Explicit old RGB ingestion oracle for tests of representation changes.
-    #[cfg(test)]
-    #[allow(dead_code, reason = "real-Scene representation comparison oracle")]
+    /// Gamma-RGB ingestion retained by the explicit correction candidate.
     pub(crate) fn push_rgb(
         &mut self,
         body: BodyPanorama,
@@ -165,7 +167,6 @@ impl Stream {
                 validate_compact(source, &self.device, self.full)?;
                 (source.frame().clone(), source.coefficients())
             }
-            #[cfg(test)]
             Source::Rgb { body, matrix } => {
                 validate_body(body, &self.device, self.full)?;
                 validate_matrix(*matrix)?;
@@ -216,7 +217,6 @@ impl Stream {
                 self.history
                     .encode_push_compact(&self.device, &mut encoder, &source)?
             }
-            #[cfg(test)]
             Source::Rgb { body, matrix } => self.history.encode_push_rgb(
                 &self.device,
                 &mut encoder,
@@ -491,7 +491,6 @@ impl Stream {
 
 enum Source {
     Compact(CompactNv12Panorama),
-    #[cfg(test)]
     Rgb {
         body: BodyPanorama,
         matrix: MatrixCoefficients,
@@ -531,7 +530,6 @@ fn validate_full(full: [u32; 2]) -> Fallible<()> {
     Ok(())
 }
 
-#[cfg(test)]
 fn validate_body(body: &BodyPanorama, device: &wgpu::Device, full: [u32; 2]) -> Fallible<()> {
     let texture = body.texture();
     if !body.belongs_to(device) {

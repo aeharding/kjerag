@@ -42,6 +42,9 @@ pub mod settings;
 
 pub(crate) mod stream;
 
+/// Explicit half-resolution temporal-correction candidate, not selected playback.
+pub(crate) mod correction_stream;
+
 pub(crate) mod packed;
 
 /// Effective values supplied by the calibration/history producer, not defaults.
