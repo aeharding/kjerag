@@ -13,6 +13,20 @@ use std::time::Instant;
 use wgpu::naga::valid::{Capabilities, ValidationFlags, Validator};
 
 #[test]
+fn coarse_pipeline_preparation_initializes_both_variants_once() {
+    let Some((device, _queue)) = gpu() else {
+        return;
+    };
+    let builder = Builder::new(&device);
+    assert!(builder.coarse.get().is_none());
+    builder.prepare_coarse_pipelines();
+    let prepared = builder.coarse.get().unwrap();
+    assert_eq!(prepared.len(), 2);
+    builder.prepare_coarse_pipelines();
+    assert!(std::ptr::eq(prepared, builder.coarse.get().unwrap()));
+}
+
+#[test]
 fn shader_validates_without_optional_capabilities() {
     let module = wgpu::naga::front::wgsl::parse_str(include_str!("../gpu.wgsl")).unwrap();
     Validator::new(ValidationFlags::all(), Capabilities::empty())

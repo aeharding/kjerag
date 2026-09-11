@@ -127,6 +127,10 @@ impl Builder {
         }
     }
 
+    pub(crate) fn prepare_pipelines(&self) {
+        self.search.prepare_coarse_pipelines();
+    }
+
     /// Record the complete independent coarse-to-finest motion field. Both
     /// halves share one search builder and consume only resident inputs.
     pub fn encode_motion(

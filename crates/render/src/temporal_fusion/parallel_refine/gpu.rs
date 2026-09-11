@@ -198,6 +198,12 @@ impl Builder {
         }
     }
 
+    /// Compile both coarse variants without encoding or submitting GPU work.
+    /// The stream calls this on its worker during initial source buffering.
+    pub(crate) fn prepare_coarse_pipelines(&self) {
+        let _ = self.pipeline(Mode::Coarse);
+    }
+
     /// Record one independent finest-block refinement for one through six references.
     /// Images come from `pyramid::gpu::Builder::encode_packed_base`; logical
     /// dimensions, not packed texture width, determine search bounds. As with

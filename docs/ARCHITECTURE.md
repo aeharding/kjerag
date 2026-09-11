@@ -164,6 +164,14 @@ same seven-source history. Same-queue ordering establishes preparation/search
 dependencies; only final filtered-output publication waits for completion, using
 callbacks and nonblocking device polls on the temporal worker.
 
+The first validated source push prepares both coarse-search pipelines on that
+worker, before adding history. Later ISO transitions therefore reuse compiled
+pipelines instead of compiling during playback. This records no GPU work and
+does not eagerly build motion images for radius-zero sources. A fresh seek
+epoch prepares its own pipelines during buffering; preparation is not free
+startup work. The measured first-source delay and narrow activation-hitch
+comparison are recorded in ROADMAP, separately from overall capacity.
+
 This candidate deliberately changes coarse search execution semantics: blocks
 read immutable same-level predictors instead of serially updated neighbours,
 and omit the row-major bad-block counter and adaptive UMH recovery. Level order,

@@ -14,6 +14,33 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**ONE X2 first-activation hitch isolated, 2026-09-11:**
+preparing the two existing coarse-search pipelines on the temporal worker's
+first validated source push removes the measured long hold at source6952 in
+two native trials. Frozen controls advance6952-to6953 after104.048/120.797ms;
+candidates advance after33.698/34.202ms, near the33.367ms source interval.
+Both candidates retain29.975 contiguous source advances/s while panning at
+2256x1504. No shader, settings, history or seven-source cadence change.
+This is a targeted hitch reduction, not a general smoothness or240fps pass:
+completed changing-view rates remain234.525/233.925fps, with completion-spacing
+p99 of9.781/11.721ms and maxima21.966/35.919ms.
+
+The startup tradeoff is measurable: first-present-call to first sourced draw
+is1647.723/1634.213ms in controls and1732.708/1744.111ms in candidates, about
+97ms later on average. This includes compositor/decoder/worker timing, not
+isolated compilation or process-launch latency. Fresh seek epochs also prepare
+pipelines; their extra latency is not measured here. The tradeoff was explicitly
+asked of the owner and is not yet accepted. The installed reviewed quarter build
+is unchanged. Native qualification passes1484 release workspace tests,51
+ignored across48 suites, with both footage fixtures and required GPU checks.
+All93 source-matched607/612/ONE X2 frames are byte-identical to the preceding
+quarter candidate. All50 native X4 UI checks pass, including the exact612.078
+view, pause, backward seek, real scrubber and import failure. Root inspected
+the reported-view capture. Release workspace/all-target Clippy, formatting,
+source-lock, rename and diff checks pass. No installed replacement or merge.
+Evidence: `scratch/installed-capacity/quarter-correction-load-review.md`, with
+both controls, both candidates and the pre-pan audio-identity rejection retained.
+
 **Installed full-resolution load comparison, 2026-09-11:**
 the unchanged quarter-correction Flatpak was exercised with 40 seconds of
 continuous pointer panning at 2256x1504, at nominal 300, 240 and 60 Hz. Exact

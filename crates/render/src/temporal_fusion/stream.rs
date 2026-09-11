@@ -220,6 +220,13 @@ impl Stream {
             validate_motion_full(self.full, self.motion_levels)?;
         }
 
+        // Shader compilation belongs to initial worker-side buffering, not
+        // the first later ISO transition from an unfiltered source. This
+        // creates no motion history and changes no source's filter settings.
+        if self.window.is_empty() {
+            self.coarse.prepare_pipelines();
+        }
+
         if self.window.len() == SOURCES {
             if self.next_center != CENTER + 1 {
                 return Err("temporal stream has undrained source centers".into());
