@@ -33,6 +33,53 @@ pub(crate) struct DirectCompactNv12Draw<'a> {
     producer: &'a panorama::nv12::Producer,
 }
 
+/// Test-only compact producer which caches the native mesh vertices for one map.
+/// Pipeline compilation happens before any comparison timing interval.
+#[cfg(test)]
+pub(crate) struct DirectVertexCachedCompactNv12Draw<'a> {
+    draw: &'a DirectMapDraw,
+    producer: &'a panorama::nv12_vertex_cache::Producer,
+    output: &'a panorama::nv12::Producer,
+}
+
+#[cfg(test)]
+impl DirectVertexCachedCompactNv12Draw<'_> {
+    pub(crate) fn encode(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        picture: &wgpu::BindGroup,
+        prepared: &crate::PreparedPicture,
+        size: crate::Size,
+    ) -> Fallible<CompactNv12Panorama> {
+        let Some(frame) = self.draw.bound_frame() else {
+            return Err(
+                "vertex-cached compact NV12 panorama draw has no uploaded type-2 map".into(),
+            );
+        };
+        crate::MapBindError::require_frame(frame, Some(prepared))?;
+        panorama::nv12::require_full_source(size, prepared.reframe().frame_size())?;
+        self.producer.encode(
+            device,
+            encoder,
+            picture,
+            &self.draw.binding.packed,
+            &self.draw.binding.alpha,
+            self.draw
+                .binding
+                .fusion
+                .as_ref()
+                .map(|binding| &binding.read),
+            self.output,
+            frame.clone(),
+            size,
+            crate::temporal_fusion::color::MatrixCoefficients::from_source_rgb(
+                prepared.reframe().source_color_matrix(),
+            ),
+        )
+    }
+}
+
 #[cfg(test)]
 impl DirectCompactNv12Draw<'_> {
     pub(crate) fn encode(
@@ -411,6 +458,8 @@ pub(crate) struct DirectType2Pipeline {
     fusion_sampler: Option<wgpu::Sampler>,
     panorama: OnceLock<panorama::BodyPanoramaPipeline>,
     compact_nv12: OnceLock<panorama::nv12::Producer>,
+    #[cfg(test)]
+    vertex_cached_compact_nv12: OnceLock<panorama::nv12_vertex_cache::Producer>,
 }
 
 impl DirectType2Pipeline {
@@ -562,6 +611,8 @@ impl DirectType2Pipeline {
             fusion_sampler,
             panorama: OnceLock::new(),
             compact_nv12: OnceLock::new(),
+            #[cfg(test)]
+            vertex_cached_compact_nv12: OnceLock::new(),
         }
     }
 
@@ -569,6 +620,15 @@ impl DirectType2Pipeline {
         self.compact_nv12.get_or_init(|| {
             panorama::nv12::Producer::new(&self.device, self)
                 .expect("direct pipeline must construct its compact NV12 peer on the same device")
+        })
+    }
+
+    #[cfg(test)]
+    fn vertex_cached_compact_nv12(&self) -> &panorama::nv12_vertex_cache::Producer {
+        self.vertex_cached_compact_nv12.get_or_init(|| {
+            panorama::nv12_vertex_cache::Producer::new(&self.device, self).expect(
+                "direct pipeline must construct its vertex-cached compact NV12 peer on the same device",
+            )
         })
     }
 
@@ -1046,6 +1106,26 @@ impl DirectMapDraw {
         })
     }
 
+    /// Prepare the unselected compact variant which builds one native-vertex
+    /// cache per source/map before drawing the same full body panorama.
+    #[cfg(test)]
+    pub(crate) fn prepare_vertex_cached_compact_nv12(
+        &self,
+        device: &wgpu::Device,
+    ) -> Fallible<DirectVertexCachedCompactNv12Draw<'_>> {
+        if self.pipeline.device != *device {
+            return Err(
+                "vertex-cached compact NV12 panorama pipeline belongs to a different graphics device"
+                    .into(),
+            );
+        }
+        Ok(DirectVertexCachedCompactNv12Draw {
+            draw: self,
+            producer: self.pipeline.vertex_cached_compact_nv12(),
+            output: self.pipeline.compact_nv12(),
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn draw_mesh_for_test(
         &self,
@@ -1108,6 +1188,49 @@ fn draw_wgsl_with_fusion_mode(fusion: bool, hardware_fusion: bool) -> String {
         "fn type2_correct(color: vec3<f32>, uv: vec2<f32>, lens: u32) -> vec3<f32> { return color; }"
     };
     format!("{}\n{}\n{correction}\n{DRAW}", source_wgsl(), map_wgsl())
+}
+
+#[cfg(test)]
+pub(in crate::direct_type2) fn vertex_cached_draw_wgsl_with_fusion_mode(
+    fusion: bool,
+    hardware_fusion: bool,
+) -> String {
+    let correction = if fusion {
+        if hardware_fusion {
+            crate::image_fusion::FILTERED_WGSL
+        } else {
+            crate::image_fusion::WGSL
+        }
+    } else {
+        "fn type2_correct(color: vec3<f32>, uv: vec2<f32>, lens: u32) -> vec3<f32> { return color; }"
+    };
+    format!(
+        "{}\n{}\n{correction}\n{DRAW}",
+        source_wgsl(),
+        vertex_cached_map_wgsl()
+    )
+}
+
+#[cfg(test)]
+pub(in crate::direct_type2) fn vertex_cache_prepass_wgsl() -> String {
+    let cell = MAP
+        .find("fn type2_cell(")
+        .expect("type-2 map shader contains its cell function");
+    format!(
+        "{}\n{VERTEX_CACHE_PREPASS}",
+        MAP[..cell].replace("@group(1)", "@group(0)")
+    )
+}
+
+#[cfg(test)]
+fn vertex_cached_map_wgsl() -> String {
+    let cell = MAP
+        .find("fn type2_cell(")
+        .expect("type-2 map shader contains its cell function");
+    let mesh = MAP
+        .find("fn type2_mesh(")
+        .expect("type-2 map shader contains its mesh function");
+    format!("{}\n{VERTEX_CACHED_CELL}\n{}", &MAP[..cell], &MAP[mesh..])
 }
 
 pub(crate) fn map_wgsl() -> &'static str {
@@ -1277,6 +1400,76 @@ fn type2_mesh(body: vec3<f32>) -> Type2Sample {
     if found.covered > 0.5 { return found; }
   }
   return empty;
+}
+"#;
+
+#[cfg(test)]
+const VERTEX_CACHED_CELL: &str = r#"
+struct Type2CachedVertex {
+  position: vec4<f32>,
+  packed: vec4<f32>,
+};
+
+@group(1) @binding(2) var<storage, read> type2_vertices: array<Type2CachedVertex>;
+
+fn type2_cached_vertex(row: i32, col: i32) -> Type2CachedVertex {
+  return type2_vertices[u32(row * 101 + col)];
+}
+
+fn type2_cell(ray: vec3<f32>, row: i32, col_unwrapped: i32) -> Type2Sample {
+  var out: Type2Sample;
+  let col = ((col_unwrapped % TYPE2_SLICES) + TYPE2_SLICES) % TYPE2_SLICES;
+  let v00 = type2_cached_vertex(row, col);
+  let v01 = type2_cached_vertex(row, col + 1);
+  let v10 = type2_cached_vertex(row + 1, col);
+  let v11 = type2_cached_vertex(row + 1, col + 1);
+  let uv00 = type2_varying(row, col);
+  let uv01 = type2_varying(row, col + 1);
+  let uv10 = type2_varying(row + 1, col);
+  let uv11 = type2_varying(row + 1, col + 1);
+  let fusion00 = type2_fusion_varying(row, col);
+  let fusion01 = type2_fusion_varying(row, col + 1);
+  let fusion10 = type2_fusion_varying(row + 1, col);
+  let fusion11 = type2_fusion_varying(row + 1, col + 1);
+
+  var weights = type2_triangle(ray, v00.position.xyz, v01.position.xyz, v10.position.xyz);
+  var uv = weights.x * uv00 + weights.y * uv01 + weights.z * uv10;
+  var fusion_uv = weights.x * fusion00 + weights.y * fusion01 + weights.z * fusion10;
+  var packed = weights.x * v00.packed + weights.y * v01.packed + weights.z * v10.packed;
+  if weights.w == 0.0 {
+    weights = type2_triangle(ray, v01.position.xyz, v11.position.xyz, v10.position.xyz);
+    uv = weights.x * uv01 + weights.y * uv11 + weights.z * uv10;
+    fusion_uv = weights.x * fusion01 + weights.y * fusion11 + weights.z * fusion10;
+    packed = weights.x * v01.packed + weights.y * v11.packed + weights.z * v10.packed;
+  }
+  if weights.w > 0.0 {
+    out.packed = packed;
+    out.alpha = type2_sample1(uv);
+    out.covered = 1.0;
+    out.fusion_uv = fusion_uv;
+  }
+  return out;
+}
+"#;
+
+#[cfg(test)]
+const VERTEX_CACHE_PREPASS: &str = r#"
+struct Type2CachedVertex {
+  position: vec4<f32>,
+  packed: vec4<f32>,
+};
+
+@group(0) @binding(2) var<storage, read_write> type2_vertices: array<Type2CachedVertex>;
+
+@compute @workgroup_size(64)
+fn cache_type2_vertices(@builtin(global_invocation_id) invocation: vec3<u32>) {
+  let index = invocation.x;
+  if index >= 51u * 101u { return; }
+  let row = i32(index / 101u);
+  let col = i32(index % 101u);
+  let uv = type2_varying(row, col);
+  type2_vertices[index].position = vec4<f32>(type2_position(row, col), 0.0);
+  type2_vertices[index].packed = type2_sample4(uv);
 }
 "#;
 
