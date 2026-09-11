@@ -139,6 +139,21 @@ three-group GPU creation regression now exercises that boundary. Compact
 sampling is not byte-identical to full-resolution RGB rasterization and still
 requires moving-output review; the owner's preceding607 acceptance does not
 automatically cover this representation change.
+
+The compact live producer additionally caches the 51-by-101 native mesh
+vertices once per source/map. A164,832-byte GPU buffer retains position and
+packed-map samples, including the distinct column100 endpoint. Its compute
+prepass and panorama draw share the existing encoder and source retirement.
+Per-pixel triangle selection, interpolation, alpha/fusion sampling and source
+cadence remain unchanged; installed map buffers remain private and frame/device
+sealed. This removes repeated vertex trigonometry and map sampling from millions
+of body pixels, not full-resolution sampling or temporal work. The uncached
+compact and RGB producers remain diagnostic oracles. Both-camera comparisons
+find sparse one-code YUV differences, so numerical identity is not claimed.
+Native new/old/new playback improves from14.57 to16.12–16.28 source fps, but
+maximum shown-frame gaps are worse in the cached samples. Neither smoothness
+nor active240fps capacity is established, and this candidate is not installed.
+
 A radius-zero
 source initially needs no motion inputs, but a later center may reference it.
 Missing inputs are then reconstructed once from its exact retained unfiltered

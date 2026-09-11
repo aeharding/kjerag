@@ -1,4 +1,4 @@
-//! Test-only compact panorama with a per-map native-vertex cache.
+//! Compact panorama with a per-map native-vertex cache.
 //!
 //! A compute prepass evaluates the shared type-2 position and packed-map laws
 //! for the complete 51 by 101 endpoint-preserving vertex grid. The following

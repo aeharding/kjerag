@@ -10,6 +10,8 @@ use crate::flow::one_xs_belt_gpu::ResidentPanoramaIngest;
 use crate::temporal_fusion::color::{GpuColorConversion, MatrixCoefficients};
 use sha2::{Digest, Sha256};
 
+mod vertex_cache;
+
 #[test]
 fn x4_panorama_preparation_keeps_the_player_paused_and_matches_displayed_sources() {
     let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {

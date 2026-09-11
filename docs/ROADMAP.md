@@ -14,6 +14,44 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Native vertex reuse improves throughput, not smoothness, 2026-09-10:**
+the compact source producer computes5151 native vertices once per map in a
+164,832-byte GPU cache. The prepass shares the panorama encoder and existing
+retirement. Full source resolution, refresh cadence, triangle/interpolation
+law, colour and temporal settings are unchanged. The uncached paths remain
+oracles. Warm isolated X4 preparation falls from24.18–24.42ms to16.42–16.84ms;
+ONE X2 likewise improves. These intervals include cache allocation/preparation
+but exclude history unpack and are not playback FPS.
+
+Authenticated native new/old/new runs at the same612.078 view measure
+16.28/14.57/16.12 contiguous shown source fps after startup, roughly11% faster.
+The cached runs' maximum shown-frame gaps are185.75/182.97ms versus93.84ms
+for the control. Better average throughput is not a smoothness pass; the gap
+regression remains under investigation. These are1280x720 isolated native
+window runs, not the2256x1504/4.17ms capacity gate. All three controls-wake
+checks pass their separate coarse100ms pump bounds. No installed replacement,
+owner acceptance of this new output, or merge.
+
+Three shader/cache/native-binding checks,125 temporal tests and all8 real
+X4/ONE X2 Scene checks pass. Workspace all-target release Clippy passes; the
+full release-workspace suite passes1464 tests with50 ignored across48 suites.
+The explicit byte-identity diagnostics fail with unchanged sparse one-code
+differences: X4 Y37/UV18 components and ONE X2 Y7/UV4. No tolerance was relaxed.
+Lossless moving reviews preserve current Scene pixels:607 against the existing
+Studio export,612 against the preceding uncached compact player, not Studio.
+The owner's earlier607 acceptance does not carry to these new movies.
+Evidence: `scratch/studio-seam-flicker-612-20260909-01/temporal-vertex-panorama-01`;
+native runs`run.O7wQ2Ekc`, `run.n29XkKbQ`, `run.kANb6oZZ` under
+`scratch/controls-wake`. Current app SHA256
+`77671c01457d08a327152fe56ec1051ddabf346a3311047fc63f020e343a9fa7`.
+
+The cached maximum gap repeats at shown18529→18530 after the second scripted
+controls transition. The uncached run's same-source gap is80.35ms. Source
+preparation and filter/presentation callbacks all back up while pumps continue;
+these wall intervals do not isolate GPU execution or identify the underlying
+cause. A bounded workspace-reuse follow-up is being evaluated, not presumed to
+fix that regression.
+
 **Compact YUV integrated; native playback still too slow, 2026-09-10:**
 the source worker now carries a sealed compact YUV panorama into the same
 seven-source history. It no longer materializes the full-size RGB intermediate.
