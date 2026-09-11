@@ -17,10 +17,10 @@ use crate::{Fallible, FrameStamp};
 use super::color::{GpuColorConversion, MatrixCoefficients};
 use super::history::History;
 use super::motion::{self, Geometry};
+use super::packed;
 use super::parallel_refine::coarse::gpu::{self as coarse_gpu, MotionPyramid};
 use super::pyramid::gpu as pyramid_gpu;
 use super::settings::{EffParams, Provider};
-use super::{GpuFuse, Output};
 
 const SOURCES: usize = 7;
 const CENTER: usize = 3;
@@ -72,7 +72,7 @@ pub(crate) struct Stream {
     pyramid: pyramid_gpu::Builder,
     coarse: coarse_gpu::Builder,
     motion: motion::gpu::Builder,
-    fuse: GpuFuse,
+    fuse: packed::Encoder,
 }
 
 impl Stream {
@@ -98,7 +98,7 @@ impl Stream {
             pyramid: pyramid_gpu::Builder::new(device),
             coarse: coarse_gpu::Builder::new(device),
             motion: motion::gpu::Builder::new(device),
-            fuse: GpuFuse::new(device),
+            fuse: packed::Encoder::new(device),
         })
     }
 
@@ -268,18 +268,19 @@ impl Stream {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("streaming full-panorama temporal filter"),
             });
-        let fused = if references.is_empty() {
-            history.encode_copy_current(&self.device, &mut encoder)?
+        let matrix = self
+            .matrix
+            .ok_or("temporal stream has no source color matrix")?;
+        let texture = if references.is_empty() {
+            let fused = history.encode_copy_current(&self.device, &mut encoder)?;
+            self.color
+                .encode_planes_to_rgb(&mut encoder, &fused.y, &fused.uv, matrix)?
         } else {
-            self.encode_fusion(&mut encoder, retained, &history, &references, &phases)?
+            let fused =
+                self.encode_fusion(&mut encoder, retained, &history, &references, &phases)?;
+            self.color
+                .encode_packed_planes_to_rgb(&mut encoder, &fused.y, &fused.uv, matrix)?
         };
-        let texture = self.color.encode_planes_to_rgb(
-            &mut encoder,
-            &fused.y,
-            &fused.uv,
-            self.matrix
-                .ok_or("temporal stream has no source color matrix")?,
-        )?;
         let started = trace_start();
         self.queue.submit([encoder.finish()]);
         wait_for_queue(&self.device, &self.queue)?;
@@ -350,7 +351,7 @@ impl Stream {
         history: &super::history::Window<'_>,
         references: &[usize],
         phases: &[f64],
-    ) -> Fallible<Output> {
+    ) -> Fallible<packed::Output> {
         if phases.len() != references.len() {
             return Err("temporal stream phase count differs from its references".into());
         }

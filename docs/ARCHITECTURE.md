@@ -86,12 +86,18 @@ The shell is libcosmic, which pins wgpu 28, so `render` is written against
 28 and owns the one module that wgpu 30 would delete
 (`crates/render/src/dmabuf.rs`).
 
-`render::temporal_fusion` supplies the selected stream's post-stitch primitive.
+`render::temporal_fusion` supplies the stream's post-stitch primitives.
 It consumes explicit full-range NV12 image arrays,
 current-to-reference displacement/confidence grids, a luma-index grid and
-effective fusion parameters. Two render passes produce GPU-owned R8/RG8
-planes without queue submission, CPU waits or readback. Studio's selected
-implementation uses compute; narrow render targets are Kjerag's execution
+effective fusion parameters. The full-plane `GpuFuse` reference records two
+render passes producing GPU-owned R8/RG8 planes. The selected `packed::Encoder`
+instead records one half-size MRT pass producing RGBA8 Y quartets and RG8 UV.
+Each even2x2 footprint shares its flow/luma lookup while retaining the same
+ordered per-component fusion and normalized attachment quantization. The packed
+converter reads the correct Y lane directly and retains full-resolution centered
+chroma reconstruction and RGB output, without an intervening unpack pass.
+Neither primitive submits, waits or reads pixels back. Studio's selected
+implementation uses compute; these render targets are Kjerag's execution
 choice. The caller must supply prepared images and own source association,
 history, seek epochs and completion. None of that scheduling is supplied by
 this primitive. Saved native input/output tests establish its bounded
@@ -202,6 +208,10 @@ share immutable observations but reset lookup chronology and zero-cache state.
 
 The live panorama projector renders that typed completed texture into the
 existing surface pass with the same gamma/linear convention as direct drawing.
+The packed-filter integration retains all62 saved607/612 Scene frames exactly
+and improves controlled native source throughput from15.12 to17.32–17.39fps.
+These1280x720 runs still show81–91ms maximum source-frame gaps; they establish
+neither full-rate playback nor the2256x1504/4.17ms capacity target.
 Changing view only changes its projection binding, not filtering or colour
 history. Screenshots use the exact installed panorama and surface format. EOF
 flush waits until all real prepared inputs have been accepted. Near-EOF exact

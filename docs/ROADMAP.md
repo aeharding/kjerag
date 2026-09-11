@@ -14,6 +14,47 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Delivery strategy reset after owner escalation, 2026-09-10:**
+the owner rejected the15.1-to17.4fps gain below as an inadequate use of effort.
+It remains a measured implementation improvement, not a usable-player milestone.
+The coordinator stopped the sequence of isolated pass optimizations. The next
+decision must establish an end-to-end path to29.970fps source playback and
+4.17ms active view rendering, evaluating elimination or fundamental reorganization
+of full-resolution panorama/history/search/filter work. Existing images remain
+the oracle; no quality, cadence, or invented color-smoothing compromise is approved.
+Do not start another local shader experiment merely because it can produce a
+measurable gain. The current full-picture implementation is the reference for
+that architectural decision, not a qualified installed deliverable.
+
+**Grouped temporal filtering improves native throughput, 2026-09-10:**
+the selected stream now fuses each2x2 Y/UV footprint in one MRT fragment,
+sharing motion/luma lookups while preserving ordered per-component arithmetic
+and normalized storage. Packed Y converts straight into the same full RGB
+panorama without an unpack pass. All source frames, history, motion search,
+color coefficients, filter settings, seek/EOF behavior and publication remain
+unchanged. The old full-plane fragment filter remains an independent oracle.
+
+Full-resolution X4 and ONE X2 comparisons are byte-exact. In warmed isolated
+X4 tests, filter cost drops from roughly14ms to8–9ms; these host-wall intervals
+exclude conversion, source preparation and presentation. Native new/old/new
+runs at612.078 measure17.32/15.12/17.39 contiguous shown source fps after
+startup, about15% faster. The new runs' maximum shown-frame gaps are91.09 and
+81.27ms versus101.22ms for the control. This is still below29.970fps and does
+not qualify smooth playback or240fps active capacity. The native test window
+is1280x720, not2256x1504; its separate coarse controls-wake checks all pass.
+
+The integrated build passes127 temporal tests with11 ignored and all8 Scene
+checks, including seven real-input checks across both cameras. All31 frames
+in each607/612 sequence match the retained vertex-cache checkpoint exactly.
+This preserves those optimized review images, not new owner acceptance of them.
+Release workspace/all-target Clippy and the full workspace tests pass
+(1466 passed,51 ignored across48 suites). No installed replacement,
+new Studio export, broader RE, changed cadence, color smoother or merge.
+Evidence: `scratch/studio-seam-flicker-612-20260909-01/temporal-packed-fragment-01`;
+native runs`run.FIR0pZMC`, `run.JemV28Qw`, `run.LRxkQrKY` under
+`scratch/controls-wake`. App SHA256
+`d4539c8bd94437d7ddf29995462f85c9a24932e531fe20bd8617e6d08b43e1d3`.
+
 **Native vertex reuse improves throughput, not smoothness, 2026-09-10:**
 the compact source producer computes5151 native vertices once per map in a
 164,832-byte GPU cache. The prepass shares the panorama encoder and existing

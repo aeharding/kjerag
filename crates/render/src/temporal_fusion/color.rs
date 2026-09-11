@@ -353,7 +353,6 @@ impl GpuColorConversion {
     /// Consume four already-quantized Y samples per texel without an unpack
     /// pass. Chroma reconstruction and the full-resolution RGB result retain
     /// the ordinary converter's arithmetic and attachment format.
-    #[allow(dead_code, reason = "unselected packed-fragment evaluation")]
     pub(crate) fn encode_packed_planes_to_rgb(
         &self,
         encoder: &mut wgpu::CommandEncoder,

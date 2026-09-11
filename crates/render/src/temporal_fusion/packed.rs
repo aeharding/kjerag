@@ -1,4 +1,5 @@
-//! Test-only quartet fusion prototype. Production [`super::GpuFuse`] remains selected.
+//! Quartet fusion with shared motion/luma lookups and normalized YUV storage.
+//! The full-plane [`super::GpuFuse`] remains the independent comparison path.
 
 use super::{Inputs, Parameters, fusion_layout, output_texture, prepare_binding, validate};
 

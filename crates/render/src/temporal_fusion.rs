@@ -42,7 +42,6 @@ pub mod settings;
 
 pub(crate) mod stream;
 
-#[cfg(test)]
 pub(crate) mod packed;
 
 /// Effective values supplied by the calibration/history producer, not defaults.
