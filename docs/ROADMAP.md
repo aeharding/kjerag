@@ -14,6 +14,21 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Reduced RGB vertex-cache trial retired, 2026-09-11:**
+the existing timestamp probe now measures the quarter route itself: X4 body
+preparation2.272ms, original-plane copies1.538ms and motion/refinement1.530ms
+median over25 source frames. These exclude upstream stitching and viewport
+rendering. Reusing the old compact route's164832-byte native-vertex cache
+reduces body preparation to1.983ms versus bracketing2.272/2.239ms controls.
+The gross saving is under0.3ms per source; other stages do not all improve.
+All8 real-camera Scene tests pass, but X4 comparison pixels change by up to
+2 codes at607 and4 at612. ONE X2's31 riser pictures remain byte-identical.
+The trial was removed before any app build or delivery: the small saving
+does not justify new output differences and first-use pipeline cost. No new
+movie review, installed replacement or capacity claim. Patch, logs, pixel
+counts and the noncomparable first control are preserved in
+`scratch/installed-capacity/quarter-rgb-cache-review.md` and its named artifacts.
+
 **ONE X2 first-activation hitch isolated, 2026-09-11:**
 preparing the two existing coarse-search pipelines on the temporal worker's
 first validated source push removes the measured long hold at source6952 in
