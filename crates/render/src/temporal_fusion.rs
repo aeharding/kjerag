@@ -42,6 +42,9 @@ pub mod settings;
 
 pub(crate) mod stream;
 
+#[cfg(test)]
+pub(crate) mod packed;
+
 /// Effective values supplied by the calibration/history producer, not defaults.
 pub struct Parameters {
     pub noise: f32,
@@ -80,43 +83,7 @@ pub struct GpuFuse {
 
 impl GpuFuse {
     pub fn new(device: &wgpu::Device) -> Self {
-        let sampled = |binding, sample_type, view_dimension| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type,
-                view_dimension,
-                multisampled: false,
-            },
-            count: None,
-        };
-        let float = wgpu::TextureSampleType::Float { filterable: false };
-        let array = wgpu::TextureViewDimension::D2Array;
-        let buffer = |binding, ty| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        };
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("temporal pixel fusion"),
-            entries: &[
-                sampled(0, float, array),
-                sampled(1, float, array),
-                sampled(2, wgpu::TextureSampleType::Sint, array),
-                sampled(
-                    3,
-                    wgpu::TextureSampleType::Uint,
-                    wgpu::TextureViewDimension::D2,
-                ),
-                buffer(4, wgpu::BufferBindingType::Uniform),
-                buffer(5, wgpu::BufferBindingType::Storage { read_only: true }),
-            ],
-        });
+        let layout = fusion_layout(device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("temporal pixel fusion"),
             bind_group_layouts: &[&layout],
@@ -202,97 +169,17 @@ impl GpuFuse {
         roi: [u32; 4],
         scissors: Option<&[[u32; 4]]>,
     ) -> Output {
-        // Two vec4 layer-index groups keep the uniform's alignment explicit.
-        let mut words = [0u32; 16];
-        words[..4].copy_from_slice(&roi);
-        words[4] = params.noise.to_bits();
-        words[5] = params.limit.to_bits();
-        words[6] = params.current_layer;
-        words[7] = params.reference_layers.len() as u32;
-        words[8..8 + params.reference_layers.len()].copy_from_slice(&params.reference_layers);
-        let config: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
-        let tables: Vec<u8> = params
-            .y_limits
-            .iter()
-            .chain(&params.uv_limits)
-            .flat_map(|value| value.to_le_bytes())
-            .collect();
-        let config = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("temporal fusion parameters"),
-            contents: &config,
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let tables = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("temporal fusion limits"),
-            contents: &tables,
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let array_view = |texture: &wgpu::Texture| {
-            texture.create_view(&wgpu::TextureViewDescriptor {
-                dimension: Some(wgpu::TextureViewDimension::D2Array),
-                ..Default::default()
-            })
-        };
-        let y = array_view(inputs.y);
-        let uv = array_view(inputs.uv);
-        let flow = array_view(inputs.flow);
-        let luma = inputs.luma.create_view(&Default::default());
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("temporal fusion supplied window"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&y),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&uv),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&flow),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&luma),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: config.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: tables.as_entire_binding(),
-                },
-            ],
-        });
-        let target = |label, width, height, format| {
-            device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            })
-        };
+        let prepared = prepare_binding(device, &self.layout, inputs, params, roi);
         let output = Output {
-            y: target(
+            y: output_texture(
+                device,
                 "temporally fused Y",
                 roi[2],
                 roi[3],
                 wgpu::TextureFormat::R8Unorm,
             ),
-            uv: target(
+            uv: output_texture(
+                device,
                 "temporally fused UV",
                 roi[2] / 2,
                 roi[3] / 2,
@@ -315,7 +202,7 @@ impl GpuFuse {
                 ..Default::default()
             });
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &group, &[]);
+            pass.set_bind_group(0, &prepared.group, &[]);
             if let Some(rectangles) = scissors {
                 for &[x, y, width, height] in rectangles {
                     pass.set_scissor_rect(
@@ -332,6 +219,156 @@ impl GpuFuse {
         }
         output
     }
+}
+
+fn fusion_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let sampled = |binding, sample_type, view_dimension| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type,
+            view_dimension,
+            multisampled: false,
+        },
+        count: None,
+    };
+    let float = wgpu::TextureSampleType::Float { filterable: false };
+    let array = wgpu::TextureViewDimension::D2Array;
+    let buffer = |binding, ty| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("temporal pixel fusion"),
+        entries: &[
+            sampled(0, float, array),
+            sampled(1, float, array),
+            sampled(2, wgpu::TextureSampleType::Sint, array),
+            sampled(
+                3,
+                wgpu::TextureSampleType::Uint,
+                wgpu::TextureViewDimension::D2,
+            ),
+            buffer(4, wgpu::BufferBindingType::Uniform),
+            buffer(5, wgpu::BufferBindingType::Storage { read_only: true }),
+        ],
+    })
+}
+
+struct PreparedBinding {
+    _config: wgpu::Buffer,
+    _tables: wgpu::Buffer,
+    group: wgpu::BindGroup,
+}
+
+fn prepare_binding(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    inputs: Inputs<'_>,
+    params: &Parameters,
+    roi: [u32; 4],
+) -> PreparedBinding {
+    // Two vec4 layer-index groups keep the uniform's alignment explicit.
+    let mut words = [0u32; 16];
+    words[..4].copy_from_slice(&roi);
+    words[4] = params.noise.to_bits();
+    words[5] = params.limit.to_bits();
+    words[6] = params.current_layer;
+    words[7] = params.reference_layers.len() as u32;
+    words[8..8 + params.reference_layers.len()].copy_from_slice(&params.reference_layers);
+    let config: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let tables: Vec<u8> = params
+        .y_limits
+        .iter()
+        .chain(&params.uv_limits)
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let config = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("temporal fusion parameters"),
+        contents: &config,
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+    let tables = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("temporal fusion limits"),
+        contents: &tables,
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+    let array_view = |texture: &wgpu::Texture| {
+        texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        })
+    };
+    let y = array_view(inputs.y);
+    let uv = array_view(inputs.uv);
+    let flow = array_view(inputs.flow);
+    let luma = inputs.luma.create_view(&Default::default());
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("temporal fusion supplied window"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&y),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&uv),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&flow),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(&luma),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: config.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: tables.as_entire_binding(),
+            },
+        ],
+    });
+    PreparedBinding {
+        _config: config,
+        _tables: tables,
+        group,
+    }
+}
+
+fn output_texture(
+    device: &wgpu::Device,
+    label: &'static str,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
 }
 
 fn validate(inputs: &Inputs<'_>, params: &Parameters, roi: [u32; 4]) -> Result<(), String> {

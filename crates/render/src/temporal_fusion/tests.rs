@@ -519,7 +519,7 @@ fn flow_texel(x: i16, y: i16, z: i16, w: i16) -> Vec<u8> {
         .collect()
 }
 
-fn array_texture(
+pub(super) fn array_texture(
     device: &wgpu::Device,
     label: &'static str,
     size: [u32; 2],
@@ -541,7 +541,7 @@ fn array_texture(
         view_formats: &[],
     })
 }
-fn write_layer(
+pub(super) fn write_layer(
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
     layer: u32,
