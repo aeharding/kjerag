@@ -1233,8 +1233,8 @@ fn vertex_cached_map_wgsl() -> String {
         .find("fn type2_cell(")
         .expect("type-2 map shader contains its cell function");
     let mesh = MAP
-        .find("fn type2_mesh(")
-        .expect("type-2 map shader contains its mesh function");
+        .find("fn type2_inverse_seed(")
+        .expect("type-2 map shader contains its seed functions");
     format!("{}\n{VERTEX_CACHED_CELL}\n{}", &MAP[..cell], &MAP[mesh..])
 }
 
@@ -1386,25 +1386,39 @@ fn type2_cell(ray: vec3<f32>, row: i32, col_unwrapped: i32) -> Type2Sample {
   return out;
 }
 
-fn type2_mesh(body: vec3<f32>) -> Type2Sample {
-  var empty: Type2Sample;
-  let ray = normalize(vec3<f32>(-body.x, body.y, -body.z));
+fn type2_inverse_seed(ray: vec3<f32>) -> vec2<i32> {
   let row = i32(clamp(floor(acos(clamp(ray.y, -1.0, 1.0)) * f32(TYPE2_STACKS) / TYPE2_PI), 0.0, f32(TYPE2_STACKS - 1)));
   var theta = atan2(-ray.x, ray.z);
   if theta < 0.0 { theta += TYPE2_TAU; }
   let col = i32(floor(theta * f32(TYPE2_SLICES) / TYPE2_TAU)) % TYPE2_SLICES;
+  return vec2<i32>(row, col);
+}
+
+fn type2_body_seed(sample_uv: vec2<f32>) -> vec2<i32> {
+  let row = i32(clamp(floor(sample_uv.y * f32(TYPE2_STACKS)), 0.0, f32(TYPE2_STACKS - 1)));
+  let col = i32(floor(sample_uv.x * f32(TYPE2_SLICES))) % TYPE2_SLICES;
+  return vec2<i32>(row, col);
+}
+
+fn type2_mesh_seeded(ray: vec3<f32>, seed: vec2<i32>) -> Type2Sample {
+  var empty: Type2Sample;
   let neighbours = array<vec2<i32>, 9>(
     vec2<i32>(0, 0), vec2<i32>(-1, -1), vec2<i32>(-1, 0),
     vec2<i32>(-1, 1), vec2<i32>(0, -1), vec2<i32>(0, 1),
     vec2<i32>(1, -1), vec2<i32>(1, 0), vec2<i32>(1, 1),
   );
   for (var candidate = 0u; candidate < 9u; candidate += 1u) {
-    let at = vec2<i32>(row, col) + neighbours[candidate];
+    let at = seed + neighbours[candidate];
     if at.x < 0 || at.x >= TYPE2_STACKS { continue; }
     let found = type2_cell(ray, at.x, at.y);
     if found.covered > 0.5 { return found; }
   }
   return empty;
+}
+
+fn type2_mesh(body: vec3<f32>) -> Type2Sample {
+  let ray = normalize(vec3<f32>(-body.x, body.y, -body.z));
+  return type2_mesh_seeded(ray, type2_inverse_seed(ray));
 }
 "#;
 
