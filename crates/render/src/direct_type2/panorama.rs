@@ -8,6 +8,8 @@ use wgpu::util::DeviceExt;
 use super::{DirectType2Pipeline, draw_wgsl_with_fusion_mode};
 use crate::{Extent, Fallible, FrameStamp, Size};
 
+#[cfg(test)]
+pub(crate) mod correction_review;
 pub(super) mod nv12;
 pub(crate) mod nv12_vertex_cache;
 
