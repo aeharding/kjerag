@@ -1,6 +1,7 @@
 //! Single-pass direct view with a half-resolution temporal RGB residual.
 //!
-//! The high-frequency picture remains the native type-2 draw. Only the
+//! The high-frequency picture samples source-rate prefiltered lens planes.
+//! This approximates the native box between its original texel centres. Only the
 //! accepted low-frequency term comes from the temporal panorama:
 //! `clamp(rgb8(high) + filtered - current, 0, 1)`. The two low inputs are
 //! inseparably owned by one [`CorrectionFrame`], and this module neither
@@ -95,7 +96,10 @@ impl CorrectionPipeline {
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
                     entry_point: Some(fragment),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[("type2_source_is_prefiltered", 1.0)],
+                        ..Default::default()
+                    },
                     targets: &[Some(wgpu::ColorTargetState {
                         format: output_format,
                         blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),

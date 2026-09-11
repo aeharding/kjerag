@@ -15,13 +15,7 @@ fn hardware_atlas_sampling_keeps_join_and_clamp_edges() {
     };
     // The original box law, using the original four-load linear sampler.
     // Extract the unchanged law so the probe also covers every inner sample.
-    let reference_box = DRAW
-        .split_once("fn type2_box(")
-        .unwrap()
-        .1
-        .split_once("fn type2_ycbcr(")
-        .unwrap()
-        .0;
+    let reference_box = SOURCE_FILTER_WGSL.split_once("fn type2_box(").unwrap().1;
     // Keep the previous eager select in the oracle. The optimized path only
     // fetches the fallback sample if the box has no usable area.
     let lazy_return = "if area > 0.0010000000474974513 { return sum / area; }\n  return type2_atlas_linear(a, b, uv);";

@@ -1,9 +1,14 @@
-//! GPU-owned copy of one exact imported lens pair.
+//! GPU-owned, full-resolution display snapshot of one imported lens pair.
 //!
 //! Imported textures alias decoder surfaces and therefore cannot outlive their
-//! `Frames`. This module samples each plane once into ordinary wgpu textures.
-//! The sealed result keeps the exact decoded source stamp and graphics
-//! context, but no decoder owner or resident production carrier.
+//! `Frames`. This module evaluates the native source box filter once at every
+//! output texel centre into ordinary wgpu textures. Final views then sample
+//! those immutable, prefiltered planes without retaining a decoder owner or
+//! resident production carrier.
+//!
+//! This is deliberately approximate: filtering before R8/RG8 quantization and
+//! later viewport interpolation is not algebraically identical to evaluating
+//! the native box at every final view sample.
 
 use kjerag_media::{Samples, Size};
 
@@ -13,13 +18,14 @@ use crate::flow::one_xs::gpu_context::OneXsGpuContext;
 use crate::flow::one_xs::one_xs_belt_gpu::ResidentSourceIdentity;
 use crate::{Extent, Fallible, FrameStamp, Planes};
 
-const COPY_SHADER: &str = r#"
+const FILTER_SHADER_PREFIX: &str = r#"
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
 }
 
 @group(0) @binding(0) var source_a: texture_2d<f32>;
 @group(0) @binding(1) var source_b: texture_2d<f32>;
+@group(0) @binding(2) var type2_sampler: sampler;
 
 @vertex
 fn vs(@builtin(vertex_index) vertex: u32) -> VertexOutput {
@@ -32,6 +38,16 @@ fn vs(@builtin(vertex_index) vertex: u32) -> VertexOutput {
   out.position = vec4<f32>(points[vertex], 0.0, 1.0);
   return out;
 }
+"#;
+
+const FILTER_SHADER_ENTRIES: &str = r#"
+fn atlas_centres(position: vec2<f32>) -> array<vec2<f32>, 2> {
+  let dimensions = vec2<f32>(textureDimensions(source_a));
+  return array(
+    vec2<f32>(position.x / (2.0 * dimensions.x), position.y / dimensions.y),
+    vec2<f32>((dimensions.x + position.x) / (2.0 * dimensions.x), position.y / dimensions.y),
+  );
+}
 
 struct LumaOutput {
   @location(0) a: f32,
@@ -40,10 +56,11 @@ struct LumaOutput {
 
 @fragment
 fn luma_fs(in: VertexOutput) -> LumaOutput {
-  let at = vec2<i32>(in.position.xy);
+  let centres = atlas_centres(in.position.xy);
+  let logical = vec2<f32>(textureDimensions(source_a));
   var out: LumaOutput;
-  out.a = textureLoad(source_a, at, 0).r;
-  out.b = textureLoad(source_b, at, 0).r;
+  out.a = type2_box(source_a, source_b, centres[0], logical).r;
+  out.b = type2_box(source_a, source_b, centres[1], logical).r;
   return out;
 }
 
@@ -54,20 +71,22 @@ struct ChromaOutput {
 
 @fragment
 fn chroma_fs(in: VertexOutput) -> ChromaOutput {
-  let at = vec2<i32>(in.position.xy);
+  let centres = atlas_centres(in.position.xy);
+  let logical = vec2<f32>(textureDimensions(source_a));
   var out: ChromaOutput;
-  out.a = textureLoad(source_a, at, 0).rg;
-  out.b = textureLoad(source_b, at, 0).rg;
+  out.a = type2_box(source_a, source_b, centres[0], logical).rg;
+  out.b = type2_box(source_a, source_b, centres[1], logical).rg;
   return out;
 }
 "#;
 
-/// Cached copier shared by every source snapshot made through one direct
-/// pipeline. It records commands only; submission and retirement stay with the
-/// installed resident transaction.
+/// Cached full-resolution prefilter shared by every display snapshot made
+/// through one direct pipeline. It records commands only; submission and
+/// retirement stay with the installed resident transaction.
 pub(super) struct SnapshotPipeline {
     device: wgpu::Device,
     layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
     luma: wgpu::RenderPipeline,
     chroma: wgpu::RenderPipeline,
 }
@@ -76,25 +95,56 @@ impl SnapshotPipeline {
     pub(super) fn new(device: &wgpu::Device) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("resident source snapshot inputs"),
-            entries: &[0, 1].map(|binding| wgpu::BindGroupLayoutEntry {
-                binding,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
                 },
-                count: None,
-            }),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("resident source snapshot"),
             bind_group_layouts: &[&layout],
             immediate_size: 0,
         });
+        let shader_source = format!(
+            "{FILTER_SHADER_PREFIX}\n{}\n{FILTER_SHADER_ENTRIES}",
+            super::SOURCE_FILTER_WGSL
+        );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("resident source snapshot"),
-            source: wgpu::ShaderSource::Wgsl(COPY_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("resident source snapshot linear clamp"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
         });
         let make = |label, entry_point, format| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -128,6 +178,7 @@ impl SnapshotPipeline {
         Self {
             device: device.clone(),
             layout,
+            sampler,
             luma: make(
                 "resident luma source snapshot",
                 "luma_fs",
@@ -163,6 +214,10 @@ impl SnapshotPipeline {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&source_views[1]),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
             ],
         });
         let attachments = target_views.each_ref().map(|view| {
@@ -187,8 +242,8 @@ impl SnapshotPipeline {
     }
 }
 
-/// One immutable, GPU-owned pair of lens planes and its unforgeable source
-/// association. Plane handles never cross this owner boundary.
+/// One immutable, GPU-owned pair of prefiltered display planes and its
+/// unforgeable source association. Plane handles never cross this boundary.
 pub(crate) struct SourceSnapshot {
     planes: [Planes; 2],
     frame: FrameStamp,
@@ -417,10 +472,11 @@ mod tests {
         assert!(fields.contains("frame: FrameStamp"));
     }
 
-    // Root runs GPU tests serially; this test deliberately does no submission
-    // or readback outside its own exact plane-copy comparison.
+    // Root runs GPU tests serially. The CPU oracle independently evaluates the
+    // native atlas box at every destination texel centre, including both sides
+    // of the lens join and alternating source parity.
     #[test]
-    fn gpu_snapshot_preserves_every_initialized_plane_byte() {
+    fn gpu_snapshot_matches_native_box_at_every_plane_texel_centre() {
         let Ok((device, queue)) = super::super::tests::gpu() else {
             assert!(std::env::var_os("KJERAG_REQUIRE_GPU").is_none());
             return;
@@ -429,9 +485,21 @@ mod tests {
         let stamp = FrameStamp::for_test(7, std::time::Duration::from_millis(233), None);
         let context = OneXsGpuContext::new(&device, &queue);
         let session = ResidentSourceIdentity::for_test();
-        let bytes = |len: usize, salt: u8| {
-            (0..len)
-                .map(|at| (at as u8).wrapping_mul(73).wrapping_add(salt))
+        let bytes = |size: Size, channels: usize, lens: usize, salt: usize| {
+            (0..size.height as usize)
+                .flat_map(|y| {
+                    (0..size.width as usize).flat_map(move |x| {
+                        (0..channels).map(move |channel| {
+                            ((x * 73
+                                + y * 47
+                                + channel * 113
+                                + lens * 191
+                                + ((x + y) & 1) * 59
+                                + salt)
+                                % 256) as u8
+                        })
+                    })
+                })
                 .collect::<Vec<_>>()
         };
         let make = |label, size: Size, format, data: &[u8], bytes_per_pixel| {
@@ -457,15 +525,9 @@ mod tests {
             );
             texture
         };
-        let luma = [
-            bytes((size.width * size.height) as usize, 0),
-            bytes((size.width * size.height) as usize, 19),
-        ];
+        let luma = [bytes(size, 1, 0, 0), bytes(size, 1, 1, 19)];
         let half = size.halved();
-        let chroma = [
-            bytes((half.width * half.height * 2) as usize, 41),
-            bytes((half.width * half.height * 2) as usize, 113),
-        ];
+        let chroma = [bytes(half, 2, 0, 41), bytes(half, 2, 1, 113)];
         let planes = std::array::from_fn(|lens| Planes {
             luma: make(
                 "snapshot source luma",
@@ -494,7 +556,14 @@ mod tests {
         let snapshot = imported
             .encode_source_snapshot(&producer, &device, &mut encoder)
             .unwrap();
-        let expected = [&luma[0], &chroma[0], &luma[1], &chroma[1]];
+        let expected_luma = native_box_planes([&luma[0], &luma[1]], size, 1);
+        let expected_chroma = native_box_planes([&chroma[0], &chroma[1]], half, 2);
+        let expected = [
+            &expected_luma[0],
+            &expected_chroma[0],
+            &expected_luma[1],
+            &expected_chroma[1],
+        ];
         let textures = [
             &snapshot.planes[0].luma,
             &snapshot.planes[0].chroma,
@@ -503,12 +572,137 @@ mod tests {
         ];
         let readbacks = textures.map(|texture| encode_readback(&device, &mut encoder, texture));
         let submission = queue.submit([encoder.finish()]);
+        let mut worst = 0u8;
         for ((readback, texture), expected) in readbacks.into_iter().zip(textures).zip(expected) {
-            assert_eq!(
-                readback_bytes(&device, submission.clone(), readback, texture),
-                expected.as_slice()
-            );
+            let actual = readback_bytes(&device, submission.clone(), readback, texture);
+            assert_eq!(actual.len(), expected.len());
+            for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+                let difference = actual.abs_diff(expected);
+                // Hardware bilinear weights may have finite subtexel
+                // precision before the render target performs UNORM rounding.
+                // One code value bounds that numeric variance; it is not an
+                // acceptance of the visual prefilter approximation.
+                assert!(
+                    difference <= 1,
+                    "prefilter byte {index} is {actual}, CPU native box is {expected}"
+                );
+                worst = worst.max(difference);
+            }
         }
+        eprintln!("source snapshot native-box worst difference: {worst} code values");
+    }
+
+    const BOX_SIZE: f32 = 1.7881767;
+
+    fn native_box_planes(sources: [&[u8]; 2], size: Size, channels: usize) -> [Vec<u8>; 2] {
+        std::array::from_fn(|lens| {
+            let mut output =
+                Vec::with_capacity(size.width as usize * size.height as usize * channels);
+            for y in 0..size.height {
+                for x in 0..size.width {
+                    let uv = [
+                        (lens as f32 * size.width as f32 + x as f32 + 0.5)
+                            / (2.0 * size.width as f32),
+                        (y as f32 + 0.5) / size.height as f32,
+                    ];
+                    for channel in 0..channels {
+                        output.push(
+                            (native_box(sources, size, channels, channel, uv) * 255.0)
+                                .round()
+                                .clamp(0.0, 255.0) as u8,
+                        );
+                    }
+                }
+            }
+            output
+        })
+    }
+
+    fn native_box(
+        sources: [&[u8]; 2],
+        size: Size,
+        channels: usize,
+        channel: usize,
+        uv: [f32; 2],
+    ) -> f32 {
+        let logical = [size.width as f32, size.height as f32];
+        let start = [
+            uv[0] * logical[0] - BOX_SIZE * 0.5,
+            uv[1] * logical[1] - BOX_SIZE * 0.5,
+        ];
+        let end = [start[0] + BOX_SIZE, start[1] + BOX_SIZE];
+        let mut sum = 0.0;
+        let mut area = 0.0;
+        let mut y = start[1].floor();
+        while y < end[1] {
+            let low_y = y.max(start[1]);
+            let high_y = (y + 2.0).min(end[1]);
+            let mut x = start[0].floor();
+            while x < end[0] {
+                let low_x = x.max(start[0]);
+                let high_x = (x + 2.0).min(end[0]);
+                let cell_area = (high_x - low_x) * (high_y - low_y);
+                let sample_uv = [
+                    (low_x + high_x) * 0.5 / logical[0],
+                    (low_y + high_y) * 0.5 / logical[1],
+                ];
+                sum += atlas_linear(sources, size, channels, channel, sample_uv) * cell_area;
+                area += cell_area;
+                x += 2.0;
+            }
+            y += 2.0;
+        }
+        // The WGSL's recovered decimal rounds to this same binary32 value.
+        if area > 0.001_f32 {
+            sum / area
+        } else {
+            atlas_linear(sources, size, channels, channel, uv)
+        }
+    }
+
+    fn atlas_linear(
+        sources: [&[u8]; 2],
+        size: Size,
+        channels: usize,
+        channel: usize,
+        uv: [f32; 2],
+    ) -> f32 {
+        let p = [
+            uv[0] * (2 * size.width) as f32 - 0.5,
+            uv[1] * size.height as f32 - 0.5,
+        ];
+        let base = [p[0].floor() as i32, p[1].floor() as i32];
+        let fraction = [p[0] - p[0].floor(), p[1] - p[1].floor()];
+        let top = mix(
+            atlas_load(sources, size, channels, channel, base),
+            atlas_load(sources, size, channels, channel, [base[0] + 1, base[1]]),
+            fraction[0],
+        );
+        let bottom = mix(
+            atlas_load(sources, size, channels, channel, [base[0], base[1] + 1]),
+            atlas_load(sources, size, channels, channel, [base[0] + 1, base[1] + 1]),
+            fraction[0],
+        );
+        mix(top, bottom, fraction[1])
+    }
+
+    fn atlas_load(
+        sources: [&[u8]; 2],
+        size: Size,
+        channels: usize,
+        channel: usize,
+        at: [i32; 2],
+    ) -> f32 {
+        let x = at[0].clamp(0, (2 * size.width) as i32 - 1) as u32;
+        let y = at[1].clamp(0, size.height as i32 - 1) as u32;
+        let lens = usize::from(x >= size.width);
+        let local_x = x % size.width;
+        let index = ((y * size.width + local_x) as usize) * channels + channel;
+        sources[lens][index] as f32 / 255.0
+    }
+
+    fn mix(a: f32, b: f32, amount: f32) -> f32 {
+        a * (1.0 - amount) + b * amount
     }
 
     fn encode_readback(

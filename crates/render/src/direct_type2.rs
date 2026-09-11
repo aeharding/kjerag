@@ -1247,7 +1247,11 @@ fn draw_wgsl_with_fusion_mode(fusion: bool, hardware_fusion: bool) -> String {
         // introduces no resource binding or texture read.
         "fn type2_correct(color: vec3<f32>, uv: vec2<f32>, lens: u32) -> vec3<f32> { return color; }"
     };
-    format!("{}\n{}\n{correction}\n{DRAW}", source_wgsl(), map_wgsl())
+    format!(
+        "{}\n{}\n{correction}\n{DRAW}\n{SOURCE_FILTER_WGSL}\n{DRAW_COLOR}",
+        source_wgsl(),
+        map_wgsl()
+    )
 }
 
 pub(in crate::direct_type2) fn vertex_cached_draw_wgsl_with_fusion_mode(
@@ -1264,7 +1268,7 @@ pub(in crate::direct_type2) fn vertex_cached_draw_wgsl_with_fusion_mode(
         "fn type2_correct(color: vec3<f32>, uv: vec2<f32>, lens: u32) -> vec3<f32> { return color; }"
     };
     format!(
-        "{}\n{}\n{correction}\n{DRAW}",
+        "{}\n{}\n{correction}\n{DRAW}\n{SOURCE_FILTER_WGSL}\n{DRAW_COLOR}",
         source_wgsl(),
         vertex_cached_map_wgsl()
     )
@@ -1552,6 +1556,12 @@ fn vs(@builtin(vertex_index) index: u32) -> Type2VsOut {
   return out;
 }
 
+"#;
+
+// The source-rate snapshot prefilter and the unchanged body/reference draw
+// share the same atlas boundary and box arithmetic.
+const SOURCE_FILTER_WGSL: &str = r#"
+
 fn type2_atlas_load(a: texture_2d<f32>, b: texture_2d<f32>, p: vec2<i32>) -> vec4<f32> {
   let dims = textureDimensions(a);
   let x = clamp(p.x, 0, i32(2u * dims.x) - 1);
@@ -1607,10 +1617,25 @@ fn type2_box(a: texture_2d<f32>, b: texture_2d<f32>, uv: vec2<f32>, logical: vec
   return type2_atlas_linear(a, b, uv);
 }
 
+"#;
+
+const DRAW_COLOR: &str = r#"
+// Only the corrected display pipeline selects this. Its sealed snapshots
+// have already evaluated the source box at each original texel centre.
+// Body panoramas, calibration and the reference draw keep the native box.
+override type2_source_is_prefiltered: bool = false;
+
 fn type2_ycbcr(uv: vec2<f32>) -> vec3<f32> {
   let source_size = vec2<f32>(reframe.frame_width, reframe.frame_height);
-  let luma = type2_box(type2_luma0, type2_luma1, uv, source_size);
-  let chroma = type2_box(type2_chroma0, type2_chroma1, uv, source_size * 0.5);
+  var luma: vec4<f32>;
+  var chroma: vec4<f32>;
+  if type2_source_is_prefiltered {
+    luma = type2_atlas_linear(type2_luma0, type2_luma1, uv);
+    chroma = type2_atlas_linear(type2_chroma0, type2_chroma1, uv);
+  } else {
+    luma = type2_box(type2_luma0, type2_luma1, uv, source_size);
+    chroma = type2_box(type2_chroma0, type2_chroma1, uv, source_size * 0.5);
+  }
   let c = chroma.rg - vec2<f32>(0.50196081399917603);
   return source_rgb(luma.r, c);
 }

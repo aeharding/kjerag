@@ -86,7 +86,7 @@ The shell is libcosmic, which pins wgpu 28, so `render` is written against
 28 and owns the one module that wgpu 30 would delete
 (`crates/render/src/dmabuf.rs`).
 
-The branch and installed test build draw original full-resolution source/map
+The installed test build draws original full-resolution source/map
 samples with a reduced full-sphere temporal residual. The owner accepted the607
 quarter-field moving comparison, with the exact response recorded in ROADMAP;
 this is not broad footage acceptance or a performance qualification. The two
@@ -96,6 +96,16 @@ RGB8, clamped, then transferred to the surface in one render pass. Rectilinear
 views use the existing native mesh; curved views use the existing body-ray map.
 Correction textures extend picture group0, retaining map group1 and colour
 group2 within the native three-group limit. Pipelines cache by surface format.
+
+The branch's pending source-rate prefilter trial changes only the corrected
+display's high term: it evaluates the existing native box at every source
+texel centre in the existing snapshot passes, then uses atlas bilinear reads
+at view time. Full dimensions do not mean unchanged detail: prefilter storage
+quantization and later interpolation can soften detail or change noise. This
+requires its own moving owner approval. A private snapshot constructor and
+corrected-only shader specialization keep prefiltered storage away from raw
+body/map/color/temporal inputs. Native-box reference draws default to unchanged
+sampling; both paths share the original atlas boundary and box WGSL functions.
 
 The selected correction raster preserves the preceding half-field candidate's
 original-source ownership and display rules. Its five-level field is1920x960
@@ -112,20 +122,22 @@ acceptance of all footage, live-player performance or a merge. This candidate's
 installed bundle passes40 X4 and44 ONE X2 UI checks; ROADMAP records its exact
 source and executable identity. The preceding package is retained for recovery.
 
-The resident source worker encodes the reduced RGB body and exact texture-load
-copies of both original lens planes in one command buffer. Imported dmabufs are
+The resident source worker encodes the reduced RGB body and display snapshots
+of both original lens planes in one command buffer. The installed build uses
+exact texture-load copies; the branch prefilters in the same two MRT passes,
+reading both original lens planes at the internal atlas join. Imported dmabufs are
 sampled-only, so no unsupported COPY_SRC use is invented. The first body pass
 arms submission-complete retirement before any source sampling. Its retirement
-covers the later copy passes too; a later encode rejection explicitly closes
+covers the later snapshot passes too; a later encode rejection explicitly closes
 admission and quarantines uncertain owners while preserving the original error.
-Copies are ordinary GPU-owned R8/RG8 textures, not aliases of VA-API surfaces.
-The current copier explicitly requires8-bit planes; higher-bit-depth snapshot
+Snapshots are ordinary GPU-owned R8/RG8 textures, not aliases of VA-API surfaces.
+The snapshot path explicitly requires8-bit planes; higher-bit-depth snapshot
 support has not been qualified. The installed map snapshot clones only immutable
 read/fusion bind groups, exact frame and context, not the heavyweight carrier.
 
 `CorrectionStream` owns the low unfiltered controls and reduced-level temporal
-Stream. `CorrectionSequence` retains at most seven original source/map snapshots
-and moves each into its exact completed `CorrectedFrame`. Readbacks and uploaded
+Stream. `CorrectionSequence` retains at most seven full-resolution display/map
+snapshots and moves each into its exact completed `CorrectedFrame`. Readbacks and uploaded
 maps exist only in the older paired review harness, not this live path. Scene
 publishes and screenshots these typed frames. There is no coefficient EMA,
 skipped source refresh or interpolation between correction updates. Halving the

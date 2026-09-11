@@ -14,6 +14,49 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Source-rate display prefilter reaches native throughput target, pending
+quality review, 2026-09-11:** the branch evaluates the existing native box
+filter at full-resolution source texel centres during the existing snapshot
+passes, then uses simple bilinear sampling during corrected view redraws.
+Raw source inputs still feed body/map/color/temporal preparation. Source
+association, seven-source cadence, allocation count and decoder ownership
+are unchanged. Prefiltering before storage quantization and interpolation
+changes sharpness/noise; the owner's previous quarter-field approval does
+NOT cover this change. Original native-box draw and temporal oracles remain.
+
+Two 40-second native X4 pans at 2256x1504 complete 281.475/274.974 redraws/s
+with 29.975 contiguous source advances/s. The matched-build control between
+them completes 269.524 redraws/s but only 23.700 source advances/s, accumulating
+8.328 s video lateness versus candidate 7.2/49.8 ms. ONE X2 completes 306.450
+redraws/s with 29.975 source advances/s across its known ISO transition. All
+four runs pass the unchanged strict source/draw/present association and
+Radeon/quiet audio checks. These candidate cohorts satisfy the throughput
+component of the 240 fps active native-player target, not physical 240 Hz
+output or a broad smoothness verdict. Completion-spacing p99/max remain
+12.165/25.923 ms and 12.326/32.984 ms on X4, 9.008/22.703 ms on ONE X2.
+No no-spikes requirement is invented, and those spikes are not silently accepted.
+
+All 29 direct GPU checks now pass, including the new one-code snapshot
+CPU/GPU bound. The initial 28/29 run's sole failure was a shader-text extraction
+test needing its reference updated after helper extraction, not a changed
+numeric tolerance. All 8 real-camera Scene tests pass and save 93 captures
+with matching source indices/times. The fresh 607 moving comparison reuses
+the existing Studio export and retained index-derived offset; that Studio
+offset is not independently authenticated. All movie-body hashes match the
+inputs. The new softened-detail/noise tradeoff is explicitly asked of the
+owner, with no answer yet. The full release workspace passes 1484 tests,
+51 ignored across 48 suites, with both footage fixtures and required GPU
+checks. Release workspace/all-target Clippy, formatting, source-lock, rename
+and diff checks pass. A binary32-equivalent test-only literal cleanup follows
+the full test run; production code and test bounds are unchanged. All 50 native
+X4 UI checks pass, including the exact 612.078 view, pause, backward seek,
+scrubber, fullscreen and import-failure recovery. Captures and logs are
+retained in `scratch/installed-capacity/quarter-prefilter-ui-x4`.
+The installed owner-approved quarter build remains unchanged; no merge or
+release. Both this sampling tradeoff and the earlier roughly 0.1-second
+prewarm first-picture delay still await owner acceptance before delivery.
+Evidence: `scratch/installed-capacity/quarter-prefilter-review.md`.
+
 **Bounded decoder-loan trial retired, 2026-09-11:** removing original-plane
 copies preserves all93 source-matched pictures and passes9 real-camera Scene
 tests, including recorded GPU draw ownership and both-camera seek pressure.
