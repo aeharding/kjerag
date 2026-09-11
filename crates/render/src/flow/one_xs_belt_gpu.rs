@@ -36,6 +36,8 @@ mod corrected;
 #[path = "one_xs/filtered_capture.rs"]
 mod filtered_capture;
 pub(crate) use corrected::PreparedCorrectionDraw;
+#[path = "one_xs/native_capacity.rs"]
+mod native_capacity;
 #[path = "one_xs/panorama_ingest.rs"]
 mod panorama_ingest;
 pub(crate) use filtered_capture::FilteredCaptureFacade;
@@ -2231,12 +2233,7 @@ impl InstalledOneXsDraw {
                 .pipeline
                 .prepare_resident_picture(&self.source, reframe),
             draw: Arc::clone(self),
-            native_capacity_view: native_capacity_probe_enabled().then(|| {
-                use std::hash::{Hash, Hasher};
-                let mut hash = std::collections::hash_map::DefaultHasher::new();
-                reframe.bytes().hash(&mut hash);
-                hash.finish()
-            }),
+            native_capacity: native_capacity::DrawMarker::for_reframe(reframe),
         })
     }
 
@@ -2266,12 +2263,7 @@ impl InstalledOneXsDraw {
 struct InstalledOneXsPass {
     binding: crate::direct_type2::ImportedOneXsDrawBinding,
     draw: Arc<InstalledOneXsDraw>,
-    native_capacity_view: Option<u64>,
-}
-
-fn native_capacity_probe_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("KJERAG_NATIVE_CAPACITY_PROBE").is_some())
+    native_capacity: Option<native_capacity::DrawMarker>,
 }
 
 fn native_lifecycle_probe_enabled() -> bool {
@@ -2316,26 +2308,8 @@ impl InstalledOneXsPass {
             self.draw.map.fusion_read(),
             pass,
         );
-        if let Some(view) = self.native_capacity_view {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            let ordinal = NEXT.fetch_add(1, Ordering::Relaxed);
-            let frame = self.draw.frame();
-            let start = std::time::Instant::now();
-            let unix_us = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_micros();
-            eprintln!(
-                "native-draw: {{\"id\":{ordinal},\"unix_us\":{unix_us},\"source\":{},\"pts_ns\":{},\"view_hash\":{view}}}",
-                frame.index(),
-                frame.timestamp().as_nanos()
-            );
-            pass.on_submitted_work_done(move || {
-                let unix_us = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
-                eprintln!("native-draw-done: {{\"id\":{ordinal},\"unix_us\":{unix_us},\"elapsed_ns\":{}}}", start.elapsed().as_nanos());
-            });
+        if let Some(marker) = self.native_capacity {
+            marker.record(&self.draw.frame(), pass);
         }
     }
 

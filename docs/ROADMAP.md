@@ -14,6 +14,62 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Installed full-resolution load comparison, 2026-09-11:**
+the unchanged quarter-correction Flatpak was exercised with 40 seconds of
+continuous pointer panning at 2256x1504, at nominal 300, 240 and 60 Hz. Exact
+installed identity, Radeon execution and quiet audio checks pass. At 300 Hz,
+player source reports deteriorate to 23-25 fps with 7.073 seconds worst
+lateness. At 240 Hz they remain near 30 fps, with 29.20/30.80 catch-up windows
+and 115.8 ms worst lateness. At 60 Hz, steady reports are 29.80-30.00 fps; the
+256.4 ms worst lateness is already present in the startup-inclusive report
+and does not grow during panning. All runs report zero drops, starvation or
+audio underruns. The 300 Hz overload is not itself a failure at the 240 target.
+
+The source-authenticated capacity checker correctly fails all three traces:
+the new corrected draw path lacks the existing old resident path's draw marker.
+The recorded surface-only rates are 307.12/243.42/62.42 commits per second,
+with commit-spacing p99 of 8.666/9.031/16.956 ms and maxima of
+21.513/19.516/22.562 ms respectively. These are not source-authenticated
+changing-view rates, physical presentation or a 240 fps pass. Missing markers
+are not evidence of blank frames. Preserve the strict checker; reuse its
+existing draw marker on the corrected path before claiming a native capacity
+gate. No app or installed-package change was made for these runs. Evidence:
+`scratch/installed-capacity/quarter-correction-load-review.md` and its three
+named run directories. Ordinary-display playback and high-refresh overload
+are now separated; owner live review and performance headroom remain open.
+
+The working branch now reuses one shared opt-in draw marker in both old
+resident and corrected draws. It retains the existing JSON schema, Reframe
+hash and completion callback, with no shader, normal GPU command, scheduling
+or cadence change. The two marker unit tests and all eight real-camera Scene
+tests pass; all 93 source-matched 607/612/ONE X2 pictures are byte-identical
+to the preceding quarter captures. Release workspace/all-target Clippy,
+formatting, source-lock and rename checks pass.
+
+The first corrected-path native 240 Hz run now passes the unchanged strict
+source/draw/present checker: 9,302 sourced commits, all eventually completed,
+9,301 inside the 40-second pan (232.525/s). Sources 18549-19710 are contiguous
+at 29.025 advances/s. Of 8,140 same-source redraw pairs, 7,704 have a changed
+Reframe hash. Begin-spacing p99 is 8.105 ms/max 16.329 ms; completion-spacing
+p99 is 10.646 ms/max 20.791 ms. This establishes changing-view rendering
+with stitching active, but not the required capacity/full source rate.
+Native runtime and marker overhead differ from the installed runs above;
+this is not an A/B speed comparison. The installed owner-review package is
+unchanged. Evidence: `quarter-x4-612-native-marked-240-01` under the same
+installed-capacity directory, plus `quarter-marker-*` test/build logs.
+
+The matching ONE X2 run also passes strict association: 234.300 completed
+redraws/s with 29.975 contiguous source advances/s, spanning sources 6571-7770
+and the known ISO transition. Begin-spacing p99 is 8.190 ms/max 30.140 ms;
+completion-spacing p99 is 10.133 ms/max 36.046 ms. It is not a 240 fps pass.
+The source-authenticated commit trace locates a 104.048 ms dwell from source
+6952 to 6953 at first temporal activation, not merely a pre-prepare `shown`
+report interval. That transition lazily creates two coarse-search pipelines.
+Their contribution is a testable cause, not yet established: next isolate
+preparing those pipelines during initial buffering, without changing picture
+math, source cadence or the installed owner-review build. Evidence:
+`quarter-x2-native-marked-240-01` in the same directory.
+
 **Quarter correction installed for live owner testing, 2026-09-11:**
 source `5f7fc59d9170e5c46a4574ae83c9efc1aad1ee11` now supplies the installed
 `dev.harding.Kjerag` stable test build. Executable SHA256 is

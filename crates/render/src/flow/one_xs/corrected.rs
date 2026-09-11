@@ -10,6 +10,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use super::map_patch_gpu::MapSnapshot;
+use super::native_capacity;
 use crate::direct_type2::correction::{CorrectionPictureBinding, CorrectionPipeline};
 use crate::direct_type2::{BodyPanorama, DirectType2Pipeline, SourceSnapshot};
 use crate::flow::one_xs::gpu_context::OneXsGpuContext;
@@ -156,6 +157,7 @@ impl CorrectedFrame {
             fusion: self.display.map.fusion_read().cloned(),
             pipeline,
             frame: self.frame().clone(),
+            native_capacity: native_capacity::DrawMarker::for_reframe(reframe),
         })
     }
 }
@@ -168,6 +170,7 @@ pub(crate) struct PreparedCorrectionDraw {
     fusion: Option<wgpu::BindGroup>,
     pipeline: Arc<CorrectionPipeline>,
     frame: FrameStamp,
+    native_capacity: Option<native_capacity::DrawMarker>,
 }
 
 impl PreparedCorrectionDraw {
@@ -178,5 +181,8 @@ impl PreparedCorrectionDraw {
     pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
         self.pipeline
             .draw(pass, &self.picture, &self.map, self.fusion.as_ref());
+        if let Some(marker) = self.native_capacity {
+            marker.record(&self.frame, pass);
+        }
     }
 }
