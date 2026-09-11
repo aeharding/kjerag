@@ -14,6 +14,33 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Quarter correction installed for live owner testing, 2026-09-11:**
+source `5f7fc59d9170e5c46a4574ae83c9efc1aad1ee11` now supplies the installed
+`dev.harding.Kjerag` stable test build. Executable SHA256 is
+`65dce13b2289284bebb71be7242919327f8fcdaa429012f4ed3bfd82e78cae4c`;
+installed OSTree is
+`db43978530f93ac3fc52b71f4ec4ed7a507be0376e964710464f28a09d2047d2`.
+The archived-source SDK build completes in2:34, and installed executable bytes,
+runtime/permission metadata and deployment identity match the package before
+and after qualification. Origin remains `kjerag-origin`. The preceding
+half-field package is retained. There is no merge or public release.
+
+The actual installed app passes40 X4 UI checks at612.078 and44 ONE X2 checks
+at212.512, including their exact views, pause, backward seek, real scrubber,
+screenshots, fullscreen and ONE X2 paired-file opening. Root inspected both
+reported-view captures. Audio controls and injected import failure skip in the
+main sandbox harness; native qualification separately covers those paths.
+This verifies test-build delivery, not broad visual acceptance or240fps capacity.
+Separate audio-enabled installed controls-wake checks pass for both cameras,
+with three pointer wakes each and null-sink48kHz stereo. Steady source reports
+are29.99-30.01fps, with zero drops, starvation and audio underruns. Startup-inclusive
+reports are16.44/18.94fps; worst video lateness is5.1/15.8ms and startup-inclusive
+audio errors59.6/69.1ms. These short1280x720 checks guard controls wakeup, not
+full-resolution presentation or the4.17ms capacity budget. Evidence:
+`scratch/flatpak-delivery-5f7fc59d` and `scratch/controls-wake/run.sqZkL1gY`,
+`run.7xwvlLEH`. The remaining owner review is live blotches, motion and hitches
+in the installed build, not another offline movie.
+
 **Quarter correction approved in moving comparison, 2026-09-11:**
 the owner answered "Yes, looks acceptable" to the607 moving comparison with
 Studio on the left and this faster candidate on the right. The smaller field,

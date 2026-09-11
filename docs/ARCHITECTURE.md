@@ -86,9 +86,9 @@ The shell is libcosmic, which pins wgpu 28, so `render` is written against
 28 and owns the one module that wgpu 30 would delete
 (`crates/render/src/dmabuf.rs`).
 
-The delivered test build draws original full-resolution source/map samples with a
-half-linear full-sphere temporal residual. The owner accepted the607 moving
-comparison, with the exact short response/interpretation recorded in ROADMAP;
+The branch and installed test build draw original full-resolution source/map
+samples with a reduced full-sphere temporal residual. The owner accepted the607
+quarter-field moving comparison, with the exact response recorded in ROADMAP;
 this is not broad footage acceptance or a performance qualification. The two
 low-resolution terms pass through the same gamma RGB/NV12/RGB conversion. Their
 signed difference is bilinearly sampled, added to explicitly quantized direct
@@ -97,19 +97,20 @@ views use the existing native mesh; curved views use the existing body-ray map.
 Correction textures extend picture group0, retaining map group1 and colour
 group2 within the native three-group limit. Pipelines cache by surface format.
 
-The working branch now uses a further reduced correction raster while
-preserving those original-source ownership and display rules. Its five-level
-field is1920x960 for X4 and1408x704 for ONE X2. The latter rounds the natural
+The selected correction raster preserves the preceding half-field candidate's
+original-source ownership and display rules. Its five-level field is1920x960
+for X4 and1408x704 for ONE X2. The latter rounds the natural
 quarter height down to a multiple of32, preserving a2:1 full-sphere raster
-without partial finest/output motion blocks; it does not crop source coverage. Level3 still
-supplies exactly full-field/16 luma coordinates. Five and six levels use the
+without partial finest/output motion blocks; it does not crop source coverage.
+Level3 still supplies exactly full-field/16 luma coordinates. Five and six levels use the
 explicit reduced finest-size entry; the full seven-level oracle keeps its
 original minimum. Five through seven matching nonempty pyramids are admitted,
 never padded or fabricated levels. The larger angular search support and
 changed noise/motion-edge output were disclosed before the owner accepted the
 607 moving Studio comparison ("Yes, looks acceptable"). That approval is not
-acceptance of all footage, live-player performance or a merge. The installed
-half-field build remains until this candidate's separate bundle qualification.
+acceptance of all footage, live-player performance or a merge. This candidate's
+installed bundle passes40 X4 and44 ONE X2 UI checks; ROADMAP records its exact
+source and executable identity. The preceding package is retained for recovery.
 
 The resident source worker encodes the reduced RGB body and exact texture-load
 copies of both original lens planes in one command buffer. Imported dmabufs are
