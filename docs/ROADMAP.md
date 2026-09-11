@@ -14,6 +14,16 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Optional transfer-copy trial retired, 2026-09-11:**
+capability-checked DMA-BUF transfer-source imports and four direct texture
+copies preserve all93 real607/612/ONE X2 captures exactly. Both synthetic copy
+routes, external-memory guards and8 real-camera Scene tests pass; the latter
+explicitly require transfer admission. However, matching25-source X4 GPU
+measurements show copies cost2.044ms median versus1.527ms for the existing
+two MRT passes, a33.9% regression. The trial is removed before app build or
+delivery. No new capacity or visual approval claim. Evidence and rejected
+patch: `scratch/installed-capacity/quarter-transfer-review.md`.
+
 **Submission-specific completion trial retired, 2026-09-11:**
 two paired native X4 runs found no dependable benefit from replacing the
 temporal output's queue callback with a private four-byte mapping witness.
