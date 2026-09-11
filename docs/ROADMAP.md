@@ -14,6 +14,19 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Submission-specific completion trial retired, 2026-09-11:**
+two paired native X4 runs found no dependable benefit from replacing the
+temporal output's queue callback with a private four-byte mapping witness.
+At2256x1504 during40-second pans, control redraw rates are231.325/231.075fps
+and trial rates231.550/232.775fps. Source-rate differences reverse sign
+(+0.675 then-0.475fps); all remain below full29.97fps source cadence under
+this load. All strict source/draw/present checks pass and93 comparison frames
+are byte-identical, but the0.42% mean redraw gain does not justify the extra
+mapping lifecycle. The trial was removed before delivery; the simpler existing
+completion path and installed reviewed quarter build remain. No240fps or
+smoothness pass. Evidence and rejected patch are retained in
+`scratch/installed-capacity/quarter-witness-review.md`.
+
 **Reduced RGB vertex-cache trial retired, 2026-09-11:**
 the existing timestamp probe now measures the quarter route itself: X4 body
 preparation2.272ms, original-plane copies1.538ms and motion/refinement1.530ms
