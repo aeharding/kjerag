@@ -119,10 +119,10 @@ pub fn open_decoder(
     Ok(ctx.decoder().video()?)
 }
 
-/// Surfaces this decoder's frame pool holds, straight from the
-/// `AVHWFramesContext` ffmpeg built for it. A VA-API pool is fixed at
-/// `avcodec_open2` time, so this is the hard ceiling on how many decoded
-/// frames the engine may hold at once; the playback instrument prints it.
+/// Initial pool size from the decoder's `AVHWFramesContext`. Zero denotes
+/// dynamic VA-API allocation, not an empty or exhausted pool. Positive sizes
+/// are the ceiling for fixed-pool backends. Hardware-format negotiation
+/// creates this context; the playback instrument prints its initial size.
 pub fn pool_size(decoder: &ff::decoder::Video) -> Option<i32> {
     unsafe {
         let frames = (*decoder.as_ptr()).hw_frames_ctx;

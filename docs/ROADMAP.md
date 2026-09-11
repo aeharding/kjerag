@@ -14,6 +14,18 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Bounded decoder-loan trial retired, 2026-09-11:** removing original-plane
+copies preserves all93 source-matched pictures and passes9 real-camera Scene
+tests, including recorded GPU draw ownership and both-camera seek pressure.
+It holds full source cadence at roughly232 native redraw/s, but repeated
+higher-load native runs regress to198-203 redraw/s and13-14 source/s versus
+control270/23.75. A faster offscreen result does not override that real-player
+regression. The trial is removed before delivery; the approved installed
+quarter build is unchanged and240fps capacity remains open. Current FFmpeg7.1
+VA-API pools are dynamically allocated (reported initial size0), not the
+historical fixed20; the corresponding documentation is corrected. Evidence,
+rejected patch and binaries: `scratch/installed-capacity/quarter-zero-copy-review.md`.
+
 **Optional transfer-copy trial retired, 2026-09-11:**
 capability-checked DMA-BUF transfer-source imports and four direct texture
 copies preserve all93 real607/612/ONE X2 captures exactly. Both synthetic copy

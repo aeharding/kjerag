@@ -681,8 +681,8 @@ impl Reader {
         self.sources.len()
     }
 
-    /// Surfaces in one lane's frame pool, which is the ceiling on how many
-    /// decoded frames the engine may hold at once. `None` until the first
+    /// Initial surfaces in one lane's frame pool. Zero denotes dynamic
+    /// VA-API allocation, not a maximum. `None` until the first
     /// frame has been decoded: ffmpeg builds the pool when the decoder first
     /// picks a hardware format, not when it is opened.
     pub fn pool_size(&self) -> Option<i32> {

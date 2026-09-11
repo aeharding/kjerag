@@ -1228,10 +1228,15 @@ parity.
   than the newest takes dual-stream decode from 2.19x realtime at depth 0
   to 2.46x at depth 2, and 2.47x at depth 4. `Reader::lookahead` is that
   depth and the engine sets it to 2.
-- The decoder's VA-API surface pool is fixed at `avcodec_open2` and is 20
-  surfaces per stream here (`Reader::pool_size`, read from the
-  `AVHWFramesContext` after the first frame). Every held frame, mapped or
-  not, holds one: the engine holds at most 9 per stream (2 lookahead, 2
+- Do not interpret `Reader::pool_size() == Some(0)` as exhaustion or a
+  fixed zero-surface pool. Current FFmpeg7.1 VA-API uses dynamic allocation;
+  both lanes on both owner cameras report0 after decoding (2026-09-11).
+  The earlier20-surface reading is historical, not a current ceiling.
+  `extra_hw_frames` adds capacity only when FFmpeg selects a positive fixed
+  pool; modern VA-API grows on demand. The context is created at hardware
+  format negotiation, not necessarily at `avcodec_open2`. Every held frame,
+  mapped or not, still prevents reuse of its surface. The engine holds at
+  most9 per stream (2 lookahead, 2
   queued pairs, the one on screen, the one peeked, and 3 retained on the GPU)
   on the generic route. Nothing checks that generic-route count at runtime;
   selected resident playback instead owns pending, installed and bounded
@@ -1257,9 +1262,10 @@ parity.
 - Reference import code: `ez-ffmpeg` 0.17 `wgpu_filter/hw_interop.rs`,
   `iroh-live` `rusty-codecs/src/render/dmabuf_import.rs`, `bevy-dmabuf`.
 - GStreamer was evaluated and rejected: no wgpu or dmabuf-to-Vulkan sink.
-- System ffmpeg is 6.1 (Pop!_OS): pin the ffmpeg-next major that matches,
-  or vendor a newer ffmpeg; do not assume the 8.x APIs from the research
-  notes are present.
+- The base Pop!_OS runtime was FFmpeg6.1; this project now builds against
+  FFmpeg7.1, with libavcodec.so.61 and libavutil.so.59 verified on the host.
+  Bindings must match the linked runtime. Do not assume8.x APIs from research
+  notes are available; AGENTS.md records the development-package setup.
 - wgpu-hal 28 enables `VK_KHR_external_memory_fd` and
   `VK_EXT_external_memory_dma_buf` whenever the adapter has them, but never
   `VK_EXT_image_drm_format_modifier`, and `iced_wgpu` builds its device from
