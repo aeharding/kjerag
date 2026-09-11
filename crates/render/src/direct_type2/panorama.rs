@@ -8,7 +8,6 @@ use wgpu::util::DeviceExt;
 use super::{DirectType2Pipeline, draw_wgsl_with_fusion_mode};
 use crate::{Extent, Fallible, FrameStamp, Size};
 
-#[allow(dead_code)]
 pub(super) mod nv12;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -18,6 +17,7 @@ const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// Construction is private to the exact map draw. Scene may retain this owner
 /// through a temporal window without separately pairing a texture and stamp.
 pub(crate) struct BodyPanorama {
+    #[cfg(test)]
     device: wgpu::Device,
     texture: wgpu::Texture,
     frame: FrameStamp,
@@ -45,6 +45,7 @@ impl BodyPanorama {
             view_formats: &[],
         });
         Ok(Self {
+            #[cfg(test)]
             device: device.clone(),
             texture,
             frame,
@@ -59,6 +60,7 @@ impl BodyPanorama {
         &self.frame
     }
 
+    #[cfg(test)]
     pub(crate) fn belongs_to(&self, device: &wgpu::Device) -> bool {
         self.device == *device
     }

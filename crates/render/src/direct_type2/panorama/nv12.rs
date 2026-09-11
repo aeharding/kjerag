@@ -9,11 +9,9 @@
 //! The former Rgba8Unorm panorama quantized gamma RGB before RGB-to-NV12.
 //! `pack4x8unorm` followed by `unpack4x8unorm` retains an explicit 8-bit
 //! boundary here. Attachment conversion and WGSL packing have shown backend
-//! rounding differences elsewhere, so this candidate requires a real old-RGB
-//! versus direct-output comparison before selection and makes no exactness
-//! claim. It records no submission, wait, readback, history, or cadence policy.
-
-use wgpu::util::DeviceExt;
+//! rounding differences elsewhere. The real old-RGB comparison is not exact;
+//! moving-output acceptance of this integration remains pending. It records
+//! no submission, wait, readback, history, or cadence policy.
 
 use super::super::{DirectType2Pipeline, draw_wgsl_with_fusion_mode};
 use crate::temporal_fusion::color::MatrixCoefficients;
@@ -59,14 +57,29 @@ impl CompactNv12Panorama {
     }
 }
 
-/// Detached producer only. A later selected owner must keep its exact source,
-/// map, fusion resources, and retirement boundary alive through completion.
+/// Shared recording primitive. Each caller owns the exact source/map/fusion
+/// lifetime and submission; resident callers use their existing retirement gate.
 pub(in crate::direct_type2) struct Producer {
     device: wgpu::Device,
     pipeline: wgpu::RenderPipeline,
-    parameters_layout: wgpu::BindGroupLayout,
-    parameters_group: u32,
     fusion: bool,
+}
+
+pub(crate) struct Prepared {
+    output: CompactNv12Panorama,
+}
+
+impl Prepared {
+    pub(crate) fn views(&self) -> [wgpu::TextureView; 2] {
+        [
+            self.output.packed_y.create_view(&Default::default()),
+            self.output.uv.create_view(&Default::default()),
+        ]
+    }
+
+    pub(crate) fn into_output(self) -> CompactNv12Panorama {
+        self.output
+    }
 }
 
 impl Producer {
@@ -80,28 +93,13 @@ impl Producer {
             );
         }
         let fusion = direct.fusion_layout.is_some();
-        let parameters_group = if fusion { 3 } else { 2 };
-        let parameters_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("compact NV12 panorama parameters"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: std::num::NonZeroU64::new(32),
-                },
-                count: None,
-            }],
-        });
-        let source = shader_source(fusion, direct.fusion_sampler.is_some(), parameters_group);
+        let source = shader_source(fusion, direct.fusion_sampler.is_some());
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("direct compact NV12 body panorama"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
         let mut layouts = vec![&direct.picture_layout, &direct.map_layout];
         layouts.extend(direct.fusion_layout.as_ref());
-        layouts.push(&parameters_layout);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("direct compact NV12 body panorama"),
             bind_group_layouts: &layouts,
@@ -142,13 +140,12 @@ impl Producer {
         Ok(Self {
             device: device.clone(),
             pipeline,
-            parameters_layout,
-            parameters_group,
             fusion,
         })
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(in crate::direct_type2) fn encode(
         &self,
         device: &wgpu::Device,
@@ -160,13 +157,34 @@ impl Producer {
         full: Size,
         coefficients: MatrixCoefficients,
     ) -> Fallible<CompactNv12Panorama> {
+        let prepared = self.prepare(device, frame, full, coefficients, fusion.is_some())?;
+        let [y_view, uv_view] = prepared.views();
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("direct compact NV12 body panorama"),
+                color_attachments: &[Some(attachment(&y_view)), Some(attachment(&uv_view))],
+                ..Default::default()
+            });
+            self.draw(&mut pass, picture, map, fusion);
+        }
+        Ok(prepared.into_output())
+    }
+
+    pub(in crate::direct_type2) fn prepare(
+        &self,
+        device: &wgpu::Device,
+        frame: FrameStamp,
+        full: Size,
+        coefficients: MatrixCoefficients,
+        supplied_fusion: bool,
+    ) -> Fallible<Prepared> {
         validate(
             device,
             &self.device,
             full,
             coefficients,
             self.fusion,
-            fusion.is_some(),
+            supplied_fusion,
         )?;
         let half = Size::new(full.width / 2, full.height / 2);
         let target = |label, format| {
@@ -191,71 +209,44 @@ impl Producer {
             "source-stamped compact panorama UV",
             wgpu::TextureFormat::Rg8Unorm,
         );
-        let mut words = [0u32; 8];
-        words[0] = coefficients.r_cr.to_bits();
-        words[1] = coefficients.g_cb.to_bits();
-        words[2] = coefficients.g_cr.to_bits();
-        words[3] = coefficients.b_cb.to_bits();
-        words[4] = full.width;
-        words[5] = full.height;
-        let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
-        let parameters = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("compact NV12 panorama matrix and size"),
-            contents: &bytes,
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let parameters = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("compact NV12 panorama matrix and size"),
-            layout: &self.parameters_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: parameters.as_entire_binding(),
-            }],
-        });
-        let y_view = packed_y.create_view(&Default::default());
-        let uv_view = uv.create_view(&Default::default());
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("direct compact NV12 body panorama"),
-                color_attachments: &[
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: &y_view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    }),
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: &uv_view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    }),
-                ],
-                ..Default::default()
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, picture, &[]);
-            pass.set_bind_group(1, map, &[]);
-            if let Some(fusion) = fusion {
-                pass.set_bind_group(2, fusion, &[]);
-            }
-            pass.set_bind_group(self.parameters_group, &parameters, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        Ok(CompactNv12Panorama {
-            device: device.clone(),
-            packed_y,
-            uv,
-            frame,
-            full,
-            coefficients,
+        Ok(Prepared {
+            output: CompactNv12Panorama {
+                device: device.clone(),
+                packed_y,
+                uv,
+                frame,
+                full,
+                coefficients,
+            },
         })
+    }
+
+    pub(in crate::direct_type2) fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        picture: &wgpu::BindGroup,
+        map: &wgpu::BindGroup,
+        fusion: Option<&wgpu::BindGroup>,
+    ) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, picture, &[]);
+        pass.set_bind_group(1, map, &[]);
+        if let Some(fusion) = fusion {
+            pass.set_bind_group(2, fusion, &[]);
+        }
+        pass.draw(0..3, 0..1);
+    }
+}
+
+pub(crate) fn attachment(view: &wgpu::TextureView) -> wgpu::RenderPassColorAttachment<'_> {
+    wgpu::RenderPassColorAttachment {
+        view,
+        depth_slice: None,
+        resolve_target: None,
+        ops: wgpu::Operations {
+            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+            store: wgpu::StoreOp::Store,
+        },
     }
 }
 
@@ -307,11 +298,20 @@ fn validate(
     Ok(())
 }
 
-fn shader_source(fusion: bool, hardware_fusion: bool, parameters_group: u32) -> String {
+/// The shader obtains geometry from the exact picture uniform. Reject scaled
+/// diagnostic targets before allocation instead of silently moving sample centres.
+pub(in crate::direct_type2) fn require_full_source(full: Size, source: [f32; 2]) -> Fallible<()> {
+    if [full.width as f32, full.height as f32] != [source[0] * 2.0, source[1]] {
+        return Err("compact NV12 panorama must use the bound source's full body size".into());
+    }
+    Ok(())
+}
+
+fn shader_source(fusion: bool, hardware_fusion: bool) -> String {
     format!(
         "{}\n{}",
         draw_wgsl_with_fusion_mode(fusion, hardware_fusion),
-        include_str!("nv12.wgsl").replace("NV12_PARAMETERS_GROUP", &parameters_group.to_string())
+        include_str!("nv12.wgsl")
     )
 }
 
@@ -321,9 +321,32 @@ mod tests {
     use wgpu::naga::valid::{Capabilities, ValidationFlags, Validator};
 
     #[test]
+    fn compact_pipeline_fits_native_three_bind_group_device() {
+        let (device, _) = match crate::direct_type2::tests::gpu() {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                assert!(std::env::var_os("KJERAG_REQUIRE_GPU").is_none(), "{error}");
+                eprintln!("skipping compact native-limit test: {error}");
+                return;
+            }
+        };
+        assert_eq!(device.limits().max_bind_groups, 3);
+        let picture = crate::scene::bind_group_layout(&device);
+        for fusion in [false, true] {
+            let direct = DirectType2Pipeline::with_fusion(
+                &device,
+                &picture,
+                wgpu::TextureFormat::Rgba8Unorm,
+                fusion,
+            );
+            Producer::new(&device, &direct).unwrap();
+        }
+    }
+
+    #[test]
     fn direct_compact_nv12_shaders_validate_with_and_without_fusion() {
-        for (fusion, hardware, group) in [(false, false, 2), (true, false, 3), (true, true, 3)] {
-            let source = shader_source(fusion, hardware, group);
+        for (fusion, hardware) in [(false, false), (true, false), (true, true)] {
+            let source = shader_source(fusion, hardware);
             let module = wgpu::naga::front::wgsl::parse_str(&source).unwrap_or_else(|error| {
                 panic!("compact NV12 shader ({fusion}, {hardware}) did not parse: {error}")
             });
@@ -332,7 +355,23 @@ mod tests {
                 .unwrap_or_else(|error| {
                     panic!("compact NV12 shader ({fusion}, {hardware}) did not validate: {error}")
                 });
+            for (_, global) in module.global_variables.iter() {
+                if let Some(binding) = &global.binding {
+                    assert!(
+                        binding.group < 3,
+                        "native renderer permits only three bind groups"
+                    );
+                }
+            }
         }
+    }
+
+    #[test]
+    fn compact_geometry_must_match_bound_source_uniform() {
+        assert!(require_full_source(Size::new(7680, 3840), [3840.0, 3840.0]).is_ok());
+        assert!(require_full_source(Size::new(5760, 2880), [2880.0, 2880.0]).is_ok());
+        assert!(require_full_source(Size::new(3840, 1920), [3840.0, 3840.0]).is_err());
+        assert!(require_full_source(Size::new(7680, 3840), [f32::NAN, 3840.0]).is_err());
     }
 
     #[test]

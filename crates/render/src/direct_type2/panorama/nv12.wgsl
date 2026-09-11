@@ -1,14 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Direct compact body panorama using Kjerag's disclosed full-range NV12 law.
 
-struct CompactNv12Parameters {
-  matrix: vec4<f32>,
-  full_size: vec2<u32>,
-  padding: vec2<u32>,
-}
-@group(NV12_PARAMETERS_GROUP) @binding(0)
-var<uniform> compact_nv12: CompactNv12Parameters;
-
 struct CompactNv12Output {
   @location(0) y: vec4<f32>,
   @location(1) uv: vec2<f32>,
@@ -28,7 +20,7 @@ fn panorama_gamma_rgb(sample_uv: vec2<f32>) -> vec3<f32> {
 }
 
 fn convert_rgb_to_ycbcr(rgb: vec3<f32>) -> vec3<f32> {
-  let m = compact_nv12.matrix;
+  let m = reframe.source_matrix;
   let y = (rgb.g + m.y * rgb.b / m.w + m.z * rgb.r / m.x) /
     (1.0 + m.y / m.w + m.z / m.x);
   return vec3<f32>(y, (rgb.b - y) / m.w, (rgb.r - y) / m.x);
@@ -39,7 +31,9 @@ fn panorama_nv12_fs(in: Type2VsOut) -> CompactNv12Output {
   // Mirror the old panorama's interpolated coordinate path, then offset from
   // this 2x2 tile centre to each full-resolution pixel centre.
   let base = in.uv;
-  let half_texel = vec2<f32>(0.5) / vec2<f32>(compact_nv12.full_size);
+  // Both matrix and size come from the same source uniform as lens sampling.
+  let full_size = vec2<f32>(reframe.frame_width * 2.0, reframe.frame_height);
+  let half_texel = vec2<f32>(0.5) / full_size;
   let a = panorama_gamma_rgb(base + vec2<f32>(-half_texel.x, -half_texel.y));
   let b = panorama_gamma_rgb(base + vec2<f32>( half_texel.x, -half_texel.y));
   let c = panorama_gamma_rgb(base + vec2<f32>(-half_texel.x,  half_texel.y));

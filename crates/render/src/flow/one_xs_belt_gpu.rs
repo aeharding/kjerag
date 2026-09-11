@@ -2149,6 +2149,18 @@ impl ResidentScreenshotDraw {
             .expect("resident screenshot draw is linear")
             .arm_and_encode_panorama(&self.retirements, device, encoder, size)
     }
+
+    pub(crate) fn encode_compact_panorama(
+        mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        size: crate::Size,
+    ) -> Fallible<crate::direct_type2::CompactNv12Panorama> {
+        self.ready
+            .take()
+            .expect("resident screenshot draw is linear")
+            .arm_and_encode_compact_panorama(&self.retirements, device, encoder, size)
+    }
 }
 
 /// One-shot callback handed only to the concrete imported-source owner after
@@ -2487,6 +2499,57 @@ impl InstalledOneXsReady {
         });
         drop(pass);
         Ok(output)
+    }
+
+    fn arm_and_encode_compact_panorama(
+        self,
+        retirements: &IcedDrawRetirements<InstalledOneXsPass>,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        size: crate::Size,
+    ) -> Fallible<crate::direct_type2::CompactNv12Panorama> {
+        let draw = self
+            .pass
+            .expect("resident compact panorama must retain its exact private picture binding");
+        if !draw.binding.is_gamma_output() {
+            return Err(
+                "resident compact NV12 panorama requires gamma-encoded source output".into(),
+            );
+        }
+        let frame = draw.draw.source.resident_frame();
+        if &frame != draw.draw.map.frame() {
+            return Err(
+                "resident compact NV12 panorama source and map name different frames".into(),
+            );
+        }
+        let prepared = draw.draw.pipeline.prepare_resident_compact_panorama(
+            device,
+            &draw.draw.source,
+            &draw.binding,
+            size,
+            draw.draw.map.fusion_read().is_some(),
+        )?;
+        let [y, uv] = prepared.views();
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("resident compact NV12 body panorama snapshot"),
+            color_attachments: &[
+                Some(crate::direct_type2::compact_nv12_attachment(&y)),
+                Some(crate::direct_type2::compact_nv12_attachment(&uv)),
+            ],
+            ..Default::default()
+        });
+        // Registration precedes sampling exactly as it does for the RGB body
+        // panorama. Abandoned work therefore remains bounded fail-closed state.
+        retirements.arm_and_draw(self.permit, &mut pass, draw, |draw, pass| {
+            draw.draw.pipeline.draw_resident_compact_panorama(
+                &draw.binding,
+                draw.draw.map.read(),
+                draw.draw.map.fusion_read(),
+                pass,
+            );
+        });
+        drop(pass);
+        Ok(prepared.into_output())
     }
 
     #[cfg(test)]

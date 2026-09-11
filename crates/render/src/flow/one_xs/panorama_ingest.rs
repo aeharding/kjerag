@@ -12,10 +12,10 @@ use kjerag_meta::OrientationTrack;
 
 use super::resident_worker::PanoramaJob;
 use super::{
-    ImportedOneXsSource, ResidentCameraProfile, ResidentCaptureSession, ResidentReadyMap,
-    prepare_resident_bound,
+    ImportedOneXsSource, InstalledOneXsReady, ResidentCameraProfile, ResidentCaptureSession,
+    ResidentReadyMap, prepare_resident_bound,
 };
-use crate::direct_type2::BodyPanorama;
+use crate::direct_type2::{BodyPanorama, CompactNv12Panorama};
 use crate::draw_retirement::DrawRetirementError;
 use crate::flow::one_xs::gpu_context::OneXsGpuContext;
 use crate::{Fallible, Reframe, Size};
@@ -183,6 +183,59 @@ pub(super) fn prepare_panorama(
     size: Size,
     permit: crate::draw_retirement::DrawPermit,
 ) -> Fallible<BodyPanorama> {
+    let draw = prepare_panorama_draw(session, frames, reframe, stamp, permit)?;
+    let mut encoder =
+        session
+            .context
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("resident panorama ingestion"),
+            });
+    let output = draw.arm_and_encode_panorama(
+        &session.retirements,
+        session.context.device(),
+        &mut encoder,
+        size,
+    )?;
+    session.context.queue().submit(Some(encoder.finish()));
+    Ok(output)
+}
+
+/// Prepare the same exact resident source/map transaction as
+/// [`prepare_panorama`], but materialize its compact YUV representation.
+pub(super) fn prepare_compact_panorama(
+    session: &Arc<ResidentCaptureSession>,
+    frames: Arc<Frames>,
+    reframe: Reframe,
+    stamp: &FrameStamp,
+    size: Size,
+    permit: crate::draw_retirement::DrawPermit,
+) -> Fallible<CompactNv12Panorama> {
+    let draw = prepare_panorama_draw(session, frames, reframe, stamp, permit)?;
+    let mut encoder =
+        session
+            .context
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("resident compact panorama ingestion"),
+            });
+    let output = draw.arm_and_encode_compact_panorama(
+        &session.retirements,
+        session.context.device(),
+        &mut encoder,
+        size,
+    )?;
+    session.context.queue().submit(Some(encoder.finish()));
+    Ok(output)
+}
+
+fn prepare_panorama_draw(
+    session: &Arc<ResidentCaptureSession>,
+    frames: Arc<Frames>,
+    reframe: Reframe,
+    stamp: &FrameStamp,
+    permit: crate::draw_retirement::DrawPermit,
+) -> Fallible<InstalledOneXsReady> {
     let started = Instant::now();
     let source = retry_source_import(
         || session.capture.import_picture(Arc::clone(&frames)),
@@ -202,21 +255,7 @@ pub(super) fn prepare_panorama(
     }?;
     let mut draw = bound.commit_processing(permit)?;
     draw.write_reframe(&reframe);
-    let mut encoder =
-        session
-            .context
-            .device()
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("resident panorama ingestion"),
-            });
-    let output = draw.arm_and_encode_panorama(
-        &session.retirements,
-        session.context.device(),
-        &mut encoder,
-        size,
-    )?;
-    session.context.queue().submit(Some(encoder.finish()));
-    Ok(output)
+    Ok(draw)
 }
 
 /// Retry only resource exhaustion before a source enters the stitch transaction.

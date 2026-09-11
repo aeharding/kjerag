@@ -13,14 +13,20 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::ops::Range;
+use std::sync::OnceLock;
 
 use crate::FrameStamp;
+use crate::direct_type2::CompactNv12Panorama;
 
-use super::color::{GpuColorConversion, MatrixCoefficients, Nv12};
+use super::color::Nv12;
+#[cfg(test)]
+use super::color::{GpuColorConversion, MatrixCoefficients};
 use super::{Inputs, Parameters};
 
 const LAYERS: u32 = 7;
 const CENTER: usize = 3;
+
+mod compact;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -28,6 +34,7 @@ pub enum Error {
     UnsupportedSize,
     ForeignDevice,
     SourceTextures,
+    SourceCompact,
     SourceRgb,
     Color(super::color::Error),
     DecodeEpoch,
@@ -48,6 +55,9 @@ impl fmt::Display for Error {
             }
             Self::SourceTextures => {
                 "temporal history needs matching sampled copyable single-layer NV12 textures"
+            }
+            Self::SourceCompact => {
+                "temporal history needs matching sampled compact Y and copyable UV textures"
             }
             Self::SourceRgb => {
                 "temporal history needs a matching sampled single-layer Rgba8Unorm texture"
@@ -86,6 +96,7 @@ pub struct History {
     y: wgpu::Texture,
     uv: wgpu::Texture,
     slots: VecDeque<Slot>,
+    compact: OnceLock<compact::Unpack>,
 }
 
 /// The full-resolution luma view written by one direct RGB history push.
@@ -147,6 +158,7 @@ impl History {
                 wgpu::TextureFormat::Rg8Unorm,
             ),
             slots: VecDeque::with_capacity(LAYERS as usize),
+            compact: OnceLock::new(),
         })
     }
 
@@ -177,6 +189,7 @@ impl History {
     ///
     /// Validation and render-pass recording precede history mutation. The
     /// returned luma view names exactly the newly written physical layer.
+    #[cfg(test)]
     pub(crate) fn encode_push_rgb(
         &mut self,
         device: &wgpu::Device,
@@ -200,6 +213,48 @@ impl History {
         color.encode_rgb_to_views(encoder, rgb, coefficients, &y_view, &uv_view)?;
 
         self.push_slot(stamp, layer);
+        Ok(PushedLuma {
+            view: y_view,
+            size: self.full,
+            device: self.device.clone(),
+        })
+    }
+
+    /// Unpack one sealed compact panorama directly into its resident layer.
+    ///
+    /// The frame stamp, matrix provenance, planes and device remain joined in
+    /// `source`; callers cannot pair unrelated textures with a stamp. All
+    /// synchronous validation and command recording happen before the ring
+    /// slot is committed. Queue ordering has the same layer-reuse contract as
+    /// [`Self::encode_push`].
+    pub(crate) fn encode_push_compact(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &CompactNv12Panorama,
+    ) -> Result<PushedLuma, Error> {
+        self.validate_push(device, source.frame())?;
+        if !source.belongs_to(device) {
+            return Err(Error::ForeignDevice);
+        }
+        let half = [self.full[0] / 2, self.full[1] / 2];
+        if source.size().width != self.full[0]
+            || source.size().height != self.full[1]
+            || !packed_y_texture(source.packed_y(), half)
+            || !source_texture(source.uv(), half, wgpu::TextureFormat::Rg8Unorm)
+        {
+            return Err(Error::SourceCompact);
+        }
+
+        let layer = self.next_layer();
+        let y_view = layer_view(&self.y, layer);
+        let unpack = self
+            .compact
+            .get_or_init(|| compact::Unpack::new(&self.device));
+        unpack.encode(encoder, source.packed_y(), &y_view);
+        copy_layer(encoder, source.uv(), &self.uv, layer);
+
+        self.push_slot(source.frame(), layer);
         Ok(PushedLuma {
             view: y_view,
             size: self.full,
@@ -492,7 +547,21 @@ fn source_texture(texture: &wgpu::Texture, size: [u32; 2], format: wgpu::Texture
             .contains(wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC)
 }
 
+#[cfg(test)]
 fn source_rgb(texture: &wgpu::Texture, size: [u32; 2]) -> bool {
+    texture.format() == wgpu::TextureFormat::Rgba8Unorm
+        && texture.dimension() == wgpu::TextureDimension::D2
+        && texture.width() == size[0]
+        && texture.height() == size[1]
+        && texture.depth_or_array_layers() == 1
+        && texture.mip_level_count() == 1
+        && texture.sample_count() == 1
+        && texture
+            .usage()
+            .contains(wgpu::TextureUsages::TEXTURE_BINDING)
+}
+
+fn packed_y_texture(texture: &wgpu::Texture, size: [u32; 2]) -> bool {
     texture.format() == wgpu::TextureFormat::Rgba8Unorm
         && texture.dimension() == wgpu::TextureDimension::D2
         && texture.width() == size[0]

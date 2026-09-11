@@ -123,9 +123,22 @@ the separate 612 comparison and live performance remain unqualified. GPU work
 still has dependent levels and one large filter submission/completion boundary
 per output; GPU residency alone does
 not establish smooth drawing or full-rate playback.
-RGB conversion writes directly into the arriving source's resident history
-layer, using the same R8/RG8 targets and quantization. Its typed single-layer
-luma view supplies the pyramid without allocating and copying another NV12 pair.
+The live source producer now draws directly to half-size packed-Y and UV
+attachments, avoiding the disposable full-size RGB panorama. It samples four
+full-resolution centres per fragment, explicitly quantizes each gamma RGB
+sample to RGB8, then applies the existing full-range NV12 conversion. History
+unpacks the four Y lanes and copies UV into the arriving source's reserved
+layer. The typed single-layer luma view supplies the pyramid. The old RGB
+producer and direct RGB-to-history path remain test oracles.
+The compact owner seals device, source stamp, matrix and geometry. Its shader
+reuses the exact lens-sampling Reframe for size and matrix; the caller rejects
+scaled targets before allocation. This keeps the existing three bind groups,
+including photometric fusion, within the native renderer's limits. The initial
+four-group prototype passed adapter-max tests but failed native startup; a
+three-group GPU creation regression now exercises that boundary. Compact
+sampling is not byte-identical to full-resolution RGB rasterization and still
+requires moving-output review; the owner's preceding607 acceptance does not
+automatically cover this representation change.
 A radius-zero
 source initially needs no motion inputs, but a later center may reference it.
 Missing inputs are then reconstructed once from its exact retained unfiltered
@@ -177,7 +190,7 @@ capacity or installed-quality verdict.
 
 The `history` child owns seven resident NV12 array layers and the exact source
 stamp occupying each slot. Arriving NV12 images can be copied once; the selected
-RGB producer instead converts directly into the same validated slot. A complete borrowed
+compact producer unpacks/copies directly into the same validated slot. A complete borrowed
 window supplies center/reference stamps and physical layer indices in logical
 c-3,c-2,c-1,c+1,c+2,c+3 order. An explicit `window_at(center, radius)` also
 supplies the clipped intervals needed for startup and tail frames: ascending
@@ -298,9 +311,10 @@ imports one exact decoded pair, runs the unchanged stitch/color transaction,
 then commits only its computational successor. Neither the raw future nor ready
 display slot is populated. A draw-retirement permit is reserved before admission
 or computation; its immutable source/map/fusion pass survives through panorama
-submission completion. The returned panorama owns its independent RGB texture
-and source stamp, not a decoder surface. One pending request or untaken output
-provides backpressure. Ordinary playback does not yet call this producer.
+submission completion. The returned panorama owns independent compact YUV
+textures and its source stamp, not a decoder surface. The RGB reference and
+compact live producer share the same import/map/commit/reframe transaction.
+The filtered facade above supplies bounded admission and publication.
 
 `Player::prepare_ahead` supplies the corresponding explicit source horizon:
 up to six successors may be retained without presenting one, including while

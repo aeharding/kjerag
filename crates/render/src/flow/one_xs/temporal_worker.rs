@@ -1,6 +1,6 @@
 //! One bounded temporal executor shared across a capture's seek epochs.
 //!
-//! The resident stitch worker produces source-ordered body panoramas. This
+//! The resident stitch worker produces source-ordered compact YUV panoramas. This
 //! worker alone mutates [`Stream`], so its seven-layer history and center
 //! ordering remain serial while the stitch worker prepares one successor.
 //!
@@ -13,22 +13,17 @@
 
 use std::sync::{Arc, Mutex, mpsc};
 
-use kjerag_media::FrameStamp;
-
 use super::filtered_capture::FilteredCaptureInner;
 use super::native_lifecycle_event;
 use crate::Fallible;
-use crate::direct_type2::BodyPanorama;
-use crate::temporal_fusion::color::MatrixCoefficients;
+use crate::direct_type2::CompactNv12Panorama;
 use crate::temporal_fusion::stream::Stream;
 
 pub(super) enum TemporalJob {
     Push {
         owner: Arc<FilteredCaptureInner>,
         epoch: Arc<TemporalEpoch>,
-        panorama: BodyPanorama,
-        stamp: FrameStamp,
-        matrix: MatrixCoefficients,
+        panorama: Box<CompactNv12Panorama>,
         started: Option<std::time::Instant>,
     },
     Finish {
@@ -119,16 +114,15 @@ fn service(job: TemporalJob) -> Fallible<()> {
             owner,
             epoch,
             panorama,
-            stamp,
-            matrix,
             started,
         } => {
+            let stamp = panorama.frame().clone();
             owner.ensure_temporal_source(&stamp)?;
             let mut stream = epoch
                 .stream
                 .lock()
                 .map_err(|_| "filtered temporal epoch stream is poisoned")?;
-            let outputs = stream.push(panorama, matrix)?;
+            let outputs = stream.push(*panorama)?;
             if let Some(started) = started {
                 native_lifecycle_event("filtered-worker-complete", &stamp, Some(started.elapsed()));
             }

@@ -21,15 +21,16 @@ use crate::{Fallible, FrameStamp, MAX_LENSES, Planes};
 
 pub(crate) mod panorama;
 pub(crate) use panorama::BodyPanorama;
-#[cfg(test)]
-pub(crate) use panorama::nv12::CompactNv12Panorama;
+pub(crate) use panorama::nv12::{
+    CompactNv12Panorama, Prepared as CompactNv12Prepared, attachment as compact_nv12_attachment,
+};
 
 /// Test-only cached compact producer borrowing one authenticated detached draw.
 /// Pipeline compilation happens before any comparison timing interval.
 #[cfg(test)]
 pub(crate) struct DirectCompactNv12Draw<'a> {
     draw: &'a DirectMapDraw,
-    producer: panorama::nv12::Producer,
+    producer: &'a panorama::nv12::Producer,
 }
 
 #[cfg(test)]
@@ -46,6 +47,7 @@ impl DirectCompactNv12Draw<'_> {
             return Err("compact NV12 panorama draw has no uploaded type-2 map".into());
         };
         crate::MapBindError::require_frame(frame, Some(prepared))?;
+        panorama::nv12::require_full_source(size, prepared.reframe().frame_size())?;
         self.producer.encode(
             device,
             encoder,
@@ -166,6 +168,8 @@ impl ImportedOneXsPicture {
             _uniforms: uniforms,
             rectilinear: reframe.is_rectilinear(),
             gamma_output: !reframe.linearizes_output(),
+            source_matrix: reframe.source_color_matrix(),
+            source_size: reframe.frame_size(),
         }
     }
 
@@ -310,6 +314,8 @@ pub(crate) struct ImportedOneXsDrawBinding {
     _uniforms: wgpu::Buffer,
     rectilinear: bool,
     gamma_output: bool,
+    source_matrix: [f32; 4],
+    source_size: [f32; 2],
 }
 
 /// Capture-owned source-band inputs and every binding used to encode them.
@@ -404,6 +410,7 @@ pub(crate) struct DirectType2Pipeline {
     fusion_layout: Option<wgpu::BindGroupLayout>,
     fusion_sampler: Option<wgpu::Sampler>,
     panorama: OnceLock<panorama::BodyPanoramaPipeline>,
+    compact_nv12: OnceLock<panorama::nv12::Producer>,
 }
 
 impl DirectType2Pipeline {
@@ -554,7 +561,15 @@ impl DirectType2Pipeline {
             fusion_layout,
             fusion_sampler,
             panorama: OnceLock::new(),
+            compact_nv12: OnceLock::new(),
         }
+    }
+
+    fn compact_nv12(&self) -> &panorama::nv12::Producer {
+        self.compact_nv12.get_or_init(|| {
+            panorama::nv12::Producer::new(&self.device, self)
+                .expect("direct pipeline must construct its compact NV12 peer on the same device")
+        })
     }
 
     pub(crate) fn prepare_resident_picture(
@@ -683,6 +698,39 @@ impl DirectType2Pipeline {
         self.panorama
             .get_or_init(|| panorama::BodyPanoramaPipeline::new(&self.device, self))
             .draw(pass, &binding.picture, map);
+    }
+
+    pub(crate) fn prepare_resident_compact_panorama(
+        &self,
+        device: &wgpu::Device,
+        source: &ImportedOneXsPicture,
+        binding: &ImportedOneXsDrawBinding,
+        size: crate::Size,
+        fusion: bool,
+    ) -> Fallible<CompactNv12Prepared> {
+        if self.device != *device || self.device != *source.context.device() {
+            return Err(
+                "compact NV12 panorama pipeline belongs to a different graphics device".into(),
+            );
+        }
+        let frame = source.resident_frame();
+        panorama::nv12::require_full_source(size, binding.source_size)?;
+        let matrix = crate::temporal_fusion::color::MatrixCoefficients::from_source_rgb(
+            binding.source_matrix,
+        );
+        self.compact_nv12()
+            .prepare(device, frame, size, matrix, fusion)
+    }
+
+    pub(crate) fn draw_resident_compact_panorama(
+        &self,
+        binding: &ImportedOneXsDrawBinding,
+        map: &wgpu::BindGroup,
+        fusion: Option<&wgpu::BindGroup>,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        self.compact_nv12()
+            .draw(pass, &binding.picture, map, fusion);
     }
 
     pub(crate) fn draw(
@@ -994,7 +1042,7 @@ impl DirectMapDraw {
         }
         Ok(DirectCompactNv12Draw {
             draw: self,
-            producer: panorama::nv12::Producer::new(device, &self.pipeline)?,
+            producer: self.pipeline.compact_nv12(),
         })
     }
 
@@ -1860,7 +1908,12 @@ mod tests {
         block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("direct type-2 twin"),
             required_features: wgpu::Features::empty(),
-            required_limits: adapter.limits(),
+            required_limits: wgpu::Limits {
+                // Exercise the native renderer's binding budget, not the
+                // adapter maximum that hid compact panorama's fourth group.
+                max_bind_groups: 3,
+                ..adapter.limits()
+            },
             ..Default::default()
         }))
         .map_err(|error| error.to_string())

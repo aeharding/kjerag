@@ -14,6 +14,37 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Compact YUV integrated; native playback still too slow, 2026-09-10:**
+the source worker now carries a sealed compact YUV panorama into the same
+seven-source history. It no longer materializes the full-size RGB intermediate.
+Source/map/color provenance, bounded retirement, source cadence and temporal
+settings are unchanged; the previous RGB route remains a test oracle.
+
+The first native attempt failed at startup: the prototype added a fourth bind
+group, but the native renderer permits three. Reusing the exact bound source
+Reframe for matrix/size removes that redundant group. Four focused checks,
+including GPU pipeline creation on a three-group device, pass;125 temporal
+tests pass with10 ignored, and all8 real X4/ONE X2 Scene checks pass. All31
+607 and31 612 frames remain byte-identical across this binding correction,
+not across the preceding RGB-to-compact representation change.
+
+The corrected native controls-wake run passes its three100ms wake guards, but
+steady playback is only14.2–15.0 source fps. Contiguous shown-frame transitions
+independently measure14.37fps after startup. Its measured wake-window gaps are
+55.79–58.06ms. This is neither smooth full-rate playback nor240fps capacity.
+The installed app remains unchanged and this candidate is not qualified for
+delivery. Evidence: `scratch/controls-wake/run.2mB3RXva`, app SHA256
+`a2bd966891ab5e1a7c37cb37395393d8f95b5e57e7565093983d7151d12a580d`.
+
+The preceding offscreen `view-rate` new/old/new runs all reached about13.6–13.7
+source fps. That instrument waits for draw completion before pumping/admitting
+again and can underfeed the source worker; these numbers cannot establish a
+native throughput comparison. Its queue-wide completion registration also can
+include worker submissions arriving after the draw. Native traces avoid that
+admission gate and independently confirm the current slowdown. No authenticated
+native c5 RGB baseline exists, so no compact native speedup is claimed. Existing
+filtered traces do not time the final view pass or establish240fps capacity.
+
 **Direct compact YUV preparation, isolated gain only, 2026-09-10:**
 a new unselected producer avoids the disposable full-size RGBA body image.
 On exact X4 source18344 at612.078133333s, repeated warm isolated preparation
@@ -27,9 +58,8 @@ byte-identical. Reusing raster-interpolated coordinates reduces the larger Y
 outlier population from2355 to552 of29,491,200 pixels, maximum19. The exact
 reported projected still differs by at most6 codes; its framing/structure was
 inspected, not accepted as moving-video parity. The GPU Y unpack is byte-exact
-against its CPU reorder. Resident retirement/history integration is in progress
-in the isolated branch. The primary player remains the accepted607 checkpoint,
-around14fps, and the installed app is unchanged. Evidence:
+against its CPU reorder. Resident retirement/history integration was subsequently
+completed and tested above. The installed app is unchanged. Evidence:
 `scratch/studio-seam-flicker-612-20260909-01/temporal-direct-nv12-01`.
 
 **Block-sharing filter experiment retired, 2026-09-10:**

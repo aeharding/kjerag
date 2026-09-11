@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use kjerag_media::{FrameStamp, Frames};
 use kjerag_meta::OrientationTrack;
 
-use super::panorama_ingest::{prepare_panorama, validate_reframe};
+use super::panorama_ingest::{prepare_compact_panorama, validate_reframe};
 use super::{
     ResidentCameraProfile, ResidentCaptureSession, native_lifecycle_event,
     native_lifecycle_probe_enabled,
@@ -20,7 +20,6 @@ use super::{
 use crate::draw_retirement::{DrawPermit, DrawRetirementError};
 use crate::flow::one_xs::gpu_context::OneXsGpuContext;
 use crate::ready_wake::ReadyWake;
-use crate::temporal_fusion::color::MatrixCoefficients;
 use crate::temporal_fusion::settings::Provider;
 use crate::temporal_fusion::stream::{FilteredPanorama, Stream};
 use crate::{Fallible, Reframe, Size};
@@ -94,7 +93,6 @@ pub(super) struct FilteredPanoramaJob {
     reframe: Reframe,
     stamp: FrameStamp,
     size: Size,
-    matrix: MatrixCoefficients,
     permit: DrawPermit,
 }
 
@@ -249,7 +247,6 @@ impl FilteredCaptureFacade {
         // The same source metadata must govern both panorama decoding and the
         // temporal representation. Do not maintain a second coefficient table.
         let reframe = reframe.with_samples(frames.samples);
-        let matrix = MatrixCoefficients::from_source_rgb(reframe.source_color_matrix());
         let session = self.attached_session()?;
         if let Err(error) = session.resident.retirements.poll() {
             self.inner.fail_worker(&error.to_string());
@@ -297,7 +294,6 @@ impl FilteredCaptureFacade {
             reframe,
             stamp,
             size: Size::new(self.inner.full[0], self.inner.full[1]),
-            matrix,
             permit,
         }));
         match session.resident.worker.try_kick_filtered(job) {
@@ -728,7 +724,7 @@ pub(super) fn service_filtered(job: FilteredJob) -> Fallible<()> {
             job.owner.ensure_stitch_source(&job.stamp)?;
             let started = native_lifecycle_probe_enabled().then(std::time::Instant::now);
             native_lifecycle_event("filtered-worker-start", &job.stamp, None);
-            let panorama = prepare_panorama(
+            let panorama = prepare_compact_panorama(
                 &job.session.resident,
                 job.frames,
                 job.reframe,
@@ -746,13 +742,10 @@ pub(super) fn service_filtered(job: FilteredJob) -> Fallible<()> {
             }
             let wake = job.owner.handoff_source(&job.stamp)?;
             let owner = Arc::clone(&job.owner);
-            let stamp = job.stamp;
             let temporal = TemporalJob::Push {
                 owner,
                 epoch: Arc::clone(&job.session.epoch),
-                panorama,
-                stamp,
-                matrix: job.matrix,
+                panorama: Box::new(panorama),
                 started,
             };
             let sent = job.session.temporal.send(temporal);

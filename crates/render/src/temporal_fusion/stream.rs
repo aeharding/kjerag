@@ -9,7 +9,9 @@ use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::time::Duration;
 
+#[cfg(test)]
 use crate::direct_type2::BodyPanorama;
+use crate::direct_type2::CompactNv12Panorama;
 use crate::{Fallible, FrameStamp};
 
 use super::color::{GpuColorConversion, MatrixCoefficients};
@@ -100,12 +102,20 @@ impl Stream {
         })
     }
 
-    pub(crate) fn push(
+    pub(crate) fn push(&mut self, source: CompactNv12Panorama) -> Fallible<Vec<FilteredPanorama>> {
+        let result = self.push_inner(Source::Compact(source));
+        self.remember_failure(result)
+    }
+
+    /// Explicit old RGB ingestion oracle for tests of representation changes.
+    #[cfg(test)]
+    #[allow(dead_code, reason = "real-Scene representation comparison oracle")]
+    pub(crate) fn push_rgb(
         &mut self,
         body: BodyPanorama,
         matrix: MatrixCoefficients,
     ) -> Fallible<Vec<FilteredPanorama>> {
-        let result = self.push_inner(body, matrix);
+        let result = self.push_inner(Source::Rgb { body, matrix });
         self.remember_failure(result)
     }
 
@@ -114,15 +124,21 @@ impl Stream {
         self.remember_failure(result)
     }
 
-    fn push_inner(
-        &mut self,
-        body: BodyPanorama,
-        matrix: MatrixCoefficients,
-    ) -> Fallible<Vec<FilteredPanorama>> {
+    fn push_inner(&mut self, source: Source) -> Fallible<Vec<FilteredPanorama>> {
         let started = trace_start();
         self.ensure_active()?;
-        validate_body(&body, &self.device, self.full)?;
-        let stamp = body.frame().clone();
+        let (stamp, matrix) = match &source {
+            Source::Compact(source) => {
+                validate_compact(source, &self.device, self.full)?;
+                (source.frame().clone(), source.coefficients())
+            }
+            #[cfg(test)]
+            Source::Rgb { body, matrix } => {
+                validate_body(body, &self.device, self.full)?;
+                validate_matrix(*matrix)?;
+                (body.frame().clone(), *matrix)
+            }
+        };
         if let Some(previous) = self.window.back() {
             if !previous.stamp.same_decode_epoch(&stamp) {
                 return Err("temporal stream cannot cross a decode epoch".into());
@@ -162,14 +178,21 @@ impl Stream {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("streaming temporal source preparation"),
             });
-        let luma = self.history.encode_push_rgb(
-            &self.device,
-            &mut encoder,
-            &self.color,
-            &stamp,
-            body.texture(),
-            matrix,
-        )?;
+        let luma = match source {
+            Source::Compact(source) => {
+                self.history
+                    .encode_push_compact(&self.device, &mut encoder, &source)?
+            }
+            #[cfg(test)]
+            Source::Rgb { body, matrix } => self.history.encode_push_rgb(
+                &self.device,
+                &mut encoder,
+                &self.color,
+                &stamp,
+                body.texture(),
+                matrix,
+            )?,
+        };
         let motion = if effective.radius == 0 {
             None
         } else {
@@ -416,6 +439,15 @@ impl Stream {
     }
 }
 
+enum Source {
+    Compact(CompactNv12Panorama),
+    #[cfg(test)]
+    Rgb {
+        body: BodyPanorama,
+        matrix: MatrixCoefficients,
+    },
+}
+
 fn trace_start() -> Option<std::time::Instant> {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     ENABLED
@@ -449,6 +481,7 @@ fn validate_full(full: [u32; 2]) -> Fallible<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_body(body: &BodyPanorama, device: &wgpu::Device, full: [u32; 2]) -> Fallible<()> {
     let texture = body.texture();
     if !body.belongs_to(device) {
@@ -470,6 +503,67 @@ fn validate_body(body: &BodyPanorama, device: &wgpu::Device, full: [u32; 2]) -> 
         );
     }
     Ok(())
+}
+
+fn validate_compact(
+    source: &CompactNv12Panorama,
+    device: &wgpu::Device,
+    full: [u32; 2],
+) -> Fallible<()> {
+    let packed = source.packed_y();
+    let uv = source.uv();
+    if !source.belongs_to(device) {
+        return Err(
+            "temporal stream compact panorama belongs to a different graphics device".into(),
+        );
+    }
+    if [source.size().width, source.size().height] != full
+        || packed.width() != full[0] / 2
+        || packed.height() != full[1] / 2
+        || uv.width() != full[0] / 2
+        || uv.height() != full[1] / 2
+        || packed.format() != wgpu::TextureFormat::Rgba8Unorm
+        || uv.format() != wgpu::TextureFormat::Rg8Unorm
+        || !sampled_single_2d(packed)
+        || !sampled_single_2d(uv)
+        || !uv.usage().contains(wgpu::TextureUsages::COPY_SRC)
+    {
+        return Err(
+            "temporal stream compact panorama has unsupported texture geometry or usage".into(),
+        );
+    }
+    validate_matrix(source.coefficients())
+}
+
+fn sampled_single_2d(texture: &wgpu::Texture) -> bool {
+    texture.dimension() == wgpu::TextureDimension::D2
+        && texture.depth_or_array_layers() == 1
+        && texture.mip_level_count() == 1
+        && texture.sample_count() == 1
+        && texture
+            .usage()
+            .contains(wgpu::TextureUsages::TEXTURE_BINDING)
+}
+
+fn validate_matrix(matrix: MatrixCoefficients) -> Fallible<()> {
+    let denominator = 1.0 + matrix.g_cb / matrix.b_cb + matrix.g_cr / matrix.r_cr;
+    if [
+        matrix.r_cr,
+        matrix.g_cb,
+        matrix.g_cr,
+        matrix.b_cb,
+        denominator,
+    ]
+    .into_iter()
+    .all(f32::is_finite)
+        && matrix.r_cr != 0.0
+        && matrix.b_cb != 0.0
+        && denominator != 0.0
+    {
+        Ok(())
+    } else {
+        Err("temporal stream source color matrix must have a finite inverse".into())
+    }
 }
 
 fn validate_motion_full(full: [u32; 2]) -> Fallible<()> {
