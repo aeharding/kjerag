@@ -29,7 +29,7 @@ const VERTICES: u32 = (ROWS * COLUMNS) as u32;
 const DIRECT_BODY_SELECTOR: &str = r#"
 fn panorama_type2_mesh(body: vec3<f32>, sample_uv: vec2<f32>) -> Type2Sample {
   let ray = normalize(vec3<f32>(-body.x, body.y, -body.z));
-  return type2_mesh_seeded(ray, type2_body_seed(sample_uv));
+  return type2_mesh_seeded(ray, type2_body_seed(ray, sample_uv));
 }
 "#;
 
@@ -393,20 +393,31 @@ mod tests {
             }
         };
 
+        let control = Size::new(64, 32);
+        assert_eq!(
+            direct_seed_mismatches(&device, &queue, control, true),
+            control.width * control.height,
+            "the injected mismatch must count every rasterized quartet sample"
+        );
+        let mut all_match = true;
         for full in [Size::new(7680, 3840), Size::new(5760, 2880)] {
-            assert_eq!(
-                direct_seed_mismatches(&device, &queue, full),
-                0,
-                "direct and inverse seeds differ for {full:?}"
-            );
+            let mismatches = direct_seed_mismatches(&device, &queue, full, false);
+            eprintln!("body seed {full:?}: {mismatches} mismatches");
+            all_match &= mismatches == 0;
         }
+        assert!(all_match, "direct and inverse seeds differ");
     }
 
-    fn direct_seed_mismatches(device: &wgpu::Device, queue: &wgpu::Queue, full: Size) -> u32 {
+    fn direct_seed_mismatches(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        full: Size,
+        force_mismatch: bool,
+    ) -> u32 {
         let source = format!(
             "{}\n{}",
             crate::direct_type2::map_wgsl(),
-            seed_comparison_wgsl(full)
+            seed_comparison_wgsl(full, force_mismatch)
         );
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("type-2 direct body seed comparison"),
@@ -420,7 +431,7 @@ mod tests {
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: false },
                     has_dynamic_offset: false,
-                    min_binding_size: NonZeroU64::new(4),
+                    min_binding_size: NonZeroU64::new(28),
                 },
                 count: None,
             }],
@@ -452,23 +463,25 @@ mod tests {
             primitive: Default::default(),
             depth_stencil: None,
             multisample: Default::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
         let counter = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("type-2 seed mismatch counter"),
-            size: 4,
+            size: 28,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: true,
         });
-        counter
-            .slice(..)
-            .get_mapped_range_mut()
-            .copy_from_slice(&0u32.to_ne_bytes());
+        counter.slice(..).get_mapped_range_mut().copy_from_slice(
+            &[0u32, 0, 0, u32::MAX, u32::MAX, 0, 0]
+                .into_iter()
+                .flat_map(u32::to_ne_bytes)
+                .collect::<Vec<_>>(),
+        );
         counter.unmap();
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("type-2 seed mismatch readback"),
-            size: 4,
+            size: 28,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -516,18 +529,26 @@ mod tests {
             pass.set_bind_group(0, &counter_group, &[]);
             pass.draw(0..3, 0..1);
         }
-        encoder.copy_buffer_to_buffer(&counter, 0, &readback, 0, 4);
+        encoder.copy_buffer_to_buffer(&counter, 0, &readback, 0, 28);
         queue.submit([encoder.finish()]);
         readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let mapped = readback.slice(..).get_mapped_range();
         let mismatches = u32::from_ne_bytes(mapped[..4].try_into().unwrap());
+        let counts: Vec<_> = mapped
+            .chunks_exact(4)
+            .map(|word| u32::from_ne_bytes(word.try_into().unwrap()))
+            .collect();
+        eprintln!(
+            "seed detail {full:?} forced={force_mismatch}: count={}, rows={}, cols={}, min=({},{}), max=({},{})",
+            counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6]
+        );
         drop(mapped);
         readback.unmap();
         mismatches
     }
 
-    fn seed_comparison_wgsl(full: Size) -> String {
+    fn seed_comparison_wgsl(full: Size, force_mismatch: bool) -> String {
         format!(
             r#"
 struct SeedVsOut {{
@@ -535,7 +556,10 @@ struct SeedVsOut {{
   @location(0) uv: vec2<f32>,
 }}
 
-struct SeedMismatchCounter {{ value: atomic<u32> }}
+struct SeedMismatchCounter {{
+  value: atomic<u32>, rows: atomic<u32>, cols: atomic<u32>,
+  min_x: atomic<u32>, min_y: atomic<u32>, max_x: atomic<u32>, max_y: atomic<u32>,
+}}
 @group(0) @binding(0) var<storage, read_write> seed_mismatches: SeedMismatchCounter;
 
 @vertex
@@ -554,8 +578,16 @@ fn compare_seed(sample_uv: vec2<f32>) {{
   let body = vec3<f32>(sin(phi) * sin(theta), cos(phi),
     -sin(phi) * cos(theta));
   let ray = normalize(vec3<f32>(-body.x, body.y, -body.z));
-  if any(type2_inverse_seed(ray) != type2_body_seed(sample_uv)) {{
+  let different = type2_inverse_seed(ray) != type2_body_seed(ray, sample_uv);
+  if {force_mismatch} || any(different) {{
     atomicAdd(&seed_mismatches.value, 1u);
+    if different.x {{ atomicAdd(&seed_mismatches.rows, 1u); }}
+    if different.y {{ atomicAdd(&seed_mismatches.cols, 1u); }}
+    let pixel = vec2<u32>(sample_uv * vec2<f32>({}.0, {}.0));
+    atomicMin(&seed_mismatches.min_x, pixel.x);
+    atomicMin(&seed_mismatches.min_y, pixel.y);
+    atomicMax(&seed_mismatches.max_x, pixel.x);
+    atomicMax(&seed_mismatches.max_y, pixel.y);
   }}
 }}
 
@@ -570,7 +602,7 @@ fn seed_fs(in: SeedVsOut) -> @location(0) f32 {{
   return 0.0;
 }}
 "#,
-            full.width, full.height
+            full.width, full.height, full.width, full.height
         )
     }
 }

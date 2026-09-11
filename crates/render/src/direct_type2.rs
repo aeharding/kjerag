@@ -1387,15 +1387,21 @@ fn type2_cell(ray: vec3<f32>, row: i32, col_unwrapped: i32) -> Type2Sample {
 }
 
 fn type2_inverse_seed(ray: vec3<f32>) -> vec2<i32> {
-  let row = i32(clamp(floor(acos(clamp(ray.y, -1.0, 1.0)) * f32(TYPE2_STACKS) / TYPE2_PI), 0.0, f32(TYPE2_STACKS - 1)));
+  let row = type2_row_seed(ray.y);
   var theta = atan2(-ray.x, ray.z);
   if theta < 0.0 { theta += TYPE2_TAU; }
   let col = i32(floor(theta * f32(TYPE2_SLICES) / TYPE2_TAU)) % TYPE2_SLICES;
   return vec2<i32>(row, col);
 }
 
-fn type2_body_seed(sample_uv: vec2<f32>) -> vec2<i32> {
-  let row = i32(clamp(floor(sample_uv.y * f32(TYPE2_STACKS)), 0.0, f32(TYPE2_STACKS - 1)));
+fn type2_row_seed(ray_y: f32) -> i32 {
+  return i32(clamp(floor(acos(clamp(ray_y, -1.0, 1.0)) * f32(TYPE2_STACKS) / TYPE2_PI), 0.0, f32(TYPE2_STACKS - 1)));
+}
+
+fn type2_body_seed(ray: vec3<f32>, sample_uv: vec2<f32>) -> vec2<i32> {
+  // Keep the recovered latitude: the GPU inverse and ideal UV latitude can
+  // choose different rows. Only longitude skips the redundant inverse.
+  let row = type2_row_seed(ray.y);
   let col = i32(floor(sample_uv.x * f32(TYPE2_SLICES))) % TYPE2_SLICES;
   return vec2<i32>(row, col);
 }
