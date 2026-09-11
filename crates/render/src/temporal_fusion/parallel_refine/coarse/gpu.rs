@@ -1,7 +1,7 @@
 //! GPU-resident coarse-to-fine motion preparation.
 //!
-//! All seven immutable gray levels and the downstream luma grid stay on the
-//! device. Each level searches independent blocks, then derives the next level's
+//! All immutable gray levels and the downstream luma grid stay on the device.
+//! Each level searches independent blocks, then derives the next level's
 //! global predictor and seeds on the GPU. There is no host pixel/vector transfer,
 //! submission, completion wait, source scheduling or colour policy here.
 //!
@@ -14,7 +14,8 @@ use crate::temporal_fusion::pyramid::gpu as pyramid;
 
 use super::prepare::{self, Prepared};
 
-const LEVELS: usize = 7;
+const FULL_RESOLUTION_LEVELS: usize = 7;
+const HALF_RESOLUTION_LEVELS: usize = 6;
 const BLOCK: u32 = 16;
 
 /// Immutable resident motion inputs for one source. Its caller owns the exact
@@ -32,18 +33,31 @@ impl MotionPyramid {
         builder: &pyramid::Builder,
         source: &pyramid::Output,
     ) -> Fallible<Self> {
-        if source.levels.len() != LEVELS {
-            return Err("resident motion needs seven gray pyramid levels".into());
+        Self::encode_with_levels(device, encoder, builder, source, FULL_RESOLUTION_LEVELS)
+    }
+
+    pub(crate) fn encode_with_levels(
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        builder: &pyramid::Builder,
+        source: &pyramid::Output,
+        expected_levels: usize,
+    ) -> Fallible<Self> {
+        if !matches!(
+            expected_levels,
+            HALF_RESOLUTION_LEVELS | FULL_RESOLUTION_LEVELS
+        ) || source.levels.len() != expected_levels
+        {
+            return Err(format!(
+                "resident motion needs six or seven requested gray pyramid levels, requested {expected_levels} and got {}",
+                source.levels.len()
+            )
+            .into());
         }
         let first = &source.levels[0];
         let mut expected = [first.width(), first.height()];
-        if expected
-            .iter()
-            .any(|dimension| !(1_024..8_192).contains(dimension))
-        {
-            return Err(
-                "resident motion pyramid base dimensions must be from 1024 through 8191".into(),
-            );
+        if expected.iter().any(|dimension| *dimension >= 8_192) {
+            return Err("resident motion pyramid base dimensions must be below 8192".into());
         }
         // Validate every level before recording the first packing pass. Odd
         // camera dimensions halve downward, as in the existing pyramid.
@@ -59,6 +73,16 @@ impl MotionPyramid {
                 return Err("resident motion pyramid level differs from its gray geometry".into());
             }
             expected = [expected[0] / 2, expected[1] / 2];
+        }
+        let coarsest = source
+            .levels
+            .last()
+            .expect("the validated motion pyramid has levels");
+        if [coarsest.width(), coarsest.height()]
+            .into_iter()
+            .any(|dimension| dimension < BLOCK)
+        {
+            return Err("resident motion pyramid coarsest level needs a 16 by 16 block".into());
         }
         let levels = source
             .levels
@@ -116,17 +140,29 @@ impl Builder {
             .iter()
             .map(|reference| reference.finest())
             .collect();
-        Ok(self.search.encode_finest_resident(
-            device,
-            encoder,
-            current.finest(),
-            &references,
-            &prepared,
-        )?)
+        let output = if current.levels.len() == HALF_RESOLUTION_LEVELS {
+            self.search.encode_finest_resident_half_resolution_review(
+                device,
+                encoder,
+                current.finest(),
+                &references,
+                &prepared,
+            )?
+        } else {
+            self.search.encode_finest_resident(
+                device,
+                encoder,
+                current.finest(),
+                &references,
+                &prepared,
+            )?
+        };
+        Ok(output)
     }
 
-    /// Record levels6 through1 and the final level0 seed preparation. Level
-    /// barriers remain GPU command ordering; no CPU search runs between them.
+    /// Record the coarsest level through level1 and the final level0 seed
+    /// preparation. Level barriers remain GPU command ordering; no CPU search
+    /// runs between them.
     pub fn encode_finest_inputs(
         &self,
         device: &wgpu::Device,
@@ -147,6 +183,10 @@ impl Builder {
         if !(1..=6).contains(&references.len()) {
             return Err("resident coarse motion needs one through six references".into());
         }
+        let level_count = matching_level_count(
+            current.levels.len(),
+            references.iter().map(|reference| reference.levels.len()),
+        )?;
         if references.iter().any(|reference| {
             reference
                 .levels
@@ -157,7 +197,7 @@ impl Builder {
             return Err("resident coarse motion reference geometry differs from its source".into());
         }
         let mut prepared = None;
-        for level in (1..LEVELS).rev() {
+        for level in (1..level_count).rev() {
             let reference_levels: Vec<_> = references
                 .iter()
                 .map(|reference| &reference.levels[level])
@@ -177,7 +217,20 @@ impl Builder {
                 [next[0] / BLOCK, next[1] / BLOCK],
             )?);
         }
-        Ok(prepared.expect("seven validated levels prepare the finest inputs"))
+        Ok(prepared.expect("six or seven validated levels prepare the finest inputs"))
+    }
+}
+
+fn matching_level_count(
+    current: usize,
+    references: impl IntoIterator<Item = usize>,
+) -> Fallible<usize> {
+    if !matches!(current, HALF_RESOLUTION_LEVELS | FULL_RESOLUTION_LEVELS)
+        || references.into_iter().any(|levels| levels != current)
+    {
+        Err("resident coarse motion needs matching six- or seven-level pyramids".into())
+    } else {
+        Ok(current)
     }
 }
 

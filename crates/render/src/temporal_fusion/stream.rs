@@ -24,7 +24,9 @@ use super::settings::{EffParams, Provider};
 
 const SOURCES: usize = 7;
 const CENTER: usize = 3;
-const LEVELS: usize = 7;
+const FULL_RESOLUTION_LEVELS: usize = 7;
+#[cfg(test)]
+const HALF_RESOLUTION_LEVELS: usize = 6;
 const BLOCK: u32 = 16;
 const SCALE_BASE: i32 = 4;
 const TEMPORAL: f32 = 1.25;
@@ -61,6 +63,7 @@ pub(crate) struct Stream {
     device: wgpu::Device,
     queue: wgpu::Queue,
     full: [u32; 2],
+    motion_levels: usize,
     provider: Provider,
     matrix: Option<MatrixCoefficients>,
     history: History,
@@ -82,11 +85,41 @@ impl Stream {
         full: [u32; 2],
         provider: Provider,
     ) -> Fallible<Self> {
+        Self::new_with_motion_levels(device, queue, full, provider, FULL_RESOLUTION_LEVELS)
+    }
+
+    /// Experimental half-linear correction field. Halving both panorama axes
+    /// doubles the angle represented by each correction pixel, so this is an
+    /// output-changing diagnostic whose moving result is not accepted merely
+    /// because its temporal/source/settings laws remain otherwise unchanged.
+    #[cfg(test)]
+    #[allow(
+        dead_code,
+        reason = "selected by the real-input half-resolution review"
+    )]
+    pub(crate) fn new_half_resolution_review(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        full: [u32; 2],
+        provider: Provider,
+    ) -> Fallible<Self> {
+        validate_motion_full(full, HALF_RESOLUTION_LEVELS)?;
+        Self::new_with_motion_levels(device, queue, full, provider, HALF_RESOLUTION_LEVELS)
+    }
+
+    fn new_with_motion_levels(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        full: [u32; 2],
+        provider: Provider,
+        motion_levels: usize,
+    ) -> Fallible<Self> {
         validate_full(full)?;
         Ok(Self {
             device: device.clone(),
             queue: queue.clone(),
             full,
+            motion_levels,
             provider,
             matrix: None,
             history: History::new(device, full)?,
@@ -162,7 +195,7 @@ impl Stream {
             .into());
         }
         if effective.radius > 0 {
-            validate_motion_full(self.full)?;
+            validate_motion_full(self.full, self.motion_levels)?;
         }
 
         if self.window.len() == SOURCES {
@@ -196,15 +229,13 @@ impl Stream {
         let motion = if effective.radius == 0 {
             None
         } else {
-            let pyramid =
-                self.pyramid
-                    .encode_history_luma(&self.device, &mut encoder, &luma, LEVELS)?;
-            Some(MotionPyramid::encode(
+            let pyramid = self.pyramid.encode_history_luma(
                 &self.device,
                 &mut encoder,
-                &self.pyramid,
-                &pyramid,
-            )?)
+                &luma,
+                self.motion_levels,
+            )?;
+            Some(self.encode_motion_pyramid(&mut encoder, &pyramid)?)
         };
         self.queue.submit([encoder.finish()]);
         // Subsequent consumers use this same queue. GPU ordering, not a CPU
@@ -299,8 +330,26 @@ impl Stream {
     ) -> Fallible<MotionPyramid> {
         let pyramid = self
             .pyramid
-            .encode_luma(&self.device, encoder, luma, LEVELS)?;
-        MotionPyramid::encode(&self.device, encoder, &self.pyramid, &pyramid)
+            .encode_luma(&self.device, encoder, luma, self.motion_levels)?;
+        self.encode_motion_pyramid(encoder, &pyramid)
+    }
+
+    fn encode_motion_pyramid(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        pyramid: &pyramid_gpu::Output,
+    ) -> Fallible<MotionPyramid> {
+        if self.motion_levels == FULL_RESOLUTION_LEVELS {
+            MotionPyramid::encode(&self.device, encoder, &self.pyramid, pyramid)
+        } else {
+            MotionPyramid::encode_with_levels(
+                &self.device,
+                encoder,
+                &self.pyramid,
+                pyramid,
+                self.motion_levels,
+            )
+        }
     }
 
     /// A source with radius zero needs no motion for its own output, but a
@@ -567,12 +616,11 @@ fn validate_matrix(matrix: MatrixCoefficients) -> Fallible<()> {
     }
 }
 
-fn validate_motion_full(full: [u32; 2]) -> Fallible<()> {
+fn validate_motion_full(full: [u32; 2], motion_levels: usize) -> Fallible<()> {
     let base = [full[0] / 2, full[1] / 2];
-    // Both supported camera sizes have seven nonempty 16x16 search grids.
-    // Successive dimensions floor-halve; an odd intermediate dimension does
-    // not remove a usable level. Larger/smaller native level-count routes are
-    // not implemented by this selected search.
+    // Both supported full-size camera fields have seven nonempty 16x16 search
+    // grids. Their explicit half-linear review fields have six. No missing
+    // level is represented with padding or a duplicated image.
     let mut shortest = base[0].min(base[1]);
     let mut levels = 0;
     while shortest >= BLOCK {
@@ -580,7 +628,8 @@ fn validate_motion_full(full: [u32; 2]) -> Fallible<()> {
         shortest /= 2;
     }
     if base.into_iter().any(|value| value >= 8_192)
-        || levels != LEVELS
+        || !matches!(motion_levels, 6 | 7)
+        || levels != motion_levels
         || full.into_iter().any(|value| !value.is_multiple_of(32))
     {
         return Err(format!(
@@ -683,12 +732,34 @@ mod geometry_tests {
     #[test]
     fn geometry_gate_accepts_both_cameras_with_seven_search_grids() {
         assert!(validate_full([7_680, 3_840]).is_ok());
-        assert!(validate_motion_full([7_680, 3_840]).is_ok());
+        assert!(validate_motion_full([7_680, 3_840], FULL_RESOLUTION_LEVELS).is_ok());
         assert!(validate_full([5_760, 2_880]).is_ok());
-        assert!(validate_motion_full([5_760, 2_880]).is_ok());
-        assert!(validate_motion_full([4_096, 2_048]).is_ok());
-        assert!(validate_motion_full([2_048, 1_024]).is_err());
-        assert!(validate_motion_full([8_192, 4_096]).is_err());
+        assert!(validate_motion_full([5_760, 2_880], FULL_RESOLUTION_LEVELS).is_ok());
+        assert!(validate_motion_full([4_096, 2_048], FULL_RESOLUTION_LEVELS).is_ok());
+        assert!(validate_motion_full([2_048, 1_024], FULL_RESOLUTION_LEVELS).is_err());
+        assert!(validate_motion_full([8_192, 4_096], FULL_RESOLUTION_LEVELS).is_err());
+    }
+
+    #[test]
+    fn half_resolution_review_accepts_both_camera_fields_with_six_real_levels() {
+        for full in [[3_840, 1_920], [2_880, 1_440]] {
+            assert!(validate_full(full).is_ok(), "{full:?}");
+            assert!(
+                validate_motion_full(full, HALF_RESOLUTION_LEVELS).is_ok(),
+                "{full:?}"
+            );
+            assert!(
+                validate_motion_full(full, FULL_RESOLUTION_LEVELS).is_err(),
+                "{full:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn motion_geometry_rejects_wrong_count_or_sub_block_coarsest_level() {
+        assert!(validate_motion_full([3_840, 1_920], 5).is_err());
+        assert!(validate_motion_full([3_840, 1_920], 7).is_err());
+        assert!(validate_motion_full([1_024, 512], 6).is_err());
     }
 
     #[test]

@@ -1,6 +1,15 @@
 use super::*;
 use crate::temporal_fusion::{parallel_refine, pyramid as cpu_pyramid, tests::gpu};
 
+#[test]
+fn level_count_gate_accepts_only_matching_six_or_seven_level_inputs() {
+    assert_eq!(matching_level_count(6, [6, 6]).unwrap(), 6);
+    assert_eq!(matching_level_count(7, [7, 7]).unwrap(), 7);
+    assert!(matching_level_count(5, [5]).is_err());
+    assert!(matching_level_count(6, [6, 7]).is_err());
+    assert!(matching_level_count(7, [6]).is_err());
+}
+
 fn upload(
     device: &wgpu::Device,
     queue: &wgpu::Queue,

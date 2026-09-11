@@ -1,4 +1,4 @@
-use super::{Builder, Error, validate_reference_count};
+use super::{BLOCK, Builder, Error, MIN_DIMENSION, dimensions_in_range, validate_reference_count};
 use crate::temporal_fusion::{
     motion::{self, Geometry, Parameters},
     parallel_refine,
@@ -18,6 +18,15 @@ fn shader_validates_without_optional_capabilities() {
     Validator::new(ValidationFlags::all(), Capabilities::empty())
         .validate(&module)
         .unwrap();
+}
+
+#[test]
+fn half_resolution_review_lowers_only_the_finest_entry_bound() {
+    for dimensions in [[1_920, 960], [1_440, 720]] {
+        assert!(!dimensions_in_range(dimensions, &(MIN_DIMENSION..8_192)));
+        assert!(dimensions_in_range(dimensions, &(BLOCK..8_192)));
+    }
+    assert!(!dimensions_in_range([1_440, 15], &(BLOCK..8_192)));
 }
 
 fn patterned_level(width: usize, height: usize, salt: u32) -> Level {

@@ -283,7 +283,48 @@ impl Builder {
         references: &[&PackedGray],
         prepared: &Prepared,
     ) -> Result<Output, Error> {
-        let blocks = self.validate_images(device, current, references, Mode::Finest)?;
+        self.encode_finest_resident_with_minimum(
+            device,
+            encoder,
+            current,
+            references,
+            prepared,
+            MIN_DIMENSION,
+        )
+    }
+
+    /// The explicit half-linear review keeps the same finest shader and 16x16
+    /// blocks, but admits its smaller real image instead of padding it to the
+    /// production entry bound.
+    pub(crate) fn encode_finest_resident_half_resolution_review(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        current: &PackedGray,
+        references: &[&PackedGray],
+        prepared: &Prepared,
+    ) -> Result<Output, Error> {
+        self.encode_finest_resident_with_minimum(
+            device, encoder, current, references, prepared, BLOCK,
+        )
+    }
+
+    fn encode_finest_resident_with_minimum(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        current: &PackedGray,
+        references: &[&PackedGray],
+        prepared: &Prepared,
+        minimum_dimension: u32,
+    ) -> Result<Output, Error> {
+        let blocks = self.validate_images_with_finest_minimum(
+            device,
+            current,
+            references,
+            Mode::Finest,
+            minimum_dimension,
+        )?;
         validate_prepared(device, blocks, references.len(), prepared)?;
         Ok(self.encode_bound(
             device,
@@ -364,6 +405,17 @@ impl Builder {
         references: &[&PackedGray],
         mode: Mode,
     ) -> Result<[u32; 2], Error> {
+        self.validate_images_with_finest_minimum(device, current, references, mode, MIN_DIMENSION)
+    }
+
+    fn validate_images_with_finest_minimum(
+        &self,
+        device: &wgpu::Device,
+        current: &PackedGray,
+        references: &[&PackedGray],
+        mode: Mode,
+        finest_minimum: u32,
+    ) -> Result<[u32; 2], Error> {
         validate_reference_count(references.len(), references.len(), references.len())?;
         if self.device != *device
             || current.device() != device
@@ -373,12 +425,11 @@ impl Builder {
         }
         let [width, height] = current.logical_size();
         let (range, error) = match mode {
-            Mode::Finest => (MIN_DIMENSION..MAX_DIMENSION_EXCLUSIVE, Error::Geometry),
+            Mode::Finest => (finest_minimum..MAX_DIMENSION_EXCLUSIVE, Error::Geometry),
             Mode::Coarse => (BLOCK..MAX_DIMENSION_EXCLUSIVE / 2, Error::CoarseGeometry),
             Mode::Smallest => (BLOCK..MAX_DIMENSION_EXCLUSIVE / 64, Error::CoarseGeometry),
         };
-        if !range.contains(&width)
-            || !range.contains(&height)
+        if !dimensions_in_range([width, height], &range)
             || references
                 .iter()
                 .any(|image| image.logical_size() != [width, height])
@@ -520,6 +571,10 @@ impl Builder {
             references: reference_count as u32,
         }
     }
+}
+
+fn dimensions_in_range(dimensions: [u32; 2], range: &std::ops::Range<u32>) -> bool {
+    dimensions.into_iter().all(|value| range.contains(&value))
 }
 
 fn validate_prepared(
