@@ -7,13 +7,17 @@
 
 use std::num::NonZeroU64;
 
+#[cfg(test)]
 use super::nv12;
+use crate::Fallible;
 use crate::direct_type2::{
     DirectType2Pipeline, vertex_cache_prepass_wgsl, vertex_cached_draw_wgsl_with_fusion_mode,
 };
 use crate::studio_type2::{ALPHA_BYTES, PACKED_BYTES};
+#[cfg(test)]
 use crate::temporal_fusion::color::MatrixCoefficients;
-use crate::{Fallible, FrameStamp, Size};
+#[cfg(test)]
+use crate::{FrameStamp, Size};
 
 const ROWS: u64 = 51;
 const COLUMNS: u64 = 101;
@@ -22,13 +26,20 @@ const CACHE_BYTES: u64 = ROWS * COLUMNS * RECORD_BYTES;
 const WORKGROUP_SIZE: u32 = 64;
 const VERTICES: u32 = (ROWS * COLUMNS) as u32;
 
-pub(in crate::direct_type2) struct Producer {
+pub(crate) struct Producer {
     device: wgpu::Device,
     prepass_layout: wgpu::BindGroupLayout,
     render_map_layout: wgpu::BindGroupLayout,
     prepass: wgpu::ComputePipeline,
     render: wgpu::RenderPipeline,
     fusion: bool,
+}
+
+/// One per-map cache and the binding which reads it during the following draw.
+/// The buffer remains owned until both passes have been recorded.
+pub(crate) struct Prepared {
+    _cache: wgpu::Buffer,
+    render_binding: wgpu::BindGroup,
 }
 
 impl Producer {
@@ -131,6 +142,7 @@ impl Producer {
         })
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(in crate::direct_type2) fn encode(
         &self,
@@ -154,6 +166,39 @@ impl Producer {
         if self.fusion != fusion.is_some() {
             return Err(
                 "vertex-cached compact NV12 map and photometric binding presence differ".into(),
+            );
+        }
+
+        let cached = self.prepare(device, encoder, packed, alpha)?;
+
+        let [y_view, uv_view] = prepared.views();
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("vertex-cached compact NV12 body panorama"),
+                color_attachments: &[
+                    Some(nv12::attachment(&y_view)),
+                    Some(nv12::attachment(&uv_view)),
+                ],
+                ..Default::default()
+            });
+            self.draw(&mut pass, picture, &cached, fusion);
+        }
+        Ok(prepared.into_output())
+    }
+
+    /// Allocate and populate one complete native vertex grid. The caller owns
+    /// the exact installed map buffers and records its compact draw afterward
+    /// in this same encoder.
+    pub(crate) fn prepare(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        packed: &wgpu::Buffer,
+        alpha: &wgpu::Buffer,
+    ) -> Fallible<Prepared> {
+        if self.device != *device {
+            return Err(
+                "vertex-cached compact NV12 producer belongs to a different graphics device".into(),
             );
         }
 
@@ -189,26 +234,31 @@ impl Producer {
             pass.set_bind_group(0, &prepass_binding, &[]);
             pass.dispatch_workgroups(VERTICES.div_ceil(WORKGROUP_SIZE), 1, 1);
         }
+        Ok(Prepared {
+            _cache: cache,
+            render_binding,
+        })
+    }
 
-        let [y_view, uv_view] = prepared.views();
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("vertex-cached compact NV12 body panorama"),
-                color_attachments: &[
-                    Some(nv12::attachment(&y_view)),
-                    Some(nv12::attachment(&uv_view)),
-                ],
-                ..Default::default()
-            });
-            pass.set_pipeline(&self.render);
-            pass.set_bind_group(0, picture, &[]);
-            pass.set_bind_group(1, &render_binding, &[]);
-            if let Some(fusion) = fusion {
-                pass.set_bind_group(2, fusion, &[]);
-            }
-            pass.draw(0..3, 0..1);
+    pub(crate) fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        picture: &wgpu::BindGroup,
+        cached: &Prepared,
+        fusion: Option<&wgpu::BindGroup>,
+    ) {
+        assert_eq!(
+            self.fusion,
+            fusion.is_some(),
+            "vertex-cached compact NV12 map and photometric binding presence differ"
+        );
+        pass.set_pipeline(&self.render);
+        pass.set_bind_group(0, picture, &[]);
+        pass.set_bind_group(1, &cached.render_binding, &[]);
+        if let Some(fusion) = fusion {
+            pass.set_bind_group(2, fusion, &[]);
         }
-        Ok(prepared.into_output())
+        pass.draw(0..3, 0..1);
     }
 }
 

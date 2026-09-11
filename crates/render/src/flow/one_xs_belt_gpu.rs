@@ -2538,8 +2538,6 @@ impl InstalledOneXsReady {
             ],
             ..Default::default()
         });
-        // Registration precedes sampling exactly as it does for the RGB body
-        // panorama. Abandoned work therefore remains bounded fail-closed state.
         retirements.arm_and_draw(self.permit, &mut pass, draw, |draw, pass| {
             draw.draw.pipeline.draw_resident_compact_panorama(
                 &draw.binding,
@@ -2547,6 +2545,65 @@ impl InstalledOneXsReady {
                 draw.draw.map.fusion_read(),
                 pass,
             );
+        });
+        drop(pass);
+        Ok(prepared.into_output())
+    }
+
+    fn arm_and_encode_cached_compact_panorama(
+        self,
+        retirements: &IcedDrawRetirements<InstalledOneXsPass>,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        size: crate::Size,
+    ) -> Fallible<crate::direct_type2::CompactNv12Panorama> {
+        let draw = self
+            .pass
+            .expect("resident compact panorama must retain its exact private picture binding");
+        if !draw.binding.is_gamma_output() {
+            return Err(
+                "resident compact NV12 panorama requires gamma-encoded source output".into(),
+            );
+        }
+        let frame = draw.draw.source.resident_frame();
+        if &frame != draw.draw.map.frame() {
+            return Err(
+                "resident compact NV12 panorama source and map name different frames".into(),
+            );
+        }
+        let prepared = draw.draw.pipeline.prepare_resident_compact_panorama(
+            device,
+            &draw.draw.source,
+            &draw.binding,
+            size,
+            draw.draw.map.fusion_read().is_some(),
+        )?;
+        let cached = draw.draw.map.prepare_compact_vertex_cache(
+            &frame,
+            &draw.draw.pipeline,
+            device,
+            encoder,
+        )?;
+        let [y, uv] = prepared.views();
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("resident compact NV12 body panorama snapshot"),
+            color_attachments: &[
+                Some(crate::direct_type2::compact_nv12_attachment(&y)),
+                Some(crate::direct_type2::compact_nv12_attachment(&uv)),
+            ],
+            ..Default::default()
+        });
+        // Registration precedes sampling exactly as it does for the RGB body
+        // panorama. Abandoned work therefore remains bounded fail-closed state.
+        retirements.arm_and_draw(self.permit, &mut pass, draw, |draw, pass| {
+            draw.draw
+                .pipeline
+                .draw_resident_vertex_cached_compact_panorama(
+                    &draw.binding,
+                    &cached,
+                    draw.draw.map.fusion_read(),
+                    pass,
+                );
         });
         drop(pass);
         Ok(prepared.into_output())

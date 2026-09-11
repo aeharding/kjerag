@@ -9,8 +9,7 @@ use super::{DirectType2Pipeline, draw_wgsl_with_fusion_mode};
 use crate::{Extent, Fallible, FrameStamp, Size};
 
 pub(super) mod nv12;
-#[cfg(test)]
-pub(super) mod nv12_vertex_cache;
+pub(crate) mod nv12_vertex_cache;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 

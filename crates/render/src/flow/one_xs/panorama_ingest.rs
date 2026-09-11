@@ -219,7 +219,7 @@ pub(super) fn prepare_compact_panorama(
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("resident compact panorama ingestion"),
             });
-    let output = draw.arm_and_encode_compact_panorama(
+    let output = draw.arm_and_encode_cached_compact_panorama(
         &session.retirements,
         session.context.device(),
         &mut encoder,

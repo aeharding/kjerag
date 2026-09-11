@@ -458,7 +458,6 @@ pub(crate) struct DirectType2Pipeline {
     fusion_sampler: Option<wgpu::Sampler>,
     panorama: OnceLock<panorama::BodyPanoramaPipeline>,
     compact_nv12: OnceLock<panorama::nv12::Producer>,
-    #[cfg(test)]
     vertex_cached_compact_nv12: OnceLock<panorama::nv12_vertex_cache::Producer>,
 }
 
@@ -611,7 +610,6 @@ impl DirectType2Pipeline {
             fusion_sampler,
             panorama: OnceLock::new(),
             compact_nv12: OnceLock::new(),
-            #[cfg(test)]
             vertex_cached_compact_nv12: OnceLock::new(),
         }
     }
@@ -623,8 +621,7 @@ impl DirectType2Pipeline {
         })
     }
 
-    #[cfg(test)]
-    fn vertex_cached_compact_nv12(&self) -> &panorama::nv12_vertex_cache::Producer {
+    pub(crate) fn vertex_cached_compact_nv12(&self) -> &panorama::nv12_vertex_cache::Producer {
         self.vertex_cached_compact_nv12.get_or_init(|| {
             panorama::nv12_vertex_cache::Producer::new(&self.device, self).expect(
                 "direct pipeline must construct its vertex-cached compact NV12 peer on the same device",
@@ -791,6 +788,17 @@ impl DirectType2Pipeline {
     ) {
         self.compact_nv12()
             .draw(pass, &binding.picture, map, fusion);
+    }
+
+    pub(crate) fn draw_resident_vertex_cached_compact_panorama(
+        &self,
+        binding: &ImportedOneXsDrawBinding,
+        cached: &panorama::nv12_vertex_cache::Prepared,
+        fusion: Option<&wgpu::BindGroup>,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        self.vertex_cached_compact_nv12()
+            .draw(pass, &binding.picture, cached, fusion);
     }
 
     pub(crate) fn draw(
@@ -1190,7 +1198,6 @@ fn draw_wgsl_with_fusion_mode(fusion: bool, hardware_fusion: bool) -> String {
     format!("{}\n{}\n{correction}\n{DRAW}", source_wgsl(), map_wgsl())
 }
 
-#[cfg(test)]
 pub(in crate::direct_type2) fn vertex_cached_draw_wgsl_with_fusion_mode(
     fusion: bool,
     hardware_fusion: bool,
@@ -1211,7 +1218,6 @@ pub(in crate::direct_type2) fn vertex_cached_draw_wgsl_with_fusion_mode(
     )
 }
 
-#[cfg(test)]
 pub(in crate::direct_type2) fn vertex_cache_prepass_wgsl() -> String {
     let cell = MAP
         .find("fn type2_cell(")
@@ -1222,7 +1228,6 @@ pub(in crate::direct_type2) fn vertex_cache_prepass_wgsl() -> String {
     )
 }
 
-#[cfg(test)]
 fn vertex_cached_map_wgsl() -> String {
     let cell = MAP
         .find("fn type2_cell(")
@@ -1403,7 +1408,6 @@ fn type2_mesh(body: vec3<f32>) -> Type2Sample {
 }
 "#;
 
-#[cfg(test)]
 const VERTEX_CACHED_CELL: &str = r#"
 struct Type2CachedVertex {
   position: vec4<f32>,
@@ -1452,7 +1456,6 @@ fn type2_cell(ray: vec3<f32>, row: i32, col_unwrapped: i32) -> Type2Sample {
 }
 "#;
 
-#[cfg(test)]
 const VERTEX_CACHE_PREPASS: &str = r#"
 struct Type2CachedVertex {
   position: vec4<f32>,
