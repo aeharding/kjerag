@@ -47,14 +47,33 @@ Native new/control/new runs at1280x720 now show a meaningful throughput change.
 The control sustains17.29 source fps. The first new run averages28.68fps with
 startup/catch-up and up to2.03s late; the repeat sustains29.9706fps over551
 contiguous shown frames, with0 drops/starvation/audio underruns and12.9ms worst
-reported lateness. Maximum observed shown-frame gaps remain66.3/65.2ms, so this
-is not a smoothness pass. At2256x1504 sRGB, the existing completed-redraw Scene
-diagnostic measures407fps paused but171fps active, active p9921.37ms and25.24
-source fps. Its per-redraw queue completion can underfeed processing and include
+reported lateness. The retained66.3/65.2ms maxima are `native-pump`'s
+pre-prepare `shown` reporting intervals, not established visible pauses. That
+probe records the prior installed frame before the same redraw's prepare can
+install its newly offered frame. In the repeat, representative reported gaps
+of65.159/63.611/61.795ms correspond to consecutive offered/install opportunities
+only33.359/33.362/33.350ms apart, with the required temporal output already
+complete. The largest supported pacing outlier is instead source18866 to18867:
+the latter was ready in advance, a pump requested the next redraw1.745ms away,
+and the next observed tick arrived14.689ms later, about12.945ms late. These
+events locate delayed tick delivery, but neither this pre-prepare probe nor a
+submit proves physical presentation timing or absence of a visible pause. The
+run therefore remains unqualified for smooth native presentation. At2256x1504
+sRGB, the existing completed-redraw Scene diagnostic measures407fps paused
+but171fps active, active p9921.37ms and25.24 source fps. Its per-redraw queue
+completion can underfeed processing and include
 queue backlog, but it does not establish the required240fps active capacity.
 Keep the target; do not present paused capacity as completion.
 
-No standard full UI harness, installation or merge is claimed. The app snapshot tested here is
+The standard full native UI harness now passes50 checks at the exact612.078
+reported view. This covers pause/resume, backward seek, the real scrubber,
+screenshots, fullscreen, both drop transports, import-failure recovery and
+refusal surfaces. The late-content scrubber check first observed its target
+after7 seconds; passing its10-second guard is not a responsive-seeking verdict.
+The one-file X4 input skips paired-file drop cases. GPU shader/twin checks pass.
+Logs and captures are retained in `uitest-native-01.log` and
+`ui-x4-native-01` under the evidence directory below. No installation or merge
+is claimed. The app snapshot tested here is
 `e6245d4f2f63928ef37d769a4672165a05f46528e59946807eb3328b2ff934cb`.
 Evidence: `scratch/studio-seam-flicker-612-20260909-01/temporal-correction-live-01`;
 native runs `run.fina8OU3`, `run.AkyjQCdT`, `run.wYANkADf` under

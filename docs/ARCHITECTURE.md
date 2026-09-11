@@ -189,10 +189,13 @@ of body pixels, not full-resolution sampling or temporal work. The uncached
 compact and RGB producers remain diagnostic oracles. Both-camera comparisons
 find sparse one-code YUV differences, so numerical identity is not claimed.
 Native new/old/new playback improves from14.57 to16.12–16.28 source fps, but
-maximum shown-frame gaps are worse in those cached samples. A later unchanged
-cached control reaches15.66fps without that long gap, so cache causation is not
-established. Reusing one workspace across sources gave no further throughput
-benefit and was removed; the retained producer allocates one per source/map.
+maximum pre-prepare `native-pump` shown-report gaps are worse in those cached
+samples. Those reports sample the prior installed frame before the current
+redraw's prepare and therefore do not by themselves establish visible pauses.
+A later unchanged cached control reaches15.66fps without that long gap, so
+cache causation is not established. Reusing one workspace across sources gave
+no further throughput benefit and was removed; the retained producer allocates
+one per source/map.
 Neither smoothness nor active240fps capacity is established, and this candidate
 is not installed.
 
