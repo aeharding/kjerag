@@ -229,6 +229,33 @@ impl SourceSnapshot {
         reframe: &crate::Reframe,
     ) -> Fallible<ImportedOneXsDrawBinding> {
         producer.ensure_device(&self.context)?;
+        let reframe = self.exact_reframe(reframe)?;
+        Ok(prepare_picture_binding(
+            &self.context,
+            [&self.planes[0], &self.planes[1]],
+            layout,
+            sampler,
+            &reframe,
+        ))
+    }
+
+    pub(crate) fn prepare_correction_picture(
+        &self,
+        pipeline: &super::correction::CorrectionPipeline,
+        reframe: &crate::Reframe,
+        correction: &crate::temporal_fusion::correction_stream::CorrectionFrame,
+    ) -> Fallible<super::correction::CorrectionPictureBinding> {
+        if &self.frame != correction.frame() {
+            return Err("temporal correction names a different source snapshot".into());
+        }
+        if !correction.belongs_to(self.context.device()) {
+            return Err("temporal correction belongs to a different graphics device".into());
+        }
+        let reframe = self.exact_reframe(reframe)?;
+        pipeline.prepare_picture(&reframe, [&self.planes[0], &self.planes[1]], correction)
+    }
+
+    fn exact_reframe(&self, reframe: &crate::Reframe) -> Fallible<crate::Reframe> {
         let expected_size = self.source_size();
         if reframe.frame_size() != expected_size {
             let actual = reframe.frame_size();
@@ -245,13 +272,7 @@ impl SourceSnapshot {
             );
         }
         let reframe = (*reframe).with_samples(self.samples);
-        Ok(prepare_picture_binding(
-            &self.context,
-            [&self.planes[0], &self.planes[1]],
-            layout,
-            sampler,
-            &reframe,
-        ))
+        Ok(reframe)
     }
 
     pub(crate) fn draw_binding(

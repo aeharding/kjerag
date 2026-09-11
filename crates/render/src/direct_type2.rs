@@ -5,7 +5,7 @@
 //! current `Reframe` body ray, rather than accepting a dense output-sized map.
 
 use std::num::NonZeroU64;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use kjerag_media::Frames;
 
@@ -19,6 +19,7 @@ use crate::projection;
 use crate::studio_type2::{ALPHA_BYTES, MAP_HEIGHT, MAP_WIDTH, OneXsMapFrame, PACKED_BYTES};
 use crate::{Fallible, FrameStamp, MAX_LENSES, Planes};
 
+pub(crate) mod correction;
 pub(crate) mod panorama;
 mod source_snapshot;
 pub(crate) use panorama::BodyPanorama;
@@ -482,6 +483,7 @@ pub(crate) struct DirectType2Pipeline {
     compact_nv12: OnceLock<panorama::nv12::Producer>,
     vertex_cached_compact_nv12: OnceLock<panorama::nv12_vertex_cache::Producer>,
     source_snapshot: OnceLock<source_snapshot::SnapshotPipeline>,
+    correction_pipelines: Mutex<Vec<(wgpu::TextureFormat, Arc<correction::CorrectionPipeline>)>>,
 }
 
 impl DirectType2Pipeline {
@@ -635,12 +637,33 @@ impl DirectType2Pipeline {
             compact_nv12: OnceLock::new(),
             vertex_cached_compact_nv12: OnceLock::new(),
             source_snapshot: OnceLock::new(),
+            correction_pipelines: Mutex::new(Vec::new()),
         }
     }
 
     fn source_snapshot(&self) -> &source_snapshot::SnapshotPipeline {
         self.source_snapshot
             .get_or_init(|| source_snapshot::SnapshotPipeline::new(&self.device))
+    }
+
+    pub(crate) fn correction_pipeline(
+        &self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+    ) -> Fallible<Arc<correction::CorrectionPipeline>> {
+        if self.device != *device {
+            return Err("corrected direct view belongs to a different graphics device".into());
+        }
+        let mut pipelines = self
+            .correction_pipelines
+            .lock()
+            .map_err(|_| "corrected direct pipeline cache is poisoned")?;
+        if let Some((_, pipeline)) = pipelines.iter().find(|(cached, _)| *cached == format) {
+            return Ok(Arc::clone(pipeline));
+        }
+        let pipeline = Arc::new(correction::CorrectionPipeline::new(device, self, format)?);
+        pipelines.push((format, Arc::clone(&pipeline)));
+        Ok(pipeline)
     }
 
     fn compact_nv12(&self) -> &panorama::nv12::Producer {
