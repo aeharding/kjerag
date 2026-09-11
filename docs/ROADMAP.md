@@ -20,7 +20,9 @@ tests, including recorded GPU draw ownership and both-camera seek pressure.
 It holds full source cadence at roughly232 native redraw/s, but repeated
 higher-load native runs regress to198-203 redraw/s and13-14 source/s versus
 control270/23.75. A faster offscreen result does not override that real-player
-regression. The trial is removed before delivery; the approved installed
+regression. A fresh restored control built with the same package selection as
+the trial confirms269.875/23.925; the result does not rely on the older frozen
+binary alone. The trial is removed before delivery; the approved installed
 quarter build is unchanged and240fps capacity remains open. Current FFmpeg7.1
 VA-API pools are dynamically allocated (reported initial size0), not the
 historical fixed20; the corresponding documentation is corrected. Evidence,
