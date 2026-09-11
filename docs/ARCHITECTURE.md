@@ -151,8 +151,12 @@ of body pixels, not full-resolution sampling or temporal work. The uncached
 compact and RGB producers remain diagnostic oracles. Both-camera comparisons
 find sparse one-code YUV differences, so numerical identity is not claimed.
 Native new/old/new playback improves from14.57 to16.12–16.28 source fps, but
-maximum shown-frame gaps are worse in the cached samples. Neither smoothness
-nor active240fps capacity is established, and this candidate is not installed.
+maximum shown-frame gaps are worse in those cached samples. A later unchanged
+cached control reaches15.66fps without that long gap, so cache causation is not
+established. Reusing one workspace across sources gave no further throughput
+benefit and was removed; the retained producer allocates one per source/map.
+Neither smoothness nor active240fps capacity is established, and this candidate
+is not installed.
 
 A radius-zero
 source initially needs no motion inputs, but a later center may reference it.

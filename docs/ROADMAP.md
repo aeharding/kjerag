@@ -25,9 +25,10 @@ but exclude history unpack and are not playback FPS.
 
 Authenticated native new/old/new runs at the same612.078 view measure
 16.28/14.57/16.12 contiguous shown source fps after startup, roughly11% faster.
-The cached runs' maximum shown-frame gaps are185.75/182.97ms versus93.84ms
-for the control. Better average throughput is not a smoothness pass; the gap
-regression remains under investigation. These are1280x720 isolated native
+Those cached runs' maximum shown-frame gaps are185.75/182.97ms versus93.84ms
+for the control. A later unchanged cached control reaches15.66fps with an88.19ms
+maximum gap, so the long hitch cannot yet be attributed to the cache itself.
+Better average throughput is not a smoothness pass. These are1280x720 isolated native
 window runs, not the2256x1504/4.17ms capacity gate. All three controls-wake
 checks pass their separate coarse100ms pump bounds. No installed replacement,
 owner acceptance of this new output, or merge.
@@ -45,12 +46,17 @@ native runs`run.O7wQ2Ekc`, `run.n29XkKbQ`, `run.kANb6oZZ` under
 `scratch/controls-wake`. Current app SHA256
 `77671c01457d08a327152fe56ec1051ddabf346a3311047fc63f020e343a9fa7`.
 
-The cached maximum gap repeats at shown18529→18530 after the second scripted
+The earlier cached maximum gap repeats at shown18529→18530 after the second scripted
 controls transition. The uncached run's same-source gap is80.35ms. Source
 preparation and filter/presentation callbacks all back up while pumps continue;
 these wall intervals do not isolate GPU execution or identify the underlying
-cause. A bounded workspace-reuse follow-up is being evaluated, not presumed to
-fix that regression.
+cause. A bounded workspace-reuse follow-up is now retired: new/control/new
+native rates15.37/15.66/15.47fps show no gain. All62 saved607/612 frames stay
+byte-identical, and the pending-map contamination regression passes, but those
+correctness results do not justify retaining an unhelpful performance change.
+The retained code is again the per-source cache. Next evaluate eliminating the
+body renderer's redundant angular-coordinate inverse, with exact cell-selection
+checks before any source-sampling change. No new RE or cadence change.
 
 **Compact YUV integrated; native playback still too slow, 2026-09-10:**
 the source worker now carries a sealed compact YUV panorama into the same
