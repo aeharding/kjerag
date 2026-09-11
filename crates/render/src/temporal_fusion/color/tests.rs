@@ -116,6 +116,114 @@ fn gpu_matches_varying_footprints_and_centred_chroma_reconstruction() {
     }
 }
 
+#[test]
+fn packed_luma_conversion_matches_unpacked_planes_exactly() {
+    let Some((device, queue)) = gpu() else {
+        return;
+    };
+    let conversion = GpuColorConversion::new(&device);
+    for [width, height] in [[2, 2], [18, 6], [66, 34]] {
+        let make_texture = |label, width, height, format| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let y = make_texture(
+            "unpacked conversion Y",
+            width,
+            height,
+            wgpu::TextureFormat::R8Unorm,
+        );
+        let packed = make_texture(
+            "packed conversion Y",
+            width / 2,
+            height / 2,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        let uv = make_texture(
+            "packed conversion UV",
+            width / 2,
+            height / 2,
+            wgpu::TextureFormat::Rg8Unorm,
+        );
+        let y_bytes: Vec<_> = (0..width * height)
+            .map(|i| ((i * 131 + i / width * 37) % 256) as u8)
+            .collect();
+        let uv_bytes: Vec<_> = (0..width * height / 2)
+            .map(|i| ((i * 73 + 11) % 256) as u8)
+            .collect();
+        let mut packed_bytes = Vec::with_capacity(y_bytes.len());
+        for row in (0..height).step_by(2) {
+            for column in (0..width).step_by(2) {
+                for [dx, dy] in [[0, 0], [1, 0], [0, 1], [1, 1]] {
+                    packed_bytes.push(y_bytes[((row + dy) * width + column + dx) as usize]);
+                }
+            }
+        }
+        for (texture, bytes, row_bytes) in [
+            (&y, &y_bytes, width),
+            (&packed, &packed_bytes, width * 2),
+            (&uv, &uv_bytes, width),
+        ] {
+            queue.write_texture(
+                texture.as_image_copy(),
+                bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row_bytes),
+                    rows_per_image: Some(texture.height()),
+                },
+                texture.size(),
+            );
+        }
+        for matrix in [
+            X4,
+            MatrixCoefficients::from_source_rgb([1.402, 0.344, 0.714, 1.772]),
+        ] {
+            let mut encoder = device.create_command_encoder(&Default::default());
+            assert_eq!(
+                conversion
+                    .encode_packed_planes_to_rgb(&mut encoder, &y, &uv, matrix)
+                    .err(),
+                Some(Error::PackedNv12Textures)
+            );
+            assert_eq!(
+                conversion
+                    .encode_planes_to_rgb(&mut encoder, &packed, &uv, matrix)
+                    .err(),
+                Some(Error::Nv12Textures)
+            );
+            let expected = conversion
+                .encode_planes_to_rgb(&mut encoder, &y, &uv, matrix)
+                .unwrap();
+            let actual = conversion
+                .encode_packed_planes_to_rgb(&mut encoder, &packed, &uv, matrix)
+                .unwrap();
+            assert_eq!(actual.size(), expected.size());
+            let expected = copy_texture(&device, &mut encoder, &expected, width, height, 4);
+            let actual = copy_texture(&device, &mut encoder, &actual, width, height, 4);
+            queue.submit([encoder.finish()]);
+            let expected = read_copy(&device, expected, width, height, 4);
+            let actual = read_copy(&device, actual, width, height, 4);
+            assert_eq!(
+                actual, expected,
+                "packed conversion {width}x{height} {matrix:?}"
+            );
+        }
+    }
+}
+
 fn gpu_round_trip(
     device: &wgpu::Device,
     queue: &wgpu::Queue,

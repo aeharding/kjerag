@@ -57,6 +57,7 @@ pub enum Error {
     Coefficients,
     RgbTexture,
     Nv12Textures,
+    PackedNv12Textures,
     ForeignNv12,
     MatrixMismatch,
 }
@@ -70,6 +71,9 @@ impl fmt::Display for Error {
             }
             Self::Nv12Textures => {
                 "RGB/NV12 conversion needs matching sampled R8Unorm and Rg8Unorm planes"
+            }
+            Self::PackedNv12Textures => {
+                "packed YUV conversion needs matching sampled Rgba8Unorm and Rg8Unorm planes"
             }
             Self::ForeignNv12 => "NV12 planes belong to a different color converter device",
             Self::MatrixMismatch => "NV12 reverse conversion needs its originating source matrix",
@@ -107,6 +111,7 @@ pub struct GpuColorConversion {
     y_pipeline: wgpu::RenderPipeline,
     uv_pipeline: wgpu::RenderPipeline,
     rgb_pipeline: wgpu::RenderPipeline,
+    packed_rgb_pipeline: wgpu::RenderPipeline,
 }
 
 impl GpuColorConversion {
@@ -147,46 +152,53 @@ impl GpuColorConversion {
             label: Some("diagnostic NV12 to RGB"),
             source: wgpu::ShaderSource::Wgsl(NV12_TO_RGB_WGSL.into()),
         });
-        let make_pipeline =
-            |label, layout: &wgpu::BindGroupLayout, shader: &wgpu::ShaderModule, entry, format| {
-                let pipeline_layout =
-                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                        label: Some(label),
-                        bind_group_layouts: &[layout],
-                        immediate_size: 0,
-                    });
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
-                    layout: Some(&pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: shader,
-                        entry_point: Some("triangle"),
-                        compilation_options: Default::default(),
-                        buffers: &[],
+        let make_pipeline = |label,
+                             layout: &wgpu::BindGroupLayout,
+                             shader: &wgpu::ShaderModule,
+                             entry,
+                             format,
+                             packed| {
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(label),
+                bind_group_layouts: &[layout],
+                immediate_size: 0,
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: shader,
+                    entry_point: Some("triangle"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: shader,
+                    entry_point: Some(entry),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: if packed { &[("PACKED_LUMA", 1.0)] } else { &[] },
+                        ..Default::default()
                     },
-                    fragment: Some(wgpu::FragmentState {
-                        module: shader,
-                        entry_point: Some(entry),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    primitive: Default::default(),
-                    depth_stencil: None,
-                    multisample: Default::default(),
-                    multiview_mask: None,
-                    cache: None,
-                })
-            };
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
         let y_pipeline = make_pipeline(
             "diagnostic RGB to Y",
             &rgb_layout,
             &rgb_to_nv12,
             "rgb_to_y",
             wgpu::TextureFormat::R8Unorm,
+            false,
         );
         let uv_pipeline = make_pipeline(
             "diagnostic RGB to UV",
@@ -194,6 +206,7 @@ impl GpuColorConversion {
             &rgb_to_nv12,
             "rgb_to_uv",
             wgpu::TextureFormat::Rg8Unorm,
+            false,
         );
         let rgb_pipeline = make_pipeline(
             "diagnostic NV12 to RGB",
@@ -201,6 +214,15 @@ impl GpuColorConversion {
             &nv12_to_rgb,
             "nv12_to_rgb",
             wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        );
+        let packed_rgb_pipeline = make_pipeline(
+            "packed YUV to RGB",
+            &nv12_layout,
+            &nv12_to_rgb,
+            "nv12_to_rgb",
+            wgpu::TextureFormat::Rgba8Unorm,
+            true,
         );
         Self {
             device: device.clone(),
@@ -209,6 +231,7 @@ impl GpuColorConversion {
             y_pipeline,
             uv_pipeline,
             rgb_pipeline,
+            packed_rgb_pipeline,
         }
     }
 
@@ -327,6 +350,31 @@ impl GpuColorConversion {
         Ok(self.encode_validated_planes_to_rgb(encoder, y, uv, coefficients, None))
     }
 
+    /// Consume four already-quantized Y samples per texel without an unpack
+    /// pass. Chroma reconstruction and the full-resolution RGB result retain
+    /// the ordinary converter's arithmetic and attachment format.
+    #[allow(dead_code, reason = "unselected packed-fragment evaluation")]
+    pub(crate) fn encode_packed_planes_to_rgb(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        y: &wgpu::Texture,
+        uv: &wgpu::Texture,
+        coefficients: MatrixCoefficients,
+    ) -> Result<wgpu::Texture, Error> {
+        coefficients.validate()?;
+        if !sampled_2d(y, wgpu::TextureFormat::Rgba8Unorm)
+            || !sampled_2d(uv, wgpu::TextureFormat::Rg8Unorm)
+            || y.size() != uv.size()
+            || y.width().checked_mul(2).is_none()
+            || y.height().checked_mul(2).is_none()
+            || y.width() * 2 > self.device.limits().max_texture_dimension_2d
+            || y.height() * 2 > self.device.limits().max_texture_dimension_2d
+        {
+            return Err(Error::PackedNv12Textures);
+        }
+        Ok(self.encode_validated_planes_to_rgb(encoder, y, uv, coefficients, None))
+    }
+
     /// Convert only supplied full-image rectangles, keeping absolute texel
     /// coordinates and the original full-size output texture. Pixels outside
     /// the rectangles are cleared, not valid converted image data. The caller
@@ -375,14 +423,21 @@ impl GpuColorConversion {
             ],
         });
         let size = y.size();
+        let packed = y.format() == wgpu::TextureFormat::Rgba8Unorm;
+        let scale = if packed { 2 } else { 1 };
         let output = target(
             &self.device,
             "diagnostic NV12 round-trip RGB",
-            size.width,
-            size.height,
+            size.width * scale,
+            size.height * scale,
             wgpu::TextureFormat::Rgba8Unorm,
         );
-        draw_scissored(encoder, &output, &self.rgb_pipeline, &group, rectangles);
+        let pipeline = if packed {
+            &self.packed_rgb_pipeline
+        } else {
+            &self.rgb_pipeline
+        };
+        draw_scissored(encoder, &output, pipeline, &group, rectangles);
         output
     }
 }
@@ -573,6 +628,7 @@ fn convert(rgb: vec3<f32>) -> vec3<f32> {
 "#;
 
 const NV12_TO_RGB_WGSL: &str = r#"
+override PACKED_LUMA: bool = false;
 struct Matrix { value: vec4<f32>, }
 @group(0) @binding(0) var source_y: texture_2d<f32>;
 @group(0) @binding(1) var source_uv: texture_2d<f32>;
@@ -604,7 +660,14 @@ fn centred_chroma(position: vec2<f32>) -> vec2<f32> {
 }
 
 @fragment fn nv12_to_rgb(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-  let y = textureLoad(source_y, vec2<i32>(position.xy), 0).r;
+  let pixel = vec2<u32>(position.xy);
+  var y: f32;
+  if PACKED_LUMA {
+    let quartet = textureLoad(source_y, vec2<i32>(pixel / 2u), 0);
+    y = quartet[(pixel.x & 1u) + 2u * (pixel.y & 1u)];
+  } else {
+    y = textureLoad(source_y, vec2<i32>(position.xy), 0).r;
+  }
   let c = centred_chroma(position.xy);
   let m = matrix.value;
   let rgb = vec3(y + m.x * c.y, y - m.y * c.x - m.z * c.y, y + m.w * c.x);
