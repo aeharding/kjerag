@@ -26,13 +26,6 @@ const CACHE_BYTES: u64 = ROWS * COLUMNS * RECORD_BYTES;
 const WORKGROUP_SIZE: u32 = 64;
 const VERTICES: u32 = (ROWS * COLUMNS) as u32;
 
-const DIRECT_BODY_SELECTOR: &str = r#"
-fn panorama_type2_mesh(body: vec3<f32>, sample_uv: vec2<f32>) -> Type2Sample {
-  let ray = normalize(vec3<f32>(-body.x, body.y, -body.z));
-  return type2_mesh_seeded(ray, type2_body_seed(ray, sample_uv));
-}
-"#;
-
 pub(crate) struct Producer {
     device: wgpu::Device,
     prepass_layout: wgpu::BindGroupLayout,
@@ -91,7 +84,7 @@ impl Producer {
             label: Some("vertex-cached compact NV12 body panorama"),
             source: wgpu::ShaderSource::Wgsl(
                 format!(
-                    "{}\n{DIRECT_BODY_SELECTOR}\n{}",
+                    "{}\n{}",
                     vertex_cached_draw_wgsl_with_fusion_mode(fusion, hardware_fusion),
                     include_str!("nv12.wgsl")
                 )
@@ -341,7 +334,7 @@ mod tests {
 
         for (fusion, hardware) in [(false, false), (true, false), (true, true)] {
             let source = format!(
-                "{}\n{DIRECT_BODY_SELECTOR}\n{}",
+                "{}\n{}",
                 vertex_cached_draw_wgsl_with_fusion_mode(fusion, hardware),
                 include_str!("nv12.wgsl")
             );
@@ -380,229 +373,5 @@ mod tests {
             );
             Producer::new(&device, &direct).unwrap();
         }
-    }
-
-    #[test]
-    fn direct_body_seed_matches_inverse_at_every_compact_sample() {
-        let (device, queue) = match crate::direct_type2::tests::gpu() {
-            Ok(gpu) => gpu,
-            Err(error) => {
-                assert!(std::env::var_os("KJERAG_REQUIRE_GPU").is_none(), "{error}");
-                eprintln!("skipping direct body seed test: {error}");
-                return;
-            }
-        };
-
-        let control = Size::new(64, 32);
-        assert_eq!(
-            direct_seed_mismatches(&device, &queue, control, true),
-            control.width * control.height,
-            "the injected mismatch must count every rasterized quartet sample"
-        );
-        let mut all_match = true;
-        for full in [Size::new(7680, 3840), Size::new(5760, 2880)] {
-            let mismatches = direct_seed_mismatches(&device, &queue, full, false);
-            eprintln!("body seed {full:?}: {mismatches} mismatches");
-            all_match &= mismatches == 0;
-        }
-        assert!(all_match, "direct and inverse seeds differ");
-    }
-
-    fn direct_seed_mismatches(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        full: Size,
-        force_mismatch: bool,
-    ) -> u32 {
-        let source = format!(
-            "{}\n{}",
-            crate::direct_type2::map_wgsl(),
-            seed_comparison_wgsl(full, force_mismatch)
-        );
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("type-2 direct body seed comparison"),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
-        });
-        let counter_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("type-2 seed mismatch counter layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: NonZeroU64::new(28),
-                },
-                count: None,
-            }],
-        });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("type-2 seed comparison pipeline layout"),
-            bind_group_layouts: &[&counter_layout],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("type-2 direct body seed comparison"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("seed_vs"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("seed_fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::R8Unorm,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::empty(),
-                })],
-            }),
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let counter = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("type-2 seed mismatch counter"),
-            size: 28,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: true,
-        });
-        counter.slice(..).get_mapped_range_mut().copy_from_slice(
-            &[0u32, 0, 0, u32::MAX, u32::MAX, 0, 0]
-                .into_iter()
-                .flat_map(u32::to_ne_bytes)
-                .collect::<Vec<_>>(),
-        );
-        counter.unmap();
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("type-2 seed mismatch readback"),
-            size: 28,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let counter_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("type-2 seed mismatch counter"),
-            layout: &counter_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: counter.as_entire_binding(),
-            }],
-        });
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("type-2 seed comparison raster"),
-            size: wgpu::Extent3d {
-                width: full.width / 2,
-                height: full.height / 2,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let target_view = target.create_view(&Default::default());
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("type-2 direct body seed comparison"),
-        });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("type-2 direct body seed comparison"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Discard,
-                    },
-                })],
-                ..Default::default()
-            });
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &counter_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        encoder.copy_buffer_to_buffer(&counter, 0, &readback, 0, 28);
-        queue.submit([encoder.finish()]);
-        readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let mapped = readback.slice(..).get_mapped_range();
-        let mismatches = u32::from_ne_bytes(mapped[..4].try_into().unwrap());
-        let counts: Vec<_> = mapped
-            .chunks_exact(4)
-            .map(|word| u32::from_ne_bytes(word.try_into().unwrap()))
-            .collect();
-        eprintln!(
-            "seed detail {full:?} forced={force_mismatch}: count={}, rows={}, cols={}, min=({},{}), max=({},{})",
-            counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6]
-        );
-        drop(mapped);
-        readback.unmap();
-        mismatches
-    }
-
-    fn seed_comparison_wgsl(full: Size, force_mismatch: bool) -> String {
-        format!(
-            r#"
-struct SeedVsOut {{
-  @builtin(position) position: vec4<f32>,
-  @location(0) uv: vec2<f32>,
-}}
-
-struct SeedMismatchCounter {{
-  value: atomic<u32>, rows: atomic<u32>, cols: atomic<u32>,
-  min_x: atomic<u32>, min_y: atomic<u32>, max_x: atomic<u32>, max_y: atomic<u32>,
-}}
-@group(0) @binding(0) var<storage, read_write> seed_mismatches: SeedMismatchCounter;
-
-@vertex
-fn seed_vs(@builtin(vertex_index) index: u32) -> SeedVsOut {{
-  let x = f32((index << 1u) & 2u);
-  let y = f32(index & 2u);
-  var out: SeedVsOut;
-  out.uv = vec2<f32>(x, y);
-  out.position = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
-  return out;
-}}
-
-fn compare_seed(sample_uv: vec2<f32>) {{
-  let phi = TYPE2_PI * sample_uv.y;
-  let theta = TYPE2_TAU * sample_uv.x;
-  let body = vec3<f32>(sin(phi) * sin(theta), cos(phi),
-    -sin(phi) * cos(theta));
-  let ray = normalize(vec3<f32>(-body.x, body.y, -body.z));
-  let different = type2_inverse_seed(ray) != type2_body_seed(ray, sample_uv);
-  if {force_mismatch} || any(different) {{
-    atomicAdd(&seed_mismatches.value, 1u);
-    if different.x {{ atomicAdd(&seed_mismatches.rows, 1u); }}
-    if different.y {{ atomicAdd(&seed_mismatches.cols, 1u); }}
-    let pixel = vec2<u32>(sample_uv * vec2<f32>({}.0, {}.0));
-    atomicMin(&seed_mismatches.min_x, pixel.x);
-    atomicMin(&seed_mismatches.min_y, pixel.y);
-    atomicMax(&seed_mismatches.max_x, pixel.x);
-    atomicMax(&seed_mismatches.max_y, pixel.y);
-  }}
-}}
-
-@fragment
-fn seed_fs(in: SeedVsOut) -> @location(0) f32 {{
-  let full_size = vec2<f32>({}.0, {}.0);
-  let half_texel = vec2<f32>(0.5) / full_size;
-  compare_seed(in.uv + vec2<f32>(-half_texel.x, -half_texel.y));
-  compare_seed(in.uv + vec2<f32>( half_texel.x, -half_texel.y));
-  compare_seed(in.uv + vec2<f32>(-half_texel.x,  half_texel.y));
-  compare_seed(in.uv + vec2<f32>( half_texel.x,  half_texel.y));
-  return 0.0;
-}}
-"#,
-            full.width, full.height, full.width, full.height
-        )
     }
 }

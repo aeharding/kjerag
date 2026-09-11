@@ -158,6 +158,12 @@ benefit and was removed; the retained producer allocates one per source/map.
 Neither smoothness nor active240fps capacity is established, and this candidate
 is not installed.
 
+Deriving the initial body cell from panorama UV was evaluated and removed.
+Direct latitude disagreed with the existing GPU inverse on both camera rasters;
+the longitude-only refinement preserved the tested seeds and rendered sequences
+but gave no dependable native throughput gain. The retained renderer therefore
+uses the original inverse and search, without the extra body-selector wrapper.
+
 A radius-zero
 source initially needs no motion inputs, but a later center may reference it.
 Missing inputs are then reconstructed once from its exact retained unfiltered

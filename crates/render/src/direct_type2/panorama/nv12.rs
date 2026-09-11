@@ -309,17 +309,11 @@ pub(in crate::direct_type2) fn require_full_source(full: Size, source: [f32; 2])
 
 fn shader_source(fusion: bool, hardware_fusion: bool) -> String {
     format!(
-        "{}\n{GENERIC_BODY_SELECTOR}\n{}",
+        "{}\n{}",
         draw_wgsl_with_fusion_mode(fusion, hardware_fusion),
         include_str!("nv12.wgsl")
     )
 }
-
-const GENERIC_BODY_SELECTOR: &str = r#"
-fn panorama_type2_mesh(body: vec3<f32>, sample_uv: vec2<f32>) -> Type2Sample {
-  return type2_mesh(body);
-}
-"#;
 
 #[cfg(test)]
 mod tests {

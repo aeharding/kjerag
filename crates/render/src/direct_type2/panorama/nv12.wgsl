@@ -11,7 +11,7 @@ fn panorama_gamma_rgb(sample_uv: vec2<f32>) -> vec3<f32> {
   let theta = TYPE2_TAU * sample_uv.x;
   let body = vec3<f32>(sin(phi) * sin(theta), cos(phi),
     -sin(phi) * cos(theta));
-  let map = panorama_type2_mesh(body, sample_uv);
+  let map = type2_mesh(body);
   if map.covered <= 0.5 { return vec3<f32>(0.0); }
   let gamma = type2_gamma_color(map).rgb;
   // The removed intermediate was Rgba8Unorm. Keep that quantization explicit;

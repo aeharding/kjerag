@@ -54,9 +54,17 @@ cause. A bounded workspace-reuse follow-up is now retired: new/control/new
 native rates15.37/15.66/15.47fps show no gain. All62 saved607/612 frames stay
 byte-identical, and the pending-map contamination regression passes, but those
 correctness results do not justify retaining an unhelpful performance change.
-The retained code is again the per-source cache. Next evaluate eliminating the
-body renderer's redundant angular-coordinate inverse, with exact cell-selection
-checks before any source-sampling change. No new RE or cadence change.
+The retained code is again the per-source cache. The follow-up angular-seed
+shortcut is also retired: native candidate/control/candidate runs reach
+15.78/15.43/14.91fps, with no dependable gain. Direct latitude initially selected
+different rows on both cameras; retaining the old latitude and deriving only
+longitude passes exhaustive seed equality and preserves all62 saved607/612
+frames exactly. Correct output alone does not justify an unhelpful optimization.
+Its code stays in git history, not the active renderer. Evidence:
+`scratch/studio-seam-flicker-612-20260909-01/temporal-angular-seed-01`.
+The next architectural work must address the remaining full-panorama preparation
+and filtering cost, not claim another scalar shortcut as a playback solution.
+No new RE, accepted quality/cadence tradeoff, installed replacement or merge.
 
 **Compact YUV integrated; native playback still too slow, 2026-09-10:**
 the source worker now carries a sealed compact YUV panorama into the same
