@@ -123,7 +123,7 @@ fn one_x2_filtered_scene_preserves_exact_source_ownership() {
             pitch: -13.99_f32.to_radians(),
             fov: 57.95_f32.to_radians(),
         },
-        None,
+        std::env::var_os("KJERAG_FILTERED_REVIEW_X2_DIR").map(PathBuf::from),
     );
 }
 

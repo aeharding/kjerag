@@ -14,6 +14,45 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Quarter correction approved in moving comparison, 2026-09-11:**
+the owner answered "Yes, looks acceptable" to the607 moving comparison with
+Studio on the left and this faster candidate on the right. The smaller field,
+retained full-resolution detail and possible noise/motion-edge differences
+were explicitly disclosed. This approval covers that movie, not612, all footage,
+live-player smoothness,240fps capacity or a merge.
+
+The selected branch uses a1920x960 X4 correction field and1408x704 ONE X2
+field, with five real motion levels. ONE X2's natural quarter raster is rounded
+down to complete32-pixel blocks while retaining the entire2:1 sphere. Original
+source planes, maps, photometric updates, direct-view detail, exact source
+ownership and seven-source temporal cadence are unchanged. No coefficient EMA,
+skipped update or interpolation between fields was introduced. The preceding
+half and full paths remain test oracles.
+
+At2256x1504 sRGB, two uninstrumented12-second X4 active Scene samples reach
+259.65/239.56 completed changing-view redraws/s and29.998/29.997 contiguous
+source advances/s. Bracketing half-field controls reach161.85/149.33 redraws/s
+and26.99/24.17 source advances/s. Candidate p99 times are8.05/9.42ms and maxima
+9.82/17.48ms, with zero drops, starvation or audio underruns. One sample falls
+below240 and tails exceed4.17ms: the target is NOT passed. This queue-prefix
+completion diagnostic is not native-window presentation or GPU-only timing.
+
+All8 real-camera Scene tests pass, including exact reported views, source
+ownership, seek/EOF and the ONE X2 ISO transition. The full release workspace
+passes1481 tests with51 ignored across48 suites, with both footage fixtures
+and required GPU checks. Release workspace/all-target Clippy, formatting,
+source-lock and rename checks pass. Native UI qualification passes50 checks
+at the exact612.078 view. The initial type-mismatch build failure and subsequent
+successful rebuild are retained, not omitted from the evidence.
+
+The607 comparison uses the existing authenticated Studio export;612 and ONE X2
+comparisons use preceding Kjerag candidates, not Studio. All movie panels decode
+to their named source frames exactly below the labels. Evidence and frozen
+binaries are in
+`scratch/studio-seam-flicker-612-20260909-01/quarter-correction-review-01`.
+Next deliver and separately qualify this exact branch candidate in the installed
+Flatpak for owner testing. No merge or public release is authorized by the movie.
+
 **Reduced-correction capacity budget and rejected motion trial, 2026-09-11:**
 the uninstrumented Scene diagnostic still misses the2256x1504 active target:
 162.91 completed changing-view redraws/s and27.33 contiguous source fps,

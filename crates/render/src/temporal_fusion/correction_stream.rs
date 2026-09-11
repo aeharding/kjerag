@@ -1,7 +1,8 @@
-//! Half-resolution temporal correction ownership, without a display policy.
+//! Reduced temporal correction ownership, without a display policy.
 //!
 //! This candidate keeps the existing seven-source cadence and motion/fusion
-//! laws over a six-level half-linear field. Each output carries the exact
+//! laws over an explicit reduced field. The quarter-field review candidate
+//! uses five real levels. Each output carries the exact
 //! unfiltered RGB/NV12/RGB control for its filtered source. It does not own a
 //! high-resolution source snapshot, interpolate fields, or select playback.
 
@@ -47,7 +48,7 @@ impl CorrectionFrame {
     }
 }
 
-/// Sequential owner for the explicit half-resolution correction candidate.
+/// Sequential owner for the explicit reduced-resolution correction candidate.
 pub(crate) struct CorrectionStream {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -63,14 +64,14 @@ impl CorrectionStream {
     pub(crate) fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        half_size: [u32; 2],
+        field_size: [u32; 2],
         provider: Provider,
     ) -> Fallible<Self> {
-        let stream = Stream::new_half_resolution_correction(device, queue, half_size, provider)?;
+        let stream = Stream::new_quarter_resolution_review(device, queue, field_size, provider)?;
         Ok(Self {
             device: device.clone(),
             queue: queue.clone(),
-            size: half_size,
+            size: field_size,
             color: GpuColorConversion::new(device),
             stream,
             pending: VecDeque::with_capacity(SOURCES),
@@ -118,7 +119,7 @@ impl CorrectionStream {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("half-resolution temporal correction control"),
+                label: Some("reduced temporal correction control"),
             });
         #[cfg(test)]
         let mut gpu_profile = crate::gpu_profile::Profile::begin(

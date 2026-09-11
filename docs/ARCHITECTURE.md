@@ -86,7 +86,7 @@ The shell is libcosmic, which pins wgpu 28, so `render` is written against
 28 and owns the one module that wgpu 30 would delete
 (`crates/render/src/dmabuf.rs`).
 
-The current branch draws original full-resolution source/map samples with a
+The delivered test build draws original full-resolution source/map samples with a
 half-linear full-sphere temporal residual. The owner accepted the607 moving
 comparison, with the exact short response/interpretation recorded in ROADMAP;
 this is not broad footage acceptance or a performance qualification. The two
@@ -97,7 +97,21 @@ views use the existing native mesh; curved views use the existing body-ray map.
 Correction textures extend picture group0, retaining map group1 and colour
 group2 within the native three-group limit. Pipelines cache by surface format.
 
-The resident source worker encodes the half-size RGB body and exact texture-load
+The working branch now uses a further reduced correction raster while
+preserving those original-source ownership and display rules. Its five-level
+field is1920x960 for X4 and1408x704 for ONE X2. The latter rounds the natural
+quarter height down to a multiple of32, preserving a2:1 full-sphere raster
+without partial finest/output motion blocks; it does not crop source coverage. Level3 still
+supplies exactly full-field/16 luma coordinates. Five and six levels use the
+explicit reduced finest-size entry; the full seven-level oracle keeps its
+original minimum. Five through seven matching nonempty pyramids are admitted,
+never padded or fabricated levels. The larger angular search support and
+changed noise/motion-edge output were disclosed before the owner accepted the
+607 moving Studio comparison ("Yes, looks acceptable"). That approval is not
+acceptance of all footage, live-player performance or a merge. The installed
+half-field build remains until this candidate's separate bundle qualification.
+
+The resident source worker encodes the reduced RGB body and exact texture-load
 copies of both original lens planes in one command buffer. Imported dmabufs are
 sampled-only, so no unsupported COPY_SRC use is invented. The first body pass
 arms submission-complete retirement before any source sampling. Its retirement
@@ -108,7 +122,7 @@ The current copier explicitly requires8-bit planes; higher-bit-depth snapshot
 support has not been qualified. The installed map snapshot clones only immutable
 read/fusion bind groups, exact frame and context, not the heavyweight carrier.
 
-`CorrectionStream` owns the low unfiltered controls and six-level temporal
+`CorrectionStream` owns the low unfiltered controls and reduced-level temporal
 Stream. `CorrectionSequence` retains at most seven original source/map snapshots
 and moves each into its exact completed `CorrectedFrame`. Readbacks and uploaded
 maps exist only in the older paired review harness, not this live path. Scene
@@ -116,7 +130,7 @@ publishes and screenshots these typed frames. There is no coefficient EMA,
 skipped source refresh or interpolation between correction updates. Halving the
 field changes angular block support and motion decisions, so it is deliberately
 not claimed to be an equivalent arithmetic optimization. The full-resolution
-seven-level Stream constructor remains a test oracle.
+seven-level and preceding half-field Stream constructors remain test oracles.
 
 `render::temporal_fusion` supplies the stream's post-stitch primitives.
 It consumes explicit full-range NV12 image arrays,

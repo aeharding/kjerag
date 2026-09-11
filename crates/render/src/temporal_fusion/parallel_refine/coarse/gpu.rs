@@ -16,6 +16,7 @@ use super::prepare::{self, Prepared};
 
 const FULL_RESOLUTION_LEVELS: usize = 7;
 const HALF_RESOLUTION_LEVELS: usize = 6;
+const FIVE_LEVEL_REVIEW_LEVELS: usize = 5;
 const BLOCK: u32 = 16;
 
 /// Immutable resident motion inputs for one source. Its caller owns the exact
@@ -45,11 +46,11 @@ impl MotionPyramid {
     ) -> Fallible<Self> {
         if !matches!(
             expected_levels,
-            HALF_RESOLUTION_LEVELS | FULL_RESOLUTION_LEVELS
+            FIVE_LEVEL_REVIEW_LEVELS | HALF_RESOLUTION_LEVELS | FULL_RESOLUTION_LEVELS
         ) || source.levels.len() != expected_levels
         {
             return Err(format!(
-                "resident motion needs six or seven requested gray pyramid levels, requested {expected_levels} and got {}",
+                "resident motion needs five, six or seven requested gray pyramid levels, requested {expected_levels} and got {}",
                 source.levels.len()
             )
             .into());
@@ -140,7 +141,10 @@ impl Builder {
             .iter()
             .map(|reference| reference.finest())
             .collect();
-        let output = if current.levels.len() == HALF_RESOLUTION_LEVELS {
+        let output = if matches!(
+            current.levels.len(),
+            FIVE_LEVEL_REVIEW_LEVELS | HALF_RESOLUTION_LEVELS
+        ) {
             self.search.encode_finest_resident_half_resolution_review(
                 device,
                 encoder,
@@ -217,7 +221,7 @@ impl Builder {
                 [next[0] / BLOCK, next[1] / BLOCK],
             )?);
         }
-        Ok(prepared.expect("six or seven validated levels prepare the finest inputs"))
+        Ok(prepared.expect("five through seven validated levels prepare the finest inputs"))
     }
 }
 
@@ -225,10 +229,12 @@ fn matching_level_count(
     current: usize,
     references: impl IntoIterator<Item = usize>,
 ) -> Fallible<usize> {
-    if !matches!(current, HALF_RESOLUTION_LEVELS | FULL_RESOLUTION_LEVELS)
-        || references.into_iter().any(|levels| levels != current)
+    if !matches!(
+        current,
+        FIVE_LEVEL_REVIEW_LEVELS | HALF_RESOLUTION_LEVELS | FULL_RESOLUTION_LEVELS
+    ) || references.into_iter().any(|levels| levels != current)
     {
-        Err("resident coarse motion needs matching six- or seven-level pyramids".into())
+        Err("resident coarse motion needs matching five-, six- or seven-level pyramids".into())
     } else {
         Ok(current)
     }

@@ -29,6 +29,14 @@ use super::temporal_worker::{TemporalEpoch, TemporalJob, TemporalWorker};
 const READY_CAPACITY: usize = 4;
 const FINISH_OUTPUT_CAPACITY: usize = 3;
 
+/// Quarter-field review candidate. Retain the whole 2:1 sphere while rounding
+/// raster height down to a complete motion block footprint. Source planes,
+/// map/colour cadence and the direct viewport stay at their original sizes.
+fn quarter_correction_review_size(source_height: u32) -> [u32; 2] {
+    let height = source_height / 4 / 32 * 32;
+    [height * 2, height]
+}
+
 pub(super) struct FilteredSession {
     resident: Arc<ResidentCaptureSession>,
     temporal: Arc<TemporalWorker>,
@@ -153,7 +161,7 @@ impl FilteredCaptureFacade {
                 profile,
                 orientation,
                 provider,
-                field_size: [source.width, source.height / 2],
+                field_size: quarter_correction_review_size(source.height),
                 state: Mutex::new(State::new()),
             }),
         })
@@ -902,5 +910,15 @@ mod stage_tests {
         assert!(first_reported);
         assert!(!second_reported);
         assert_eq!(state.failure.as_deref(), Some("underlying GPU error"));
+    }
+
+    #[test]
+    fn quarter_review_raster_preserves_aspect_and_complete_motion_blocks() {
+        for (height, expected) in [(3_840, [1_920, 960]), (2_880, [1_408, 704])] {
+            let field = quarter_correction_review_size(height);
+            assert_eq!(field, expected);
+            assert_eq!(field[0], field[1] * 2);
+            assert!(field.into_iter().all(|value| value.is_multiple_of(32)));
+        }
     }
 }

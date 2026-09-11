@@ -25,7 +25,9 @@ use super::settings::{EffParams, Provider};
 const SOURCES: usize = 7;
 const CENTER: usize = 3;
 const FULL_RESOLUTION_LEVELS: usize = 7;
+#[cfg(test)]
 const HALF_RESOLUTION_LEVELS: usize = 6;
+const QUARTER_RESOLUTION_LEVELS: usize = 5;
 const BLOCK: u32 = 16;
 const SCALE_BASE: i32 = 4;
 const TEMPORAL: f32 = 1.25;
@@ -93,6 +95,7 @@ impl Stream {
     /// doubles the angle represented by each correction pixel, so this is an
     /// output-changing candidate whose moving result is not accepted merely
     /// because its temporal/source/settings laws remain otherwise unchanged.
+    #[cfg(test)]
     pub(crate) fn new_half_resolution_correction(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -101,6 +104,19 @@ impl Stream {
     ) -> Fallible<Self> {
         validate_motion_full(full, HALF_RESOLUTION_LEVELS)?;
         Self::new_with_motion_levels(device, queue, full, provider, HALF_RESOLUTION_LEVELS)
+    }
+
+    /// Performance/quality review candidate. The original source remains
+    /// full resolution; only the correction uses this five-level field. This
+    /// changes angular block support; ROADMAP records scoped owner acceptance.
+    pub(crate) fn new_quarter_resolution_review(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        full: [u32; 2],
+        provider: Provider,
+    ) -> Fallible<Self> {
+        validate_motion_full(full, QUARTER_RESOLUTION_LEVELS)?;
+        Self::new_with_motion_levels(device, queue, full, provider, QUARTER_RESOLUTION_LEVELS)
     }
 
     /// Compatibility name for the existing real-input quality review.
@@ -688,8 +704,8 @@ fn validate_matrix(matrix: MatrixCoefficients) -> Fallible<()> {
 fn validate_motion_full(full: [u32; 2], motion_levels: usize) -> Fallible<()> {
     let base = [full[0] / 2, full[1] / 2];
     // Both supported full-size camera fields have seven nonempty 16x16 search
-    // grids. Their explicit half-linear review fields have six. No missing
-    // level is represented with padding or a duplicated image.
+    // grids. Half-linear fields have six; the explicit quarter-field trial
+    // has five. No missing level is padded or represented by a duplicate.
     let mut shortest = base[0].min(base[1]);
     let mut levels = 0;
     while shortest >= BLOCK {
@@ -697,7 +713,7 @@ fn validate_motion_full(full: [u32; 2], motion_levels: usize) -> Fallible<()> {
         shortest /= 2;
     }
     if base.into_iter().any(|value| value >= 8_192)
-        || !matches!(motion_levels, 6 | 7)
+        || !matches!(motion_levels, 5..=7)
         || levels != motion_levels
         || full.into_iter().any(|value| !value.is_multiple_of(32))
     {
@@ -829,6 +845,19 @@ mod geometry_tests {
         assert!(validate_motion_full([3_840, 1_920], 5).is_err());
         assert!(validate_motion_full([3_840, 1_920], 7).is_err());
         assert!(validate_motion_full([1_024, 512], 6).is_err());
+    }
+
+    #[test]
+    fn quarter_review_keeps_five_nonempty_grids_and_complete_motion_blocks() {
+        for full in [[1_920, 960], [1_408, 704]] {
+            assert!(validate_full(full).is_ok(), "{full:?}");
+            assert!(validate_motion_full(full, QUARTER_RESOLUTION_LEVELS).is_ok());
+            assert!(validate_motion_full(full, 6).is_err());
+            assert!(validate_motion_full(full, 7).is_err());
+        }
+        // Natural quarter ONE X2 height leaves a partial final motion block.
+        // The caller reduces raster dimensions, not the covered sphere.
+        assert!(validate_motion_full([1_440, 720], QUARTER_RESOLUTION_LEVELS).is_err());
     }
 
     #[test]

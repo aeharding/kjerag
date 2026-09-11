@@ -72,11 +72,11 @@ impl CorrectionSequence {
     pub(super) fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        half_size: [u32; 2],
+        field_size: [u32; 2],
         provider: Provider,
     ) -> Fallible<Self> {
         Ok(Self {
-            stream: CorrectionStream::new(device, queue, half_size, provider)?,
+            stream: CorrectionStream::new(device, queue, field_size, provider)?,
             pending: VecDeque::with_capacity(7),
         })
     }

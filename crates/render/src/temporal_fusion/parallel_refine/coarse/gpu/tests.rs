@@ -2,10 +2,13 @@ use super::*;
 use crate::temporal_fusion::{parallel_refine, pyramid as cpu_pyramid, tests::gpu};
 
 #[test]
-fn level_count_gate_accepts_only_matching_six_or_seven_level_inputs() {
+fn level_count_gate_accepts_only_matching_five_through_seven_level_inputs() {
+    assert_eq!(matching_level_count(5, [5, 5]).unwrap(), 5);
     assert_eq!(matching_level_count(6, [6, 6]).unwrap(), 6);
     assert_eq!(matching_level_count(7, [7, 7]).unwrap(), 7);
-    assert!(matching_level_count(5, [5]).is_err());
+    assert!(matching_level_count(4, [4]).is_err());
+    assert!(matching_level_count(8, [8]).is_err());
+    assert!(matching_level_count(5, [6]).is_err());
     assert!(matching_level_count(6, [6, 7]).is_err());
     assert!(matching_level_count(7, [6]).is_err());
 }
@@ -46,15 +49,59 @@ fn upload(
         })
         .collect();
     let mut encoder = device.create_command_encoder(&Default::default());
-    let packed = MotionPyramid::encode(
+    let packed = MotionPyramid::encode_with_levels(
         device,
         &mut encoder,
         &pyramid::Builder::new(device),
         &pyramid::Output { levels: textures },
+        levels.len(),
     )
     .unwrap();
     queue.submit([encoder.finish()]);
     packed
+}
+
+#[test]
+fn five_level_review_runs_real_quarter_field_motion_bases_without_padding() {
+    let Some((device, queue)) = gpu() else {
+        return;
+    };
+    let builder = Builder::new(&device);
+    for [width, height] in [[960, 480], [704, 352]] {
+        let pixels: Vec<_> = (0..width * height)
+            .map(|at| {
+                let x = (at % width) as u32;
+                let y = (at / width) as u32;
+                x.wrapping_mul(1_664_525)
+                    .wrapping_add(y.wrapping_mul(1_013_904_223))
+                    .rotate_left((x ^ y) & 15) as u8
+            })
+            .collect();
+        let levels = cpu_pyramid::build(&pixels, width, height, FIVE_LEVEL_REVIEW_LEVELS).unwrap();
+        assert_eq!(levels.len(), FIVE_LEVEL_REVIEW_LEVELS);
+        assert_eq!(
+            [levels[4].width, levels[4].height],
+            [width / 16, height / 16]
+        );
+        assert_eq!(width % 16, 0);
+        assert_eq!(height % 16, 0);
+
+        let current = upload(&device, &queue, &levels);
+        let reference = upload(&device, &queue, &levels);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let output = builder
+            .encode_motion(&device, &mut encoder, &current, &[&reference])
+            .unwrap();
+        assert_eq!(output.blocks(), [(width / 16) as u32, (height / 16) as u32]);
+        assert_eq!(output.reference_count(), 1);
+        queue.submit([encoder.finish()]);
+        assert!(
+            read_buffer(&device, &queue, &output.raw)
+                .chunks_exact(3)
+                .all(|record| record == [0, 0, 0]),
+            "identical five-level {width} by {height} source produced motion"
+        );
+    }
 }
 
 fn read_buffer(device: &wgpu::Device, queue: &wgpu::Queue, buffer: &wgpu::Buffer) -> Vec<i32> {
