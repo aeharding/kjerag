@@ -20,10 +20,12 @@ use crate::studio_type2::{ALPHA_BYTES, MAP_HEIGHT, MAP_WIDTH, OneXsMapFrame, PAC
 use crate::{Fallible, FrameStamp, MAX_LENSES, Planes};
 
 pub(crate) mod panorama;
+mod source_snapshot;
 pub(crate) use panorama::BodyPanorama;
 pub(crate) use panorama::nv12::{
     CompactNv12Panorama, Prepared as CompactNv12Prepared, attachment as compact_nv12_attachment,
 };
+pub(crate) use source_snapshot::SourceSnapshot;
 
 /// Test-only cached compact producer borrowing one authenticated detached draw.
 /// Pipeline compilation happens before any comparison timing interval.
@@ -184,40 +186,28 @@ impl ImportedOneXsPicture {
         sampler: &wgpu::Sampler,
         reframe: &crate::Reframe,
     ) -> ImportedOneXsDrawBinding {
-        let usage = wgpu::BufferUsages::UNIFORM
-            | wgpu::BufferUsages::COPY_DST
-            | if cfg!(test) {
-                wgpu::BufferUsages::COPY_SRC
-            } else {
-                wgpu::BufferUsages::empty()
-            };
-        let uniforms = self
-            .context
-            .device()
-            .create_buffer(&wgpu::BufferDescriptor {
-                label: Some("ONE X2 resident draw-private uniforms"),
-                size: std::mem::size_of::<crate::Reframe>() as u64,
-                usage,
-                mapped_at_creation: false,
-            });
-        self.context
-            .queue()
-            .write_buffer(&uniforms, 0, reframe.bytes());
-        let picture = bind_picture(
-            self.context.device(),
-            layout,
-            &uniforms,
+        prepare_picture_binding(
+            &self.context,
             [&self.planes[0], &self.planes[1]],
+            layout,
             sampler,
-        );
-        ImportedOneXsDrawBinding {
-            picture,
-            _uniforms: uniforms,
-            rectilinear: reframe.is_rectilinear(),
-            gamma_output: !reframe.linearizes_output(),
-            source_matrix: reframe.source_color_matrix(),
-            source_size: reframe.frame_size(),
-        }
+            reframe,
+        )
+    }
+
+    /// Copy the four decoder-backed planes into a frame-bound GPU owner.
+    /// The returned value retains no decoder surface or resident carrier.
+    ///
+    /// The installed caller must already have armed this source's retirement
+    /// before recording these passes, and submit both in this same encoder.
+    /// That keeps the aliased decoder planes alive until the copies complete.
+    pub(crate) fn encode_source_snapshot(
+        &self,
+        producer: &DirectType2Pipeline,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Fallible<SourceSnapshot> {
+        source_snapshot::encode(self, producer, device, encoder)
     }
 
     /// Append source-band sampling while this exact imported picture remains
@@ -365,6 +355,38 @@ pub(crate) struct ImportedOneXsDrawBinding {
     source_size: [f32; 2],
 }
 
+fn prepare_picture_binding(
+    context: &OneXsGpuContext,
+    planes: [&Planes; 2],
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    reframe: &crate::Reframe,
+) -> ImportedOneXsDrawBinding {
+    let usage = wgpu::BufferUsages::UNIFORM
+        | wgpu::BufferUsages::COPY_DST
+        | if cfg!(test) {
+            wgpu::BufferUsages::COPY_SRC
+        } else {
+            wgpu::BufferUsages::empty()
+        };
+    let uniforms = context.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("ONE X2 resident draw-private uniforms"),
+        size: std::mem::size_of::<crate::Reframe>() as u64,
+        usage,
+        mapped_at_creation: false,
+    });
+    context.queue().write_buffer(&uniforms, 0, reframe.bytes());
+    let picture = bind_picture(context.device(), layout, &uniforms, planes, sampler);
+    ImportedOneXsDrawBinding {
+        picture,
+        _uniforms: uniforms,
+        rectilinear: reframe.is_rectilinear(),
+        gamma_output: !reframe.linearizes_output(),
+        source_matrix: reframe.source_color_matrix(),
+        source_size: reframe.frame_size(),
+    }
+}
+
 /// Capture-owned source-band inputs and every binding used to encode them.
 /// The imported picture itself remains outside this value in the submission
 /// lease; this owner only prevents its GPU bindings from being dropped early.
@@ -459,6 +481,7 @@ pub(crate) struct DirectType2Pipeline {
     panorama: OnceLock<panorama::BodyPanoramaPipeline>,
     compact_nv12: OnceLock<panorama::nv12::Producer>,
     vertex_cached_compact_nv12: OnceLock<panorama::nv12_vertex_cache::Producer>,
+    source_snapshot: OnceLock<source_snapshot::SnapshotPipeline>,
 }
 
 impl DirectType2Pipeline {
@@ -611,7 +634,13 @@ impl DirectType2Pipeline {
             panorama: OnceLock::new(),
             compact_nv12: OnceLock::new(),
             vertex_cached_compact_nv12: OnceLock::new(),
+            source_snapshot: OnceLock::new(),
         }
+    }
+
+    fn source_snapshot(&self) -> &source_snapshot::SnapshotPipeline {
+        self.source_snapshot
+            .get_or_init(|| source_snapshot::SnapshotPipeline::new(&self.device))
     }
 
     fn compact_nv12(&self) -> &panorama::nv12::Producer {
@@ -635,6 +664,14 @@ impl DirectType2Pipeline {
         reframe: &crate::Reframe,
     ) -> ImportedOneXsDrawBinding {
         source.prepare_resident_draw(&self.picture_layout, &self.sampler, reframe)
+    }
+
+    pub(crate) fn prepare_snapshot_picture(
+        &self,
+        source: &SourceSnapshot,
+        reframe: &crate::Reframe,
+    ) -> Fallible<ImportedOneXsDrawBinding> {
+        source.prepare_draw(self, &self.picture_layout, &self.sampler, reframe)
     }
 
     pub(crate) fn map_layout(&self) -> &wgpu::BindGroupLayout {

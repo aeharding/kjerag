@@ -744,6 +744,34 @@ pub(super) struct InstalledGpuMapBinding {
     carrier: Box<dyn InstalledFinalCarrier>,
 }
 
+/// Sample-only installed map resources detached from the heavyweight final-map
+/// carrier. The bind groups retain their immutable wgpu buffers and ratio
+/// textures; unlike imported source textures, none aliases decoder memory.
+pub(super) struct MapSnapshot {
+    frame: FrameStamp,
+    read: wgpu::BindGroup,
+    fusion_read: Option<wgpu::BindGroup>,
+    context: OneXsGpuContext,
+}
+
+impl MapSnapshot {
+    pub(super) fn frame(&self) -> &FrameStamp {
+        &self.frame
+    }
+
+    pub(super) fn read(&self) -> &wgpu::BindGroup {
+        &self.read
+    }
+
+    pub(super) fn fusion_read(&self) -> Option<&wgpu::BindGroup> {
+        self.fusion_read.as_ref()
+    }
+
+    pub(super) fn ensure_context(&self, expected: &OneXsGpuContext) -> Fallible<()> {
+        self.context.ensure_same(expected)
+    }
+}
+
 #[cfg(test)]
 pub(crate) struct DiagnosticFinalInputs {
     pub frame: FrameStamp,
@@ -850,6 +878,26 @@ impl InstalledGpuMapBinding {
 
     pub(super) fn fusion_read(&self) -> Option<&wgpu::BindGroup> {
         self.fusion_read.as_ref()
+    }
+
+    /// Detach only the immutable resources sampled by a later display draw.
+    /// Frame and device are checked before any handle is cloned; production
+    /// carriers, mutable receipts and decoder-backed inputs do not cross.
+    pub(super) fn snapshot(
+        &self,
+        expected: &FrameStamp,
+        context: &OneXsGpuContext,
+    ) -> Fallible<MapSnapshot> {
+        if &self.frame != expected {
+            return Err("resident map snapshot names a different source frame".into());
+        }
+        self.context.ensure_same(context)?;
+        Ok(MapSnapshot {
+            frame: self.frame.clone(),
+            read: self.read.clone(),
+            fusion_read: self.fusion_read.clone(),
+            context: self.context.clone(),
+        })
     }
 
     /// Populate one compact-panorama vertex cache from this exact installed
@@ -2323,6 +2371,31 @@ mod tests {
     use std::task::{Context, Poll, Wake, Waker};
 
     use super::*;
+
+    #[test]
+    fn display_map_snapshot_does_not_retain_production_carrier() {
+        let source = include_str!("map_patch_gpu.rs");
+        let fields = source
+            .split_once("pub(super) struct MapSnapshot")
+            .unwrap()
+            .1
+            .split_once("impl MapSnapshot")
+            .unwrap()
+            .0;
+        assert!(fields.contains("read: wgpu::BindGroup"));
+        assert!(fields.contains("fusion_read: Option<wgpu::BindGroup>"));
+        for forbidden in [
+            "carrier",
+            "statics",
+            "GpuFusionFrame",
+            "ImportedOneXsPicture",
+        ] {
+            assert!(
+                !fields.contains(forbidden),
+                "display map snapshot retained {forbidden}"
+            );
+        }
+    }
 
     fn diagnostic_fixture(
         fixture: &QualificationFixture,
