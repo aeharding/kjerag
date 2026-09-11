@@ -14,6 +14,19 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**Prefilter Flatpak prepared, not installed, 2026-09-11:** source
+`09ca503b79a4f1709c05c9cc54493507e755c312` builds offline in the 25.08 SDK
+in 2:31.78. Source hashes, Cargo.lock/source coverage, FFmpeg7 linkage,
+executable/bundle hashes and the read-only runtime `--version` check pass.
+The package's runtime/permissions metadata matches the current installation.
+The installed quarter build is unchanged. The new sampling quality and the
+earlier roughly 0.1-second prewarm first-picture delay still await owner
+acceptance; no installation, installed playback qualification, push, merge
+or public release occurred. The prepared bundle and exact identities are in
+`scratch/flatpak-delivery-09ca503b/README.md`. Next use that exact package for
+installation and both-camera sandbox qualification after the owner's decisions,
+not another speculative optimization or a fresh package of a docs-only commit.
+
 **Source-rate display prefilter reaches native throughput target, pending
 quality review, 2026-09-11:** the branch evaluates the existing native box
 filter at full-resolution source texel centres during the existing snapshot
