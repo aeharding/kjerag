@@ -97,10 +97,11 @@ views use the existing native mesh; curved views use the existing body-ray map.
 Correction textures extend picture group0, retaining map group1 and colour
 group2 within the native three-group limit. Pipelines cache by surface format.
 
-The working branch now materializes the selected temporal input in canonical
+The installed branch test build materializes the selected temporal input in canonical
 world coordinates, before filtering, for the1147 moving-line report. The owner
-accepts the stabilized-input diagnostic; this general implementation still
-requires branch-player qualification and acceptance. Scene retains actual
+accepts the stabilized-input diagnostic. This general implementation passes
+both-camera installed UI and rendering-capacity qualification (ROADMAP), but
+still requires owner acceptance in the player. Scene retains actual
 `body_from_world` independently of the display's horizon toggle. Its source
 Reframe has zero camera yaw/pitch and a fixed aspect, so mouse movement and
 window size cannot steer the temporal field. A separately cached world shader

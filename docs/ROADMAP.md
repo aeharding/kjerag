@@ -14,7 +14,39 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
-**New fast-motion color-seam report under diagnosis, 2026-09-11:** the owner
+**Installed world-coordinate fix ready for owner testing, 2026-09-11:** source
+`48e1d741f1bf7e7d8882624dff87754227bb8c7d` is committed on
+`perf/one-x2-gpu-pipeline` and installed as the branch Flatpak. The temporal
+input now removes camera rotation in a source-owned, view-independent world
+chart. Filter weights, history, source cadence and high-detail prefilter are
+unchanged. This carries the accepted stabilized diagnostic into the player;
+acceptance of the actual installed implementation remains pending.
+
+Installed qualification passes40 X4 and44 ONE X2 UI checks, including the
+reported views, pause, backward seek and the real scrubber. Existing isolated
+sandbox audio-device and preload/import-fault checks remain skipped. Separate
+40-second2256x1504 capacity runs sustain280.499 completed redraws/s for X4 and
+318.024 for ONE X2, with29.975 consecutive source advances/s on both and no
+reported drops, starvation or audio underruns. Completion-spacing p99/max is
+13.813/23.463ms and9.729/23.788ms respectively. This clears the240-redraw
+capacity target, not a guarantee of hitch-free playback. The native executable
+remains below target; the native/SDK performance gap is not explained by this
+delivery and does not invalidate the measured installed result.
+
+Installed OSTree is
+`e91cb1142e034257e56d72714b34af79fe0e0f484a572d6ff31848dd08fdca04`,
+executable SHA256
+`6e5f5c2e410b2a604f543fae50ca0247ce2a1a62a9259c0c5ce498d65451b44d`.
+Both identities are verified unchanged after qualification. Runtime,
+permissions and origin are unchanged; the preceding verified bundle remains
+available for rollback. Evidence is in `scratch/flatpak-delivery-48e1d741/`
+and `scratch/installed-capacity/world1147-installed-candidate-01` /
+`world-x2-installed-candidate-01`. All build/test jobs are terminal. No push,
+merge or release; next is owner testing of this installed build, not another
+review of the already accepted diagnostic. This status supersedes the earlier
+pre-installation checkpoints below.
+
+**Earlier fast-motion color-seam diagnosis, 2026-09-11:** the owner
 confirms the real Scene capture reproduces the reported1147.313-second X4 Air
 view (yaw-98.43,pitch26.98,FOV78.20,locked). This is not acceptance of the
 installed build or a proven difference from Studio at this interval.
@@ -42,7 +74,7 @@ view cannot qualify fine ground detail. No new Studio export is needed.
 The implementation direction is a source-owned world-coordinate temporal
 input, independent of mouse direction and the display's horizon toggle,
 paired with the exact same source matrix at final correction lookup. That
-view-independent implementation is now implemented, not installed; the older
+view-independent implementation is now installed as recorded above; the older
 body/full temporal references remain unchanged.
 
 The source-owned world candidate passes8 Scene regression tests with both
@@ -63,9 +95,9 @@ redraws/s and28.575 consecutive source advances/s, p99/max completion spacing
 AC disconnected. The unchanged installed baseline at the SAME1147 interval
 reaches267.224 completed redraws/s with normal source playback, also on battery.
 This does not isolate native compilation/runtime effects from coordinate cost;
-the candidate needs measurement in the same Flatpak runtime. Earlier native
-and installed results also differed materially. No power policy, installed
-build, public PR or main has been changed by this implementation yet.
+the candidate needed measurement in the same Flatpak runtime. Earlier native
+and installed results also differed materially. The installed measurements
+above complete that check. No power policy, public PR or main was changed.
 
 Two subsequent test-only coordinate counterfactuals retain byte-exact baseline
 Scene controls. An exact512-pixel cyclic permutation of each quarter temporal
