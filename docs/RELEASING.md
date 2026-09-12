@@ -26,12 +26,16 @@ harness CI has no device for, so a build that would not open a window cannot
 reach a tag. Give it an idle box, and set
 `KJERAG_TEST_MEDIA=~/Videos/<file>.insv` to include the playback checks.
 
-The pre-release hook first regenerates and checks `flatpak/cargo-sources.json`,
-so every Cargo.lock change carries matching offline sources in the release
-commit. The generator needs the network. A workspace-version-only change
-normally regenerates the identical source list; it still runs and is checked.
-This combined hook was exercised by both the 0.3.0 dry run and execution using
-a one-off config before being made the default here.
+The pre-release hook first regenerates and checks `flatpak/cargo-sources.json`.
+The generator needs the network. A workspace-version-only change normally
+regenerates the identical source list; it still runs and is checked. If the
+generated file differs from the reviewed commit, the hook stops before UI
+testing or tagging. Review and land that change through a normal PR first.
+Even a failed dry run can leave this generated diff in the checkout; inspect
+it rather than assuming a dry run cannot write files. Regeneration, source
+checking and UI testing were exercised by both the 0.3.0 dry run and execution
+using a one-off config. The default hook also guards against accepting an
+unexpected generated diff at release time.
 
 `--execute` then bumps `[workspace.package] version`, refreshes `Cargo.lock`,
 stamps a dated `<release>` entry at the top of the metainfo's changelog,

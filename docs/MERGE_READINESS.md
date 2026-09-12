@@ -265,6 +265,10 @@ The follow-up tree's unchanged Rust code passes the complete local gates in
 tests with 52 ignored, formatting, workspace/all-target Clippy, source/name
 checks and the ancillary gates above. Source/name and whitespace checks pass
 again after the documentation and explicit license-install changes.
+The permanent release hook regenerates and checks offline sources, but now
+stops if the result differs from the reviewed commit. A generator change must
+land through a normal PR; it cannot silently enter an automatic release commit.
+A failed dry run can leave that generated diff for inspection.
 
 Release notes describe:
 
