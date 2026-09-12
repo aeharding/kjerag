@@ -22,6 +22,12 @@ source preparation, stitching at source cadence, and reuse of the completed
 stitch result across view redraws. The detailed ownership and frame path are in
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
+The architecture guide now separates the active filtered, resident spatial and
+generic frame paths. Its complete prior text is preserved verbatim in
+[ARCHITECTURE-HISTORY-20260912.md](ARCHITECTURE-HISTORY-20260912.md), including
+rejected experiments and historical measurements. This documentation cleanup
+changes no released code, accepted picture or performance qualification.
+
 ## Current delivery
 
 PR [#183](https://github.com/aeharding/kjerag/pull/183) is the cumulative GPU
