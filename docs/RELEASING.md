@@ -26,6 +26,13 @@ harness CI has no device for, so a build that would not open a window cannot
 reach a tag. Give it an idle box, and set
 `KJERAG_TEST_MEDIA=~/Videos/<file>.insv` to include the playback checks.
 
+The pre-release hook first regenerates and checks `flatpak/cargo-sources.json`,
+so every Cargo.lock change carries matching offline sources in the release
+commit. The generator needs the network. A workspace-version-only change
+normally regenerates the identical source list; it still runs and is checked.
+This combined hook was exercised by both the 0.3.0 dry run and execution using
+a one-off config before being made the default here.
+
 `--execute` then bumps `[workspace.package] version`, refreshes `Cargo.lock`,
 stamps a dated `<release>` entry at the top of the metainfo's changelog,
 commits that as `release: 0.2.0`, tags it `0.2.0` (the plain version, no `v`),
@@ -68,10 +75,13 @@ flatpak install --user ./kjerag-0.2.0-x86_64.flatpak
 KJERAG_FLATPAK=dev.harding.Kjerag scripts/uitest.sh ~/Videos/<file>.insv
 ```
 
-The same check answers for the channel, with the first two lines replaced by
-`flatpak update dev.harding.Kjerag`. Both install branch `stable` and there is
-only ever one of them on a machine, so whichever route the build arrived by,
-`flatpak run dev.harding.Kjerag` is the same app.
+The signed channel is a separate build, not necessarily the same executable
+as the GitHub bundle. Run the same installed checks for that route too, with
+the first two lines replaced by `flatpak update dev.harding.Kjerag` if the app
+already follows the signed public remote. Verify `flatpak info --show-origin`
+and the remote URL first: a scratch test origin does not follow the public
+channel. Record the installed OSTree commit and executable SHA256 for each
+route. Both install branch `stable`, so only one can be active per installation.
 
 That last line is the release check. The dry run above proved a **binary**
 opens a window on this box; this proves the **bundle** plays real footage
@@ -84,6 +94,17 @@ the frame path is least like the one the dry run tested.
 Only the x86_64 half is ever checked that way. The aarch64 bundle is compiled
 and unit tested by CI and run by nobody: no GPU on a runner, and no aarch64
 machine on this end (README).
+
+Verify both public architecture-specific app and AppStream refs, but do not
+report that as an ARM install/playback test. `flatpak remote-info --arch=aarch64`
+can query the foreign app; AppStream update on an x86-only host is not a valid
+substitute for testing with a supported aarch64 client. Preserve any failed
+attempt with that qualification rather than calling the publication broken.
+
+Functional UI qualification does not establish the active-playback capacity
+target. Keep source cadence and completion-time spikes beside redraw throughput;
+over 240 redraws/sec while a 29.97 fps source falls behind is not a pass.
+Record current failures even if the same binary passed an earlier cohort.
 
 If the tag run fails, take the tag back, fix, and tag again:
 

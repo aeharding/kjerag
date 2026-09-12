@@ -105,6 +105,9 @@ modules:
     build-commands:
       - cargo build --release --offline --locked
       - install -Dm0755 target/release/kjerag /app/bin/kjerag
+      # Both publication paths must carry the license, even when their
+      # Flatpak Builder version does not collect source licenses itself.
+      - install -Dm0644 LICENSE /app/share/licenses/dev.harding.Kjerag/kjerag/LICENSE
       - install -Dm0644 resources/dev.harding.Kjerag.desktop
         /app/share/applications/dev.harding.Kjerag.desktop
       - install -Dm0644 resources/dev.harding.Kjerag.metainfo.xml

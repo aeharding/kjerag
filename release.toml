@@ -47,7 +47,9 @@ pre-release-replacements = [
   { file = "../../resources/dev.harding.Kjerag.metainfo.xml", search = "<releases>", replace = "<releases>\n    <release version=\"{{version}}\" type=\"development\" date=\"{{date}}\"/>", exactly = 1 },
 ]
 
-# The one gate CI cannot run: the headless harness needs a GPU
+# Regenerate the offline Flatpak sources in the same transaction as Cargo.lock,
+# including version-only releases. Then run the one gate CI cannot run: the
+# headless harness needs a GPU
 # (/dev/dri/renderD128), so a runner has nothing to check. Running it here is
 # what makes tagging without it impossible. It wants an otherwise idle box.
-pre-release-hook = ["../../scripts/uitest.sh"]
+pre-release-hook = ["bash", "-c", "../../scripts/cargo-sources.sh && ../../scripts/cargo-sources.sh --check && ../../scripts/uitest.sh"]
