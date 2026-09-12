@@ -15,6 +15,8 @@ use super::{Error, ExposureTrack, GyroTrack};
 /// `xi, fx, fy, cx, cy, yaw, pitch, roll, tx, ty, tz, k1, k2, k3, p1,
 /// p2, calib_w, calib_h, lensType`.
 const FIELDS_PER_LENS: usize = 19;
+const MODEL6_FIELDS_PER_LENS: usize = 27;
+const MAX_CALIBRATION_LENSES: usize = 16;
 
 /// FNV-1a, which is what [`CalibrationSet::camera_key`] is taken with.
 ///
@@ -32,6 +34,142 @@ fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
+}
+
+fn exact_u32(value: f64) -> Option<u32> {
+    (value.is_finite() && value >= 0.0 && value <= u32::MAX as f64 && value.fract() == 0.0)
+        .then_some(value as u32)
+}
+
+fn parse_model6(
+    text: &str,
+    dimension: Size,
+    crop: Size,
+    expected_lenses: usize,
+) -> Result<Option<Vec<Model6Lens>>, Error> {
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let tokens = text
+        .split('_')
+        .map(|token| {
+            token
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite())
+                .ok_or(Error::OffsetV6NotNumeric)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let lens_count = tokens
+        .first()
+        .and_then(|value| exact_u32(*value))
+        .unwrap_or(0) as usize;
+    let grammar_error = Error::OffsetV6Grammar {
+        lens_count,
+        tokens: tokens.len(),
+    };
+    if lens_count == 0
+        || lens_count > MAX_CALIBRATION_LENSES
+        || tokens.len() != 2 + MODEL6_FIELDS_PER_LENS * lens_count
+    {
+        return Err(grammar_error);
+    }
+    if lens_count != expected_lenses {
+        return Err(Error::OffsetV6Invalid(
+            "declares a lens count that disagrees with offset_v3",
+        ));
+    }
+    let final_word = exact_u32(*tokens.last().ok_or(grammar_error)?)
+        .ok_or(Error::OffsetV6Invalid("has a non-integer version word"))?;
+    if final_word >> 16 != 6 {
+        return Err(Error::OffsetV6Invalid(
+            "has a version word other than version 6",
+        ));
+    }
+    if dimension.width < 2 || dimension.height < 2 || crop.width < 2 || crop.height < 2 {
+        return Err(Error::OffsetV6Invalid(
+            "has a degenerate delivered frame or crop",
+        ));
+    }
+
+    let mut result = Vec::with_capacity(lens_count);
+    let mut common_canvas = None;
+    for index in 0..lens_count {
+        let start = 1 + index * MODEL6_FIELDS_PER_LENS;
+        let block = &tokens[start..start + MODEL6_FIELDS_PER_LENS];
+        let canvas_width =
+            exact_u32(block[24]).ok_or(Error::OffsetV6Invalid("has a non-integer canvas width"))?;
+        let canvas_height = exact_u32(block[25])
+            .ok_or(Error::OffsetV6Invalid("has a non-integer canvas height"))?;
+        let lens_type =
+            exact_u32(block[26]).ok_or(Error::OffsetV6Invalid("has a non-integer lens type"))?;
+        let canvas = Size {
+            width: canvas_width,
+            height: canvas_height,
+        };
+        if common_canvas
+            .replace(canvas)
+            .is_some_and(|prior| prior != canvas)
+        {
+            return Err(Error::OffsetV6Invalid(
+                "lens blocks disagree about the canvas",
+            ));
+        }
+        if canvas_width == 0 || canvas_width % lens_count as u32 != 0 {
+            return Err(Error::OffsetV6Invalid(
+                "canvas width is not divisible by its lens count",
+            ));
+        }
+        let slot_width = canvas_width / lens_count as u32;
+        if crop.width > slot_width || crop.height > canvas_height {
+            return Err(Error::OffsetV6Invalid(
+                "crop exceeds a calibration-canvas lens slot",
+            ));
+        }
+        let crop_x = f64::from(slot_width - crop.width) / 2.0;
+        let crop_y = f64::from(canvas_height - crop.height) / 2.0;
+        let scale_x = f64::from(dimension.width - 1) / f64::from(crop.width - 1);
+        let scale_y = f64::from(dimension.height - 1) / f64::from(crop.height - 1);
+        let local_cx = block[3] - index as f64 * f64::from(slot_width);
+        let intrinsics = Intrinsics {
+            xi: block[0],
+            fx: block[1] * scale_x,
+            fy: block[2] * scale_y,
+            cx: (local_cx - crop_x) * scale_x,
+            cy: (block[4] - crop_y) * scale_y,
+        };
+        if intrinsics.fx <= 0.0 || intrinsics.fy <= 0.0 {
+            return Err(Error::OffsetV6Invalid("has a non-positive focal length"));
+        }
+        if [
+            intrinsics.xi,
+            intrinsics.fx,
+            intrinsics.fy,
+            intrinsics.cx,
+            intrinsics.cy,
+        ]
+        .iter()
+        .any(|value| !value.is_finite())
+        {
+            return Err(Error::OffsetV6Invalid(
+                "produces a non-finite normalized intrinsic",
+            ));
+        }
+        let mut distortion = [0.0; 13];
+        distortion.copy_from_slice(&block[11..24]);
+        result.push(Model6Lens {
+            intrinsics,
+            distortion,
+            pose: Pose {
+                yaw_deg: block[5],
+                pitch_deg: block[6],
+                roll_deg: block[7],
+                translation_m: [block[8], block[9], block[10]],
+            },
+            lens_type,
+        });
+    }
+    Ok(Some(result))
 }
 
 /// A width and height in pixels.
@@ -59,10 +197,17 @@ pub struct CalibrationSet {
     /// `fw_version`. The calibration grammar has changed across firmware
     /// generations, so a bug report needs this.
     pub firmware: String,
+    /// Insta360 `FileGroupInfo.type`, when the metadata carries its optional
+    /// parent message. `Some(0)` is a real recorded value, not a fallback.
+    pub source_group_type: Option<i32>,
     /// The delivered frame size of one lens.
     pub dimension: Size,
     /// In file order. Lens 0 is the extrinsic reference.
     pub lenses: Vec<Lens>,
+    /// Extended `offset_v6` calibration, when present and valid. The selected
+    /// X4 renderer will consume this; v3 remains the generic projection, IMU
+    /// and camera-identity calibration rather than being overwritten here.
+    pub model6: Option<Vec<Model6Lens>>,
     /// Row readout time in milliseconds (`rolling_shutter_time`; 15.883
     /// on the fixture). At 3840 rows this displaces 12 to 18 px under
     /// typical handheld motion, the same magnitude as seam parallax, so
@@ -77,6 +222,9 @@ pub struct CalibrationSet {
     /// match brightness across the seam: measured on real captures, they
     /// do not say what they look like they say.
     pub exposure: [ExposureTrack; 2],
+    /// Camera ISO observations from trailer record 9, before interpolation,
+    /// validity filtering, or denoise selection.
+    pub denoise_iso: crate::DenoiseIsoTrack,
     /// The IMU track from trailer record 3, **in the sensor's own axes**.
     /// Empty for a file that carries no gyro record.
     ///
@@ -100,10 +248,43 @@ pub struct CalibrationSet {
     pub calibration_canvas: Size,
 }
 
+/// One lens from Insta360's optional `offset_v6` metadata.
+#[derive(Debug, Clone)]
+pub struct Model6Lens {
+    pub intrinsics: Intrinsics,
+    /// The thirteen coefficients in metadata order, without inferred names.
+    pub distortion: [f64; 13],
+    pub pose: Pose,
+    pub lens_type: u32,
+}
+
 /// One lens: a camera model, and where the lens sits.
 #[derive(Debug, Clone)]
 pub struct Lens {
     pub intrinsics: Intrinsics,
+    /// Centre of the crop-scaled camera model in delivered-frame pixels,
+    /// retained in the trailer's binary64 arithmetic.
+    ///
+    /// This differs deliberately from both [`Self::intrinsics`] and
+    /// [`Self::image_circle_centre`].  The former follows the calibration
+    /// canvas ratio used by Kjerag's projection.  The latter preserves
+    /// Studio's later packed-canvas binary32 narrowing for its mask helper.
+    /// Studio's selected ONE X2 flowstate model consumes this value directly
+    /// and narrows only when it packs the Metal parameter buffer; on lens 1,
+    /// narrowing after the packed-slot subtraction is two ULPs away.
+    pub crop_centre: [f64; 2],
+    /// Centre of Studio's static fisheye image circle in this delivered
+    /// lens frame, in pixels. This is deliberately separate from
+    /// [`Self::intrinsics`]: Studio applies the centred sensor-window crop
+    /// before it builds the camera mask, while Kjerag's existing projection
+    /// path retains the canvas-ratio principal point documented by
+    /// [`Intrinsics`].
+    ///
+    /// The value is binary32 because the native `Offset` object stores it
+    /// that way before the mask helper subtracts a packed lens-slot offset.
+    /// The parser preserves that narrowing and subtraction order, which is
+    /// observable on lens 1 of the ONE X2.
+    pub image_circle_centre: [f32; 2],
     pub distortion: Distortion,
     /// Which family the numbers above belong to, because two cameras in the
     /// corpus do not share one.
@@ -301,13 +482,13 @@ impl Pose {
     /// in a right-handed frame whose axes are the delivered frame's own,
     /// x right, y down, z out along the optical axis.
     ///
-    /// This is lens 0's whole story. Lens 1 additionally sits in a nominal
-    /// arrangement the file does not record, a half turn about the body's
-    /// vertical, which `kjerag-render` multiplies on the right of this
-    /// (docs/research/insv-format.md 4.9). The **order** of the three
-    /// angles is not settled, and neither camera can settle it: yaw and
-    /// pitch are 0.103 and 0.07 degrees on the X4 Air, so every ordering
-    /// agrees to about 2 px.
+    /// This is the generic residual-pose interpretation. Lens 1 additionally
+    /// sits in a nominal arrangement the file does not record, a half turn
+    /// about the body's vertical, which `kjerag-render` multiplies on the
+    /// right of this (docs/research/insv-format.md 4.9). Studio's selected
+    /// ONE X2 image-map producer is a measured exception and composes its
+    /// type-`0x29` pose in the renderer instead; the IMU mounting here remains
+    /// generic. Other residual-pose cameras keep this path.
     ///
     /// It lives here rather than in the shader layer because the same three
     /// angles describe where the IMU is bolted, one quarter turn away
@@ -397,6 +578,11 @@ impl CalibrationSet {
             exposure: std::array::from_fn(|lens| {
                 ExposureTrack::parse(&trailer.exposure[lens], clock)
             }),
+            denoise_iso: crate::DenoiseIsoTrack::parse(
+                &trailer.denoise_iso,
+                trailer.metadata.first_frame_timestamp,
+                trailer.metadata.is_raw_gyro,
+            ),
             imu: GyroTrack::parse(
                 &trailer.gyro,
                 set.gyro.encoding,
@@ -569,15 +755,22 @@ impl CalibrationSet {
             .enumerate()
             .map(|(index, block)| block.to_lens(index, dimension, slot_width, canvas.height, crop))
             .collect();
+        let model6 = parse_model6(&metadata.offset_v6, dimension, crop, lens_count)?;
 
         Ok(Self {
             camera_model: metadata.camera_type.clone(),
             firmware: metadata.fw_version.clone(),
+            source_group_type: metadata
+                .file_group_info
+                .as_ref()
+                .map(|info| info.source_type),
             dimension,
             lenses,
+            model6,
             rolling_shutter_ms: metadata.rolling_shutter_time,
             gyro: GyroConfig::from_metadata(metadata),
             exposure: Default::default(),
+            denoise_iso: Default::default(),
             imu: GyroTrack::default(),
             fused: OrientationTrack::default(),
             calibration_canvas: canvas,
@@ -743,12 +936,17 @@ fn imu_orientation(camera_model: &str) -> &'static str {
 /// cannot disturb issue #7's blend, where a sweep across the frame would have
 /// put 1.9 degrees of misalignment into it.
 ///
-/// X5 and everything else stay [`Sweep::Unknown`], which is a zero axis and
-/// therefore no correction: the direction is not in the file and no X5 has
-/// been measured. docs/research/insv-format.md 6.7 has the tables.
+/// A native ONE X2 packed-UV capture independently measures the same down-frame
+/// sweep. Its end-to-end turn agrees with the source IMU to 0.032 degrees, and
+/// the existing one-round solver reproduces both native lookup maps to less
+/// than one source pixel. X5 and everything else stay [`Sweep::Unknown`],
+/// which is a zero axis and therefore no correction: the direction is not in
+/// the file and no X5 has been measured. docs/research/insv-format.md 6.7 has
+/// the tables.
 fn readout_sweep(camera_model: &str) -> Sweep {
     match camera_model {
         m if m.starts_with("Insta360 X4") => Sweep::Down,
+        m if m.starts_with("Insta360 ONE X2") => Sweep::Down,
         m if m.starts_with("Insta360 X5") => Sweep::Unknown,
         _ => Sweep::Unknown,
     }
@@ -798,6 +996,25 @@ impl LensBlock {
             _,
             lens_type,
         ] = self.fields;
+        let crop_origin_x = (slot - f64::from(crop.width)) * 0.5;
+        let crop_origin_y = (f64::from(canvas_h) - f64::from(crop.height)) * 0.5;
+        let delivered_x = f64::from(dimension.width);
+        let delivered_y = f64::from(dimension.height);
+        let local_circle_x =
+            (cx - index as f64 * slot - crop_origin_x) * delivered_x / f64::from(crop.width);
+        let local_circle_y = (cy - crop_origin_y) * delivered_y / f64::from(crop.height);
+
+        // Studio crops CameraParameters while their centres still occupy a
+        // packed two-lens canvas, narrows that result into Offset's f32
+        // vector, and only then removes lens 1's delivered slot in the mask
+        // helper. Keep that order: on the ONE X2, narrowing local 1439.24
+        // directly is two ULP below narrowing packed 4319.24 then subtracting
+        // 2880.0.
+        let packed_circle_x = (local_circle_x + index as f64 * delivered_x) as f32;
+        let image_circle_centre = [
+            packed_circle_x - index as f32 * dimension.width as f32,
+            local_circle_y as f32,
+        ];
         Lens {
             intrinsics: Intrinsics {
                 xi,
@@ -809,6 +1026,8 @@ impl LensBlock {
                 cx: (cx - index as f64 * slot) * (dimension.width as f64 / slot),
                 cy: cy * (dimension.height as f64 / canvas_h as f64),
             },
+            crop_centre: [local_circle_x, local_circle_y],
+            image_circle_centre,
             distortion: Distortion { k1, k2, k3, p1, p2 },
             model: Model::Mei,
             // `offset_v3` records a residual, so the arrangement it is a
@@ -832,8 +1051,26 @@ mod tests {
     use crate::orientation::axis_map;
     use crate::rotation::dot;
 
+    // Serial, GPS and capture times are not part of this field. This is the
+    // exact tag 111 value authenticated from the owner's April X4 Air file.
+    const MODEL6_FIXTURE: &str = include_str!("../../../docs/research/x4air-offset-v6.txt");
+
     fn calibration() -> CalibrationSet {
         CalibrationSet::from_metadata(&fixture::metadata()).unwrap()
+    }
+
+    fn model6_metadata() -> ExtraMetadata {
+        let mut metadata = fixture::metadata();
+        metadata.offset_v6 = MODEL6_FIXTURE.trim().to_owned();
+        metadata
+    }
+
+    fn with_model6_token(index: usize, value: &str) -> ExtraMetadata {
+        let mut metadata = model6_metadata();
+        let mut tokens: Vec<_> = metadata.offset_v6.split('_').collect();
+        tokens[index] = value;
+        metadata.offset_v6 = tokens.join("_");
+        metadata
     }
 
     /// The fixture with its `offset_v3` tokens edited, re-joined the way
@@ -883,7 +1120,124 @@ mod tests {
             }
         );
         assert_eq!(calibration.lenses[0].lens_type, 131);
+        assert!(calibration.model6.is_none());
         near(calibration.rolling_shutter_ms, 15.883, 0.001);
+    }
+
+    #[test]
+    fn model6_uses_the_centered_sensor_crop_and_endpoint_scale() {
+        let ordinary = calibration();
+        let calibration = CalibrationSet::from_metadata(&model6_metadata()).unwrap();
+        let lenses = calibration.model6.as_ref().unwrap();
+
+        assert_eq!(lenses.len(), 2);
+        near(lenses[0].intrinsics.cx, 1920.746394988549, 1e-12);
+        near(lenses[0].intrinsics.cy, 1929.5332210696483, 1e-12);
+        near(lenses[0].intrinsics.fx, 3665.637317796039, 1e-12);
+        near(lenses[0].intrinsics.fy, 3667.137129193048, 1e-12);
+        near(lenses[1].intrinsics.cx, 1930.0503974134444, 1e-12);
+        near(lenses[1].intrinsics.cy, 1933.220688400916, 1e-12);
+        near(lenses[1].intrinsics.fx, 3673.3432453186037, 1e-12);
+        near(lenses[1].intrinsics.fy, 3672.381297319143, 1e-12);
+        assert_eq!(lenses[0].lens_type, 131);
+        near(lenses[0].distortion[0], 0.96564066, 1e-12);
+        near(lenses[0].distortion[12], -0.00347206, 1e-12);
+        assert_eq!(
+            lenses[1].pose.translation_m,
+            [0.000304, 0.000009, -0.033243]
+        );
+
+        // Optional v6 data neither replaces nor rekeys the established v3
+        // calibration while renderer selection remains an evidence gate.
+        assert_eq!(calibration.camera_key(), ordinary.camera_key());
+        assert_eq!(calibration.lenses.len(), ordinary.lenses.len());
+        near(
+            calibration.lenses[0].intrinsics.fx,
+            ordinary.lenses[0].intrinsics.fx,
+            0.0,
+        );
+    }
+
+    #[test]
+    fn absent_model6_keeps_existing_camera_metadata_valid() {
+        let x4 = calibration();
+        let x2 = CalibrationSet::from_metadata(&fixture::one_x2_metadata()).unwrap();
+        assert!(x4.model6.is_none());
+        assert!(x2.model6.is_none());
+        assert_eq!(x2.camera_model, "Insta360 ONE X2");
+        assert_eq!(x2.lenses.len(), 2);
+    }
+
+    #[test]
+    fn malformed_present_model6_is_not_silently_ignored() {
+        let mut non_numeric = model6_metadata();
+        non_numeric.offset_v6 = non_numeric.offset_v6.replacen("2.314940", "NaN", 1);
+        assert!(matches!(
+            CalibrationSet::from_metadata(&non_numeric),
+            Err(Error::OffsetV6NotNumeric)
+        ));
+
+        let mut short = model6_metadata();
+        short
+            .offset_v6
+            .truncate(short.offset_v6.rfind('_').unwrap());
+        assert!(matches!(
+            CalibrationSet::from_metadata(&short),
+            Err(Error::OffsetV6Grammar { .. })
+        ));
+
+        let mut wrong_count = model6_metadata();
+        wrong_count.offset_v6.replace_range(..1, "1");
+        assert!(matches!(
+            CalibrationSet::from_metadata(&wrong_count),
+            Err(Error::OffsetV6Grammar { .. })
+        ));
+
+        let mut wrong_version = model6_metadata();
+        let (body, _) = wrong_version.offset_v6.rsplit_once('_').unwrap();
+        wrong_version.offset_v6 = format!("{body}_1");
+        assert!(matches!(
+            CalibrationSet::from_metadata(&wrong_version),
+            Err(Error::OffsetV6Invalid(_))
+        ));
+
+        let mut mismatched_canvas = model6_metadata();
+        let mut tokens: Vec<_> = mismatched_canvas.offset_v6.split('_').collect();
+        tokens[1 + MODEL6_FIELDS_PER_LENS + 24] = "15358";
+        mismatched_canvas.offset_v6 = tokens.join("_");
+        assert!(matches!(
+            CalibrationSet::from_metadata(&mismatched_canvas),
+            Err(Error::OffsetV6Invalid(_))
+        ));
+
+        let mut oversized_crop = model6_metadata();
+        oversized_crop.window_crop_info.as_mut().unwrap().dst_width = 8_000;
+        assert!(matches!(
+            CalibrationSet::from_metadata(&oversized_crop),
+            Err(Error::OffsetV6Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn model6_rejects_non_positive_focal_lengths() {
+        let negative_fx = with_model6_token(2, "-1");
+        assert!(matches!(
+            CalibrationSet::from_metadata(&negative_fx),
+            Err(Error::OffsetV6Invalid("has a non-positive focal length"))
+        ));
+    }
+
+    #[test]
+    fn model6_rejects_normalization_overflow() {
+        let mut overflow = with_model6_token(2, "1e308");
+        overflow.dimension.as_mut().unwrap().x = i32::MAX;
+        overflow.window_crop_info.as_mut().unwrap().dst_width = 2;
+        assert!(matches!(
+            CalibrationSet::from_metadata(&overflow),
+            Err(Error::OffsetV6Invalid(
+                "produces a non-finite normalized intrinsic"
+            ))
+        ));
     }
 
     /// The seam correction is stored under this key, so what it answers has
@@ -1009,6 +1363,7 @@ mod tests {
         assert_eq!(readout.sweep, Sweep::Down);
         assert_eq!(readout.sweep.axis(), [0.0, 1.0]);
         assert_eq!(readout_sweep("Insta360 X4 Air"), Sweep::Down);
+        assert_eq!(readout_sweep("Insta360 ONE X2"), Sweep::Down);
         assert_eq!(readout_sweep("Insta360 X5"), Sweep::Unknown);
         assert_eq!(readout_sweep("GoPro Max"), Sweep::Unknown);
         assert_eq!(Sweep::Unknown.axis(), [0.0, 0.0]);

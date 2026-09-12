@@ -1,0 +1,90 @@
+# Workspace inheritance expanded from the pinned iced workspace.
+# See KJERAG.md for provenance and the child-reconciliation fix.
+[package]
+name = "iced_core"
+description = "The essential ideas of iced"
+version = "0.14.0"
+edition = "2024"
+authors = ["Héctor Ramón Jiménez <hector@hecrj.dev>"]
+license = "MIT"
+repository = "https://github.com/iced-rs/iced"
+homepage = "https://iced.rs"
+categories = ["gui"]
+keywords = ["gui", "ui", "graphics", "interface", "widgets"]
+publish = false
+
+[lints.rust]
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused_results = "deny"
+
+[lints.clippy]
+type-complexity = "allow"
+map-entry = "allow"
+large-enum-variant = "allow"
+result_large_err = "allow"
+semicolon_if_nothing_returned = "deny"
+trivially-copy-pass-by-ref = "deny"
+default_trait_access = "deny"
+match-wildcard-for-single-variants = "deny"
+redundant-closure-for-method-calls = "deny"
+filter_map_next = "deny"
+manual_let_else = "deny"
+unused_async = "deny"
+from_over_into = "deny"
+needless_borrow = "deny"
+new_without_default = "deny"
+useless_conversion = "deny"
+
+[lints.rustdoc]
+broken_intra_doc_links = "forbid"
+
+[features]
+advanced = []
+crisp = []
+basic-shaping = []
+advanced-shaping = []
+a11y = ["iced_accessibility"]
+wayland = ["cctk"]
+
+[dependencies]
+palette = "0.7"
+bitflags = "2.5"
+bytes = "1.6"
+glam = "0.25"
+lilt = "0.8"
+log = "0.4"
+num-traits = "0.2"
+rustc-hash = "2.0"
+smol_str = "0.3"
+thiserror = "2"
+unicode-segmentation = "1.0"
+web-time = "1.1"
+
+serde = { version = "1.0", optional = true, features = ["derive"] }
+# TODO(POP): I think some of these dependencies were removed. Check on that
+# xxhash-rust.workspace = true
+window_clipboard = { git = "https://github.com/pop-os/window_clipboard.git", tag = "sctk-0.20" }
+dnd = { git = "https://github.com/pop-os/window_clipboard.git", tag = "sctk-0.20" }
+mime = { git = "https://github.com/pop-os/window_clipboard.git", tag = "sctk-0.20" }
+
+# /TODO(POP)
+[dependencies.iced_accessibility]
+version = "0.1.0"
+git = "https://github.com/pop-os/libcosmic"
+rev = "dc1cf9f00cbe2902a52166492654bb9fee8a73d1"
+optional = true
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+
+[dev-dependencies]
+approx = "0.5"
+
+[target.'cfg(all(unix, not(any(target_os = "redox", target_family = "wasm", target_os = "android", target_vendor = "apple"))))'.dependencies.cctk]
+git = "https://github.com/pop-os/cosmic-protocols"
+package = "cosmic-client-toolkit"
+rev = "32283d7"
+optional = true
+
+[build-dependencies]
+build_helpers = { git = "https://github.com/pop-os/libcosmic", rev = "dc1cf9f00cbe2902a52166492654bb9fee8a73d1" }

@@ -374,3 +374,32 @@ mod tests {
         assert_eq!(read.at, Duration::ZERO);
     }
 }
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+
+    #[test]
+    fn a_copied_line_reads_back_as_the_place_it_names() {
+        // Exactly what the owner pastes, and exactly what `copied` writes:
+        // the file's NAME, then the five terms.
+        let line = "VID_20260526_191025_00_004.insv time=659.893 yaw=-114.22 \
+                    pitch=-16.51 fov=29.26 lock=1";
+        let (file, framing) = Framing::read_line(line).expect("a copied line is a place");
+        assert_eq!(file.to_str(), Some("VID_20260526_191025_00_004.insv"));
+        assert!((framing.at.as_secs_f64() - 659.893).abs() < 1e-3);
+        assert!((framing.camera.yaw.to_degrees() - -114.22).abs() < 1e-3);
+        assert!((framing.camera.pitch.to_degrees() - -16.51).abs() < 1e-3);
+        assert!((framing.camera.fov.to_degrees() - 29.26).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_path_with_a_space_in_it_is_refused_rather_than_half_read() {
+        // The owner has several: `.../ab_testing/clip 2/VID....insv`.
+        // `split_whitespace` takes `.../clip` as the file and then `2` is not
+        // a term, so this must be NOTHING rather than a place near where he
+        // asked for. It silently did the latter until 2026-08-12.
+        let line = "/home/x/clip 2/VID_1.insv time=1.0 yaw=0 pitch=0 fov=90 lock=1";
+        assert!(Framing::read_line(line).is_none());
+    }
+}

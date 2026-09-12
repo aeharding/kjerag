@@ -9,6 +9,9 @@ publish.workspace = true
 [package.metadata.release]
 release = false
 
+[features]
+test-support = []
+
 [dependencies]
 cpal = { workspace = true }
 # The `.insv` naming convention that says where a capture's other lens

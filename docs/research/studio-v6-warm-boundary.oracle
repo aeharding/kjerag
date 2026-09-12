@@ -1,0 +1,32 @@
+# PII-free Studio 6.0.2 ONE X2 warm solver-boundary oracle.
+schema = kjerag-studio-oracle/1
+oracle_id = studio602-onex2-flow-on-frame6317-v6-boundary
+scope = warm_solver_boundary_only
+studio_version = 6.0.2
+worker_arm64_sha256 = 0a34f593198a0a7a29239ccded91231af3d7bc94e04213c67a2d44a04076a452
+camera = one_x2
+lens_type = 0x29
+stitching_optimization = on
+output_frame_index = 6317
+source_pts_ticks = 6317311
+source_timescale_hz = 30000
+source_pts_ms = 210577.03333333333
+process_ordinal_observed = 6312
+output_width = 1920
+output_height = 1080
+capture_archive_sha256 = f9ef15168459325f5dd1f96ea17f5405dc7753471fa7a8c81d4df12d6d0ff430
+capture_events_sha256 = efac13866b8c07d5917d73eb9edc2883b806b321a0457fc60d1edab498aaa7db
+capture_manifest_sha256 = 7e48275b87e6486f91769f8ad82df525a16e759a4cfd289085ada6c5e1e50b15
+capture_session_sha256 = de533a46ffc336381217bf2ca673ce268cb07e1a828fafe6d817f3c402f2a623
+studio_export_bytes = 860845465
+studio_export_sha256 = fb003968e3e56dedbca15f02e855ba8cfeb22ea81f78354e732fefca115e9aed
+
+# id | origin | locator | bytes | dtype | rows | columns | channels | row_step | axes | components | units | sha256
+artifact = staging_a | external | 00038_target_input_belt_b70.bin | 583200 | u8 | 3240 | 180 | 1 | 180 | along_seam,across_seam | luma | intensity_u8 | 1b9d9d49399095e424a264152c7e51ca25f557e148c29142c7298f9b730d686c
+artifact = staging_b | external | 00039_target_input_belt_bd0.bin | 583200 | u8 | 3240 | 180 | 1 | 180 | along_seam,across_seam | luma | intensity_u8 | e830cb1db6a6439683e7d9807308589d627e427d346ace79c56f69be71c58616
+artifact = preblur_a | derived | area3x3:staging_a | 64800 | u8 | 1080 | 60 | 1 | 60 | along_seam,across_seam | luma | intensity_u8 | 9a89b003d48b25c586ae873cde902b979592fa0ecb46227a23d9feef868dd514
+artifact = preblur_b | derived | area3x3:staging_b | 64800 | u8 | 1080 | 60 | 1 | 60 | along_seam,across_seam | luma | intensity_u8 | 4aaeab96d4cf165713cf11b675388009517c2c2eb913b3811337b688f444786c
+artifact = postblur_a | derived | gaussian5_sigma0p8_reflect101:preblur_a | 64800 | u8 | 1080 | 60 | 1 | 60 | along_seam,across_seam | luma | intensity_u8 | e210ff95ae67638dfa853de5e9b93a2b5076adef80dd0d55d390a1d4854d5676
+artifact = postblur_b | derived | gaussian5_sigma0p8_reflect101:preblur_b | 64800 | u8 | 1080 | 60 | 1 | 60 | along_seam,across_seam | luma | intensity_u8 | c1bf7cd59dbd730c2d64b280847917ab6bf0e1117c3fe844794b1bb9f18d0bbd
+artifact = ordinary_b_to_a_lens0 | external | 00043_target_ordinary_flow_left_c90.bin | 518400 | f32le | 1080 | 60 | 2 | 480 | along_seam,across_seam | across_seam,along_seam | final_grid_cells | b099fb9ebe8c5d45f7c37df5aba90a9868bb24927006e8cb4cdd87d2121bea8c
+artifact = ordinary_a_to_b_lens1 | external | 00044_target_ordinary_flow_right_c30.bin | 518400 | f32le | 1080 | 60 | 2 | 480 | along_seam,across_seam | across_seam,along_seam | final_grid_cells | a5cf35fbb6ac7b78fd2d549b736d5d8de3a6e4afced489323810d5db5ad90af9

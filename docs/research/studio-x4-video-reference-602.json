@@ -1,0 +1,481 @@
+{
+  "schema_version": 1,
+  "status": "ordinary output captured and owner field of view registered; exact source/output frame association pending",
+  "producer": {
+    "application": "Insta360 Studio",
+    "version": "6.0.2",
+    "export_route": "ordinary UI, 360 Video, Match Source 7680x3840, Match Source Frame Rate 30000/1001, H.265, Original 180 Mbps"
+  },
+  "source": {
+    "name": "VID_20260410_185407_00_004.insv",
+    "bytes": 37937664334,
+    "sha256": "ddb8dee812541dc231cca91cd99beed67c2e010ffbeab260568d4a5b3006cfc3",
+    "owner_target_frame_index": 34569,
+    "owner_target_seconds": "1153.452300",
+    "owner_view_degrees": {
+      "yaw": 132.05,
+      "pitch": 3.55,
+      "horizontal_fov": 63.63,
+      "horizon_locked": true
+    }
+  },
+  "artifacts": {
+    "video": {
+      "name": "VID_20260410_185407_00_004.mp4",
+      "bytes": 79674872,
+      "sha256": "9926504109a37b64836fb8af2d7b80ad5d4b6adf0de232d1cde9b8c7954b9d35"
+    },
+    "project": {
+      "name": "x4-default-short360-project.insprj",
+      "bytes": 12919,
+      "sha256": "c853887c7720db6256063c81add75cc5a473322fbc8fd1b583ea9b3c6c5b0e20"
+    }
+  },
+  "project_settings": {
+    "roughcut": {
+      "leftTrim": 34538,
+      "rightTrim": 19301,
+      "totalFrames": 53940
+    },
+    "enableAIStitching": true,
+    "enableOpticalFlowStitching": false,
+    "enableDynamicStitching": false,
+    "enableImageFusionStitching": true,
+    "enableStab": true,
+    "enableDirectionalLock": true,
+    "optimizedOffset": ""
+  },
+  "media": {
+    "codec_name": "hevc",
+    "profile": "Main",
+    "width": 7680,
+    "height": 3840,
+    "pix_fmt": "yuvj420p",
+    "color_range": "pc",
+    "color_space": "bt709",
+    "color_transfer": "bt709",
+    "color_primaries": "bt709",
+    "chroma_location": "left",
+    "projection": "equirectangular",
+    "frame_rate": "30000/1001",
+    "time_base": "1/30000",
+    "start_pts": 0,
+    "duration_ts": 102102,
+    "duration_seconds": "3.403400",
+    "nb_frames": 102
+  },
+  "packet_grid": {
+    "count": 102,
+    "first_pts": 0,
+    "last_pts": 101101,
+    "step": 1001,
+    "duration": 1001,
+    "dts_equals_pts": true
+  },
+  "frame_association": {
+    "candidate_export_frame_for_owner_target": 31,
+    "basis": "owner source index minus saved roughcut leftTrim; 102 output frames are consistent with inclusive source endpoints 34538 through 34639",
+    "independent_pixel_authentication": "pending; fixed-rotation comparisons of export frames 30, 31 and 32 favor 30, not the index-derived candidate 31"
+  },
+  "view_registration": {
+    "operation": "common panorama rotation only; no lens, seam or field-of-view fit",
+    "ffmpeg_v360": "input=equirect:output=flat:yaw=90.90:pitch=-2.30:roll=-0.37:rorder=ypr:h_fov=63.63:v_fov=38.474775649129:w=1280:h=720:interp=line",
+    "reference_export_frame": 31,
+    "registered_image": {
+      "name": "registered-owner-view.png",
+      "sha256": "95a9ba7f1f0d56f485c4731fd84c3e8f20ada4e40c781b115a54e9ed26955540"
+    },
+    "visual_observation": "Studio horizon is broadly straight where current Kjerag final bends through the central join; neighboring Studio frames show the same distinction"
+  },
+  "stitching_off_comparison": {
+    "purpose": "separate optional stitching AI from the camera/base-mapping discrepancy, not isolate photometric fusion",
+    "video": {
+      "name": "studio-stitching-off.mp4",
+      "producer_name": "VID_20260410_185407_00_004(1).mp4",
+      "bytes": 79571230,
+      "sha256": "af1076c6a865afc6ced01fbf447a05293769ff28ba4111600c0e3fddd6c1e4cc"
+    },
+    "project": {
+      "name": "x4-stitching-off-project.insprj",
+      "bytes": 12920,
+      "sha256": "c0fda10d0dde68d6ef7cee7af0b4cb4028cedf460681b575fe21496ba2fdb917"
+    },
+    "project_difference": {
+      "$.projects[0].clip.stitching_optimization.enableAIStitching": {
+        "before": true,
+        "after": false
+      },
+      "$.projects[0].modifiedTime": "changed",
+      "verification": "full sorted JSON equality after deleting exactly those two fields"
+    },
+    "unchanged_settings": {
+      "enableOpticalFlowStitching": false,
+      "enableDynamicStitching": false,
+      "enableImageFusionStitching": true,
+      "trim_and_stabilization": "identical to default reference"
+    },
+    "video_grid": {
+      "width": 7680,
+      "height": 3840,
+      "frame_rate": "30000/1001",
+      "frames": 102,
+      "duration_seconds": "3.403400",
+      "packet_grid_matches_default": true
+    },
+    "registered_image": {
+      "export_frame": 31,
+      "same_v360_rotation_and_fov_as_default": true,
+      "name": "registered-off-frame-0031.png",
+      "sha256": "61744f92fd355f6cbce81986a6f5ea2aa233c1213bc0da25b01badc2d790c67a"
+    },
+    "visual_observation": "Studio also retains the broadly straight horizon with stitching optimization Off; the large disagreement with Kjerag parent lens A persists",
+    "interpretation": "the next investigation is camera/base mapping before optional alignment; no replacement mounting or projection law is established",
+    "default_ai_setting_restored_and_project_verified": true
+  },
+  "base_calibration_diagnostic": {
+    "source_offset_v6": {
+      "protobuf_tag": 111,
+      "serialized_bytes": 523,
+      "tokens": 56,
+      "lens_count": 2,
+      "lens_types": [131, 131],
+      "trailing_word": 394240,
+      "sha256": "0950b9d7bb63fc131e698cf80cf81d7720a6cdae4d3f1c1f8514cba3e7fba3ef",
+      "authentication": "direct indexed metadata read from the exact source, matching the archived sanitized fixture"
+    },
+    "selection_evidence": {
+      "archive_commit": "672f9f4f17e1633c29945e49c73279ff19e8990d",
+      "path": "docs/research/studio-seam-re.md",
+      "sections": ["3.3", "5.3"],
+      "producer_scope": "Windows Studio 5.9.10.0, not a runtime trace of the current Mac 6.0.2 export",
+      "selected_model": "v6, OmniProjection<RadtanDistortPro>, 13 coefficients",
+      "current_kjerag_model": "v3, five-coefficient Mei"
+    },
+    "rendered_arms": [
+      "current-v3-null",
+      "v6-pose-only",
+      "v6-pose-intrinsics-v3-distortion",
+      "v6-full-generic",
+      "v6-full-template-rx-pi"
+    ],
+    "controls": {
+      "current_null_picture_matches_previous_parent_bytes": true,
+      "equivalent_five_term_scalar_null": {
+        "sentinel_validity_matches": true,
+        "jointly_valid_nodes": 32861,
+        "max_source_pixel_error": 0.001232245
+      },
+      "full_v6_cap_120_vs_105_degrees": {
+        "jointly_valid_nodes": 28185,
+        "max_source_pixel_difference": 0,
+        "validity_disagreements": 4675
+      }
+    },
+    "visual_observation": "all five calibration-only arms retain a visible horizon join; no production correction selected",
+    "scope": "shared current orientation/readout schedule and saved alpha, scalar f32 model diagnostic consumed by the unchanged real frame renderer; not a recovered X4 rolling-pose or Mac arithmetic contract",
+    "temporary_test_hook_removed": true,
+    "native_player_sha256_unchanged": "aecd39b338fd7c8ce2d0c90109275d807e3ba4a29a2d1b9ce8951610040b220c"
+  },
+  "native_camera_input_capture": {
+    "producer": "Mac Studio 6.0.2, ordinary short AI-on 360 export",
+    "worker_arm64_sha256": "0a34f593198a0a7a29239ccded91231af3d7bc94e04213c67a2d44a04076a452",
+    "boundary": "MultiFlowstateSystem getEquirectangleFlowMap call at worker offset 0x17f2d80 to FlowstateRender2 getFlowMap at 0x17e78f8",
+    "private_report_sha256": "7da8e44832f31ac36d635be9db66e51825b44524f4e5ea789f683248a2d6d155",
+    "observer_sha256": "3235a00ec714378dfa5c089d01fc681589a790a1f540c27c02a1b4fd684b12fd",
+    "copies_hash_match_between_hosts": true,
+    "status": "captured",
+    "breakpoint_deleted": true,
+    "detached": true,
+    "ordered_pair_from_same_system": true,
+    "lenses": [
+      {
+        "ordinal": 0,
+        "model": 6,
+        "dimensions": [3840, 3840],
+        "center": [1920.746394988549, 1929.5332210696483],
+        "focal": [3665.637317796039, 3667.137129193048],
+        "xi": 2.31494,
+        "quaternion_xyzw": [0.49668182777623043, -0.5032273368722446, 0.49869786245508285, 0.5013679799947969]
+      },
+      {
+        "ordinal": 1,
+        "model": 6,
+        "dimensions": [3840, 3840],
+        "center": [1930.0503974134444, 1933.220688400916],
+        "focal": [3673.3432453186037, 3672.381297319143],
+        "xi": 2.31494,
+        "quaternion_xyzw": [0.4952514266264301, 0.5037332504058263, -0.496686893797798, 0.5042627949686171]
+      }
+    ],
+    "comparison": {
+      "all_13_coefficients_per_lens_match_exact_source_v6": true,
+      "delivered_center_and_focal_match_full_crop_schedule_binary64": true,
+      "raw_template_max_sign_aligned_quaternion_component_error": [1.11e-16, 2.22e-16],
+      "no_image_fitting": true
+    },
+    "not_captured": ["configured angular cap", "configured horizontal mirror", "common mapping quaternion", "pose batch", "returned parent map", "independent source/output frame identity"],
+    "scope": "direct static camera inputs for this activation; not complete parent-map or output parity"
+  },
+  "native_camera_motion_diagnostic": {
+    "source_frame": 34569,
+    "provider": "unchanged Kjerag orientation track, not Studio's captured provider",
+    "datum": "fixed nominal Rx(pi) at output grid via (row,column) -> (99-row,(200-column)%200); no fitted angle",
+    "max_current_provider_rotation_from_center_degrees": 0.131883363,
+    "versus_previous_post_quaternion_datum": {
+      "jointly_valid_nodes": 28185,
+      "validity_differences": 0,
+      "max_source_pixel_difference": 0.656410038
+    },
+    "versus_constant_center_pose": {
+      "jointly_valid_nodes": 28185,
+      "validity_differences": 0,
+      "max_source_pixel_difference": 4.712916851
+    },
+    "visual_observation": "native-input and constant-pose blends still show the horizon offset; lens-only inputs and computed trace inspected",
+    "runtime_cap_and_mirror_still_unverified": true,
+    "production_source_and_native_binary_unchanged": true
+  },
+  "native_parent_map_capture": {
+    "producer": "Mac Studio 6.0.2, one ordinary short AI-on 360 export transaction",
+    "worker_arm64_sha256": "0a34f593198a0a7a29239ccded91231af3d7bc94e04213c67a2d44a04076a452",
+    "private_report_sha256": "2434526dc453e004f36bbc264bde43b129b73919b55fbd580a51eb3956a8b92b",
+    "observer_sha256": "7e7690fefdc31d1a04bb73f3fd7d2a3a2e716cdc124abd04c29e9ecce543761d",
+    "status": "captured",
+    "transaction": "call 0, return 0, call 1, return 1, Wait return 0, Wait return 1; same controller, caller stack and thread; parent descriptor and lens ownership revalidated",
+    "sites_worker_relative": {
+      "call": "0x17f2d80",
+      "return": "0x17f2d84",
+      "wait_return": "0x17f2dc8"
+    },
+    "finished_output_boundary": "each matching Wait return, after native GPU completion and texture download; not the earlier submission return",
+    "half_shape": {"rows": 100, "columns": 200, "outer_stride": 200},
+    "all_three_breakpoints_deleted": true,
+    "detached": true,
+    "report_and_map_hashes_match_between_hosts": true,
+    "lenses": [
+      {
+        "ordinal": 0,
+        "map_bytes": 160000,
+        "map_sha256": "f479b3d93da1ed63cd346650164747d4dbc416a9a79d100b8828b4108a0fee5b",
+        "pose_bytes": 1632,
+        "pose_sha256": "adcede59126c3394ab346a4e84c6fe65f62c328b009475abb5dee3ae1317dca4",
+        "gpu_half_fov_radians": 2.094395160675049,
+        "gpu_flip": 1,
+        "scalar_replay": {
+          "jointly_valid_nodes": 16431,
+          "validity_differences": 0,
+          "max_source_pixel_error": 0.001862478,
+          "rms_source_pixel_error": 0.000592628
+        }
+      },
+      {
+        "ordinal": 1,
+        "map_bytes": 160000,
+        "map_sha256": "7d5e8d4f0c24f4eb8aa2d7e9758c58504ab6a6eefe2bb591b00a43bc19ac1622",
+        "pose_bytes": 1632,
+        "pose_sha256": "30f04c8aadb337eb84bb26ffff399a6171045b8afaadf6b5523e1f04f40a356a",
+        "gpu_half_fov_radians": 2.094395160675049,
+        "gpu_flip": 1,
+        "scalar_replay": {
+          "jointly_valid_nodes": 16421,
+          "validity_differences": 0,
+          "max_source_pixel_error": 0.001844824,
+          "rms_source_pixel_error": 0.000562617
+        }
+      }
+    ],
+    "pose_comparison": {
+      "count_per_lens": 51,
+      "qwm_same_bits_between_lenses": true,
+      "lens_1_time_minus_lens_0_seconds": -0.000178161077656114,
+      "initial_composed_quaternion": "f32(qci_f64 * pose[25]_f64 * qwm_f64), all four lanes reproduced exactly for both lenses",
+      "initial_vs_raw_lens_rotation_degrees": [0.001222796, 0.001223497],
+      "scope": "small measured per-lens center residual, not a diagnosed cause of the broad image defect"
+    },
+    "replay_scope": "scalar f32 model-6 calculation using actual captured GPU parameters and narrowed native pose batches; not selected-player, exact source-frame, final-consumer or visible stitching parity",
+    "production_source_and_native_binary_unchanged": true
+  },
+  "native_plane_stitch_inputs": {
+    "producer": "Mac Studio 6.0.2, ordinary AI-on 360 export, PlaneStitchingRenderModelImpl",
+    "worker_arm64_sha256": "0a34f593198a0a7a29239ccded91231af3d7bc94e04213c67a2d44a04076a452",
+    "private_report_sha256": "426a8517a8ee5f1b836aafc9baaa412b3ba1167506f03be9e2614d04a614e543",
+    "observer_sha256": "18142ddecf76f64b509f43c13cb6f3fcfc55ba702369e58cf0ea0f2f5f166d72",
+    "status": "required maps and first submitted blocks captured; coverage texel and final binding unverified",
+    "report_hash_matches_between_hosts": true,
+    "all_ten_breakpoints_deleted": true,
+    "detached": true,
+    "packed_dual_uv": {
+      "bytes": 320000,
+      "sha256": "31321e2a564a99a95047667ce2ec8456c42a4e6375df4f15fb958ba9c8d13667"
+    },
+    "left_alpha": {
+      "bytes": 80000,
+      "sha256": "ca12e2d8836f4029bcef61f7cb5aa60bcbf94b9291fe0b7da307e5cf990f3e0e"
+    },
+    "map_bytes_identical_across_three_separate_capture_transactions": true,
+    "fragment_block": {
+      "bytes": 96,
+      "sha256": "ae41ad306f485838f6ba6ea880cfe63b953ad0be2d06582198d9363cf634fc34",
+      "slot": 1,
+      "lookup_dimensions": [200, 100],
+      "fisheye_alpha_dimensions": [1, 1],
+      "fisheye_alpha_texel_captured": false
+    },
+    "texture_block": {
+      "bytes": 152,
+      "sha256": "e2960ee823baaac41a71b3c220eceac875f3b05118f2c346f491a4661c2d1d8c",
+      "slot": 0,
+      "source_transform": "identity 4x4",
+      "source_dimensions": [3840, 3840],
+      "box_dimensions": [1, 1],
+      "scope": "first TextureParam apply on the selected thread; not proof of final bind or source pixel identity"
+    },
+    "native_timing": {
+      "ticks": 34572538,
+      "timebase": 30000,
+      "milliseconds": 1152417.9333333333,
+      "independent_ffmpeg_lens_png_pts": [34572538, 34572538],
+      "scope": "numeric timing match, not authenticated ancestry of the actual bound source textures"
+    },
+    "comparison": "source-transform staging leaves packed map bytes unchanged; both the type-2 replay and direct per-fragment plane-stitch replay retain a double horizon",
+    "direct_replay": {
+      "lookup": "200x100 bilinear per fragment, captured geometry and alpha, independently decoded source PNGs",
+      "color_and_support_omissions": "photometric fusion and uncaptured 1x1 fisheye-alpha texel; no claim of pixel-exact native color",
+      "view_registration": "one common spherical rotation applied unchanged to final, lens-only and alpha images against ordinary AI-on export frame zero",
+      "type2_vs_direct_sample": {
+        "sample": "both triangle centroids in 641 jointly blended triangles; not exhaustive whole-sphere coverage",
+        "max_source_pixel_difference_lens_a": 2.120,
+        "max_source_pixel_difference_lens_b": 2.241
+      },
+      "visual_observation": "registered direct replay still has a visibly double horizon where Studio does not; type-2 interpolation alone is not an adequate explanation",
+      "actual_bound_source_pixel_identity": "unverified"
+    },
+    "production_source_and_native_binary_unchanged": true
+  },
+  "native_plane_stitch_source_metadata": {
+    "producer": "same DynamicStitch update window and first subsequent submitted blocks, ordinary AI-on 360 export",
+    "private_report_sha256": "55029269edd74d463b59210e5940fd00d860e267bc516370a2a759ac4851c8ac",
+    "observer_sha256": "c8637f8aae6268ce20d94043a85174e222f23427c17c6baee9e7aca186fdb457",
+    "report_hash_matches_between_hosts": true,
+    "all_ten_breakpoints_deleted": true,
+    "detached": true,
+    "texture_data_count": 2,
+    "texture_data_stride_bytes": 424,
+    "avframe_header_prefix_bytes": 256,
+    "avframe_dimensions": [[3840, 3840], [3840, 3840]],
+    "avframe_format_values": [158, 158],
+    "format_interpretation": "VideoToolbox, from observed 0x9e and pinned MtlStreamingTexture loader READ; data[3] holds CVPixelBuffer",
+    "avframe_signed_pts": [34572538, 34572538],
+    "pts_read_basis": "signed i64 AVFrame field at +0x88, read by pinned fcp::GetPts at worker +0x6fd250",
+    "media_texture_rotation_f32": [0.0, 0.0],
+    "media_texture_upside_down_u8": [1, 1],
+    "first_texture_param_media_texture_matches_record_ordinal": 0,
+    "packed_alpha_and_submitted_blocks_identical_to_previous_capture": true,
+    "pixel_payload_captured": false,
+    "container_stream_order_authenticated": false,
+    "final_shader_binding_authenticated": false,
+    "interpretation": "matching actual decoder PTS does not support a different-moment lens pair; it does not authenticate source pixels or container-stream order",
+    "production_source_and_native_binary_unchanged": true
+  },
+  "native_plane_stitch_source_pixels": {
+    "private_report_sha256": "8e32e0a8eede38a82f62de403ef6000536f45dfd8536971cd37118bef5378617",
+    "observer_sha256": "d6e5c6f17d4f2c014f0ddda2e7baae503af8aeb25aa4b8a6cfaba4befd3c0c0c",
+    "source_association_report_sha256": "f79908db67b4d5801cf9538bc919b181f403d4dccf7d955c225095218ed165f6",
+    "report_hash_matches_between_hosts": true,
+    "all_ten_breakpoints_deleted": true,
+    "detached": true,
+    "read_only_corevideo_lock_and_unlock_returns": [[0, 0], [0, 0]],
+    "corevideo_lock_flags": 1,
+    "pixel_format": "420f, full-range eight-bit bi-planar 4:2:0",
+    "source_pts": [34572538, 34572538],
+    "source_dimensions": [[3840, 3840], [3840, 3840]],
+    "observed_y_and_uv_strides": [[3840, 3840], [3840, 3840]],
+    "logical_bytes_compared_per_record": 22118400,
+    "ftd_ordinal_to_container_stream": [1, 0],
+    "different_bytes_for_verified_assignment": [0, 0],
+    "ftd_order_to_shader_source_order": "pinned TextureRenderObject assignment iterates FTD ordinal and names samplerImage then samplerImageRight; Metal binding preserves the texture-array slot",
+    "ftd_order_read_sites": ["0x4cfcac", "0x4d00b8", "0x4d00d4", "0x4d00e8", "0x4d010c", "0x4d0120", "0x4cc9f0", "0x4ccc14", "0x166d430", "0x166d434"],
+    "independent_container_stream_yuv420p_sha256": [
+      "9c3a7f9b94028a46e906df820915ffa2d397d49faf48f8aad3e98583360966e4",
+      "e1afcc915e88f3a00a3db729161c9f8bbf3901b05cde6d2ad3bd6450ff1ee066"
+    ],
+    "maps_and_uniforms_identical_to_input_capture_02": true,
+    "corrected_replay": {
+      "source_order_change_only": "container stream 1 supplies packed xy; container stream 0 supplies packed zw",
+      "registration_manifest_sha256": "22bfc534a76a38b84755e3fe04fdccb0c523e9566e3160e6ed61a04c3e35b0ad",
+      "owner_view_png_sha256": "4c3467bfdb9b3612d852b7d682750b18c9bdc26c18ef9aea73ac5ee278ce0151",
+      "studio_reference_owner_view_png_sha256": "84bdd61137c65f518f065ccc3982f5eada105b5e315a74957b97bdbe9d6919a7",
+      "registration": "one common panorama rotation applied unchanged to final, both lens-only images and alpha; no per-lens fit",
+      "root_viewed_actual_comparison": true,
+      "visual_observation": "broadly straight horizon and no prior obvious doubled terrain; local differences and softness remain",
+      "scope": "corrected isolated replay, not native-player implementation or owner acceptance"
+    },
+    "production_source_and_native_binary_unchanged": true
+  },
+  "model6_player_candidate_20260906": {
+    "camera_inputs": "offset_v6 crop-scaled intrinsics, 13 distortion coefficients and captured Template mounting",
+    "source_association": "native calibration record 1 to engine/container source 0; record 0 to source 1, resolved once during static packing",
+    "coordinate_bridge": "BODY Rx(pi), equivalently producer-SPHERE Ry(pi), postmultiplied into the native static lens quaternion; existing rolling-provider basis retained",
+    "decoder_imu_and_view_conventions_unchanged": true,
+    "import_order_only_candidate_rejected_and_removed": true,
+    "live_x4_admission_requires_model6": true,
+    "scene_sequence": {
+      "directory": "scratch/x4-model6-scene-review-20260906-01",
+      "frames": [34569, 34599],
+      "count": 31,
+      "view": {"yaw": 132.05, "pitch": 3.55, "fov": 63.63, "lock": true},
+      "path": "ordinary Scene seek, resident GPU stitch, draw and screenshot, with no substituted map or hidden warmup",
+      "review_video_sha256": "8c799ab445e7ba155eca765b3fa434a337b1289ba0872f8e501fabc10922b6ee",
+      "first_png_sha256": "b9c2b93bdae0c13f3e1b7c2dc306ad621e90f9173d93c38485d2b62229022bff",
+      "middle_png_sha256": "b899214a68d7963a5c0a632e777c8ec7a682697dd0ac18c59d9b1ac807b3fe48",
+      "last_png_sha256": "65518df59df4552255403db2c810dc15cd683795d4ad9d455b2019e598fabb14",
+      "root_viewed": "full-size first, middle and last frames plus complete 31-frame contact sheet",
+      "observation": "broad horizon remains straight through the central join instead of the previous visible bend; local differences from Studio remain"
+    },
+    "parent_ablation": {
+      "directory": "scratch/x4-model6-production-layers-20260906-01",
+      "frame": 34569,
+      "parent_png_sha256": "026058ccfc52061319ed4469f580835fddd79ed2251805376b364999dd5c38b4",
+      "parent_trace_png_sha256": "ac177aa7ee4032ea78dee945217b1d52d7cd22df1d6c048cd4764a9da3c812f0",
+      "root_viewed_actual_pixels_and_computed_trace": true
+    },
+    "one_x2_regression": {
+      "directory": "scratch/x2-model6-regression-20260906-01",
+      "baseline": "scratch/shared-onex2-review-01",
+      "frames": [6339, 6399],
+      "ppm_packed_alpha_files_compared": 183,
+      "files_differing": 0
+    },
+    "gpu_qualification": {
+      "adapter": "AMD Radeon 760M, RADV",
+      "model6_parent_pair": "all 80000 binary32 words identical to scalar reference",
+      "model3_parent_cases": "7 of 7 existing exact cases pass"
+    },
+    "native_window": {
+      "binary": ".worktrees/one-x2-gpu-pipeline/target/release/kjerag",
+      "binary_sha256": "750dc98af63c54192a75710ef83ee935a9bc4e85b99ee8af20cebe231839807c",
+      "capture": "scratch/x4-model6-native-window-20260906.png",
+      "capture_sha256": "b3f1707ba645a7c47cc7290ebe23e0c56eb2b6744d429e039b5d533aaa147052",
+      "root_viewed": true,
+      "harness_checks": 48,
+      "harness_failures": 0,
+      "skips": "four two-file drop checks do not apply to this single-file X4 capture",
+      "workspace_tests_passed": 1139,
+      "workspace_tests_failed": 0,
+      "workspace_tests_ignored": 30
+    },
+    "remaining_boundaries": [
+      "Existing Kjerag v3-derived blend and image-circle support, not complete Studio fusion parity; peripheral support coverage remains to be reviewed.",
+      "Existing shared Kjerag pose provider, not Studio's exact per-lens pose schedule.",
+      "Owner acceptance, whole-video review and sustained active 240 fps capacity remain outstanding."
+    ]
+  },
+  "limitations": [
+    "A recorded project setting does not identify the exclusive runtime stitching algorithm.",
+    "This is the default X4 setting, not the earlier ONE X2 Optical Flow On setting.",
+    "The first snapshot taken during UI recovery is not a matching-time or matching-view reference.",
+    "Accessibility slider value writes did not reliably seek Studio; acquisition used physical clicks and verified saved trim fields.",
+    "Registration permits a near-time same-field-of-view shape comparison, not a pixel-exact frame-parity verdict.",
+    "The bounded player candidate improves the reported X4 shape; exact Studio frame identity, whole-video parity and owner acceptance are not established."
+  ]
+}

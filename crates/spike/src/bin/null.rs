@@ -12,7 +12,7 @@
 //!
 //! ```sh
 //! cargo run --release -p kjerag-spike --bin null -- <file.insv> \
-//!   from=63.5 to=69.5 yaw=179.00 pitch=-36.97 fov=20.00 lock=1 seam=pool
+//!   from=63.5 to=69.5 yaw=179.00 pitch=-36.97 fov=20.00 lock=1 seam=factory
 //! ```
 //!
 //! **It plays rather than seeking, and that is the point.** The seam band
@@ -77,7 +77,7 @@ fn main() -> Fallible<()> {
         options.h
     );
 
-    let mut pipeline = ScenePipeline::new(&gpu.device, kjerag_spike::FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, kjerag_spike::FORMAT);
     let mut scene = Scene::still(&options.input, Cue::Time(secs(options.from)))?;
     scene.set_horizon(match options.lock {
         true => Horizon::Locked,
@@ -269,11 +269,11 @@ impl Options {
             w: 960,
             h: 540,
             lock: true,
-            seam: Seam::File,
-            seam_name: String::from("file"),
+            seam: Seam::Factory,
+            seam_name: String::from("factory"),
             out: None,
         };
-        let mut seam = String::from("file");
+        let mut seam = String::from("factory");
         for arg in args {
             match arg.split_once('=') {
                 None => options.input = PathBuf::from(arg),
@@ -293,14 +293,14 @@ impl Options {
         if options.input.as_os_str().is_empty() {
             return Err(USAGE.into());
         }
-        options.seam = Seam::parse(&seam, &options.input)?;
+        options.seam = Seam::parse(&seam)?;
         options.seam_name = seam;
         Ok(options)
     }
 }
 
 const USAGE: &str = "usage: null <file.insv> from=s to=s yaw=deg pitch=deg fov=deg [w=px] \
-     [h=px] [lock=0] [seam=factory|file|pool] [out=dir]";
+     [h=px] [lock=0] [seam=factory|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9] [out=dir]";
 
 #[cfg(test)]
 mod tests {

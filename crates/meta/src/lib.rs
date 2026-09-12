@@ -21,6 +21,7 @@ mod calibration;
 /// reads right qualified: `capture::resolve(path)`, rather than a bare
 /// `resolve` at the root of a crate about trailers.
 pub mod capture;
+mod denoise_iso;
 mod exposure;
 mod format;
 mod gyro;
@@ -34,9 +35,10 @@ mod rotation;
 mod trailer;
 
 pub use calibration::{
-    CalibrationSet, Distortion, GyroConfig, GyroEncoding, Intrinsics, Lens, Model, Pose, Readout,
-    Size, Sweep,
+    CalibrationSet, Distortion, GyroConfig, GyroEncoding, Intrinsics, Lens, Model, Model6Lens,
+    Pose, Readout, Size, Sweep,
 };
+pub use denoise_iso::{DenoiseIsoObservation, DenoiseIsoTrack};
 pub use exposure::{ExposureSample, ExposureTrack};
 pub use format::{Foreign, Format};
 pub use gyro::{GyroSample, GyroTrack};
@@ -72,6 +74,15 @@ pub enum Error {
         lens_count: usize,
         tokens: usize,
     },
+    /// An `offset_v6` token was not a finite number.
+    OffsetV6NotNumeric,
+    /// `offset_v6` did not have its declared number of 27-field lens blocks.
+    OffsetV6Grammar {
+        lens_count: usize,
+        tokens: usize,
+    },
+    /// A present `offset_v6` record violated its bounded geometry grammar.
+    OffsetV6Invalid(&'static str),
     /// The lens blocks disagreed about the size of the calibration
     /// canvas, which means the string was misread.
     CanvasMismatch,
@@ -97,6 +108,14 @@ impl std::fmt::Display for Error {
                 f,
                 "offset_v3 has {tokens} tokens, which is not 1 + 19 * {lens_count} + 1"
             ),
+            Self::OffsetV6NotNumeric => {
+                write!(f, "offset_v6 holds a token that is not a finite number")
+            }
+            Self::OffsetV6Grammar { lens_count, tokens } => write!(
+                f,
+                "offset_v6 has {tokens} tokens, which is not 1 + 27 * {lens_count} + 1"
+            ),
+            Self::OffsetV6Invalid(reason) => write!(f, "offset_v6 {reason}"),
             Self::CanvasMismatch => write!(f, "lens blocks disagree about the calibration canvas"),
             Self::DegenerateCanvas => write!(f, "a canvas or crop dimension is zero"),
             Self::NoTelemetry => write!(f, "file has no DJI telemetry track"),
@@ -121,16 +140,21 @@ impl From<prost::DecodeError> for Error {
     }
 }
 
-/// The real X4 Air trailer with serial number, GPS and capture times
-/// stripped, as checked in by the format study. Both halves of this
-/// module test against it: the calibration maths directly, and the
-/// trailer walk by re-encoding it into a synthetic `.insv`.
+/// Real calibration metadata with serial number, GPS and capture times
+/// stripped, as checked in by the format study. Both halves of this module
+/// test against it: the calibration maths directly, and the trailer walk by
+/// re-encoding it into a synthetic `.insv`.
 #[cfg(test)]
 mod fixture {
     pub const JSON: &str = include_str!("../../../docs/research/x4air-calibration.json");
+    pub const ONE_X2_JSON: &str = include_str!("../../../docs/research/onex2-calibration.json");
 
     pub fn metadata() -> super::trailer::ExtraMetadata {
         serde_json::from_str(JSON).expect("fixture matches the metadata shape")
+    }
+
+    pub fn one_x2_metadata() -> super::trailer::ExtraMetadata {
+        serde_json::from_str(ONE_X2_JSON).expect("ONE X2 fixture matches the metadata shape")
     }
 }
 
@@ -164,6 +188,12 @@ mod tests {
                 lens_count: 2,
                 tokens: 3,
             },
+            Error::OffsetV6NotNumeric,
+            Error::OffsetV6Grammar {
+                lens_count: 2,
+                tokens: 3,
+            },
+            Error::OffsetV6Invalid("has an invalid test value"),
             Error::CanvasMismatch,
             Error::DegenerateCanvas,
             Error::NoTelemetry,
@@ -178,6 +208,9 @@ mod tests {
                 Error::MissingField(_) => "MissingField",
                 Error::OffsetNotNumeric => "OffsetNotNumeric",
                 Error::OffsetGrammar { .. } => "OffsetGrammar",
+                Error::OffsetV6NotNumeric => "OffsetV6NotNumeric",
+                Error::OffsetV6Grammar { .. } => "OffsetV6Grammar",
+                Error::OffsetV6Invalid(_) => "OffsetV6Invalid",
                 Error::CanvasMismatch => "CanvasMismatch",
                 Error::DegenerateCanvas => "DegenerateCanvas",
                 Error::NoTelemetry => "NoTelemetry",

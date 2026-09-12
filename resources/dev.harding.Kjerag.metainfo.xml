@@ -39,25 +39,41 @@
     <ul>
       <li>Drag to reframe, scroll to zoom</li>
       <li>Gyro horizon lock</li>
-      <li>Blended lens seam</li>
+      <li>Automatic GPU stitching and lens color matching on supported cameras</li>
+      <li>Temporal filtering to reduce flickering seam differences</li>
       <li>Screenshots</li>
       <li>Copyable view references</li>
       <li>Zero-copy hardware decode</li>
     </ul>
     <p>Camera support:</p>
     <ul>
-      <li>Insta360 X4 Air and ONE X2: fully supported</li>
+      <li>Insta360 X4 Air and ONE X2: tested with real footage</li>
       <li>Insta360 X3, X4 and X5: unverified</li>
-      <li>GoPro and DJI: not supported, refused by name</li>
+      <li>DJI Osmo 360 .osv: basic calibrated playback, not the shared stitcher</li>
+      <li>Other DJI and GoPro: not supported, refused by name</li>
     </ul>
+    <p>
+      Not every recording mode or camera firmware is verified. Stitching is
+      Studio-like, not identical: seams and differences in noise or moving
+      detail can remain. Playback requires working VA-API hardware decoding
+      and a compatible Vulkan GPU; there is no software-decoding fallback.
+    </p>
+    <p>
+      Existing Osmo 360 playback is separate from the Insta360 stitching work.
+      Open .osv files from the command line or by dropping them into the player;
+      the current file chooser filters for .insv.
+    </p>
     <p>
       Requests and sample footage for more cameras are welcome on the issue
       tracker.
     </p>
     <p>
-      The dual fisheye footage is decoded on the GPU and reprojected through
-      the calibrated lens model that every .insv carries, so the horizon is
-      where it belongs and the seam between the two lenses is blended.
+      Supported cameras share a GPU stitching engine with camera-specific
+      calibration. Alignment, lens color matching and temporal filtering run
+      at source-video cadence; completed results are reused when reframing.
+      Opening or seeking prepares the first picture before playback starts.
+      Seeking restarts stitching history, so its first pictures can differ
+      slightly from uninterrupted playback.
     </p>
   </description>
 

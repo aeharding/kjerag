@@ -127,6 +127,10 @@ pub const ZOOM_OUT: &str = "Zoom out";
 /// The horizon lock toggle (issue #8). "Lock horizon" is what Insta360's own
 /// app and Studio call it, so it is the words this pilot already has.
 pub const LOCK_HORIZON: &str = "Lock horizon";
+/// The Studio optical-flow seam correction toggle. "Optical Flow" is Studio's
+/// own name for the arm the owner runs, so it is the words this pilot already
+/// has (memory: Studio stitching controls).
+pub const OPTICAL_FLOW: &str = "Optical flow";
 pub const FULLSCREEN: &str = "Fullscreen";
 /// The ellipsis is on the menu item, which opens something; the page it opens
 /// is titled without one.

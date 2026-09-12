@@ -28,6 +28,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use ffmpeg_next as ff;
@@ -156,6 +157,128 @@ pub struct Frames {
     /// container's answer and not the descriptor's: the DRM format says how
     /// wide a sample is and nothing at all about what range it is in.
     pub samples: Samples,
+    /// Opaque identity of this exact delivered lens pair.
+    ///
+    /// Index and timestamp repeat after a seek and across captures. This
+    /// token is minted only after every lane has been aligned and mapped, so
+    /// a consumer can bind derived work to these exact delivered surfaces
+    /// without retaining the decoder surfaces themselves.
+    pub(crate) stamp: FrameStamp,
+}
+
+/// Identity of one exact delivery of an aligned lens pair.
+///
+/// The readable index and timestamp are report fields. Equality additionally
+/// requires the private allocation minted for this delivery, so seeking back
+/// to the same instant or opening another capture cannot make an old result
+/// look current. A separate private identity is shared by deliveries from one
+/// reader until its next seek attempt; callers can compare it but cannot mint
+/// it. A clone retains both allocations without retaining any decoded surface.
+#[derive(Clone)]
+pub struct FrameStamp {
+    pair: Arc<()>,
+    decode_epoch: Arc<()>,
+    index: u64,
+    timestamp: Duration,
+}
+
+impl FrameStamp {
+    #[cfg(test)]
+    pub(crate) fn new(index: u64, timestamp: Duration) -> Self {
+        DecodeEpoch::new().stamp(index, timestamp)
+    }
+
+    /// Mint adjacent delivery identities for another crate's unit tests.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn for_test(index: u64, timestamp: Duration, previous: Option<&Self>) -> Self {
+        let decode_epoch = previous
+            .map(|stamp| stamp.decode_epoch.clone())
+            .unwrap_or_else(|| Arc::new(()));
+        Self {
+            pair: Arc::new(()),
+            decode_epoch,
+            index,
+            timestamp,
+        }
+    }
+
+    /// Whether two deliveries came from one reader without an intervening
+    /// seek attempt.
+    ///
+    /// This is source continuity evidence, not frame adjacency. Callers must
+    /// still compare the readable indices before advancing sequential state.
+    pub fn same_decode_epoch(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.decode_epoch, &other.decode_epoch)
+    }
+
+    pub fn index(&self) -> u64 {
+        self.index
+    }
+
+    pub fn timestamp(&self) -> Duration {
+        self.timestamp
+    }
+}
+
+/// Private issuer for one uninterrupted `Reader` run.
+///
+/// Opening a reader creates one issuer. A seek attempt replaces it before
+/// touching demuxer or decoder state, so a failed or partial seek cannot make
+/// a later delivery attest continuity with the position it tried to leave.
+struct DecodeEpoch(Arc<()>);
+
+impl DecodeEpoch {
+    fn new() -> Self {
+        Self(Arc::new(()))
+    }
+
+    fn stamp(&self, index: u64, timestamp: Duration) -> FrameStamp {
+        FrameStamp {
+            pair: Arc::new(()),
+            decode_epoch: self.0.clone(),
+            index,
+            timestamp,
+        }
+    }
+}
+
+impl PartialEq for FrameStamp {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index
+            && self.timestamp == other.timestamp
+            && Arc::ptr_eq(&self.pair, &other.pair)
+    }
+}
+
+impl Eq for FrameStamp {}
+
+impl std::fmt::Debug for FrameStamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FrameStamp")
+            .field("index", &self.index)
+            .field("timestamp", &self.timestamp)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Frames {
+    pub fn stamp(&self) -> FrameStamp {
+        self.stamp.clone()
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn empty_for_test(stamp: FrameStamp, size: Size) -> Self {
+        Self {
+            index: stamp.index(),
+            timestamp: stamp.timestamp(),
+            lenses: Vec::new(),
+            size,
+            samples: Samples::default(),
+            stamp,
+        }
+    }
 }
 
 impl std::fmt::Debug for Frames {
@@ -193,6 +316,8 @@ pub struct Reader {
     /// first picture comes out, which is 24 ms of a 46 ms scrub on this
     /// camera. A seek gives that up once and fills the pipeline behind it.
     landing: bool,
+    /// Identity shared by deliveries since open or the most recent seek attempt.
+    decode_epoch: DecodeEpoch,
     /// Held so the device outlives the decoders that reference it.
     _hw: HwDevice,
 }
@@ -251,14 +376,14 @@ struct Video {
     samples: Samples,
 }
 
-/// How one video stream's samples are written, off the container's own two
-/// fields.
+/// How one video stream's samples are written, off the container's own three
+/// fields: pixel format, range and Y'CbCr matrix.
 ///
-/// Read here rather than off a decoded frame because only one of the two is
-/// in a frame at all: a pixel format says how wide a sample is, and the range
-/// travels beside it and not in it. A depth this does not recognize is the
-/// 8-bit picture Kjerag drew before there was a second answer, which is what
-/// every `.insv` in the corpus is.
+/// Read from the container before decoder construction, where the capture's
+/// lens streams can be checked as one set. Range and matrix cannot be inferred
+/// from the plane layout. A depth this does not recognize is the 8-bit picture
+/// Kjerag drew before there was a second answer, which is what every `.insv`
+/// in the corpus is.
 ///
 /// **Big endian is refused rather than drawn.** The shader puts a 16-bit word
 /// back together itself, from two 8-bit components, in one order
@@ -283,7 +408,7 @@ struct Video {
 /// # Safety
 /// `parameters` must be a live `AVCodecParameters` of a video stream.
 unsafe fn written(parameters: &ff::ffi::AVCodecParameters) -> Fallible<Samples> {
-    use ff::ffi::{AVColorRange, AVPixelFormat};
+    use ff::ffi::{AVColorRange, AVColorSpace, AVPixelFormat};
     let is = |want: AVPixelFormat| parameters.format == want as i32;
     if is(AVPixelFormat::AV_PIX_FMT_P010BE) || is(AVPixelFormat::AV_PIX_FMT_YUV420P10BE) {
         return Err("this video's 10-bit samples are big endian, which Kjerag cannot read".into());
@@ -291,6 +416,17 @@ unsafe fn written(parameters: &ff::ffi::AVCodecParameters) -> Fallible<Samples> 
     Ok(Samples {
         wide: is(AVPixelFormat::AV_PIX_FMT_P010LE) || is(AVPixelFormat::AV_PIX_FMT_YUV420P10LE),
         limited: parameters.color_range != AVColorRange::AVCOL_RANGE_JPEG,
+        matrix: match parameters.color_space {
+            AVColorSpace::AVCOL_SPC_BT709 => crate::ColorMatrix::Bt709,
+            AVColorSpace::AVCOL_SPC_SMPTE170M | AVColorSpace::AVCOL_SPC_BT470BG => {
+                crate::ColorMatrix::Bt601
+            }
+            // BT.709 is the compatibility fallback for an unspecified or
+            // not-yet-supported matrix. This keeps drawing what the general
+            // renderer drew before the matrix was metadata rather than
+            // claiming a conversion we do not implement.
+            _ => crate::ColorMatrix::Bt709,
+        },
     })
 }
 
@@ -305,6 +441,7 @@ struct Shape {
     rate: (i32, i32),
     time_base: (i32, i32),
     frames: u64,
+    samples: Samples,
 }
 
 impl Shape {
@@ -329,6 +466,7 @@ impl Shape {
             && self.rate == other.rate
             && self.time_base == other.time_base
             && self.frames.abs_diff(other.frames) <= 1
+            && self.samples == other.samples
     }
 }
 
@@ -372,9 +510,38 @@ impl Reader {
         Self::over(sources, hw)
     }
 
+    /// Opens an already selected two-file capture in lens order.
+    ///
+    /// This is the descriptor-bound path used by offline instruments: the
+    /// caller has already selected and authenticated both leaves, so this
+    /// does not rediscover either one by name. Unlike [`Reader::open_with`],
+    /// disagreement is an error rather than a one-lens fallback.
+    pub fn open_pair(first: &Path, second: &Path) -> Fallible<Self> {
+        ff::init()?;
+        let hw = HwDevice::vaapi()?;
+        let first = Opened::new(first)?;
+        let second = Opened::new(second)?;
+        let shape = first.shape().ok_or("first file has no video stream")?;
+        if !second
+            .shape()
+            .is_some_and(|second| shape.pairs_with(second))
+        {
+            return Err("the explicitly selected files are not two lenses of one capture".into());
+        }
+        Self::over(vec![first, second], hw)
+    }
+
     /// One decoder per video stream of every source, and the timing the
     /// whole capture is read on.
     fn over(sources: Vec<Opened>, hw: HwDevice) -> Fallible<Self> {
+        // One uniform describes all planes in a draw, so settle their complete
+        // sample interpretation before creating any decoder or GPU owner.
+        // `Opened::new` has already filtered these videos through `is_lens`,
+        // so an attached cover image with its own tags is not compared here.
+        let samples =
+            agreed_samples(sources.iter().enumerate().flat_map(|(source, opened)| {
+                opened.videos.iter().map(move |video| (source, video))
+            }))?;
         let mut lanes = Vec::new();
         for (source, opened) in sources.iter().enumerate() {
             for video in &opened.videos {
@@ -411,11 +578,6 @@ impl Reader {
         // X2 pairs on this box are one frame apart, always in lens 0's
         // favour.
         let frames = videos().map(|video| video.frames).min().unwrap_or(0);
-        let samples = videos()
-            .next()
-            .map(|video| video.samples)
-            .unwrap_or_default();
-
         Ok(Self {
             sources: sources.into_iter().map(Opened::into_source).collect(),
             lanes,
@@ -426,6 +588,7 @@ impl Reader {
             lookahead: 0,
             skip_before: 0,
             landing: false,
+            decode_epoch: DecodeEpoch::new(),
             _hw: hw,
         })
     }
@@ -518,8 +681,8 @@ impl Reader {
         self.sources.len()
     }
 
-    /// Surfaces in one lane's frame pool, which is the ceiling on how many
-    /// decoded frames the engine may hold at once. `None` until the first
+    /// Initial surfaces in one lane's frame pool. Zero denotes dynamic
+    /// VA-API allocation, not a maximum. `None` until the first
     /// frame has been decoded: ffmpeg builds the pool when the decoder first
     /// picks a hardware format, not when it is opened.
     pub fn pool_size(&self) -> Option<i32> {
@@ -598,6 +761,11 @@ impl Reader {
     /// of that table would buy nothing;
     /// `cargo run --release -p kjerag-spike --bin seek` is the measurement.
     pub fn seek(&mut self, at: Cue, accuracy: Accuracy) -> Fallible<()> {
+        // Rotate before the first mutation. A seek can fail after moving one
+        // source or flushing part of the retained state; any later delivery
+        // must then refuse continuity with the position this call tried to
+        // leave.
+        self.decode_epoch = DecodeEpoch::new();
         let index = at.index(self.timing);
         // Stream index -1 means the timestamp is in AV_TIME_BASE units,
         // which is microseconds, and `..ts` asks for the keyframe at or
@@ -626,6 +794,39 @@ impl Reader {
             // Nothing to walk to: the picture is whatever the seek landed on.
             Accuracy::Keyframe => 0,
         };
+        self.landing = true;
+        Ok(())
+    }
+
+    /// Start a causal video replay at exact frame zero while positioning the
+    /// independent sound demuxer at the eventual target.
+    ///
+    /// Video must traverse every frame for a sequential consumer. Audio has
+    /// no such estimator state; filling its bounded ring from frame zero
+    /// would leave stale sound waiting when the target finally completed.
+    pub(crate) fn replay_from_zero(&mut self, audio_at: Cue) -> Fallible<()> {
+        self.replay_from(Cue::Index(0), audio_at)
+    }
+
+    /// Start a causal video replay at `video_at` while positioning the
+    /// independent sound demuxer at the eventual presented target.
+    pub(crate) fn replay_from(&mut self, video_at: Cue, audio_at: Cue) -> Fallible<()> {
+        self.decode_epoch = DecodeEpoch::new();
+        let video_index = video_at.index(self.timing);
+        let video_target = self.timing.time_of(video_index).as_micros() as i64;
+        for source in &mut self.sources {
+            source.input.seek(video_target, ..video_target)?;
+            source.drained = false;
+        }
+        for lane in &mut self.lanes {
+            lane.decoder.flush();
+            lane.queue.clear();
+        }
+        if let Some(track) = &mut self.track {
+            let target = self.timing.time_of(audio_at.index(self.timing)).as_micros() as i64;
+            track.seek(target)?;
+        }
+        self.skip_before = video_index;
         self.landing = true;
         Ok(())
     }
@@ -709,6 +910,7 @@ impl Reader {
                     lenses,
                     size: self.size,
                     samples: self.samples,
+                    stamp: self.decode_epoch.stamp(index, timestamp),
                 }));
             }
             // Decoded on the way to a cue. Dropping it here, before the map,
@@ -903,8 +1105,40 @@ impl Opened {
             rate: pair(first.rate),
             time_base: pair(self.time_base),
             frames: first.frames,
+            samples: first.samples,
         })
     }
+}
+
+fn agreed_samples<'a>(mut videos: impl Iterator<Item = (usize, &'a Video)>) -> Fallible<Samples> {
+    let (first_source, first) = videos.next().ok_or("file has no video stream")?;
+    if let Some((source, video)) = videos.find(|(_, video)| video.samples != first.samples) {
+        return Err(format!(
+            "video stream {} of file {} is {}, but video stream {} of file {} is {}",
+            video.stream,
+            source,
+            sample_description(video.samples),
+            first.stream,
+            first_source,
+            sample_description(first.samples)
+        )
+        .into());
+    }
+    Ok(first.samples)
+}
+
+fn sample_description(samples: Samples) -> String {
+    let depth = if samples.wide { "10-bit" } else { "8-bit" };
+    let range = if samples.limited {
+        "studio swing"
+    } else {
+        "full range"
+    };
+    let matrix = match samples.matrix {
+        crate::ColorMatrix::Bt709 => "BT.709",
+        crate::ColorMatrix::Bt601 => "BT.601",
+    };
+    format!("{depth}, {range}, {matrix}")
 }
 
 /// The file holding this capture's other lens, opened and checked, or `None`
@@ -948,8 +1182,127 @@ fn partner(path: &Path, first: &Opened, alongside: &[PathBuf]) -> Option<Opened>
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_frame_stamp_names_one_delivery_not_one_timestamp() {
+        let at = Duration::from_micros(212_512_300);
+        let delivered = FrameStamp::new(6_369, at);
+        let same_delivery = delivered.clone();
+        let reseeked = FrameStamp::new(6_369, at);
+
+        assert_eq!(delivered, same_delivery);
+        assert_ne!(delivered, reseeked);
+        assert_ne!(delivered, FrameStamp::new(6_370, at));
+        assert_ne!(
+            delivered,
+            FrameStamp::new(6_369, at + Duration::from_micros(1))
+        );
+    }
+
+    #[test]
+    fn a_decode_epoch_names_one_uninterrupted_reader_run_not_adjacency() {
+        let epoch = DecodeEpoch::new();
+        let first = epoch.stamp(6_369, Duration::from_micros(212_512_300));
+        let next = epoch.stamp(6_370, Duration::from_micros(212_545_667));
+        let gap = epoch.stamp(6_400, Duration::from_micros(213_546_667));
+        let after_seek = DecodeEpoch::new().stamp(next.index(), next.timestamp());
+
+        assert!(first.same_decode_epoch(&next));
+        assert!(first.same_decode_epoch(&gap));
+        assert!(!first.same_decode_epoch(&after_seek));
+        assert_ne!(next, after_seek);
+    }
+
+    #[test]
+    fn retaining_a_frame_stamp_prevents_aba_identity_reuse() {
+        let held = FrameStamp::new(7, Duration::from_secs(1));
+        for _ in 0..10_000 {
+            let another = FrameStamp::new(7, Duration::from_secs(1));
+            assert_ne!(held, another);
+        }
+    }
+
     fn ntsc() -> Timing {
         Timing::new(ff::Rational::new(30000, 1001), 53940).unwrap()
+    }
+
+    fn parameters(
+        format: ff::ffi::AVPixelFormat,
+        range: ff::ffi::AVColorRange,
+        space: ff::ffi::AVColorSpace,
+    ) -> ff::ffi::AVCodecParameters {
+        // All fields `written` does not read are inert here. The C struct has
+        // no Rust constructor because libavcodec normally allocates it.
+        let mut parameters: ff::ffi::AVCodecParameters = unsafe { std::mem::zeroed() };
+        parameters.format = format as i32;
+        parameters.color_range = range;
+        parameters.color_space = space;
+        parameters
+    }
+
+    #[test]
+    fn sample_matrix_is_container_metadata_not_depth_or_range() {
+        use ff::ffi::{AVColorRange as Range, AVColorSpace as Matrix, AVPixelFormat as Format};
+
+        let bt709 = unsafe {
+            written(&parameters(
+                Format::AV_PIX_FMT_YUV420P,
+                Range::AVCOL_RANGE_JPEG,
+                Matrix::AVCOL_SPC_BT709,
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            bt709,
+            Samples {
+                wide: false,
+                limited: false,
+                matrix: crate::ColorMatrix::Bt709,
+            }
+        );
+
+        let bt601 = unsafe {
+            written(&parameters(
+                Format::AV_PIX_FMT_P010LE,
+                Range::AVCOL_RANGE_MPEG,
+                Matrix::AVCOL_SPC_SMPTE170M,
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            bt601,
+            Samples {
+                wide: true,
+                limited: true,
+                matrix: crate::ColorMatrix::Bt601,
+            }
+        );
+
+        let bt470 = unsafe {
+            written(&parameters(
+                Format::AV_PIX_FMT_YUV420P,
+                Range::AVCOL_RANGE_JPEG,
+                Matrix::AVCOL_SPC_BT470BG,
+            ))
+            .unwrap()
+        };
+        assert_eq!(bt470.matrix, crate::ColorMatrix::Bt601);
+    }
+
+    #[test]
+    fn unspecified_or_unsupported_matrix_keeps_the_bt709_compatibility_default() {
+        use ff::ffi::{AVColorRange as Range, AVColorSpace as Matrix, AVPixelFormat as Format};
+
+        for matrix in [Matrix::AVCOL_SPC_UNSPECIFIED, Matrix::AVCOL_SPC_BT2020_NCL] {
+            let samples = unsafe {
+                written(&parameters(
+                    Format::AV_PIX_FMT_YUV420P,
+                    Range::AVCOL_RANGE_JPEG,
+                    matrix,
+                ))
+                .unwrap()
+            };
+            assert_eq!(samples.matrix, crate::ColorMatrix::Bt709);
+        }
     }
 
     /// One lens of a ONE X2 pair, as the container describes it: 2880 square,
@@ -962,6 +1315,10 @@ mod tests {
             rate: (30000, 1001),
             time_base: (1, 30000),
             frames,
+            samples: Samples {
+                matrix: crate::ColorMatrix::Bt601,
+                ..Samples::default()
+            },
         }
     }
 
@@ -998,6 +1355,13 @@ mod tests {
             ..x2_lens(2516)
         }));
         assert!(!lens.pairs_with(x2_lens(2600)));
+        assert!(!lens.pairs_with(Shape {
+            samples: Samples {
+                matrix: crate::ColorMatrix::Bt709,
+                ..Samples::default()
+            },
+            ..x2_lens(2516)
+        }));
         // An X4-class file, which carries both lenses itself: neither side of
         // this is ever half a capture.
         let both = Shape {
@@ -1007,6 +1371,56 @@ mod tests {
         };
         assert!(!both.pairs_with(x2_lens(4546)));
         assert!(!x2_lens(4546).pairs_with(both));
+    }
+
+    #[test]
+    fn every_selected_lens_stream_agrees_on_complete_sample_metadata() {
+        let video = |stream, samples| Video {
+            stream,
+            rate: ff::Rational::new(30000, 1001),
+            frames: 100,
+            size: Size::new(3840, 3840),
+            samples,
+        };
+        let first = video(0, Samples::default());
+        let same = video(1, Samples::default());
+        assert_eq!(
+            agreed_samples([(0, &first), (0, &same)].into_iter()).unwrap(),
+            Samples::default()
+        );
+
+        for different in [
+            Samples {
+                wide: true,
+                ..Samples::default()
+            },
+            Samples {
+                limited: true,
+                ..Samples::default()
+            },
+            Samples {
+                matrix: crate::ColorMatrix::Bt601,
+                ..Samples::default()
+            },
+        ] {
+            let different = video(1, different);
+            assert!(agreed_samples([(0, &first), (0, &different)].into_iter()).is_err());
+        }
+
+        let different = video(
+            1,
+            Samples {
+                matrix: crate::ColorMatrix::Bt601,
+                ..Samples::default()
+            },
+        );
+        let error = agreed_samples([(0, &first), (0, &different)].into_iter())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "video stream 1 of file 0 is 8-bit, full range, BT.601, but video stream 0 of file 0 is 8-bit, full range, BT.709"
+        );
     }
 
     #[test]
@@ -1190,6 +1604,7 @@ mod tests {
             reader.seek(Cue::Time(at), Accuracy::Exact).unwrap();
             let exact = reader.next_frames().unwrap().unwrap();
             assert_eq!(exact.index, wanted, "exact seek to {at:?}");
+            let exact_stamp = exact.stamp();
 
             reader.seek(Cue::Time(at), Accuracy::Keyframe).unwrap();
             let key = reader.next_frames().unwrap().unwrap();
@@ -1198,19 +1613,35 @@ mod tests {
                 "keyframe seek to {at:?} landed on {} for {wanted}",
                 key.index
             );
+            let key_stamp = key.stamp();
+            assert!(
+                !exact_stamp.same_decode_epoch(&key_stamp),
+                "a seek must rotate source continuity"
+            );
 
             // Giving a read up must cost nothing but the time already spent:
             // the lanes keep what they decoded, so the frame the abandoned
             // read was reaching for is the one the next read hands over.
+            let mut checks = 0;
             assert!(matches!(
-                reader.read_until(|| true).unwrap(),
+                reader
+                    .read_until(|| {
+                        checks += 1;
+                        checks == 2
+                    })
+                    .unwrap(),
                 Read::Interrupted
             ));
+            assert_eq!(checks, 2, "one packet must be pumped before interruption");
 
             // And reading on from a landing carries on in order, which is
             // what playing after a scrub depends on.
             let next = reader.next_frames().unwrap().unwrap();
             assert_eq!(next.index, key.index + 1);
+            assert!(
+                key_stamp.same_decode_epoch(&next.stamp()),
+                "an interrupted read must preserve source continuity"
+            );
         }
     }
 }

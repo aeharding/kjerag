@@ -2217,7 +2217,6 @@ dependencies = [
 [[package]]
 name = "iced_core"
 version = "0.14.0"
-source = "git+https://github.com/pop-os/libcosmic?rev=dc1cf9f00cbe2902a52166492654bb9fee8a73d1#dc1cf9f00cbe2902a52166492654bb9fee8a73d1"
 dependencies = [
  "bitflags 2.13.1",
  "build_helpers",
@@ -2344,7 +2343,6 @@ dependencies = [
 [[package]]
 name = "iced_wgpu"
 version = "0.14.0"
-source = "git+https://github.com/pop-os/libcosmic?rev=dc1cf9f00cbe2902a52166492654bb9fee8a73d1#dc1cf9f00cbe2902a52166492654bb9fee8a73d1"
 dependencies = [
  "as-raw-xcb-connection",
  "bitflags 2.13.1",
@@ -2876,6 +2874,7 @@ dependencies = [
  "kjerag-meta",
  "libc",
  "libcosmic",
+ "sha2",
  "wgpu",
 ]
 
@@ -2885,13 +2884,15 @@ version = "0.2.0"
 dependencies = [
  "ashpd 0.12.3",
  "ffmpeg-next",
- "kjerag",
  "kjerag-media",
  "kjerag-meta",
  "kjerag-render",
  "libc",
  "png 0.17.16",
  "pollster",
+ "serde",
+ "serde_json",
+ "sha2",
  "tokio",
  "url",
  "wayland-client",

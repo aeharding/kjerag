@@ -77,6 +77,22 @@ impl Offscreen {
         self.size
     }
 
+    /// Draw an explicitly supplied diagnostic map over the prepared picture.
+    pub fn render_map(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipeline: &mut ScenePipeline,
+        map: &kjerag_render::OneXsMapFrame,
+    ) -> Fallible<()> {
+        let index = pipeline.submit_one_xs_map_direct(device, queue, &self.texture, map)?;
+        device.poll(wgpu::PollType::Wait {
+            submission_index: Some(index),
+            timeout: None,
+        })?;
+        Ok(())
+    }
+
     /// The pass, drawn and waited for.
     pub fn render(
         &self,
@@ -84,6 +100,48 @@ impl Offscreen {
         queue: &wgpu::Queue,
         pipeline: &ScenePipeline,
     ) -> Fallible<()> {
+        let index = self.submit_draw(device, queue, pipeline);
+        device.poll(wgpu::PollType::Wait {
+            submission_index: Some(index),
+            timeout: None,
+        })?;
+        Ok(())
+    }
+
+    /// Complete a capacity-test draw without holding wgpu's fence lock while
+    /// the GPU runs. A blocking poll would prevent the concurrent stitch
+    /// worker from submitting and distort the scheduling being measured.
+    /// The queue-prefix callback can include a concurrent worker submission;
+    /// its receipt is a conservative completion time, never an early one.
+    pub fn render_callback_completed(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipeline: &ScenePipeline,
+    ) -> Fallible<()> {
+        self.submit_draw(device, queue, pipeline);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        queue.on_submitted_work_done(move || {
+            let _ = sender.try_send(());
+        });
+        loop {
+            device.poll(wgpu::PollType::Poll)?;
+            match receiver.recv_timeout(std::time::Duration::from_micros(100)) {
+                Ok(()) => return Ok(()),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("offscreen draw completion callback disconnected".into());
+                }
+            }
+        }
+    }
+
+    fn submit_draw(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipeline: &ScenePipeline,
+    ) -> wgpu::SubmissionIndex {
         let view = self.texture.create_view(&Default::default());
         let mut encoder = device.create_command_encoder(&Default::default());
         {
@@ -102,12 +160,7 @@ impl Offscreen {
             });
             pipeline.draw(&mut pass);
         }
-        let index = queue.submit([encoder.finish()]);
-        device.poll(wgpu::PollType::Wait {
-            submission_index: Some(index),
-            timeout: None,
-        })?;
-        Ok(())
+        queue.submit([encoder.finish()])
     }
 
     /// The picture as tightly packed RGBA rows, with the copy's row padding

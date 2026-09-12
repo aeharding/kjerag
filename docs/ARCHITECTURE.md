@@ -10,17 +10,19 @@ a dependency it does not declare, so the diagram below is enforced by
 crates/app      kjerag         libcosmic shell + window. The view is an
                                `iced::widget::shader` around a Scene, and
                                the mouse reaches it through that widget.
-crates/render   kjerag-render  wgpu: dmabuf import, one WGSL pass (NV12 ->
-                               RGB + Mei reprojection + seam blend),
-                               camera state (drag = yaw/pitch, scroll = FOV),
-                               offscreen render for screenshots
+crates/render   kjerag-render  wgpu: dmabuf import, final WGSL pass (NV12 ->
+                               RGB + projection); selected ONE X2 compact GPU
+                               luma sampling, sparse PIS, retained state, dense
+                               map construction and direct resident draw;
+                               camera state and offscreen screenshot rendering
 crates/media    kjerag-media   ffmpeg demux, dual VA-API HEVC decoders in
                                lockstep, presentation clock, play/pause,
                                frames by index or timestamp. One demuxer per
                                file of the capture, which is two on the
                                cameras that write one lens per file. No UI.
 crates/meta     kjerag-meta    .insv trailer, read directly: per-lens Mei
-                               calibration, gyro track, per-frame exposure.
+                               calibration, gyro track, per-frame exposure,
+                               global ISO observations for denoising.
                                No UI, no ffmpeg, no wgpu.
 crates/spike    kjerag-spike   the headless instruments, which nothing else
                                depends on: `spike` (M0 frame-path timings)
@@ -34,16 +36,38 @@ That last one is the point of the split: `cargo test -p kjerag-meta` passes
 on a box with no libav headers, and a CI job that installs nothing proves it
 on every push.
 
-`spike -> app` is the one edge that points up that list, and it is one
-function wide: `seam=pool` (`crates/spike/src/seam.rs`) reads the saved seam
-pool through `kjerag::config::state` and answers off it with
-`SeamPool::answer`, so an instrument draws the pose the app draws. Copying
-either the file's shape or the medoid rule into the instruments would be a
-second answer to "what pose does the app draw this camera with", and a second
-answer is exactly the defect it was added for: two acceptance lines in
-docs/research/reference-views.md, and four copies of them, spent two days
-quoting a pose the app had stopped drawing. The app crate has a `src/lib.rs`
-for this and for nothing else; `src/main.rs` is the same thin binary it was.
+`CalibrationSet::denoise_iso` holds the record-9 observations and summary
+decoded by the Studio-read constructor law. This is a global denoising input,
+not per-lens gain or a photometric correction. Its millisecond origin discards
+the native 40-item prefix, independently of the shutter clock, preserving the
+native signed/wrapping operations. Missing data supplies no observations;
+metadata parsing chooses no ISO100 default. Frame-time interpolation, invalid
+ISO handling and backend parameter selection belong to the temporal consumer,
+not this parser. `temporal_fusion::iso::Lookup` now owns a single open-time
+snapshot and implements the recovered binary64 bracketing/interpolation,
+forward-zero cache and invalid-value correction. Empty or unordered input is
+refused; backward query time requires an explicit reset, which also clears the
+cache. It does not select filter parameters or invent missing ISO values.
+`CalibrationSet::source_group_type` preserves the presence and int32 type of
+protobuf FileGroupInfo (tag26/type1), including an explicitly present zero.
+`settings::Provider` combines source metadata, source fps and the ISO lookup
+for the authenticated X4 Air and ONE X2 selector routes. It returns per-source
+radius, motion-confidence inputs and fusion settings using the recovered native
+table interpolation. Unsupported sources or missing ISO are errors, not guessed
+defaults. Reset clears the ISO lookup's chronology/cache. Ordinary file opening
+selects this provider once during live opening, before dropping the full
+calibration. Authenticated supported sources select the temporal stream below;
+unsupported selectors explicitly retain the existing spatial stitch. Invalid
+ISO on a supported source is an error, not a silent fallback. Stepped stills do
+not construct a temporal provider.
+`docs/research/studio-denoise-iso-602.md`
+records the binary and real-file authority.
+
+`spike` has no dependency on `app`. Its stitch instruments default to the
+factory calibration, which is the parity base. A research run may name the
+five seam knobs explicitly, but the removed `file` and `pool` values cannot
+silently select a content-fitted pose. The app's saved seam pool and the
+upward dependency that exposed it to instruments are gone.
 
 `media -> meta` is one function wide and it is issue #79's: a capture is not
 always one file, and which file holds the other lens is a fact about `.insv`
@@ -62,10 +86,746 @@ The shell is libcosmic, which pins wgpu 28, so `render` is written against
 28 and owns the one module that wgpu 30 would delete
 (`crates/render/src/dmabuf.rs`).
 
+The installed test build draws full-resolution prefiltered source/map
+samples with a reduced full-sphere temporal residual. The owner accepted the607
+quarter-field and subsequent prefilter moving comparisons, with exact responses
+recorded in ROADMAP; this is not broad footage or live smoothness acceptance. The two
+low-resolution terms pass through the same gamma RGB/NV12/RGB conversion. Their
+signed difference is bilinearly sampled, added to explicitly quantized direct
+RGB8, clamped, then transferred to the surface in one render pass. Rectilinear
+views use the existing native mesh; curved views use the existing body-ray map.
+Correction textures extend picture group0, retaining map group1 and colour
+group2 within the native three-group limit. Pipelines cache by surface format.
+
+The installed branch test build materializes the selected temporal input in canonical
+world coordinates, before filtering, for the1147 moving-line report. The owner
+accepts both the stabilized-input diagnostic and, on2026-09-12, the installed
+player ("looks good. not perfect but pretty damn good"). This implementation
+passes both-camera installed UI and rendering-capacity qualification (ROADMAP).
+That is tested-build acceptance, not all-footage or exact Studio parity. Scene retains actual
+`body_from_world` independently of the display's horizon toggle. Its source
+Reframe has zero camera yaw/pitch and a fixed aspect, so mouse movement and
+window size cannot steer the temporal field. A separately cached world shader
+specialization samples the existing source/map with that transform; ordinary
+body/full reference constructors keep their body-fixed chart.
+
+`WorldPanorama` seals the exact prepared source-uniform columns to its stamped
+RGB texture. `CorrectionInput` retains those columns with the same source/map
+owner while the coordinate-neutral `RgbPanorama` enters the unchanged temporal
+stream. Each completed center source carries its own48-byte immutable matrix
+buffer. The final correction lookup transforms the actual displayed body ray
+back into that source's world chart; it never derives the transform from the
+redraw Reframe. This adds binding9 to picture group0, not another bind group or
+render pass. The matrix buffer is allocated at source cadence and shared by
+view redraws. Temporal weights, history, raster resolution, source cadence and
+high-detail prefilter remain unchanged. The world chart's different sampling
+grid can change motion/noise decisions; the owner tested the installed version
+separately rather than transferring the diagnostic's acceptance automatically.
+
+The source-rate prefilter changes only the corrected
+display's high term: it evaluates the existing native box at every source
+texel centre in the existing snapshot passes, then uses atlas bilinear reads
+at view time. Full dimensions do not mean unchanged detail: prefilter storage
+quantization and later interpolation can soften detail or change noise. This
+was disclosed and accepted for the607 movie and test build, not all footage.
+A private snapshot constructor and corrected-only shader specialization keep
+prefiltered storage away from raw
+body/map/color/temporal inputs. Native-box reference draws default to unchanged
+sampling; both paths share the original atlas boundary and box WGSL functions.
+
+The selected correction raster preserves the preceding half-field candidate's
+original-source ownership and display rules. Its five-level field is1920x960
+for X4 and1408x704 for ONE X2. The latter rounds the natural
+quarter height down to a multiple of32, preserving a2:1 full-sphere raster
+without partial finest/output motion blocks; it does not crop source coverage.
+Level3 still supplies exactly full-field/16 luma coordinates. Five and six levels use the
+explicit reduced finest-size entry; the full seven-level oracle keeps its
+original minimum. Five through seven matching nonempty pyramids are admitted,
+never padded or fabricated levels. The larger angular search support and
+changed noise/motion-edge output were disclosed before the owner accepted the
+607 moving Studio comparison ("Yes, looks acceptable"). That approval is not
+acceptance of all footage, live-player performance or a merge. The
+preceding quarter bundle passed40 X4 and44 ONE X2 UI checks; ROADMAP records
+the current prefilter package's separate installed qualification and exact
+source/executable identity. The preceding package is retained for recovery.
+
+The selected quarter path uses a periodic-horizontal temporal specialization
+for the owner-confirmed680-second sky defect. The visible boundary follows the
+body panorama's0/360-degree cut, not a lens handover, and the owner confirms it
+is absent from the moving Studio comparison. Pyramid reduction, motion search,
+final motion packing, reference fusion and both residual terms' chroma
+reconstruction now wrap actual image X; Y keeps its existing boundary rule.
+Coarse predictor grids wrap only when their blocks cover the complete physical
+image width. Partial coarse tails retain endpoint predictors. Only the selected
+quarter constructor opts in; full/half and native saved-input reference paths
+remain clamped. The owner accepts the moving Studio comparison and calls the
+old/new result "Looks fixed" for sky680. The installed source `dad5d709` Flatpak
+contains this same specialization;
+ROADMAP records its exact package identity, both-camera installed UI checks
+and separate capacity measurements. The owner's installed live-player verdict
+is still pending. History, source cadence and filter weights do
+not change. Evidence and moving comparisons: `scratch/sky680/quarter-periodic-01`.
+
+The resident source worker encodes the reduced RGB body and display snapshots
+of both original lens planes in one command buffer. The previous quarter build
+used exact texture-load copies; the current branch and installed build prefilter
+in the same two MRT passes, reading both original lens planes at the internal
+atlas join. Imported dmabufs are
+sampled-only, so no unsupported COPY_SRC use is invented. The first body pass
+arms submission-complete retirement before any source sampling. Its retirement
+covers the later snapshot passes too; a later encode rejection explicitly closes
+admission and quarantines uncertain owners while preserving the original error.
+Snapshots are ordinary GPU-owned R8/RG8 textures, not aliases of VA-API surfaces.
+The snapshot path explicitly requires8-bit planes; higher-bit-depth snapshot
+support has not been qualified. The installed map snapshot clones only immutable
+read/fusion bind groups, exact frame and context, not the heavyweight carrier.
+
+`CorrectionStream` owns the low unfiltered controls and reduced-level temporal
+Stream. `CorrectionSequence` retains at most seven full-resolution display/map
+snapshots and moves each into its exact completed `CorrectedFrame`. Readbacks and uploaded
+maps exist only in the older paired review harness, not this live path. Scene
+publishes and screenshots these typed frames. There is no coefficient EMA,
+skipped source refresh or interpolation between correction updates. Halving the
+field changes angular block support and motion decisions, so it is deliberately
+not claimed to be an equivalent arithmetic optimization. The full-resolution
+seven-level and preceding half-field Stream constructors remain test oracles.
+
+`render::temporal_fusion` supplies the stream's post-stitch primitives.
+It consumes explicit full-range NV12 image arrays,
+current-to-reference displacement/confidence grids, a luma-index grid and
+effective fusion parameters. The full-plane `GpuFuse` reference records two
+render passes producing GPU-owned R8/RG8 planes. The selected `packed::Encoder`
+instead records one half-size MRT pass producing RGBA8 Y quartets and RG8 UV.
+Each even2x2 footprint shares its flow/luma lookup while retaining the same
+ordered per-component fusion and normalized attachment quantization. The packed
+converter reads the correct Y lane directly and retains full-resolution centered
+chroma reconstruction and RGB output, without an intervening unpack pass.
+Neither primitive submits, waits or reads pixels back. Studio's selected
+implementation uses compute; these render targets are Kjerag's execution
+choice. The caller must supply prepared images and own source association,
+history, seek epochs and completion. None of that scheduling is supplied by
+this primitive. Saved native input/output tests establish its bounded
+arithmetic result, not a complete temporal pipeline or performance verdict.
+
+Its `stream` child supplies worker-owned execution over the requested field.
+Seven real sources emit startup
+centers0..3, steady center3 and flush4..6. The source's matrix and retained
+automatic settings travel with its exact stamp. Full RGB/NV12 conversion,
+GPU pyramid/search/refinement/fusion now use resident images throughout. Arrival
+encodes the selected number of packed motion-pyramid levels and submits without
+waiting for CPU pixels. Coarse levels down through one produce GPU records; histogram,
+global prediction and seed interpolation feed the next level directly, followed
+by the finest search. Motion packing reads the retained level-three luma texture,
+not an uploaded CPU copy. Source stamps and effective settings remain in the
+same seven-source history. Same-queue ordering establishes preparation/search
+dependencies; only final filtered-output publication waits for completion, using
+callbacks and nonblocking device polls on the temporal worker.
+
+The first validated source push prepares both coarse-search pipelines on that
+worker, before adding history. Later ISO transitions therefore reuse compiled
+pipelines instead of compiling during playback. This records no GPU work and
+does not eagerly build motion images for radius-zero sources. A fresh seek
+epoch prepares its own pipelines during buffering; preparation is not free
+startup work. The measured first-source delay and narrow activation-hitch
+comparison are recorded in ROADMAP, separately from overall capacity.
+The owner accepted the roughly0.1-second first-picture delay for this test
+build after its meaning and the unmeasured extra seek delay were disclosed.
+
+This candidate deliberately changes coarse search execution semantics: blocks
+read immutable same-level predictors instead of serially updated neighbours,
+and omit the row-major bad-block counter and adaptive UMH recovery. Level order,
+strict candidate ties, penalties, fixed-center radius-two search, global
+prediction and interpolation remain. Both the preceding serial CPU oracle and a
+readable CPU reference for the new independent-block candidate remain available.
+GPU/CPU candidate equality does not establish Studio-like moving output. The
+owner accepted the current 607-second moving Studio comparison on 2026-09-10;
+the separate 612 comparison and live performance remain unqualified. GPU work
+still has dependent levels and one large filter submission/completion boundary
+per output; GPU residency alone does
+not establish smooth drawing or full-rate playback.
+The preceding full-resolution reference producer draws to packed-Y and UV
+attachments, avoiding the disposable full-size RGB panorama. It samples four
+full-resolution centres per fragment, explicitly quantizes each gamma RGB
+sample to RGB8, then applies the existing full-range NV12 conversion. History
+unpacks the four Y lanes and copies UV into the arriving source's reserved
+layer. The typed single-layer luma view supplies the pyramid. The old RGB
+producer and direct RGB-to-history path remain test oracles.
+The compact owner seals device, source stamp, matrix and geometry. Its shader
+reuses the exact lens-sampling Reframe for size and matrix; the caller rejects
+scaled targets before allocation. This keeps the existing three bind groups,
+including photometric fusion, within the native renderer's limits. The initial
+four-group prototype passed adapter-max tests but failed native startup; a
+three-group GPU creation regression now exercises that boundary. Compact
+sampling is not byte-identical to full-resolution RGB rasterization and still
+requires moving-output review; the owner's preceding607 acceptance does not
+automatically cover this representation change.
+
+That compact reference producer additionally caches the 51-by-101 native mesh
+vertices once per source/map. A164,832-byte GPU buffer retains position and
+packed-map samples, including the distinct column100 endpoint. Its compute
+prepass and panorama draw share the existing encoder and source retirement.
+Per-pixel triangle selection, interpolation, alpha/fusion sampling and source
+cadence remain unchanged; installed map buffers remain private and frame/device
+sealed. This removes repeated vertex trigonometry and map sampling from millions
+of body pixels, not full-resolution sampling or temporal work. The uncached
+compact and RGB producers remain diagnostic oracles. Both-camera comparisons
+find sparse one-code YUV differences, so numerical identity is not claimed.
+Native new/old/new playback improves from14.57 to16.12–16.28 source fps, but
+maximum pre-prepare `native-pump` shown-report gaps are worse in those cached
+samples. Those reports sample the prior installed frame before the current
+redraw's prepare and therefore do not by themselves establish visible pauses.
+A later unchanged cached control reaches15.66fps without that long gap, so
+cache causation is not established. Reusing one workspace across sources gave
+no further throughput benefit and was removed; the retained producer allocates
+one per source/map.
+Neither smoothness nor active240fps capacity is established, and this candidate
+is not installed.
+
+Deriving the initial body cell from panorama UV was evaluated and removed.
+Direct latitude disagreed with the existing GPU inverse on both camera rasters;
+the longitude-only refinement preserved the tested seeds and rendered sequences
+but gave no dependable native throughput gain. The retained renderer therefore
+uses the original inverse and search, without the extra body-selector wrapper.
+
+A radius-zero
+source initially needs no motion inputs, but a later center may reference it.
+Missing inputs are then reconstructed once from its exact retained unfiltered
+NV12 layer; no lens sampling or colour-coefficient update runs again.
+
+`FilteredCaptureFacade` separates processing from presentation. The resident
+stitch worker prepares source/map/color and body panoramas while a single temporal
+executor filters the preceding source. At most two sources may occupy those
+stages within an epoch. Admission reserves the four-picture ready capacity,
+including the seventh arrival's four startup outputs; EOF waits for both stages
+to drain before reserving its three tail outputs. Only completed outputs publish.
+The executor and its capacity-one channel are shared across seek restarts. Each
+epoch owns a fresh sealed Stream, and only that executor may mutate it. A full
+channel blocks the stitch worker, never the UI, bounding old work across rapid
+seeks to one executing job, one queued job, one blocked stitch handoff and one
+queued stitch job. Alongside current and last-shown owners this retains at most
+six distinct epoch owners in the product seek path. A successful restart now
+cancels its predecessor's temporal epoch and clears unpublished ready outputs.
+Idle history drops immediately through a nonblocking try-lock; executing history
+drops after its current operation. Old completed Shown remains independent.
+Errors stay with their
+epoch and preserve the first underlying failure. There is no per-seek worker
+thread, UI join, changed source cadence or changed filter arithmetic.
+Panorama source import retries only classified resource exhaustion before the
+stitch transaction begins. The exact decoded pair and reserved draw slot remain
+on the bounded stitch worker, with a 1 ms scarcity backoff and the existing
+two-second import limit. The deadline is checked before another attempt after
+waiting. No successful import sleeps; invalid descriptors fail immediately.
+Exhaustion beyond the bound passes the last underlying error to the existing
+capture-terminal handoff. No later stitching or filtering failure is retried.
+At most four ready corrected frames and one installed frame remain per epoch.
+Original source snapshots move from temporal pending into those outputs rather
+than being duplicated. Decoder leases retire after body/plane-copy preparation;
+corrected outputs own all sampled resources independently of decoder surfaces. Only the
+exact due FIFO front may install and acknowledge Player's current delivery.
+Scene drains six prepared successors even during paused startup/seeks, never
+advancing picture/audio time merely to satisfy the filter. A completed panorama
+and its acknowledgement survive renderer recreation together; a seek replaces
+the facade while the old shown facade retains its last picture. ISO restarts
+share immutable observations but reset lookup chronology and zero-cache state.
+
+The live panorama projector renders that typed completed texture into the
+existing surface pass with the same gamma/linear convention as direct drawing.
+The packed-filter integration retains all62 saved607/612 Scene frames exactly
+and improves controlled native source throughput from15.12 to17.32–17.39fps.
+These1280x720 runs still show81–91ms maximum source-frame gaps; they establish
+neither full-rate playback nor the2256x1504/4.17ms capacity target.
+Changing view only changes its projection binding, not filtering or colour
+history. Screenshots use the exact installed panorama and surface format. EOF
+flush waits until all real prepared inputs have been accepted. Near-EOF exact
+seeks decode the last seven real sources, holding picture/audio time at the
+requested target and preventing pre-target outputs from replacing Shown. Whole
+captures shorter than seven sources still produce an explicit unavailable-output
+error. Full X4 and ONE X2 geometry use seven nonempty 16x16 search grids; odd
+pyramid dimensions floor-halve and discard the unmatched tail. Different native
+level-count routes remain unsupported. Automatic selection is not a playback
+capacity or installed-quality verdict.
+
+The `history` child owns seven resident NV12 array layers and the exact source
+stamp occupying each slot. Arriving NV12 images can be copied once; the selected
+compact producer unpacks/copies directly into the same validated slot. A complete borrowed
+window supplies center/reference stamps and physical layer indices in logical
+c-3,c-2,c-1,c+1,c+2,c+3 order. An explicit `window_at(center, radius)` also
+supplies the clipped intervals needed for startup and tail frames: ascending
+logical order excluding the center, with no repeated or fabricated neighbors.
+The ring must still contain seven real sources. A zero radius has no references
+and cannot be sent to the fusion primitive; `encode_copy_current` instead copies
+the selected physical Y/UV layers into an independent sampled output. Reference
+phases use the recovered binary64 raised-cosine law over the actual clipped
+interval. Neither accessor grants processing
+or presentation authority; the caller supplies the center and effective radius.
+It records copies without submitting or waiting.
+Its caller must submit earlier consumers before a later overwrite and create a
+fresh owner for a new decode epoch. It rejects gaps, duplicates and invalid
+storage before recording. Resources must share one wgpu Instance: the pinned
+native device equality only diagnoses different devices within that Instance,
+not separate Instances with colliding local IDs. This is storage ownership,
+not player startup, seeking, padding or scheduling policy.
+
+Its `pyramid` and `motion` children retain readable CPU references.
+`pyramid` takes an explicit gray base image and level
+count, retaining Studio's two separately rounded reduction passes. `motion`
+takes explicit raw displacement/cost, luma, geometry, tables and reference
+phase; it implements the verified16x16-block,2x expansion/confidence path.
+Unsupported geometry is rejected, not assigned new semantics. Neither is a
+motion search, calibration policy, image-history owner or player scheduling
+component. Hash-sealed native tests cover seven pyramids and six packed
+motion grids. The selected worker uses resident GPU pyramid preparation and
+coarse search; CPU readbacks belong to the separate offline reference path.
+View redraw does neither.
+
+The `search` child is a readable serial CPU implementation of the selected
+seven-level, gray, pel-1 motion search. Its GPL-3.0-or-later adaptation preserves
+the pinned MVTools attribution and the separately read native changes. It
+reproduces the standalone combined adapter, not every native vector. It owns
+neither source history nor player policy. Its 16x16 SAD leaf uses checked row
+slices, byte absolute differences and an exact u32 sum, converted back to the
+existing i64 penalty arithmetic. This exposes automatic compiler vectorization
+without unsafe code, CPU-feature dispatch or changed search decisions. The
+original scalar leaf remains a test oracle; the separate parallel-refinement
+CPU oracle is unchanged. The `color` child supplies an explicit
+diagnostic gamma-RGB/full-range-NV12 conversion; it is not a claim that Studio
+uses that matrix inverse, quantization or centered chroma footprint.
+
+The separate `parallel_refine` candidate changes the finest motion-search
+algorithm: blocks read immutable coarse seeds instead of newly searched
+neighbors, and omit the serial bad-block/UMH recovery. Its readable CPU oracle
+and GPU kernel keep the initial candidate order, SAD penalties, bounds and
+fixed radius-one ring. The GPU assigns one workgroup to each block/reference,
+with distinct immutable input and output buffers. Runtime slices accept one
+through six matching references/seeds/globals; allocation and dispatch use that
+actual count. Each reference has one dispatch with a directly bound reference
+texture, removing the six-way texture switch inside each SAD load. The dispatch
+uniform selects its original contiguous seed/output slice. Typed output carries its reference
+count into motion packing. Eight teams of eight lanes
+cover each candidate's complete 256-byte SAD. Gray inputs use typed, immutable
+`PackedGray` textures from the pyramid producer: four horizontal bytes in rgba,
+with logical dimensions distinct from physical packed width. Each lane handles
+two rows, using four aligned or five unaligned texel reads per row and exact
+component swizzles. The current block is 64 vec4 words, loaded once per workgroup.
+Team sums remain bounded exact u32 arithmetic, followed by the same ordered
+strict-tie decision. No padded tail byte enters a legal SAD.
+This is not Studio-exact
+search or an accepted quality tradeoff. Coarser preparation still uses the
+existing CPU reference; no player scheduling or color-update rule changes.
+
+`pyramid::gpu` now records the matching brightness preparation on the GPU.
+An R8Unorm full-Y input is averaged into a half-size R8Uint base; alternatively,
+an explicit R8Uint base can be copied without that bridge. Each later level
+uses distinct vertical and horizontal R8Uint render targets, preserving the
+intermediate byte rounding. The builder validates geometry before encoding,
+returns owned logical-level textures, and never submits, waits or reads back.
+Its separate `encode_packed_base` records R8Uint to Rgba8Uint packing with
+explicit zero tail lanes. The offline Scene packs once per arriving source in
+the existing pyramid submission, retaining that typed image instead of its R8
+base. Original R8 levels still supply CPU readbacks. This preserves source
+stamps and seven sampled bindings; it adds no history owner or queue wait.
+Frame stamps, source ownership and history remain the caller's responsibility.
+The optional offline Scene selection still reads those levels for CPU motion
+search, so it is not a GPU-resident complete temporal pipeline. Its exact
+reported-view comparison preserves all filtered and unfiltered artifacts.
+Native captures verify the reductions from the half-size base; they still do
+not provide same-input native authority for the initial full-Y bridge.
+
+`motion::gpu` expands supplied raw search vectors and packs displacement plus
+independent Y/UV confidence into an Rgba16Sint texture. The scalar phase and
+threshold preparation remains on the CPU in the reference operation order;
+the per-pixel GPU work needs no optional wide numeric types. Its explicit
+subset requires i16 raw displacement, nonnegative 16x16 byte SADs and positive
+thresholds at most46340. Other thresholds, including the CPU reference's
+wrapping-square cases, are refused rather than approximated. Encoding submits
+and waits for nothing. Raw vectors and luma are still CPU uploads, so this is
+not GPU motion search. The offline caller may separately run the six pure CPU
+reference searches concurrently, preserving their supplied order. Searches
+within each reference retain their serial predictors and candidate order.
+An alternative typed handoff accepts the validated parallel-refinement output,
+selects one of its actual reference slices and records packing without an
+intermediate readback. Geometry, device, phase and confidence validation remain
+at that boundary; arbitrary unvalidated GPU buffers are not accepted.
+
+The test-only `scene::panorama_review` path materializes each exact displayed
+source/map/fusion into a body-fixed RGB panorama, then projects it through the
+same locked view. An unfiltered NV12 round trip isolates representation changes.
+The body-image producer also accepts a linear `ResidentScreenshotDraw` from
+the selected player carrier. It draws the exact resident source, final map and
+fusion bindings without map readback/reupload, deriving the output stamp from
+the imported source and checking it against the installed map. The existing
+bounded draw retirement holds the complete source/pass until completion;
+abandoned command buffers retain the same fail-closed ownership. Linearized
+output is refused before arming. The shared body pipeline is lazily cached.
+`KJERAG_PANORAMA_RESIDENT_INPUT=1` selects this route only in the offline review;
+its first source checks the entire panorama against the uploaded-map oracle.
+Supported live playback consumes the same upstream resident stitch through the
+filtered panorama owner; explicit spatial controls retain the direct-map draw.
+The separate `ResidentPanoramaIngest` is the non-presenting source producer for
+that integration. It owns a fresh resident session and cannot share a root with
+the display facade. A typed job on the existing bounded stitch-worker channel
+imports one exact decoded pair, runs the unchanged stitch/color transaction,
+then commits only its computational successor. Neither the raw future nor ready
+display slot is populated. A draw-retirement permit is reserved before admission
+or computation; its immutable source/map/fusion pass survives through panorama
+submission completion. The returned panorama owns independent compact YUV
+textures and its source stamp, not a decoder surface. The RGB reference and
+compact live producer share the same import/map/commit/reframe transaction.
+The filtered facade above supplies bounded admission and publication.
+
+`Player::prepare_ahead` supplies the corresponding explicit source horizon:
+up to six successors may be retained without presenting one, including while
+startup or a seek landing is paused. The current source must belong to the
+newest requested epoch; pending seek notes stay available to ordinary promotion.
+Every accepted successor must be adjacent. Stale notes are discarded, while gaps
+and decoder failures remain errors. `is_input_exhausted` distinguishes decoder
+EOF from presentation EOF; if six slots are full, the trailing EOF note is read
+after a slot frees. The ordinary two-frame lookahead, reader depth, presentation
+clock and startup acknowledgement policy remain unchanged. These preparation
+interfaces do not themselves publish filtered frames. The selected facade and
+Scene route above supply that separate publication boundary.
+
+The offline temporal review keeps seven contiguous source-stamped NV12 images
+and gray pyramids. Settings are either the explicit captured ISO100 regime or,
+with `KJERAG_PANORAMA_TEMPORAL_TRACK=1`, the source-track provider above. These
+diagnostic selectors are mutually exclusive, not user calibration controls.
+After seven real inputs it emits startup centers0..3, then center3 per successor,
+and flushes centers4..6 at the end. References are radius-clipped, source-ordered
+and checked against history stamps. Radius0 copies current after the same gate.
+Fewer than seven sources produce no filtered outputs at this backend boundary;
+this does not establish Studio's higher exporter short-seek behavior.
+The first output records seven arriving copy pairs, each subsequent arrival one,
+and additional startup/tail outputs none. Copies precede consumers in their
+encoder. Optional GPU
+pyramid/packing and concurrent CPU search routes change execution only;
+CPU search and explicit readbacks remain offline
+reference execution, not the player architecture. The source image and its
+color corrections do not change between comparison arms. This diagnostic does
+not select a player seek/publication policy or gradual color update, and its
+explicit CPU waits are not a performance path. Production playback instead
+selects the separate worker-owned stream above, not this offline controller.
+The additional explicit parallel-refinement diagnostic is different: it selects
+the changed spatial algorithm described above, retaining each GPU base beside
+its exact source stamp and NV12 image. Refinement, packing and fusion share one
+encoder. Its receipt discloses the algorithm change, and its timing separates
+CPU coarse preparation from GPU work plus completion/readback.
+
+The test-only `KJERAG_PANORAMA_GPU_TIMING=1` selector adds encoder timestamps
+around history copies, finest refinement, motion packing, fusion, conversion,
+projection and picture-readback copy. The timestamps share the original
+submission; their resolve/map is reported after picture completion, not a new
+wait between stages. The intervals exclude host work and implicit queue-write
+uploads preceding that command buffer. With the selector absent, instrumentation
+allocates no GPU resources and changes no device feature requirements. These measurements
+locate expensive diagnostic stages, not actual-player capacity.
+
+The optional view-scissor diagnostic keeps full-sized fusion Y/UV and converted
+RGB targets, their absolute coordinates and the unchanged panorama projector.
+`temporal_fusion::regions` conservatively bounds one exact rectilinear `Reframe`;
+unsupported or uncertain geometry uses full coverage. RGB bounds include the
+projector's horizontally periodic linear-sampling footprint. Separate fusion
+bounds expand by two Y texels, clamped on both axes, so halving them supplies
+the centered-chroma reconstruction halo. No shader arithmetic or intermediate
+quantization changes. Scissors restrict fragment execution, not allocations,
+full source history or motion search. Cleared pixels outside those bounds are
+not valid filtered picture data: the caller may project only the prepared view,
+not reuse the partial panorama after a view change. Ordinary playback selects
+none of this diagnostic and gains no changed-view cache or scheduling policy.
+
+The shell's pinned `iced_wgpu` renderer is locally patched to request the
+adapter's supported storage-buffer count. Its fixed default of eight caused
+the resident ONE X2 pipeline to panic at startup in the window, despite
+passing headless checks whose devices requested adapter limits. This is only
+device configuration: no renderer arithmetic or stitch layout changes.
+`vendor/iced_wgpu/KJERAG.md` records the source, license and removal condition.
+The selected capture session checks its fifteen-buffer requirement before
+pipeline construction and reports an ordinary failure when it is unavailable.
+
+The same local renderer patch owns native presentation readiness. Window
+rendering prepares visible custom shader primitives before acquiring a surface
+image or preparing iced's built-in UI batches. When the selected Scene has a
+previous resident picture but preparation has no exact resident draw, it
+reports the window unavailable. Exhausting its two draw-retirement slots is
+the measured frequent cause. The compositor skips that physical
+presentation, so the previous complete compositor buffer remains visible;
+there is no cleared or UI-only replacement. Ready windows retain one combined
+UI preparation and render submission, and offscreen rendering remains ungated.
+
+The first unavailable preparation always asks the shell for an immediate
+redraw. This bridge is required because `Scene::pump` runs before preparation
+discovers the first Full result. On that next tick, a Full pending refresh is
+scheduled for `now + 1 ms` instead of requesting another immediate redraw.
+Scene advertises self-scheduling only while its post-prepare pending-refresh
+flag is set; Empty and target-mismatch states keep the renderer's default
+per-attempt redraw fallback. A ready aggregate resets the episode. The vendor
+trait defaults to that fallback and explicitly supports one independent
+self-scheduled widget per window; Kjerag has one Scene. This is admission and
+host retry scheduling only: it neither waits for GPU completion nor changes
+the two-slot capacity, source lease, shader arithmetic or presentation clock.
+The 1 ms interval is a measured Kjerag policy under qualification, not a Studio
+constant and not proof of 240 Hz physical presentation.
+
+When the only remaining work is an admitted due source's running stitch actor,
+Scene can now sleep until that actor commits the exact result. A single
+coalescing wake belongs to Scene; its shell subscription stays alive during
+paused seeks and final-frame landing. Registration shares the capture-state
+lock with temporal commit, and refuses to sleep if any publishable future
+already exists. Only an explicitly awaited due stamp wakes the shell, not
+speculative lookahead. The subscription message requests a normal redraw;
+the presentation clock remains in the widget's redraw event. Mouse and UI
+redraws remain independent. Missing listeners, admission backpressure, retired
+resource drains, ready futures and full draw slots retain their existing
+retries. No source is skipped and no older map is applied to newer video.
+The real-camera sequence tests exercise worker notification without renderer
+polling and compare the original images, maps, alpha and fusion ratios.
+
 `Size` and `Fallible` live in `media`: they are frame types, and `render`
 depends on `media` rather than the other way round. `render` re-exports both
 and adds the `Extent` trait, which is the `wgpu::Extent3d` half of `Size`
 that cannot live in a crate with no wgpu.
+
+The pinned iced core also has a local named-child reconciliation correction.
+When COSMIC restores its header, its named header is inserted before its named
+content container. The original algorithm diffed the retained content in its
+old slot, then overwrote that slot with the new header without appending the
+content. The next redraw had no Scene widget and therefore no media deadline
+request; a controls Tick rebuilt it roughly 250 ms later. The patch reconstructs
+child state in new widget order, retaining named survivors across insertions
+and removals. It changes no shell layout, frame clock, stitch calculation or
+GPU queue policy. `vendor/iced_core/KJERAG.md` records its exact provenance and
+removal condition. The app has a direct regression for the actual dependency
+operation; `scripts/uitest-controls-wake.sh` exercises repeated real pointer
+wakes in a private native compositor. Its 100 ms pump-gap rejection is a
+specific quarter-second-pause regression guard, not the 4.17 ms capacity gate.
+
+The resident ONE X2 draw path has a separate, private source-import
+owner in `direct_type2`. Its only production constructor consumes the exact
+`Arc<Frames>`, requires two lenses and imports both descriptors directly into
+`[Planes; 2]`. It has no raw-plane or stamp-only association boundary, and
+exposes no bind-group or texture handle. An actual render pass creates its
+own immutable picture binding, retained with that exact source owner until
+completion. Field order releases the pass binding before its source owner,
+and the imported planes before their decoder frame owner.
+Selected Scene playback reaches it only through the capture-owned resident
+session and renderer attachment; the legacy `VecDeque<Live>` path remains an
+explicit diagnostic/oracle boundary and is not a selected fallback.
+
+### Shared camera boundary (issue #184)
+
+Live admission produces one immutable `ResidentCameraProfile` while opening
+the capture, before selecting sequential playback or constructing GPU state.
+It owns the resolved parent inputs, source dimensions, static maps and image
+support, without retaining the full raw calibration in production. Renderer
+attachment consumes those prepared resources;
+seeks share the same profile while creating fresh temporal/frame ownership.
+Scene no longer carries a second optional calibration alongside the capture.
+The lens-only constructors remain available to reference instruments, but
+live GPU attachment does not independently rebuild or choose camera geometry.
+
+The resident solver now serves ONE X2 and X4 Air. `stitch_camera` selects
+the two tested lens families without changing their metadata identity. The
+ONE X2 law retains its recovered Template mounting, crop centers, alpha and
+housing masks. X4 Air parents use the native model-6 Template mounting and
+13-coefficient distortion from `offset_v6`. The adapter assigns native record
+1 to delivered stream 0 and native record 0 to stream 1, then applies a fixed
+body-to-sphere datum once in camera packing. Decoder order, IMU calibration,
+view controls and downstream A/B ownership stay unchanged. A v3-only X4 stays
+on ordinary projection instead of entering the resident solver.
+
+X4 currently retains Kjerag's existing blend weights and image-circle support,
+not a claim of Studio's complete fusion law. The support applies across the
+whole solver belt instead of inheriting ONE X2's pole-only housing exclusion.
+Checking peripheral support against the associated model-6 centers remains
+follow-up coverage work; the centers differ from the v3 support circles.
+
+Everything after that camera boundary is shared: source import, parent GPU
+mapping, belt sampling, sparse PIS, temporal history, final map construction,
+frame ownership and direct draw. The final luma/chroma sampler uses the actual
+per-lens dimensions. Both live routes use sequential source presentation and
+automatic stitching; the legacy optical-flow toggle cannot select a second
+solver on an admitted capture. Camera inputs are validated before changing
+presentation policy. A capture without usable orientation stays on the older
+projection path rather than entering a parent mapper that requires it.
+
+The source color matrix is container metadata, not a camera-profile constant.
+Media carries it beside depth/range in `Samples`; `Reframe::with_samples`
+packs its four coefficients for the shared `source_rgb` shader helper.
+Ordinary and resident drawing both use that helper. The tested ONE X2 stream
+declares SMPTE 170M (601); the X4 streams declare 709, matching their respective
+Studio source uniforms. Untagged or unhandled matrix tags retain the ordinary
+renderer's historical 709 fallback, not a claim of color-space support. This
+change leaves range normalization, the resident box footprint and the inner
+photometric solver's separate BGR/YCC transform alone.
+
+The fixed solver chart, displacement gates and native parent UV convention
+remain shared implementation choices, not evidence of Studio's X4 setup.
+Admission is deliberately limited to type-41 and model-6 type-131 pairs;
+other camera families need calibration/coverage validation, not a new PIS
+implementation. In particular, arbitrary mounting residuals could move a
+different camera's seam outside this chart. Existing native oracle APIs and
+module names remain available for comparison.
+
+Studio's Chromatic Calibration means photometric lens color/brightness
+matching. The shared resident capture applies it at the geometrically aligned
+source-sampling/fusion boundary. This automatic branch implementation is under
+qualification, not owner-accepted Studio parity. The old projection path's
+unaligned color estimator is not reused as a parity implementation.
+
+`field_interior` is a shared CPU diagnostic, not an estimator or playback step.
+It contains the existing dark-field coherence arithmetic previously private to
+the `colour` instrument. That instrument retains its legacy picture-generation
+path, while Scene's opt-in GPU review supplies the exact displayed ON/neutral
+pixels and their prepared Reframe directly. Both call one arithmetic core.
+The review retains all admitted azimuth bins and runs the original zero and
+0.5/2-code ripple controls. Insufficient coverage is reported explicitly; no
+new image-quality threshold is selected. Its fixed body-chart interpretation
+must be checked against the capture's alpha before treating it as off-seam
+coverage. It does not qualify arbitrary two-dimensional fields by itself.
+An optional diagnostic observer records the exact eligible pixel/bin membership
+in that same traversal, before the per-bin population gate. Scene can retain it
+as a row-major little-endian u16 raster, with 65535 marking ineligible pixels.
+This is a test-only artifact, not another rendering pass or playback allocation.
+
+The explicit saved-map diagnostic can attach an `image_fusion::RatioPair` to
+its `OneXsMapFrame`. A separate shader variant samples these two 200x100 RGB
+ratio maps in the original spherical chart, before the packed-UV/alpha
+centering transform, and corrects each lens before blending. Missing maps use
+an actual arithmetic bypass with no extra binding, not a constant-one map
+whose rounding or RGB clamp could change the neutral picture. The diagnostic
+recreates its private binding when correction presence changes. Ordinary
+resident playback selects this variant with its own computed coefficients,
+never captured coefficients.
+
+`image_fusion::solve` is a readable Windows selected-X4 inner MGP reference,
+not the production estimator. It takes already-aligned BGR8 working images;
+it does not own decode, source geometry or scheduling. Its metric-reset flag
+and warm-solution population are separate: an empty observation after reset
+can run the first 100-step solve using retained spatial admission, without
+consuming the next valid observation's direct metric seed. The separate
+`image_fusion::spatial::Reference` now wraps this with the selected current-row
+replication, periodic 200-to-212 extension, periodic-edge join and center crop, same-ordinal ratios,
+ROI-local box filtering and original-chart remap. Its full ratio arrays start
+at one and retain the previous filtered left boundary row 40. The corrected
+binding/constant contract is `docs/research/studio-image-fusion-spatial.md`.
+The reference and GPU distinguish measurement from equation emission. Robust
+color bounds use supported rows 49/50 and columns 18..193; those bounds then
+admit correction equations over **all** rows 48..51 and columns 0..211,
+including the wrapped extension. NCC and sticky invalidity select quantile
+observations, not a second mask on the final equations. Reusing the narrow
+measurement domain for the solve omitted native constraints; the Mac read and
+saved-input regression are recorded in `studio-image-fusion-temporal-602.md`.
+Both the readable reference and GPU retain the separately solved six-column
+periodic copies when joining prepared bytes before ratios, as the Mac selected
+caller does. The GPU joins within its existing ratio dispatch, with the same
+FMA and byte truncation; the current-image denominator remains unjoined.
+The native-input Scene diagnostic validates saved native coefficients before
+camera rebasing and changes only diagnostic draw bindings. It is not a
+production fallback or accepted flicker fix.
+The detached `prepare_one_xs_fusion_inputs` API composes the final packed map
+through the recovered lookup into 200x4 source UVs,
+then expands them endpoint-aligned and samples two 800x16 BGR bands. Each lens
+is bilinearly sampled locally, not through drawing's atlas box footprint.
+It retains private bindings, the exact decoded source owner and the immutable
+camera profile through a consuming readback. Stepped scenes retain that profile
+without enabling a live transaction. Ordered lens-local UV range comparisons
+produce the four validity rows; no map sentinel or image-circle substitute is
+invented. Container-driven float RGB conversion and ties-to-even bytes are
+Kjerag choices, not authenticated native conversion-branch arithmetic.
+`spatial::Reference::observe_bands` accumulates sticky invalidity before testing
+the three 66x16 strips per lens against the last admitted means. Only an
+admitted observation area-reduces the full bands into working rows 48..51 and
+advances the solve/ratio history. The CPU gate retains binary64 mean arithmetic.
+Source-map provenance and video scheduling remain the reference caller's responsibility.
+
+The admitted camera profile now carries the photometric coordinate boundary
+as well as geometry. Native X4 fusion ordinals are delivered streams `[1,0]`,
+and its native sphere differs from Kjerag's established chart by `Ry(pi)`,
+the same fixed datum used in `x4_model6_static`. Composing the native source
+lookup gives `Ry(-pi/2)` against the Kjerag packed map. Ratio publication
+instead preserves the consumed texture's centers: Kjerag `(r,c)` reads the
+native output table at `(99-r,(99-c) mod200)`. Re-evaluating the producer's
+endpoint lattice with `Ry(+pi/2)` would introduce a texel-center discrepancy.
+This fixed coordinate table is prepared once, not remapped each frame.
+Input bindings and final
+texture bindings perform the lens exchange, without copies or additional
+passes. ONE X2 keeps its original positive input/negative output lookups and
+`[0,1]` lens order. The solve and temporal history remain in native fusion
+order for both. `FusionInputs::new_reference()` creates a matching cold CPU
+diagnostic with renderer-ordered outputs; `spatial::Reference::new()` remains
+the unconverted native replay boundary. Detached sampling replaces its cache
+when the admitted camera changes, and a seek preserves the camera conversion
+while resetting color history. The X4 correction is under moving-video owner
+review, not accepted parity; see `studio-image-fusion-temporal-602.md`.
+
+Existing sparse arithmetic, box
+reductions and trigonometric implementations are not claimed numerically
+identical to Studio. Neither reference is selected by ordinary playback.
+
+`image_fusion::gpu::Producer` owns the analogous retained GPU state inside one
+`ResidentCaptureSession`. The final-map materializer appends source sampling
+and photometric dispatches before its existing asynchronous validity copy,
+advancing the same inherited source lease with one final-map submission. No
+ordinary source or ratio readback, host solve or new host wait is added. Only
+resident status `u32::MAX` authorizes history changes; a global failure leaves
+baseline, invalidity, solve and ratios untouched. Coordinate invalidity on a
+globally valid but content-skipped observation remains sticky.
+
+History follows successful source processing, not display publication. This
+matches the existing computational lookahead: a future may compute before it
+is due, but its immutable ratio pair remains attached to that exact map and
+source. A later install refusal does not roll photometric history back. A seek
+gets a new producer and causal root; renderer reattachment retains both.
+Pending/ready ownership and uncertain-completion quarantine include the color
+inputs and outputs. Installed draws retain their own ratio binding across newer
+source computation and draw retirement. Diagnostic installed-map readback can
+explicitly include the ratio pair; ordinary redraws only sample it.
+
+The GPU content gate deliberately uses integer sum delta `>3168`, so it does
+not reproduce the CPU reference's binary64 threshold-rounding edge (9 to 3177).
+CG and box reductions use GPU float arithmetic. These disclosed implementation
+choices require real-output and playback-capacity qualification, not further
+optimization reverse engineering.
+
+The current photometric candidate writes the final ratio values into immutable
+RGBA32F textures in the existing remap pass. Hardware bilinear interpolation is
+selected only when optional full-f32 filtering is enabled on the device;
+otherwise the consumer uses explicit texture loads and wrap/clamp interpolation.
+Saved-map CPU replay uses the same format and feature policy. Both the
+half-storage and due-source-priority trials were removed after they failed to
+improve the combined source-cadence and changing-view performance result.
+No half-precision storage or arithmetic remains. Full-f32 hardware interpolation
+rounding is separately qualified; this candidate is not owner-accepted.
+
+The full-f32 hardware consumer's adversarial fractional-UV test uses a
+separate half-of-one-8-bit-code bound; the explicit consumer retains `2e-6`.
+On the test Radeon, their measured maxima are `0.00054196` and `1.79e-7`,
+respectively. The hardware maximum is at the synthetic map's discontinuous
+periodic join. Actual Scene comparisons retain their one-code-per-channel
+bound; none of these gates establishes whole-video or owner acceptance.
+The follow-up working-tree simplification publishes only those textures,
+removing two redundant 320,000-byte output buffers and their stores/bindings.
+The color producer needs eleven storage buffers instead of thirteen; the
+complete stitch path's fifteen-buffer requirement is unchanged. Explicit
+diagnostics copy the exact texture texels into temporary padded staging and
+strip row padding. No live staging, readback or wait is added. All 51 color,
+three consumer and two actual-Scene checks pass. Across the two saved sequences,
+all 31 X4 and 61 X2 frames' pixels, packed maps, alpha and ratios remain
+byte-identical to the preceding implementation. Capacity qualification of this
+simplification shows no material gain: the next native run reaches only
+29.175 source fps and 239.20 changing commits/s on X4, while X2 reaches
+29.950/261.12. It removes duplicated publication, not the measured cadence
+defect. The owner's packaged review build is unchanged.
+A bounded indexed-mesh trial preserved every triangle and all 460 saved frame
+artifacts, but did not produce a useful X4 gain: 29.475 source fps, 238.95 changing
+commits/s, commit p99/max 8.79/23.00 ms and still-growing lateness. X2 reached
+29.975/262.82, with p99/max 8.47/19.17 ms. Both strict pointer cohorts fail one
+source-less commit. The additional index-buffer code is rejected; the existing
+triangle draw is retained. Trial source and evidence remain in scratch.
+The retained texture-only implementation passes full gates (1,238 workspace
+tests, zero failures, 30 ignored) and 50 X4/54 ONE X2 native UI checks. The same
+backward-seek and real mouse-scrubber checks now run on both named fixtures;
+earlier harness results covered those two interactions only on X2. These are
+correctness and interaction gates, not proof of uniform presentation timing.
 
 ## Failures the pilot is told about (issue #124)
 
@@ -131,7 +891,7 @@ Deliberately not in the funnel: a capture that could not be written says so in
 a toast, because the picture is still there and the pilot is still watching it
 (docs/UI.md). The funnel is for the failures that leave him with no video.
 
-## The frame path (zero-copy)
+## The frame path
 
 ```
 VA-API decode (two 3840x3840 HEVC streams, one demuxer)
@@ -140,18 +900,17 @@ VA-API decode (two 3840x3840 HEVC streams, one demuxer)
   -> two single-plane wgpu textures per frame:
        R8Unorm  from layer 0 (luma,   DRM_FORMAT_R8)
        Rg8Unorm from layer 1 (chroma, DRM_FORMAT_GR88 - note GR, not RG)
-  -> single fragment pass: Mei-project the ray into each lens that can have
-     it, weigh them, sample each lens that carries any of the pixel,
-     YUV->RGB, to swapchain at display resolution
+  -> imported textures remain the render sources
+  -> one fragment pass to the swapchain at display resolution
 ```
 
-The shader consumes both lenses (issue #27), so a view anywhere on the
-sphere has a picture in it, and it mixes them across a crossover on the seam
-that is 8 degrees wide on an X4-class file and the camera's own width on any
-other (issues #7 and #48, and 2026-08-05 for the width). Outside that crossover
-one lens weighs exactly 1 and the other exactly 0 and only the first is
-fetched: a pixel away from the seam costs what it cost before the blend, down
-to the bits it writes.
+On the generic projection path the shader consumes both lenses (issue #27),
+so a view anywhere on the sphere has a picture in it, and it mixes them across
+a crossover on the seam that is 8 degrees wide on an X4-class file and the
+camera's own width on any other (issues #7 and #48, and 2026-08-05 for the
+width). Outside that crossover one lens weighs exactly 1 and the other exactly
+0 and only the first is fetched: a pixel away from the seam costs what it cost
+before the blend, down to the bits it writes.
 
 Since issue #10 the second lens is not projected there either. Each lens's
 picture is one cap around its own axis, and how wide that cap is comes out of
@@ -177,6 +936,68 @@ delivery (18.4 fps) in the M0 spike: it cannot sustain realtime for even
 one lens. Zero-copy import is a requirement, not an optimization. (An
 earlier research note put `vaDeriveImage` at 0.53 ms/frame; that was the
 map call alone, with nothing reading the pixels through it.)
+
+The selected ONE X2 path samples those imported R8 textures directly and keeps
+the ordinary stitch transaction resident through retained-map sampling,
+reduction, blur, paired sparse PIS, temporal continuation, dense native-map
+materialization and direct draw. Normal post-qualification frame preparation
+maps only the four-byte validity word. It performs no solver-belt or sparse
+terminal readback, CPU PIS, CPU map materialization, frame-sized transfer or
+native-map upload. The decoded picture and every installed map stay in the
+capture-owned resident session until bounded render-pass retirement proves
+their last draw complete.
+
+Every selected ONE X2 GPU stage is rooted in one render-private
+`OneXsGpuContext`, constructed from the exact device and queue iced gives the
+`ScenePipeline`. The context compares those wgpu handles structurally, so a
+renderer-pipeline recreation on clones of the same pair remains compatible;
+a replacement device or queue within that wgpu Instance is a different context.
+The resident producer and its `SubmissionLease` retain that context. The lease submits
+later resident consumers on its own queue and replaces its own completion
+index; no consumer may hand it a detached `SubmissionIndex`.
+
+wgpu supplies one queue together with each requested device and has no public
+constructor for an independent second queue on that same device. Tests
+therefore prove cloned-pair acceptance and independently requested-pair
+refusal. The context nevertheless compares both structural handles because
+the device-and-queue pair, not either handle alone, is the ownership boundary.
+Selected Scene preparation authenticates that pair before terminal-display or
+in-flight recovery can bind, write or encode anything. After authentication,
+all selected work uses the retained context handles. A mismatch selects no
+draw, preserves the last complete display untouched and surfaces the raw
+identity error. Diagnostic picture preparation and full-luma readback are
+context-owned too; their per-frame APIs accept no replacement device or queue.
+
+The pinned wgpu's structural device/queue equality compares per-Instance IDs,
+not Instance identity. First allocations in two separate Instances can compare
+equal, so foreign-pair tests request two devices from the same Instance. This
+is a boundary limitation, not proof that separate Instances share resources.
+Normal iced renderer and surface recreation clone the existing compositor's
+Engine/device/queue. Constructing a new compositor creates fresh primitive
+storage, so current playback does not carry a resident attachment across that
+boundary. Any future cross-compositor attachment reuse must add Instance
+identity rather than rely on these structural comparisons.
+
+The shared PIS front end caches its rolling patch sums instead of replaying
+each row/column prefix for every patch. One horizontal recurrence per source
+row feeds one vertical recurrence per patch column. Both retain every
+intermediate rounded update, including positions between the stride-three
+outputs. The 3,376-word public patch-sum prefix and downstream bindings stay
+unchanged; a 10,260-word private scratch tail uses the existing allocation.
+An additional dispatch establishes the cache dependency. The CPU oracle and
+GPU mutation checks cover the complete public result. This removes repeated
+work without changing the solver's input arithmetic, admission or temporal law.
+
+The geometry mask is bilateral. A horizontal nine-column validity scan combines
+both source lenses and packs four boolean results per word. A second pass ANDs
+the nine neighboring row words, reproducing the original clipped 9-by-9
+conjunction before applying the unchanged camera support. It writes the final
+word to both lens sections; a disjoint invocation writes the validity sentinel.
+The mask allocation has a private 64,800-byte scratch tail, without an added
+buffer or binding. Its public two-lens prefix and sentinel offsets are unchanged;
+the prepared-source front end checks the actual enlarged allocation size and
+indexes only that prefix. Retained maps are never overwritten for scratch.
+Full public-mask and retained-map qualification still uses the direct CPU oracle.
 
 ## Playback (issue #4)
 
@@ -231,8 +1052,217 @@ up at the camera's own timestamp for that frame
 grid at 6.4 ppm and is 11.5 ms away from it by the end of a 30-minute file
 (issue #8, docs/research/insv-format.md 8.6).
 
+### ONE X2 Studio-derived stitch path
+
+An ordinary open of a supported ONE X2 selects this route automatically.
+There is no calibration step, setup ritual or quality toggle. The Optical
+Flow setting controls only the legacy solver and does not select or modify
+this route.
+
+The player changes to `PresentationPolicy::SequentialRealtime` and one
+capture-owned resident facade starts at frame zero. Selected startup uses the
+same exact-landing hold as seeking: Scene retains autoplay intent, but the
+source/audio clock stays paused until frame zero's resident map is installed
+and acknowledged. A pause during startup cancels that autoplay intent. Generic
+projection opens still start immediately. This prevents cold GPU setup from
+charging time against a picture that has not been prepared yet; it does not
+solve sustained processing slower than the source cadence.
+Scene branches to this route before legacy prepare, import or draw. Admission
+and publication stay on the UI thread. The capture-shared worker now owns the
+whole computational transaction: the exact imported pair, existing GPU chain,
+final validity acknowledgement and unpublished temporal commit. This autonomous
+worker refactor is under qualification. Its bounded channel permits one active
+capture-service job and one queued job across capture restarts. A full channel
+does not authorize a source admission that has no worker to service it.
+UI preparation never waits for the worker or consumes an unfinished map.
+
+The source/audio clock does not reanchor on each source frame. The original
+slow-clock `EveryFrame` policy remains available to diagnostics. During ordinary
+play, `Player` keeps the current due frame and exposes at most two already-decoded
+successors without presenting either or moving the clock. The capture root
+holds one completed unpublished source/map pair separately from its displayed
+pair. One renderer preparation can admit both decoded successors. The worker
+advances the computational temporal prior and starts the next admitted source
+without another renderer visit. The total accepted but unpublished population
+is bounded at two, including queued input, active computation, the committed
+future and any parked completed result. If the second result finishes while
+the future slot is occupied, the worker parks it and ends that service job.
+Publication frees the slot and schedules service again; there is no waiting
+thread or polling loop for a full future slot. This reserve can absorb uneven
+per-source work but cannot solve a sustained throughput deficit. The larger
+three-result FIFO/pre-roll trial remains archived in `8c6921cf`, not selected:
+its additional memory/startup cost had no qualified overall smoothness benefit.
+Restoring this installed-build scheduling boundary preserves source order,
+seam arithmetic and refresh cadence while isolating the controls-tree correction.
+
+Completion cannot publish a picture. Preparation reserves an ordinary draw
+permit and binds the exact future before moving it to the displayed slot,
+only when Player's current delivery supplies the same opaque `FrameStamp`.
+Screenshots and redraws continue sampling the displayed pair, never the newer
+computational prior. Player does not promote another frame until its current
+one is acknowledged. Two decoded successors, one unpublished completed result,
+one additional active or parked transaction and two render-retirement slots are bounded;
+none treats computation as display or permits an unbounded queue.
+
+Idle playback schedules its next redraw at Player's exact media deadline,
+not on every display refresh to poll speculative successors. An old-picture
+presentation just before that deadline arms winit's Wayland frame callback and
+can delay the due picture until a later refresh even when its map is ready.
+Input and UI redraws retain their independent scheduling; this is not a cap on
+changing-view rendering capacity. Preparation admits bounded decoded lookahead
+whenever a redraw occurs, but completion and successor execution no longer
+require redraws. If the exact currently offered, unacknowledged source
+is not installed after preparation, Scene requests a follow-up through the
+renderer while keeping the old picture presentable. This flag is recomputed on
+every prepare and cleared on errors; it does not bypass compositor callbacks,
+publish early, or reject a drawable old picture. Draw-retirement refusal keeps
+its separate existing retry policy. Worker autonomy is intended to preserve
+preparation headroom while an idle window sleeps until its next deadline.
+Source readiness and ordinary playback still require qualification alongside
+active-view capacity; the architectural split alone is not proof of smoothness.
+
+The capture-owned session and its exact source owners survive a
+renderer-pipeline recreation on the same device and queue. Pausing hides decoded
+lookahead from preparation but does not discard a job or completed future result;
+resuming returns publication authority to Player's due delivery. Seeking and
+stepping still require installation, create a new causal root where required and
+drain the replaced facade without reusing uncertain source surfaces. At EOF the
+clock stops, but redraws continue until the last offered transaction installs.
+An adjacent forward replay re-anchors its landing without discarding the remaining
+already-decoded successors; a real seek clears all decoded slots. Pending work
+and full render-retirement admission always leave the prior exact
+shown result drawable; there is no legacy recovery route.
+
+Selected PIS uses independent 16-patch-row stripes. Vertical candidates do not
+cross stripe boundaries; this is an explicit propagation approximation, not
+Studio's global schedule. The global scalar/GPU reference remains available,
+and selected GPU construction qualifies exactly against its striped CPU twin.
+Parent mapping and PIS compile one shared `one_xs/f32_div.wgsl` helper.
+Binary32 division estimates a normalized quotient on hardware and corrects
+the exact integer remainder before the unchanged RN-even/exponent handling.
+The bounded estimate follows [WGSL's division accuracy contract](https://www.w3.org/TR/WGSL/#accuracy-of-concrete-expressions);
+integer residual correction replaces the ordinary 24-step restoring loop.
+Edge/random and forced-fallback tests compare complete output bits to CPU.
+Sharing this helper removes the parent's separate divider implementation;
+alternating whole-Scene measurements did not establish a capacity improvement.
+
+Flat perspective views rasterize the native 100-by-50 sphere triangles directly,
+sampling packed maps at vertices and alpha after perspective interpolation.
+Curved/ball projections retain the ray-based shader; no intermediate panorama
+is introduced. Native fixed-function interpolation is not bit-identical to
+ray intersections. Regression requires exact coverage and bounds each mapped
+channel by CPU samples within 1/64 output pixel, plus the original arithmetic
+tolerance. Actual-footage review remains a separate owner gate.
+
+At most one nonblocking renderer-side device poll drives draw retirement for
+the active attachment and every normally draining attachment replaced by seek
+or reopen. The worker independently drives its exact final validity callback
+with nonblocking polls and a 100-microsecond sleep fallback. It never uses a
+blocking GPU fence wait. Renderer retirement never waits. Completion-proven
+owners release normally; uncertain owners remain fail-closed without blocking or
+repeatedly scheduling the new lineage. A discontinuous user seek creates a new
+temporal root on the decoder's landing frame, sharing immutable GPU kernels but
+no old history. Drag updates request keyframes; release requests the exact
+destination. Sequential consumers reject superseded decoder epochs before they
+can initialize that new root.
+This intentionally differs from uninterrupted frame-zero history, following the
+owner's 2026-09-05 priority of performant Studio-like stitching over perfect
+reproduction. A single forward step keeps the adjacent warm state. The old
+display remains visible until the destination's source-specific map
+is acknowledged. The direct type-2 draw consumes the native map and alpha
+without routing through the legacy seam-band displacement.
+
+Screen and screenshot reserve separate immutable resident draw permits. A
+source import owns only the exact imported planes, decoder frames, context,
+and capture identity. It does not allocate a picture binding or upload view
+uniforms; those are created only for an actual immutable draw permit. A
+screenshot prepares the exact shown capture and stamp, then draws its permit in
+an independent offscreen pass; it never calls the window draw. Explicit seam
+diagnostics may authenticate that same installed identity and read back packed
+map and alpha bytes, but that bulk transfer and wait are instrument-only.
+
+The type-2 picture consumer uses the GPU's linear sampler within each imported
+lens. A filter footprint crossing the two-texture atlas join still uses four
+explicit loads, since clamping either separate texture would change that join.
+The recovered box filter and native map remain unchanged. Pixels whose alpha
+is exactly zero or one read only the contributing lens. Hardware subpixel
+filtering can differ from software interpolation by small rounding amounts;
+bit identity of rendered RGB is no longer required by the owner's current
+performance goal. Real-sequence review remains required.
+
+The owner's 240 fps target is interactive view rendering during playback, not
+240 new source pictures from a 29.970 fps file. Completed source/map pairs are
+already reusable for view redraws, but processing shares the render queue and
+can still delay them. The offscreen `view-rate` diagnostic reports paused
+redraw capacity separately from changing-view playback and its tail latencies.
+It waits for each GPU draw and has no compositor; its results do not prove
+native-window presentation at 240 Hz.
+
+That diagnostic now observes a queue-completion callback using nonblocking
+polls and 100-microsecond receive timeouts, with one redraw in flight. Polling
+and wakeup costs remain in the measurement. Concurrent stitch work may join
+the callback's queue prefix and delay observation; it can never make the draw
+appear complete early. The previous offscreen blocking poll held wgpu's fence
+read lock throughout GPU execution, preventing the stitch worker from acquiring
+the write lock needed for submission. It therefore disproportionately delayed
+chunked scheduling. Comparisons of worker schedules must rebuild both arms
+with the same nonblocking measurement; old blocking-poll figures remain raw
+instrument observations, not causal evidence of native scheduling behavior.
+
+The first lazy resident-session construction runs the existing target-device
+arithmetic qualifications synchronously. Those constructor-only probes perform
+bulk readbacks and waits. Once the session exists, the UI-side submit, redraw,
+draw and retirement paths perform no bulk readback or wait; only the four-byte
+validity callback crosses to CPU. The worker submits each GPU stage normally,
+except resident L1, whose unchanged wavefront schedule is encoded into chunks
+of at most eight dispatches. Its six submissions have five callback-completion
+waits on the registered worker only. These waits hold no wgpu fence lock; a
+100-microsecond receive timeout drives nonblocking polling if no UI is active.
+The earlier one-millisecond fallback delayed completion observation between
+chunks in normal compositor-paced playback; the uncapped diagnostic's frequent
+polling had hidden this cost. The timeout is a host scheduling interval, not
+stitch arithmetic or a source-release proof.
+The callback is only a scheduling signal, not a source-release proof. The
+exact lease stays armed through every chunk and final validity acknowledgement.
+UI draws may interleave, but are not guaranteed a submission between chunks.
+Earlier blocking-wait pacing and diagnostic-only pacing were removed. Selected
+L1 runs through `GpuL2BridgeOutput::submit_l1_pis`, not the CPU-grid diagnostic
+`submit_pis_stage`. A test-only counter at the successful-submission site lets
+real Scene cold, warm and cached-redraw tests prove the selected worker route.
+The bulk legacy CPU stitch implementation is
+retained solely as the frozen oracle and explicit diagnostic surface; small
+control, pose, identity and lifecycle state remains on CPU.
+
+The selected ONE X2 basis, calibration packing, 51-pose schedule and Metal
+parent-map law are READ from Studio. Kjerag uses its existing orientation
+track in place of Studio's unrecovered `PrecomputeStabilization` pose-cache
+producer, an owner-approved implementation substitution recorded in
+`docs/research/studio-seam-re.md`. The masks, cold and warm estimator, map
+materialization, alpha and type-2 consumer implement the recovered semantics
+around that boundary. This is a disclosed implementation difference, not a
+claim that Kjerag reproduces Studio's internal provider.
+
+The bounded visual gate covers the owner's reported riser-continuity defect
+at the reported view over frames 6339 through 6399. The owner reported
+"Looks good" on that sequence and again after the first internal concurrency
+change. Later archived candidates were measured byte-identical over that
+61-frame production, map, alpha and computed-trace boundary, but the latest
+exact build still needs its own owner verdict. This does not establish
+whole-video, Studio-internal, seek/reset, real-time or continuous-sound
+parity.
+
 ## Trap list (each verified in the 2026-07 study)
 
+- A passing solver primitive test does not prove playback uses that entry.
+  The 2026-09-06 L1 pacing change was initially attached to a CPU-grid
+  diagnostic while resident playback used the GPU L2-to-L1 bridge. Its
+  apparent paced/unpaced and batch-size timing differences were uncontrolled
+  variation, not effects of those edits. Verify the actual Scene call path.
+- A blocking GPU wait on another thread can block drawing: pinned wgpu holds
+  a fence read lock across that wait and submission needs its write lock.
+  This applies in both directions, including a benchmark's draw-completion
+  wait preventing worker submission. Nonblocking callback polling avoids
+  holding the lock throughout GPU execution; it still has polling overhead.
 - Use descriptor `pitch[]`/`offset[]` verbatim. Chroma pitch is
   `align(width, 512)`: at 3840-wide that is 4096 != 3840, and computed
   strides shear chroma on real footage while passing on 1920/2560 tests.
@@ -257,23 +1287,44 @@ grid at 6.4 ppm and is 11.5 ms away from it by the end of a 30-minute file
   than the newest takes dual-stream decode from 2.19x realtime at depth 0
   to 2.46x at depth 2, and 2.47x at depth 4. `Reader::lookahead` is that
   depth and the engine sets it to 2.
-- The decoder's VA-API surface pool is fixed at `avcodec_open2` and is 20
-  surfaces per stream here (`Reader::pool_size`, read from the
-  `AVHWFramesContext` after the first frame). Every held frame, mapped or
-  not, holds one: the engine holds at most 9 per stream (2 lookahead, 2
-  queued pairs, the one on screen, the one peeked, and 3 retained on the
-  GPU). Nothing checks this at runtime; the count is the budget.
-- An imported texture aliases the decoder's surface, so dropping the
+- Do not interpret `Reader::pool_size() == Some(0)` as exhaustion or a
+  fixed zero-surface pool. Current FFmpeg7.1 VA-API uses dynamic allocation;
+  both lanes on both owner cameras report0 after decoding (2026-09-11).
+  The earlier20-surface reading is historical, not a current ceiling.
+  `extra_hw_frames` adds capacity only when FFmpeg selects a positive fixed
+  pool; modern VA-API grows on demand. The context is created at hardware
+  format negotiation, not necessarily at `avcodec_open2`. Every held frame,
+  mapped or not, still prevents reuse of its surface. The engine holds at
+  most9 per stream (2 lookahead, 2
+  queued pairs, the one on screen, the one peeked, and 3 retained on the GPU)
+  on the generic route. Nothing checks that generic-route count at runtime;
+  selected resident playback instead owns pending, installed and bounded
+  retired sources until their callbacks prove completion.
+- On the generic and legacy diagnostic routes, an imported texture aliases the decoder's surface, so dropping the
   `Frames` while the GPU is still reading hands live memory back to the
   decoder. `ScenePipeline` keeps the last 3 pairs alive behind the one it
   binds; iced submits after `prepare` returns and presents later still, so
   "the draw call was recorded" is not "the GPU is done".
+- The selected resident ONE X2 path enforces the same rule with a sealed
+  transition rather than a retention convention. `ImportedOneXsPicture` owns
+  the exact two imported plane pairs, GPU context and
+  decoder `Frames`. Its consuming resident-front operation derives the exact
+  frame identity and luma textures internally, refuses a foreign context
+  before reservation or encoding, appends parent, geometry and belt work to
+  one command stream, and moves that same aggregate into the submission
+  lease. The crate-visible admission accepts the concrete aggregate rather
+  than a `SourceTextures`/owner pair. Its opaque result retains the only
+  module-private consuming motion continuation. Scene reaches it only through
+  the capture facade and renderer attachment. No raw wgpu or dmabuf resource
+  crosses that boundary. Bounded callback retirement, rather than the generic
+  three-pair convention, proves when each selected source may be released.
 - Reference import code: `ez-ffmpeg` 0.17 `wgpu_filter/hw_interop.rs`,
   `iroh-live` `rusty-codecs/src/render/dmabuf_import.rs`, `bevy-dmabuf`.
 - GStreamer was evaluated and rejected: no wgpu or dmabuf-to-Vulkan sink.
-- System ffmpeg is 6.1 (Pop!_OS): pin the ffmpeg-next major that matches,
-  or vendor a newer ffmpeg; do not assume the 8.x APIs from the research
-  notes are present.
+- The base Pop!_OS runtime was FFmpeg6.1; this project now builds against
+  FFmpeg7.1, with libavcodec.so.61 and libavutil.so.59 verified on the host.
+  Bindings must match the linked runtime. Do not assume8.x APIs from research
+  notes are available; AGENTS.md records the development-package setup.
 - wgpu-hal 28 enables `VK_KHR_external_memory_fd` and
   `VK_EXT_external_memory_dma_buf` whenever the adapter has them, but never
   `VK_EXT_image_drm_format_modifier`, and `iced_wgpu` builds its device from
@@ -310,6 +1361,12 @@ grid at 6.4 ppm and is 11.5 ms away from it by the end of a 30-minute file
   8-bit rounding of the round trip and nothing else.
 
 ## Projection
+
+The generic camera geometry below is shared, but its crossover, adaptive band
+and research calibration knobs are not the selected ONE X2 handover. A
+supported ONE X2 instead consumes the recovered native type-2 map and alpha
+through the direct route described under Playback. That map owns its handover;
+the legacy band cannot modify it.
 
 Insta360 stores a full Mei/UCM camera model per lens in the trailer
 (`offset_v3`): xi, fx/fy, cx/cy, k1-k3, p1/p2, per-lens extrinsics
@@ -399,41 +1456,18 @@ A file with **one** lens stream takes no crossover at all: it has no seam to
 hand over at, and its picture runs to the edge of its own coverage, 7 degrees
 past where a seam would have been.
 
-### The seam is calibrated per camera (issue #48)
+### Factory seam and explicit research correction
 
-The camera's own calibration is out by degrees at the seam on the owner's
-unit: 2.4 across it, which is 43 px of the delivered frame and reads as a
-doubled tree trunk. It is a relative lens tilt with a principal-point error
-under it, and `kjerag_render::seam` measures and corrects it **per camera**,
-because that is what it is: fitted file by file the same pair of lenses asks
-for five answers 15 view pixels apart, while one answer fitted on a capture
-from a camera standing still reads the same along-seam number on three and a
-half months of the owner's flights as their own fits do
-(docs/research/insv-format.md 6.8).
+The production app fits and stores no seam calibration. It uses the factory
+calibration as the parity base, and supported ONE X2 playback replaces the
+generic handover with its recovered type-2 map. The former per-file fallback,
+saved per-camera pool and calibration action are removed.
 
-The fit is the phase-1 instrument's own measurement, in the shipped map's
-units: both lenses sampled on the same angular grid at 72 azimuths on the seam
-circle over frames spread through the file, each calibration field turned by a
-probe amount to build the design matrix, three Gauss-Newton rounds because one
-is 2 percent short at this size. Five knobs, a relative rotation and a
-principal point, with the point held towards zero by a ridge and a fit refused
-below twice the knob count in azimuths: those two are what keep a capture with
-little far-field content from asking for 54 px of principal point.
-
-**Nothing is fitted at open.** The answer is five numbers under a serial-free
-camera key (`CalibrationSet::camera_key`) in cosmic-config state, so a file
-opens corrected before its first frame with nothing to decode. `View >
-Calibrate seam from this video` is what puts one there, on the file the pilot
-has open, off the main thread, about two seconds.
-
-A camera with no stored calibration falls back to fitting off the file being
-played, on its own thread, landing a second or two in and saying so in the
-report line. That is weaker for a measured reason and not just in principle:
-a flight's across-seam column carries that flight's parallax, and a fit
-through it absorbs some into a number that is then applied to the whole
-sphere. A file the fit cannot read -- a legacy one-stream capture, a seam with
-nothing far-field on it, an answer too big to be a calibration -- keeps the
-factory calibration.
+The renderer retains `Scene::use_seam` for explicit research correction only.
+Headless instruments may name all five knobs, but no omitted argument can
+select a content-fitted pose. The historical fit method and its measured
+transfer results remain in docs/research/insv-format.md 6.8; they are evidence
+about the legacy generic route, not selected product behavior.
 
 Nothing is shown from neither lens: the two 97.4-degree caps overlap by
 about 14 degrees, which is checked over the whole sphere by `cargo test`
@@ -773,17 +1807,12 @@ on the X4 Air).
   composition is settled (above); the order is not, and no known camera can
   distinguish it, because every one of them records sub-degree yaw and
   pitch (docs/research/insv-format.md 4.8).
-- What is left of the seam. Settled and shipped for the geometry: the 2.4
-  degrees **across** the seam and the along-seam one cycle under it were both
-  calibration, and both come out of a five-knob fit stored per camera
-  (above). On the far-field control the whole thing is down to 0.02 along and
-  0.11 across, which is under two view pixels. What is left on **flights** is
-  0.15 to 0.22 along and 0.49 to 0.92 across, and the second of those two
-  numbers is parallax rather than calibration: it is the axis a baseline can
-  reach, it moves with what the camera was looking at, and no correction
-  applied to the whole sphere can take it out. That is the next thing on this
-  seam and it wants depth, not knobs.
-  docs/research/insv-format.md 6.8 has the numbers and the transfer table.
+- What remains on the legacy generic seam. Historical fitting isolated a
+  repeatable calibration component and a content-dependent component on
+  flights. The production app no longer fits or stores that five-knob
+  correction. docs/research/insv-format.md 6.8 retains the measurements and
+  transfer table; the selected ONE X2 route is the recovered type-2 map
+  described above rather than a continuation of that fitting design.
 - **Exposure across the seam is still not corrected** (6.3), and when the
   crossover was narrowed from 10 degrees to 2 there was less band to hide a
   brightness step in. Measured then on the flattest, brightest content in this

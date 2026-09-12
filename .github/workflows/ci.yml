@@ -7,6 +7,12 @@ on:
   # runs the gates a pull request runs and there is one copy of them.
   workflow_call:
 
+env:
+  # Match the toolchain qualified locally and in the 25.08 Flatpak SDK.
+  # A moving stable added new denied Clippy lints without a source change.
+  # Upgrade deliberately, with the same gates on both architectures.
+  KJERAG_CI_RUST: '1.97.1'
+
 jobs:
   # The gates that compile run on both arches, natively: ubuntu-24.04-arm is a
   # real aarch64 runner rather than emulation, and says so itself (`uname -m`,
@@ -30,6 +36,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      # Exercise the harness's log ordering without a compositor or footage.
+      - run: bash scripts/test-uitest-startup.sh
+      - run: python3 scripts/test-check-controls-wake.py
       # ffmpeg-sys-next binds the system headers, and bindgen needs libclang
       # to read them. The pin is ffmpeg 7.1 (issue #65) and ubuntu-24.04 ships
       # 6.1, so the ffmpeg half comes from a PPA, and it is the same one
@@ -59,6 +68,7 @@ jobs:
           }
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.KJERAG_CI_RUST }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
@@ -113,6 +123,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.KJERAG_CI_RUST }}
       - uses: Swatinem/rust-cache@v2
       # pkg-config is pointed at nothing as well, so this job still fails on a
       # runner image that happens to ship libav headers. Verified positively:

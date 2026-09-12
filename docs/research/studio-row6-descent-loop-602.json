@@ -1,0 +1,135 @@
+{
+  "schema": "kjerag.studio-row6-descent-loop-oracle.v1",
+  "studio_version": "6.0.2",
+  "worker_sha256": "0a34f593198a0a7a29239ccded91231af3d7bc94e04213c67a2d44a04076a452",
+  "claim": "One authenticated cold A-to-B level-two pass-zero weighted row-6 column-2 candidate, six-descent trajectory, final disparity-gate inputs, and terminal SKIP retaining the selected seed.",
+  "parity_claimed": false,
+  "coordinates": {
+    "direction": "ab",
+    "level": 2,
+    "pass": 0,
+    "output_row": 6,
+    "output_col": 2,
+    "source_row": 18,
+    "source_col": 6,
+    "row_mode": "weighted"
+  },
+  "authenticated_inputs": {
+    "source_image_sha256": "fa0ab394af7068edbe72fb9d176f017aa082c33e9d866a12148e5f4db23ca0ed",
+    "target_image_sha256": "625b6fe9e3597ff97bb32b91e17f24ad0e6b2fc33c39ee1deb2e559e935e9963",
+    "source_mask_sha256": "e30f604d1d1edb23dab753dfca8724b3caf070aeb4fd3a9a3accb306cd173ce9",
+    "target_mask_sha256": "e30f604d1d1edb23dab753dfca8724b3caf070aeb4fd3a9a3accb306cd173ce9",
+    "zero_plane_sha256": "9dd76d9311e87123c936ab0d956e9ead34dae3fb68beb075b6ee6fee9b08d9e0",
+    "level_two_work_rows_sha256": "23b16ea2aab8780bee8a8b761fc9916b38bca0e23270cfe711e347ecbc0fceb6",
+    "output_row_weighted": true,
+    "patch_side": 8,
+    "patch_stride": 3
+  },
+  "captured_candidates": {
+    "hint_present": false,
+    "candidate_order": ["current", "hint", "horizontal", "vertical"],
+    "current": {
+      "flow": ["0x00000000", "0x00000000"],
+      "score": "0x422354a2"
+    },
+    "horizontal": {
+      "flow": ["0x3dcd8267", "0x3dcf7d3c"],
+      "score": "0x41cda678"
+    },
+    "vertical": {
+      "flow": ["0xbc9d74cf", "0xbc87bb87"],
+      "score": "0x501502f9"
+    },
+    "winner": "horizontal",
+    "seed": ["0x3dcd8267", "0x3dcf7d3c"]
+  },
+  "captured_updates": [
+    {
+      "ordinal": 1,
+      "residual": "0x41cda678",
+      "tentative_flow": ["0x3deb6e03", "0x3ded956c"]
+    },
+    {
+      "ordinal": 2,
+      "residual": "0x41bed0c4",
+      "tentative_flow": ["0x3e042071", "0x3e05455b"]
+    },
+    {
+      "ordinal": 3,
+      "residual": "0x41b1292a",
+      "tentative_flow": ["0x3e120372", "0x3e1334b1"]
+    },
+    {
+      "ordinal": 4,
+      "residual": "0x41a499f7",
+      "tentative_flow": ["0x3e1f65d1", "0x3e209eb9"]
+    },
+    {
+      "ordinal": 5,
+      "residual": "0x419907a8",
+      "tentative_flow": ["0x3e2c4ce9", "0x3e2d88fd"]
+    },
+    {
+      "ordinal": 6,
+      "residual": "0x418e5d89",
+      "tentative_flow": ["0x3e38bdd6", "0x3e39f8c6"]
+    }
+  ],
+  "captured_termination": {
+    "configured_max_descents": 6,
+    "successful_count": 6,
+    "reason": "configured_limit",
+    "later_comparisons_live_nzcv": "0x8",
+    "later_comparisons_improving": true
+  },
+  "captured_final_guard": {
+    "distance_f64_bits": "0x3fbd077c8bc82af5",
+    "distance_limit_f64_bits": "0x4020000000000000",
+    "configured_distance_i32": 8,
+    "route": "default_interval",
+    "route_provenance": "DERIVED_FROM_LIVE_SNAPSHOT_AND_STATIC_READ",
+    "first_endpoint": ["0xc0700000", "0xbdfffc66"],
+    "second_endpoint": ["0x3e7ffc66", "0x3dfffc66"],
+    "tentative_flow": ["0x3e38bdd6", "0x3e39f8c6"],
+    "outcome": "disparity_skip",
+    "store_action": "SKIP",
+    "terminal_action_provenance": "LIVE_AUTHENTICATED_FROM_B660_OR_B664_AND_EXACT_CELL_STATE",
+    "retained_flow": ["0x3dcd8267", "0x3dcf7d3c"]
+  },
+  "capture_provenance": {
+    "run": "row6-descent-loop-a55ab1b-02",
+    "capture_source_commit": "a55ab1b99b34f5fbce76ddd827168d65b81b91dd",
+    "status": "success",
+    "verification_verdict": "accepted",
+    "elapsed_seconds": 81.034407292,
+    "evidence_sha256": "3549b8857d37ba99075161813a2586950f629f48f5399532d6ea8477dd749c2f",
+    "evidence_bytes": 17578,
+    "report_sha256": "295b58f2b0701389b61b653b4cd248a03c5cedad6ec41353087c21473a8cebd4",
+    "launch_receipt_sha256": "98a6337e2223511e66a05f2c7b1c9c9b91044ad8768302b7081e1907c3419d46",
+    "source_manifest_sha256": "bb4c2bc341391b796d345650f75ddbe7d382f3f03ba94489ad6e10429afb28d0",
+    "armed_marker_sha256": "e36fd7931f6af022563b4c64ea57e4d4938185f15dfb95cf73c0945848a386c8",
+    "process_receipt_sha256": "89d989460ba57b3439d984ef234a1ce68cc5948ee4f3fb6c587b78c7ad0cbaa5",
+    "packet_log_sha256": "e985b6dd14e408136897c2e7ad2ed12f1c25046fbb3670d79822d843afbfe885",
+    "packet_log_bytes": 26421248,
+    "config_template_sha256": "f2715cd093b84daec3f51d0056e7959d46dd09b5be5609a635349f9f21a4531b",
+    "pins_sha256": "4d25524ebda642f141dbabfdb66b9d29ae9225167f433ed80c6168c6c41fb65f",
+    "caches_found": 0,
+    "pins_verified": true,
+    "lifecycle": {
+      "capture_complete": true,
+      "teardown_complete": true,
+      "detached": true,
+      "debugger_state_restored": true,
+      "process_group_empty": true,
+      "timed_out": false,
+      "returncode": 0
+    },
+    "source_hash_scope": "Stable source bytes were hashed after capture arm and before the first workload continue. This is not external source attestation or proof that imported bytecode was compiled from those bytes."
+  },
+  "limitations": [
+    "This is one cold cell, not a complete field.",
+    "The exact shared-validity predicate identity was not distinguished live.",
+    "The default interval route is derived from live state and static READ, while the terminal SKIP and retained cell are live-authenticated.",
+    "No warm state, target-time replay, rendered pixels, playback wiring, parity, owner-visible defect fix, or owner approval is claimed."
+  ]
+}

@@ -14,24 +14,21 @@
 //! recorded tables in this branch's PR were taken at `bins=180`.
 //!
 //! ```sh
-//! # the owner's own view line, with a stored per-camera calibration
+//! # the owner's own view line, at the factory parity base
 //! cargo run --release -p kjerag-spike --bin crossing -- <file.insv> \
 //!   time=50.117 yaw=-80.28 pitch=0.06 fov=55.69 lock=1 bins=180 \
-//!   seam=pool
+//!   seam=factory
 //! # the null control: lens 0 against its own picture, which must read zero
 //! cargo run --release -p kjerag-spike --bin crossing -- <file.insv> ... bins=180 null=1
 //! # the plant control: a known calibration delta, read back at every site
 //! cargo run --release -p kjerag-spike --bin crossing -- <file.insv> ... bins=180 plant=yaw:0.10
 //! ```
 //!
-//! **The `seam=` there was a literal string until 2026-08-07, and it was the
-//! wrong pose.** It said `roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91`,
-//! which is the knob-by-knob median of the owner's pool and no member of it:
-//! the combination `SeamPool::answer` stopped shipping on 2026-08-05
-//! (docs/research/seam-two-axis.md 4), so the app had not drawn it since.
-//! `seam=pool` asks for the pose the app draws rather than copying it, and a
-//! run prints the five knobs it applied. **Nothing recorded below has been
-//! re-read at the drawn pose.**
+//! **`seam=pool` in that line is gone** (2026-08-15): the per-capture pool was
+//! the non-parity mechanism and was removed, so the app now draws the factory
+//! calibration. `seam=factory` is what it draws; a specific fit is pasted in as
+//! `seam=roll:..,yaw:..,pitch:..,cx:..,cy:..`, and a run prints the five knobs
+//! it applied. **Nothing recorded below has been re-read at the factory pose.**
 //!
 //! **That `yaw` is re-derived and a stale one runs without a word.** The lock
 //! became world-fixed on 2026-08-06, so the frame a `lock=1` yaw is measured
@@ -172,7 +169,7 @@ fn sensitivity(options: &Options, baseline: [f64; 3], front: &Plane, back: &Plan
         return Ok(());
     };
     let Seam::Stored(fit) = options.seam else {
-        println!("sensitivity: withheld; a dither needs seam=pool or five knobs to move");
+        println!("sensitivity: withheld; a dither needs the five knobs (seam=roll:..) to move");
         return Ok(());
     };
     let mut swing = Vec::new();
@@ -383,7 +380,9 @@ fn map(options: &Options, seam: Seam) -> Fallible<Mapped> {
 /// The same view under one knob moved by a known amount.
 fn plant(options: &Options, knob: usize, amount: f64) -> Fallible<Mapped> {
     let Seam::Stored(fit) = options.seam else {
-        return Err("plant=<knob>:<amount> requires seam=pool or five knobs to perturb".into());
+        return Err(
+            "plant=<knob>:<amount> requires the five knobs (seam=roll:..) to perturb".into(),
+        );
     };
     println!(
         "plant:  {} by {:+.3} on top of the stored fit",
@@ -879,11 +878,11 @@ impl Options {
             dither: Some(0.001),
             null: false,
             plant: None,
-            seam: Seam::File,
+            seam: Seam::Factory,
             table: kjerag_render::Table::REST,
             out: None,
         };
-        let mut seam = String::from("file");
+        let mut seam = String::from("factory");
         for arg in args {
             match arg.split_once('=') {
                 None => out.input = PathBuf::from(arg),
@@ -933,11 +932,9 @@ impl Options {
         if out.input.as_os_str().is_empty() {
             return Err(USAGE.into());
         }
-        // Deferred out of the loop because `seam=pool` is resolved against the
-        // file and the file may be named anywhere on the line, but resolved
-        // before the rest of the checks so a bad `seam=` is still the first
-        // thing a bad line is told about.
-        out.seam = Seam::parse(&seam, &out.input)?;
+        // Resolve the override before the remaining validation so an invalid
+        // `seam=` is the first thing a bad line is told about.
+        out.seam = Seam::parse(&seam)?;
         if out.bins == 0 {
             return Err("bins= is how many arc bins the crossing is cut into".into());
         }
@@ -1034,7 +1031,7 @@ fn knob(value: &str) -> Fallible<(usize, f64)> {
 const USAGE: &str = "usage: crossing <file.insv> [time=seconds] [yaw=deg] [pitch=deg] [fov=deg] \
      [lock=1] [size=px] [bins=n] [span=deg] [search=deg] [step=deg] [contrast=codes] [ncc=score] \
      [perpgate=deg | perpgate=0] [perpref=deg] [dither=deg] [null=1] [plant=knob:amount] \
-     [seam=factory|file|pool|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9] [table=table.txt] [out=name.csv]";
+     [seam=factory|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9] [table=table.txt] [out=name.csv]";
 
 /// The view line the app copies is this instrument's command line too, which
 /// is the only reason a reported reading can be pointed at a picture the owner

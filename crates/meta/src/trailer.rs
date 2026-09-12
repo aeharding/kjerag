@@ -20,9 +20,10 @@
 //! records tight, where the walk alone gets all of them. Measured
 //! 2026-07-31 on five captures from the two cameras.
 //!
-//! Four records are read: 1, the metadata protobuf that carries the
-//! calibration, 3, the IMU track, and 4 and 12, the two lenses' shutter
-//! tracks. The thumbnails are seeked over, never read.
+//! Five record ids are read: 1, the metadata protobuf that carries the
+//! calibration, 3, the IMU track, 4 and 12, the two lenses' shutter tracks,
+//! and 9, the camera's ISO observations. The thumbnails are seeked over,
+//! never read.
 //!
 //! Record 3 is the big one, 35 MB on a 30-minute X4 Air capture, and it is
 //! read whole at open. Reading it lazily would buy back a tenth of a second
@@ -61,6 +62,8 @@ const INDEX_ENTRY_LEN: usize = 1 + 1 + 4 + 4;
 const METADATA_RECORD: u8 = 1;
 /// The IMU: accelerometer and gyroscope, two encodings (`super::gyro`).
 const GYRO_RECORD: u8 = 3;
+/// Raw 48-byte camera observations consumed by Studio's ISO constructor.
+const DENOISE_ISO_RECORD: u8 = 9;
 /// Lens 0's shutter track and lens 1's, in lens order.
 ///
 /// They are two records and they stay two here. telemetry-parser reads
@@ -89,6 +92,10 @@ pub(crate) struct ExtraMetadata {
     /// Milliseconds.
     #[prost(double, tag = "25")]
     pub rolling_shutter_time: f64,
+    /// Source grouping used by Studio's denoiser selector. The parent message
+    /// is optional so an explicit scalar zero remains distinct from absence.
+    #[prost(message, optional, tag = "26")]
+    pub file_group_info: Option<FileGroupInfo>,
     #[prost(message, optional, tag = "27")]
     pub window_crop_info: Option<WindowCropInfo>,
     #[prost(double, tag = "28")]
@@ -102,6 +109,9 @@ pub(crate) struct ExtraMetadata {
     #[prost(string, tag = "54")]
     #[cfg_attr(test, serde(deserialize_with = "offset_v3_from_fixture"))]
     pub offset_v3: String,
+    /// The extended 13-coefficient lens calibration when this camera writes it.
+    #[prost(string, tag = "111")]
+    pub offset_v6: String,
     #[prost(bool, tag = "62")]
     pub is_raw_gyro: bool,
     #[prost(message, optional, tag = "65")]
@@ -116,6 +126,14 @@ pub(crate) struct Vector2 {
     pub x: i32,
     #[prost(int32, tag = "2")]
     pub y: i32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+#[cfg_attr(test, derive(serde::Deserialize))]
+#[cfg_attr(test, serde(default))]
+pub(crate) struct FileGroupInfo {
+    #[prost(int32, tag = "1")]
+    pub source_type: i32,
 }
 
 /// The sensor window the camera crops out of the calibration canvas
@@ -211,6 +229,8 @@ pub(crate) struct Trailer {
     pub metadata: ExtraMetadata,
     /// Record 3, the IMU. Empty where the file has no such record.
     pub gyro: Vec<u8>,
+    /// Record 9 as written. Empty where the file has no such record.
+    pub denoise_iso: Vec<u8>,
     /// Records 4 and 12 as they came, one per lens and never merged.
     /// Empty where the file has no such record, which is every camera
     /// that writes one lens per file.
@@ -244,9 +264,14 @@ fn read_trailer<S: Read + Seek>(source: &mut S) -> Result<Trailer, Error> {
         Some(record) => read(source, record)?,
         None => Vec::new(),
     };
+    let denoise_iso = match find(&records, DENOISE_ISO_RECORD, BINARY) {
+        Some(record) => read(source, record)?,
+        None => Vec::new(),
+    };
     Ok(Trailer {
         metadata,
         gyro,
+        denoise_iso,
         exposure,
     })
 }
@@ -449,6 +474,13 @@ mod tests {
             .collect()
     }
 
+    fn iso_item(timestamp: u32, shifted_iso: u32) -> Vec<u8> {
+        let mut item = vec![0; 48];
+        item[..4].copy_from_slice(&timestamp.to_le_bytes());
+        item[16..20].copy_from_slice(&(shifted_iso << 19).to_le_bytes());
+        item
+    }
+
     fn trailer_of(file: Vec<u8>) -> Result<Trailer, Error> {
         read_trailer(&mut Cursor::new(file))
     }
@@ -461,6 +493,44 @@ mod tests {
         assert_eq!(decoded, expected);
         assert_eq!(decoded.camera_type, "Insta360 X4 Air");
         assert_eq!(decoded.offset_v3.split('_').count(), 40);
+    }
+
+    #[test]
+    fn absent_file_group_differs_from_an_explicit_zero() {
+        let absent = CalibrationSet::from_trailer(
+            &trailer_of(Capture::of(&fixture::metadata()).insv()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(absent.source_group_type, None);
+
+        let mut explicit = fixture::metadata();
+        explicit.file_group_info = Some(FileGroupInfo { source_type: 0 });
+        let encoded = explicit.encode_to_vec();
+        assert!(
+            encoded.windows(3).any(|bytes| bytes == [0xd2, 0x01, 0x00]),
+            "the explicit empty nested message was omitted"
+        );
+        let present =
+            CalibrationSet::from_trailer(&trailer_of(Capture::of(&explicit).insv()).unwrap())
+                .unwrap();
+        assert_eq!(present.source_group_type, Some(0));
+    }
+
+    #[test]
+    fn file_group_preserves_another_type_and_ignores_unknown_nested_fields() {
+        let mut bytes = fixture::metadata().encode_to_vec();
+        // Top-level tag 26, length-delimited. Its message carries type=8 at
+        // tag 1 and an unrelated varint at tag 99.
+        bytes.extend([0xd2, 0x01, 0x05, 0x08, 0x08, 0x98, 0x06, 0x7b]);
+        let metadata = ExtraMetadata::decode(bytes.as_slice()).unwrap();
+        assert_eq!(
+            metadata.file_group_info,
+            Some(FileGroupInfo { source_type: 8 })
+        );
+        let calibration =
+            CalibrationSet::from_trailer(&trailer_of(Capture::of(&metadata).insv()).unwrap())
+                .unwrap();
+        assert_eq!(calibration.source_group_type, Some(8));
     }
 
     #[test]
@@ -590,6 +660,150 @@ mod tests {
         assert_eq!(calibration.camera_model, "Insta360 X4 Air");
         assert_eq!(calibration.lenses.len(), 2);
         assert!((calibration.lenses[1].intrinsics.cx - 1935.35).abs() < 0.01);
+        assert!(calibration.denoise_iso.is_empty());
+    }
+
+    #[test]
+    fn an_unindexed_walk_reads_record_nine() {
+        let file = Capture::of(&fixture::metadata())
+            .with(DENOISE_ISO_RECORD, iso_item(1_000, 64))
+            .insv();
+        let trailer = trailer_of(file).unwrap();
+        assert_eq!(trailer.denoise_iso, iso_item(1_000, 64));
+        let calibration = CalibrationSet::from_trailer(&trailer).unwrap();
+        assert_eq!(calibration.denoise_iso.summary_iso(), Some(100));
+    }
+
+    /// The PII-free ONE X2 fixture takes the whole production path: JSON into
+    /// the protobuf record, the camera's tight unindexed trailer walk, and
+    /// `offset_v3` into delivered-frame calibration. This prevents a hand-made
+    /// renderer fixture from silently disagreeing with what the owner's file
+    /// actually parses to.
+    #[test]
+    fn the_one_x2_fixture_yields_its_exact_calibration_and_readout() {
+        let trailer = trailer_of(Capture::of(&fixture::one_x2_metadata()).insv()).unwrap();
+        let calibration = CalibrationSet::from_trailer(&trailer).unwrap();
+
+        assert_eq!(calibration.camera_model, "Insta360 ONE X2");
+        assert_eq!(calibration.firmware, "v1.0.62_build2");
+        assert_eq!(
+            calibration.dimension,
+            crate::Size {
+                width: 2880,
+                height: 2880,
+            }
+        );
+        assert_eq!(
+            calibration.calibration_canvas,
+            crate::Size {
+                width: 6080,
+                height: 3040,
+            }
+        );
+        assert_eq!(calibration.lenses.len(), 2);
+        assert_eq!(
+            calibration
+                .lenses
+                .iter()
+                .map(|lens| lens.crop_centre.map(f64::to_bits))
+                .collect::<Vec<_>>(),
+            [
+                [0x4096_a7ae_147a_e148, 0x4096_a847_ae14_7ae1],
+                [0x4096_7cf5_c28f_5c28, 0x4096_5dae_147a_e148],
+            ]
+        );
+        assert_eq!(
+            calibration
+                .lenses
+                .iter()
+                .map(|lens| lens.crop_centre.map(|value| (value as f32).to_bits()))
+                .collect::<Vec<_>>(),
+            [[0x44b5_3d71, 0x44b5_423d], [0x44b3_e7ae, 0x44b2_ed71],]
+        );
+        assert_eq!(
+            calibration
+                .lenses
+                .iter()
+                .map(|lens| lens.image_circle_centre.map(f32::to_bits))
+                .collect::<Vec<_>>(),
+            [[0x44b5_3d71, 0x44b5_423d], [0x44b3_e7b0, 0x44b2_ed71],]
+        );
+
+        let expected = [
+            (
+                [1.72859, 2326.25, 2325.95, 1_449.397_894_736_842, 1449.54],
+                [
+                    0.226_921_54,
+                    -0.144_496_89,
+                    -0.978_097_2,
+                    -0.000_850_27,
+                    0.000_308_11,
+                ],
+                [0.957, -0.884, -179.717],
+                [0.0, 0.0, 0.0],
+            ),
+            (
+                [1.72859, 2321.46, 2321.70, 1439.28, 1_431.871_578_947_368],
+                [
+                    0.251_100_33,
+                    -0.283_471_35,
+                    -0.744_952_14,
+                    0.000_647_61,
+                    -0.000_561_68,
+                ],
+                [-0.889, -1.236, 0.963],
+                [0.000_292, -0.001_511, -0.021_103],
+            ),
+        ];
+        for (lens, (intrinsics, distortion, angles, translation)) in
+            calibration.lenses.iter().zip(expected)
+        {
+            assert_eq!(lens.lens_type, 41);
+            assert_eq!(lens.model, crate::Model::Mei);
+            assert!(lens.mounting.is_none());
+
+            let actual_intrinsics = [
+                lens.intrinsics.xi,
+                lens.intrinsics.fx,
+                lens.intrinsics.fy,
+                lens.intrinsics.cx,
+                lens.intrinsics.cy,
+            ];
+            let actual_distortion = [
+                lens.distortion.k1,
+                lens.distortion.k2,
+                lens.distortion.k3,
+                lens.distortion.p1,
+                lens.distortion.p2,
+            ];
+            let actual_angles = [lens.pose.yaw_deg, lens.pose.pitch_deg, lens.pose.roll_deg];
+            for (actual, expected) in actual_intrinsics
+                .into_iter()
+                .chain(actual_distortion)
+                .chain(actual_angles)
+                .chain(lens.pose.translation_m)
+                .zip(
+                    intrinsics
+                        .into_iter()
+                        .chain(distortion)
+                        .chain(angles)
+                        .chain(translation),
+                )
+            {
+                assert!(
+                    (actual - expected).abs() <= 1e-12,
+                    "{actual} is not the fixture value {expected}"
+                );
+            }
+        }
+
+        assert_eq!(calibration.gyro.encoding, crate::GyroEncoding::Scaled);
+        assert_eq!(calibration.gyro.imu_orientation, "Zxy");
+        assert!((calibration.rolling_shutter_ms - 23.516_071_319_580_078).abs() <= 1e-12);
+        let readout = calibration.readout();
+        assert!((readout.seconds - 0.023_516_071_319_580_08).abs() <= 1e-15);
+        assert_eq!(readout.sweep, crate::Sweep::Down);
+        assert_eq!(readout.sweep.axis(), [0.0, 1.0]);
     }
 
     /// Records 4 and 12 are two lenses and stay two. Reading them into one
@@ -643,7 +857,8 @@ mod tests {
             ..Capture::of(&fixture::metadata())
         }
         .with(EXPOSURE_RECORDS[0], shutters(&[0.001]))
-        .with(EXPOSURE_RECORDS[1], shutters(&[0.003]));
+        .with(EXPOSURE_RECORDS[1], shutters(&[0.003]))
+        .with(DENOISE_ISO_RECORD, iso_item(1_000, 64));
 
         let calibration =
             CalibrationSet::from_trailer(&trailer_of(spaced.insv()).unwrap()).unwrap();
@@ -656,6 +871,7 @@ mod tests {
             calibration.exposure[1].shutter_at(Duration::ZERO),
             Some(0.003)
         );
+        assert_eq!(calibration.denoise_iso.summary_iso(), Some(100));
 
         let unindexed = Capture {
             indexed: false,
@@ -798,5 +1014,14 @@ mod tests {
             worst > 1.05,
             "the two lenses' shutters never differ, which is not a track per lens"
         );
+    }
+
+    #[test]
+    #[ignore = "reads the owner's private April X4 Air capture"]
+    fn april_x4_air_records_source_group_zero() {
+        let path =
+            std::env::var("KJERAG_DENOISE_ISO_X4").expect("KJERAG_DENOISE_ISO_X4 is required");
+        let calibration = CalibrationSet::from_capture(path).unwrap();
+        assert_eq!(calibration.source_group_type, Some(0));
     }
 }

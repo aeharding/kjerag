@@ -72,17 +72,14 @@
 //! cargo run --release -p kjerag-spike --bin shear -- \
 //!   ~/Videos/Insta/VID_20260714_193252_00_006.insv \
 //!   time=36.303 yaw=162.31 pitch=5.44 fov=20.00 lock=1 frames=90 warm=6.0 \
-//!   seam=pool
+//!   seam=factory
 //! ```
 //!
-//! **The `seam=` there was a literal string until 2026-08-07, and it was the
-//! wrong pose.** It said `roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91`,
-//! which is the knob-by-knob median of the owner's pool and no member of it:
-//! the combination `SeamPool::answer` stopped shipping on 2026-08-05
-//! (docs/research/seam-two-axis.md 4), so the app had not drawn it since.
-//! `seam=pool` asks for the pose the app draws rather than copying it, and a
-//! run prints the five knobs it applied. **Nothing recorded below has been
-//! re-read at the drawn pose.**
+//! **`seam=pool` in that line is gone** (2026-08-15): the per-capture pool was
+//! the non-parity mechanism and was removed, so the app now draws the factory
+//! calibration. `seam=factory` is what it draws; a specific fit is pasted in as
+//! `seam=roll:..,yaw:..,pitch:..,cx:..,cy:..`, and a run prints the five knobs
+//! it applied. **Nothing recorded below has been re-read at the factory pose.**
 //!
 //! `-150` reads 0.3381 deg along the seam at 0.0066 deg step rms over 87 pairs,
 //! worst single step 0.0187; the seam itself (`+0`) 0.3356 at 0.0687 over 89,
@@ -274,11 +271,12 @@ struct Fit {
 /// Draws the run both ways and reads every band on every frame.
 ///
 /// One [`Scene`], so one decode: the frame is decoded once and handed to both
-/// pipelines. The correction walk is landed by `fit_seam` on a stepped scene,
-/// so the second `primitive` of a frame builds the same map as the first.
+/// pipelines. The seam base is landed once (factory, or a manual fit through
+/// `use_seam`), so the second `primitive` of a frame builds the same map as the
+/// first.
 fn walk(gpu: &Gpu, options: &Options) -> Fallible<Vec<Sample>> {
-    let mut live = ScenePipeline::new(&gpu.device, FORMAT);
-    let mut plain = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut live = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
+    let mut plain = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     plain.hold_band(true);
     live.hold_band(options.held());
     let mut scene = Scene::still(&options.input, options.start())?;
@@ -1342,11 +1340,11 @@ impl Options {
             null: false,
             plant: 0.05,
             out: PathBuf::from("scratch/shear"),
-            seam: Seam::File,
+            seam: Seam::Factory,
             args: args.iter().skip(1).cloned().collect::<Vec<_>>().join(" "),
         };
         let mut view = Vec::new();
-        let mut seam = String::from("file");
+        let mut seam = String::from("factory");
         for arg in args.iter().skip(1) {
             if Framing::is_term(arg) {
                 view.push(arg.as_str());
@@ -1377,11 +1375,9 @@ impl Options {
         if options.input.as_os_str().is_empty() {
             return Err(USAGE.into());
         }
-        // Deferred out of the loop because `seam=pool` is resolved against the
-        // file and the file may be named anywhere on the line, but resolved
-        // before the rest of the checks so a bad `seam=` is still the first
-        // thing a bad line is told about.
-        options.seam = Seam::parse(&seam, &options.input)?;
+        // Resolve the override before the remaining validation so an invalid
+        // `seam=` is the first thing a bad line is told about.
+        options.seam = Seam::parse(&seam)?;
         let (rows, cols) = options.mode.patch();
         if options.size as usize <= rows.max(cols) {
             return Err(format!(
@@ -1470,7 +1466,7 @@ const USAGE: &str = "usage: shear <file.insv> time=seconds yaw=deg pitch=deg fov
      [mode=probe|profile|plant] [frames=90] [warm=seconds] [size=px] [null=1] [plant=deg] \
      [out=dir] \
      [table=table.txt] \
-     [seam=factory|file|pool|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9]";
+     [seam=factory|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9]";
 
 #[cfg(test)]
 mod tests {

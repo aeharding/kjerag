@@ -11,9 +11,8 @@
 //! select it out of the terminal, put `kjerag` in front of it, and the
 //! window opens at that frame pointing that way.
 //!
-//! Hand rolled rather than through a parser crate: two flags, one path and
-//! five keys is the whole grammar, and a terminal user tries the flags before
-//! anything else.
+//! Hand rolled rather than through a parser crate: the ordinary player has
+//! two flags, one path and five keys.
 
 use std::path::PathBuf;
 

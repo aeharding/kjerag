@@ -63,10 +63,31 @@ pub fn force_extensions(args: wgpu::hal::vulkan::CreateDeviceCallbackArgs<'_, '_
 /// of this: its device is iced's, and the `[patch.crates-io]` wgpu entry is
 /// what puts the extension on that one.
 pub fn open_device(adapter: &wgpu::Adapter) -> Fallible<(wgpu::Device, wgpu::Queue)> {
+    open_device_with_features(adapter, wgpu::Features::empty())
+}
+
+#[cfg(test)]
+pub(crate) fn open_device_for_timestamp_test(
+    adapter: &wgpu::Adapter,
+) -> Fallible<(wgpu::Device, wgpu::Queue)> {
+    open_device_with_features(
+        adapter,
+        wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+    )
+}
+
+fn open_device_with_features(
+    adapter: &wgpu::Adapter,
+    required: wgpu::Features,
+) -> Fallible<(wgpu::Device, wgpu::Queue)> {
+    if !adapter.features().contains(required) {
+        return Err(format!("GPU lacks required test features {required:?}").into());
+    }
+    let features = (adapter.features() & wgpu::Features::FLOAT32_FILTERABLE) | required;
     let opened = unsafe {
         let hal = adapter.as_hal::<Vulkan>().ok_or("not a Vulkan adapter")?;
         hal.open_with_callback(
-            wgpu::Features::empty(),
+            features,
             &wgpu::MemoryHints::default(),
             Some(Box::new(force_extensions)),
         )?
@@ -76,7 +97,7 @@ pub fn open_device(adapter: &wgpu::Adapter) -> Fallible<(wgpu::Device, wgpu::Que
             opened,
             &wgpu::DeviceDescriptor {
                 label: Some("headless"),
-                required_features: wgpu::Features::empty(),
+                required_features: features,
                 required_limits: adapter.limits(),
                 ..Default::default()
             },
@@ -106,6 +127,22 @@ pub fn device_report(device: &wgpu::Device) -> String {
             name.to_string_lossy()
         ),
     }
+}
+
+/// Resource exhaustion can clear while the current picture stays on screen.
+/// This classification is only valid before an imported source is submitted.
+/// Invalid descriptors, unsupported formats and device loss are not retries.
+pub(crate) fn retryable_import_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    if let Some(error) = error.downcast_ref::<std::io::Error>() {
+        return matches!(
+            error.raw_os_error(),
+            Some(libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::EAGAIN | libc::EINTR)
+        );
+    }
+    matches!(
+        error.downcast_ref::<vk::Result>().copied(),
+        Some(vk::Result::ERROR_OUT_OF_HOST_MEMORY | vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)
+    )
 }
 
 /// Import one DRM_PRIME descriptor as two sampled textures.
@@ -421,6 +458,37 @@ fn dup_fd(fd: c_int) -> Fallible<OwnedFd> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_pre_submit_resource_errors_are_retryable() {
+        for code in [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::ENOMEM,
+            libc::EAGAIN,
+            libc::EINTR,
+        ] {
+            assert!(super::retryable_import_error(
+                &std::io::Error::from_raw_os_error(code)
+            ));
+        }
+        for code in [libc::EBADF, libc::EINVAL, libc::EACCES] {
+            assert!(!super::retryable_import_error(
+                &std::io::Error::from_raw_os_error(code)
+            ));
+        }
+        for error in [
+            vk::Result::ERROR_OUT_OF_HOST_MEMORY,
+            vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+        ] {
+            assert!(super::retryable_import_error(&error));
+        }
+        assert!(!super::retryable_import_error(
+            &vk::Result::ERROR_DEVICE_LOST
+        ));
+        let descriptor_error: Box<dyn std::error::Error> = "invalid source descriptor".into();
+        assert!(!super::retryable_import_error(descriptor_error.as_ref()));
+    }
+
     use super::*;
 
     /// Straight from drm_fourcc.h: a typo here would silently pick the wrong

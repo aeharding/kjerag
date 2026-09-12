@@ -61,7 +61,7 @@
 use std::f32::consts::PI;
 use std::sync::OnceLock;
 
-use kjerag_meta::{Intrinsics, Lens, Model, Quat};
+use kjerag_meta::{Intrinsics, Lens, Model, Pose, Quat};
 
 use super::sampling::Sampling;
 use super::{Camera, Size};
@@ -166,99 +166,124 @@ const CAP_AZIMUTHS: usize = 8;
 /// when he authorized this architecture: *"you can merge the existing stitch
 /// with a wide band"*. Wide it is, and 8 is what wide has meant here since
 /// 2026-08-05.
-pub(crate) const CROSSOVER_DEG: f32 = 8.0;
+/// **Studio's number, and now ours.** Studio's handover is
+/// `clamp(configured_degrees, 0, 16)` - 16 is the CEILING, not the width - and
+/// the width fed to it is **6.000 degrees** for this camera. Under the owner's
+/// ruling of 2026-08-12 that "studio is the only priority for seam logic", and
+/// his explicit "I'm fine reversing the 9 deg a/b", 6 is the target and the 8
+/// he chose by eye is retired in principle.
+///
+/// **How that 6 was established, and what is still open**, because this took
+/// three passes and two of them were wrong. 16.8 read it off the stitch
+/// config's constructor and claimed three scans found no later writer; 17
+/// refuted that twice over - `SetStitchConfig` reaches the field with
+/// `add rcx, 0xb10`, an immediate no displacement scan can see, and
+/// `setupDynamicStitching` writes the same field through `[rcx+0x1ac]`. 17
+/// then over-corrected to "not statically determinable", because the camera
+/// branch compares BSS globals that are filled in at runtime. 18.1 settles
+/// it: the comparison is on those globals' ADDRESSES, and the image's own
+/// static initialiser names them - `0x18094d3c0` binds `"Insta360 X4 Air"` to
+/// `0x1860ae308`, which is exactly what the branch at `0x181712227` tests.
+/// X4, X5 and X4 Air all take 6.0 degrees on that arm.
+///
+/// Three residuals ride along and are NOT closed. Later diversions on the
+/// same path take 3.0 degrees for a mode field in `{7,8}` and a caller value
+/// for `0x63`; a Qt settings writer at `0x1819253be` can set the field from a
+/// stored preference; and the function that decides this is
+/// `setupDynamicStitching` while the owner runs **Optical Flow** (15), so
+/// whether it runs on his path at all is unread. If any of those bites, the
+/// number moves and this constant moves with it.
+///
+/// **What the change cost, recorded because it is the interesting part.**
+/// Eight tests moved. Five were literals or measured spans that scale with the
+/// ask and were re-measured: the 0.9-to-0.1 walk spends 3.90 to 3.95 degrees
+/// where it spent 4.80 to 4.89, the anchor's delivered fraction goes 0.617 to
+/// 0.681 on this fixture, and the seek's hold goes 2.90 to 2.174 - all of them
+/// the same proportion of a smaller band.
+///
+/// Three needed more than a number. `UNDER_THE_ASK` was re-cut from 3790 to
+/// 3770, because a fixture that overlapped by 7.43 degrees was under the old
+/// ask and over the new one and had stopped binding the clamp it exists for.
+/// `the_widest_band_stays_inside_the_overlap` became camera-dependent, and
+/// that is a FINDING: at 6 degrees the roomiest cameras keep their anchored
+/// band inside the shared picture where at 8 every camera overshot. And
+/// `the_anchored_handover_leaves_no_hole_and_no_cliff`'s positive control had
+/// to be rebuilt - at 6 degrees breaking the coverage taper steps the weight
+/// by 0.001668, LESS than the shipped map's own 0.002878, because the ramp has
+/// committed to one lens before the rim arrives. That control now forbids the
+/// ambiguous middle instead of asserting one side of it.
+///
+/// **What did NOT change, because it did not need to.** Studio's ramp is
+/// `alpha = 1 - (theta - (90-g)) / (2g)`, linear in the ANGLE; ours is linear
+/// in a cosine difference. Evaluated against each other over the whole
+/// handover with the lenses back to back, they differ by 0.0004 of a weight at
+/// 8 degrees and 0.0011 at 16 (`studio-seam-re.md` 14.1). The form is already
+/// right; only the width is wrong.
+pub(crate) const CROSSOVER_DEG: f32 = 6.0;
 
-/// Research only: what this run asks the handover for instead of
-/// [`CROSSOVER_DEG`], from `KJERAG_HANDOVER_DEG`, in degrees.
+/// Studio's `InstaCamera::OneXS` branch, which is the ONE X2.
 ///
-/// Unset, which is every shipped run and every run that does not name it, is
-/// [`CROSSOVER_DEG`]. Set to a width, the whole handover opens to it: the
-/// weights cross over across that many degrees, and so does everything the
-/// weights carry - the epipolar bend, which is split by them, and the
-/// along-seam correction, which lens 1 takes whole and the weights hand over.
-/// Either way the camera's own overlap still has the last word
-/// ([`Reframe::crossover`]).
-///
-/// **One knob and not two, because there is only one support.** This used to
-/// carry a longer argument, about an along-seam term applied over a whole lens
-/// and ramped into the picture by the weights, which is why it could not be
-/// given a support of its own. Nothing is applied over a lens any more
-/// ([`Reframe::blend`]: the seam is flat), so the argument survives in its
-/// short form: the crossover is the only thing here with a width, and this is
-/// what sets it.
-///
-/// **It stays because it is how this width was chosen.** The 8 above is one
-/// label-blind verdict at one pair of widths, staged as two arms of one binary
-/// through this variable; the next question about the width will be asked the
-/// same way, and a rebuild per arm is what makes a session take a day instead
-/// of an evening. Not a setting, not a key and not a menu item (AGENTS.md,
-/// zero-config playback): an environment variable, read once, written nowhere.
-const HANDOVER_DEG: &str = "KJERAG_HANDOVER_DEG";
+/// The Mac 6.0.2 initializer binds `"Insta360 ONE X2"` to `OneXS`, and the
+/// selected alpha-map producer dispatches that camera on `LENSTYPE == 0x29`.
+/// This value reaches the renderer on every lens in the trailer, so the block
+/// can select the recovered law when it is built without carrying a second
+/// product identity through the scene.
+const ONE_XS_LENS_TYPE: u32 = 0x29;
 
-/// The widest width the research switch will take, in degrees: the whole
-/// overlap of the camera family it was written for.
+/// Whether these calibrated streams are the selected two-lens ONE X2 route.
 ///
-/// A guard against a typo and not the bound that matters. What actually caps
-/// the handover is the file's own calibration, which is a smaller number on
-/// every camera in the corpus ([`Reframe::overlap`]): 14.44 to 15.02 degrees
-/// over six X4 Air files and 9.19 on the ONE X2. Those figures were 9.36 to
-/// 9.82 and 4.18 until the flat seam, when the bound stopped being the overlap
-/// minus a bend's reach and became the bare overlap.
-const OVERLAP_DEG: f32 = 14.0;
-
-/// How wide the handover asks to be on this run, in degrees, which is
-/// [`CROSSOVER_DEG`] unless [`HANDOVER_DEG`] asked for another width.
-///
-/// Read once, and read only by [`Reframe::crossover`], which is where the
-/// camera clamps it and where both halves of the map take it from.
-///
-/// **The line it prints is about the ask and says nothing about the width.**
-/// No file is open when this runs, so the width drawn is not known here and
-/// cannot be: at `KJERAG_HANDOVER_DEG=12` on a file that affords 9.69 the ask
-/// and the width differ by more than the whole change this switch was built to
-/// stage. What is drawn is said per file by the shell, off the lenses the pass
-/// will draw with (`Scene::handover_deg`, printed by the app's `say_handover`
-/// after the stored calibration lands, and again by `fit_into` if a fallback
-/// fit moves it).
-fn crossover_deg() -> f32 {
-    static WIDTH: OnceLock<f32> = OnceLock::new();
-    *WIDTH.get_or_init(|| {
-        let Ok(asked) = std::env::var(HANDOVER_DEG) else {
-            return CROSSOVER_DEG;
-        };
-        match handover(&asked) {
-            Ok(width) => {
-                println!(
-                    "blend:  research handover on, {HANDOVER_DEG}={width}: the handover asks for \
-                     {width} degrees of world angle instead of {CROSSOVER_DEG}. what each file \
-                     draws is that clamped by its own two lenses, on its own blend line at open"
-                );
-                width
-            }
-            Err(said) => {
-                eprintln!(
-                    "kjerag: {said}, so the handover stays at the {CROSSOVER_DEG} degrees it ships \
-                     with"
-                );
-                CROSSOVER_DEG
-            }
-        }
-    })
+/// Camera identity stays beside the projection's own type constant. The scene
+/// and shell use this shared answer to keep ONE X2 on its automatic selected
+/// route and out of the legacy optical-flow solver.
+/// [`Reframe`] packs at most [`MAX_LENSES`], so an extra supplied stream does
+/// not change the selected identity of the first complete pair.
+pub(crate) fn is_one_xs_lens_pair(lenses: &[Lens]) -> bool {
+    lenses.len().min(MAX_LENSES) == 2
+        && lenses
+            .first()
+            .is_some_and(|lens| lens.lens_type == ONE_XS_LENS_TYPE)
 }
 
-/// The width [`HANDOVER_DEG`] asked for, or what is wrong with the ask.
-fn handover(asked: &str) -> Result<f32, String> {
-    let width = asked
-        .parse::<f32>()
-        .map_err(|e| format!("{HANDOVER_DEG}={asked}: {e}"))?;
-    match width.is_finite() && width > 0.0 && width <= OVERLAP_DEG {
-        true => Ok(width),
-        false => Err(format!(
-            "{HANDOVER_DEG}={asked} is not a width between 0 and the {OVERLAP_DEG} degrees the two \
-             lenses overlap by"
-        )),
-    }
-}
+/// The ordinary ONE X2 handover's half-width. Mac calls this `H`: 3 degrees,
+/// for a total six-degree fade away from the camera's bottom taper.
+const ONE_XS_HALF_WIDTH: f32 = 3.0 * PI / 180.0;
+
+/// The ONE X2 handover's half-width at the bottom pole. Mac calls this `P`:
+/// one degree.
+const ONE_XS_POLE_HALF_WIDTH: f32 = PI / 180.0;
+
+/// The upper end of the ONE X2's ten-degree bottom-pole override,
+/// `-cos(10 degrees)`, rounded once to the f32 both map twins consume.
+const ONE_XS_TAPER_END: f32 = -0.984_807_7;
+
+/// The legacy feathered coverage gate's total (0,1) transition width, in
+/// degrees of colatitude centred on the seam — Studio's `alpha_L` for the
+/// flow path (§42.1/§42.3).
+///
+/// HARD-read `[owner+0x3d0]`, §42.1: **16** (base default, ctor `0x182860975`) /
+/// **28** (`[+0x43c]!=0`, `0x1828968b0`) / **32** (export, `[+0x43e]!=0`,
+/// `0x1828968c3`, checked last, wins). All three are binary-read; the SELECTION
+/// of 32 for the owner's export path is INFERRED (the ledger's export belief,
+/// `[+0x43e]=1`) and DISCLOSED — the 9–25° empirical correction band brackets
+/// ±16. Not invented: the value is read, the selection is the disclosed part.
+///
+/// **Baked, not a knob (MANDATE 1).** This was reachable through
+/// `KJERAG_FLOW_GATE_DEG`; the env override is deleted and the RE'd legacy
+/// export width is the one constant both the Rust gate
+/// ([`Reframe::gate_alpha`]) and the WGSL twin
+/// ([`crate::scene::flow_wgsl`]) bake, so they cannot disagree. ONE X2 selects
+/// its captured common-alpha width below instead.
+pub const GATE_WIDTH_DEG: f32 = 32.0;
+
+/// ONE X2's flow-displacement SphereAlpha total transition width: 16 degrees
+/// (±8 around the belt equator).
+///
+/// Native Mac 6.0.2 selected the retained common alpha at `Seamless+0x1ab0`.
+/// Its captured raster is the linear 16-degree gate: the optional config
+/// override at `cfg+0x98`, which would widen it to 32 degrees, was false. This
+/// alpha only splits the two directed flow displacements; the separate OneXS
+/// Template alpha remains the final colour share.
+pub(crate) const ONE_XS_FLOW_GATE_WIDTH_DEG: f32 = 16.0;
 
 /// How many lenses one pass can sample.
 ///
@@ -436,14 +461,19 @@ pub struct Reframe {
     /// fragment shader uses it to ask a ray which azimuth of the seam it is
     /// near.
     view_to_body: [[f32; 4]; 3],
-    /// Where lens 1 sits relative to lens 0, in the body's frame, in metres:
-    /// 33 mm of z on this camera family. What makes the overlap band a stereo
-    /// pair, and zero for a file with one lens stream, which switches the
-    /// band off rather than dividing by it.
+    /// Where lens 1 sits relative to lens 0, in the body's frame, in metres.
+    /// It comes from lens 1's recorded pose and makes the overlap band a stereo
+    /// pair. A file with one lens stream supplies zero, which switches the band
+    /// off rather than dividing by it.
     baseline: [f32; 3],
-    /// A `vec3` in a uniform block is padded to sixteen bytes. WGSL does that
-    /// itself; `repr(C)` does not.
-    _baseline_pad: f32,
+    /// Whether this is Studio's `OneXS` camera, the ONE X2. The selected Mac
+    /// and Android map gives that camera its own azimuth-dependent base-alpha
+    /// law; every other camera keeps the existing handover unchanged.
+    ///
+    /// An `f32` because every scalar in this block is one. This was the pad
+    /// word after [`Self::baseline`], so naming it does not grow the uniform or
+    /// move the table below it.
+    one_xs: f32,
     /// How a point of the frame becomes a ray (issue #47). Sixteen bytes at a
     /// sixteen-byte offset, which is what a uniform block asks of a struct
     /// inside it.
@@ -483,7 +513,7 @@ pub struct Reframe {
     /// ([`SeamAnchor`]).
     ///
     /// Zero is the geometric handover, which is the picture the player drew
-    /// before the anchor and what `KJERAG_ANCHOR=off` still draws. Every
+    /// before the anchor. Every
     /// caller that does not run the follow - every instrument, every test, the
     /// blank pane - gets that zero without asking for it, and zero is a
     /// literal `+ 0.0` in both twins.
@@ -493,10 +523,9 @@ pub struct Reframe {
     /// behind it, and docs/research/studio-parity.md for the eye that ruled on
     /// it.
     ///
-    /// **Sibling of [`Self::crossover`] and not a new field at the end.** It
-    /// takes the first of the three padding words the table's alignment
-    /// already needed, so the block is the size it always was and the table
-    /// has not moved.
+    /// **Sibling of [`Self::crossover`] and not a new field at the end.** When
+    /// introduced, it took the first of the three padding words the table's
+    /// alignment already needed.
     ///
     /// **In radians, and not divided by the band it is about to be divided
     /// by.** A review asked for `shift / crossover` to be folded into this
@@ -519,9 +548,8 @@ pub struct Reframe {
     /// `super::dmabuf::plane_format`). 1 for a P010 frame and 0 for NV12.
     ///
     /// **Sibling of [`Self::crossover`] and not a new field at the end**, for
-    /// [`Self::handover_shift`]'s reason: it takes the second of the three
-    /// padding words the table's alignment already needed, so the block is
-    /// the size it always was and the table has not moved.
+    /// [`Self::handover_shift`]'s reason: when introduced, it took the second
+    /// of the three padding words the table's alignment already needed.
     wide: f32,
     /// Studio swing rather than the whole range
     /// (`kjerag_media::Samples::limited`). 1 for a DJI capture and 0 for
@@ -531,25 +559,36 @@ pub struct Reframe {
     /// The last of the three padding words, which is why there is no `_pad`
     /// below it any more.
     limited: f32,
-    // What used to sit here is what put the table below on a sixteen-byte
-    // offset: three padding words, all three of which are now numbers the
-    // shader reads (`handover_shift`, `wide`, `limited`), so the block reaches
-    // that offset on its own and there is nothing left to pad with.
+    /// Studio's crop-translated image-circle centre for each lens, packed as
+    /// `[a_x, a_y, b_x, b_y]` in delivered per-lens pixels. This is separate
+    /// from each [`LensBlock`]'s projection principal point because the two
+    /// native paths apply different coordinate conversions.
+    ///
+    /// No shader reads this. The capture-owned ONE X2 camera-mask producer
+    /// reads the same uniform block on the CPU, keeping one calibration object
+    /// rather than introducing a second side channel.
+    /// WGSL twin: `Reframe::image_circle_centres`.
+    image_circle_centres: [f32; 4],
+    /// Source YCbCr-to-RGB coefficients, selected from the container's matrix
+    /// tag independently of lens geometry, bit depth and range. The two green
+    /// coefficients are magnitudes; the shared shader subtracts them.
+    source_matrix: [f32; 4],
+    // The three scalars before `image_circle_centres` occupy the words that
+    // used to pad the block to sixteen bytes. The centre vec4 begins on that
+    // boundary, followed by the source-matrix vec4 and then the table.
     //
-    // **WGSL's alignment and not this struct's.** Every member of this block
-    // is an `f32` or an array of them, so `repr(C)` gives the whole thing an
-    // alignment of 4 and would happily start the table at 340. WGSL lays an
-    // `array<vec4<f32>, N>` out at 16, so the two definitions would then
-    // describe different bytes.
+    // **WGSL's alignment and not this struct's.** Every Rust member of this
+    // block is an `f32` or an array of them, so `repr(C)` gives the whole thing
+    // an alignment of 4. WGSL gives both vec4s and the table's
+    // `array<vec4<f32>, N>` sixteen-byte alignment, so their explicit offsets
+    // below are layout invariants.
     //
     // **Nothing catches that at run time.** `min_binding_size` checks the
     // block's total size and not one offset in it, and the sizes agree either
     // way, so the shader would read the table shifted by twelve bytes and draw
     // a wrong picture rather than refuse a pipeline. The test
-    // `the_uniform_block_is_the_size_wgsl_lays_it_out` is what checks it, and
-    // it checks the offset as well as the size for exactly that reason. A
-    // fourth number added beside those three is what it will fail on, and the
-    // fix is another three words of padding, not a smaller table.
+    // `the_uniform_block_is_the_size_wgsl_lays_it_out` is what checks them,
+    // and it checks offsets as well as size for exactly that reason.
     /// What the along-seam axis still disagrees by after a pose, direction by
     /// direction, in radians (issue #103, stage 9).
     ///
@@ -714,69 +753,6 @@ pub struct Rolling {
     pub axis: [f64; 2],
 }
 
-/// Whether the drawn handover line is held on world content instead of being
-/// carried across it by the body's own turning, from `KJERAG_ANCHOR`.
-///
-/// **On is the shipped player.** `KJERAG_ANCHOR=off` (or `0`) is the research
-/// escape that puts the 50/50 line back on the raw geometry, which is the
-/// picture every build before 2026-08-08 drew and the arm every measurement of
-/// the follow is read against. It is a way to answer "is the anchor doing
-/// this?" in one run and it is not a setting: nothing in the window offers it,
-/// it is read once, and it is written nowhere.
-///
-/// **`KJERAG_ANCHOR=` with nothing after it is UNSET, and says so.** It used to
-/// mean off, on the reasoning that anything that is not a yes is a no, and that
-/// cost a review a whole pass on 2026-08-09: a harness wrote
-/// `env KJERAG_ANCHOR="$mode"` with `$mode` empty for its "leave it alone" arm,
-/// every run of that arm silently drew the unanchored picture, and the digests
-/// were compared against an anchored reference. An empty variable is what a
-/// shell produces when a variable it is expanding is itself unset, so it is
-/// overwhelmingly a mistake rather than a request; the way to ask for the
-/// default is to not set it, which is `env -u KJERAG_ANCHOR`. A line on stderr
-/// says which of the two happened, because a silent reinterpretation is the
-/// thing that cost the pass.
-///
-/// Read once, because a value that changed mid-run would change it between two
-/// frames of one pan.
-pub fn anchoring() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        let Ok(asked) = std::env::var(ANCHOR) else {
-            return true;
-        };
-        if asked.is_empty() {
-            eprintln!(
-                "blend:  {ANCHOR} is set to nothing, which is read as UNSET and leaves the seam \
-                 anchor ON. To turn it off say {ANCHOR}=off; to ask for the default say \
-                 `env -u {ANCHOR}`"
-            );
-            return true;
-        }
-        let on = asked != "0" && !asked.eq_ignore_ascii_case("off");
-        if !on {
-            println!(
-                "blend:  research seam anchor OFF, {ANCHOR}={asked}: the 50/50 handover line sits \
-                 on the body's own geometry and is carried across the picture as the body turns, \
-                 which is what the player drew before 2026-08-08"
-            );
-        }
-        on
-    })
-}
-
-/// The variable [`anchoring`] reads.
-const ANCHOR: &str = "KJERAG_ANCHOR";
-
-/// Research only, from `KJERAG_ANCHOR_TRACE`: whether every redraw says what
-/// the held line is doing. Off in the app, on under the instruments that
-/// measure the hold.
-fn tracing() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("KJERAG_ANCHOR_TRACE").is_ok_and(|v| v != "0" && !v.is_empty())
-    })
-}
-
 /// How hard the follow pulls the drawn line back toward the geometric handover
 /// when the line is sitting AT the allowance, in reciprocal seconds.
 ///
@@ -916,10 +892,6 @@ pub struct SeamAnchor {
     /// identity, so a run at 30 or at 300 fps follows over the same stretch of
     /// picture.
     at: f64,
-    /// What the follow was aiming at and how hard it pulled this redraw, in
-    /// radians and in reciprocal seconds. For the trace, and for nothing else.
-    target: f32,
-    gain: f32,
 }
 
 impl SeamAnchor {
@@ -928,7 +900,7 @@ impl SeamAnchor {
     /// `held` is the pose the block was built for, so the world frame here is
     /// the one the view is locked to. With the horizon free that frame IS the
     /// body, the anchor never drifts, the offset stays zero, and the picture is
-    /// the one `KJERAG_ANCHOR=off` draws - which is right: a body-fixed view
+    /// the one the pure geometry draws - which is right: a body-fixed view
     /// has no crawl to hold against.
     ///
     /// `at` is the presentation time of the frame being drawn, in seconds.
@@ -998,7 +970,7 @@ impl SeamAnchor {
             // which is a stretch of film the picture really ran.
             Some(was) => (offset_of(was.on), (at - was.at) as f32),
         };
-        let (delta, gain) = Self::follow(target, step, allowance);
+        let delta = Self::follow(target, step, allowance);
         // **Clamped HERE, and that is what makes the anchor and the picture
         // agree about where the line is.** `Reframe::with_shift` clamps on the
         // way to the shader, so a `delta` past the allowance draws at the rail;
@@ -1019,17 +991,14 @@ impl SeamAnchor {
             on: world_of(reframe.seam_ray_at(centre, -delta)),
             delta,
             at,
-            target,
-            gain,
         }
-        .traced(allowance)
     }
 
     /// **THE UPDATE LAW, and the whole of it.**
     ///
     /// `target` is where the line has to be put to stand exactly still on the
     /// content it is on. `step` is how much film has gone by. The answer is
-    /// where the line is drawn, and how hard it was pulled to get there.
+    /// where the line is drawn.
     ///
     /// It is the closed-form flow of one first-order equation,
     ///
@@ -1104,7 +1073,7 @@ impl SeamAnchor {
     /// may make; it is written down here, pinned by
     /// `tests::the_follow_has_a_ceiling_and_the_frame_rate_sets_it`, and it is
     /// the belt's neighbour on the list.
-    fn follow(target: f32, step: f32, allowance: f32) -> (f32, f32) {
+    fn follow(target: f32, step: f32, allowance: f32) -> f32 {
         // An EVEN power, so this is the magnitude without an `abs` and without
         // a branch, and the whole law is a polynomial in `target` divided by a
         // root of one. `debug_assert` rather than a comment because an odd
@@ -1112,7 +1081,7 @@ impl SeamAnchor {
         debug_assert_eq!(ANCHOR_FOLLOW_POWER % 2, 0);
         let gain = ANCHOR_FOLLOW_RATE * (target / allowance).powi(ANCHOR_FOLLOW_POWER);
         let power = ANCHOR_FOLLOW_POWER as f32;
-        (target / (1.0 + power * gain * step).powf(1.0 / power), gain)
+        target / (1.0 + power * gain * step).powf(1.0 / power)
     }
 
     /// The state a map with no seam in it leaves behind: no line, and the zero
@@ -1122,26 +1091,7 @@ impl SeamAnchor {
             on: [0.0; 3],
             delta: 0.0,
             at,
-            target: 0.0,
-            gain: 0.0,
         }
-    }
-
-    /// One line per redraw under `KJERAG_ANCHOR_TRACE`, and the state
-    /// unchanged. Parseable on purpose: the instruments that measure the follow
-    /// read this and nothing else.
-    fn traced(self, allowance: f32) -> Self {
-        if tracing() {
-            println!(
-                "anchor: t={:.4} delta={:+.4} target={:+.4} gain={:.5} allow={:.4}",
-                self.at,
-                self.delta.to_degrees(),
-                self.target.to_degrees(),
-                self.gain,
-                allowance.to_degrees(),
-            );
-        }
-        self
     }
 
     /// Where the drawn 50/50 line is, in radians across the seam.
@@ -1159,7 +1109,24 @@ fn unit(ray: [f32; 3]) -> [f32; 3] {
     }
 }
 
+/// The coefficients observed in Studio's source TextureParam for the tagged
+/// ONE X2 (601) and X4 (709) inputs. These decode source video; they are not
+/// the separate BGR/YCC transform used inside the photometric solver.
+fn source_matrix(matrix: kjerag_media::ColorMatrix) -> [f32; 4] {
+    match matrix {
+        kjerag_media::ColorMatrix::Bt601 => [1.402, 0.344, 0.714, 1.772],
+        kjerag_media::ColorMatrix::Bt709 => [1.5748, 0.1873, 0.4681, 1.8556],
+    }
+}
+
 impl Reframe {
+    /// Exact shader-precision columns written into `Reframe::view_to_body`.
+    /// Typed source owners use this read-only copy to retain the transform
+    /// paired with the uniform consumed by their materializer.
+    pub(crate) fn view_to_body_columns(&self) -> [[f32; 4]; 3] {
+        self.view_to_body
+    }
+
     /// The block for one camera pose and the lenses of one file, in file
     /// order. Anything past [`MAX_LENSES`] is dropped.
     pub fn new(
@@ -1178,7 +1145,11 @@ impl Reframe {
             }),
             view_to_body: body_from_view(camera, held).columns(),
             baseline: super::band::baseline(lenses),
-            _baseline_pad: 0.0,
+            one_xs: f32::from(u8::from(
+                lenses
+                    .first()
+                    .is_some_and(|lens| lens.lens_type == ONE_XS_LENS_TYPE),
+            )),
             screen: Screen::new(camera, aspect),
             frame_width: frame.width as f32,
             frame_height: frame.height as f32,
@@ -1198,6 +1169,12 @@ impl Reframe {
             // [`Self::with_samples`] is asked to say otherwise.
             wide: 0.0,
             limited: 0.0,
+            image_circle_centres: std::array::from_fn(|component| {
+                lenses
+                    .get(component / 2)
+                    .map_or(0.0, |lens| lens.image_circle_centre[component % 2])
+            }),
+            source_matrix: source_matrix(kjerag_media::ColorMatrix::default()),
             // Nothing measured until a caller says otherwise
             // ([`Self::with_table`]), which is the picture stage 6 drew.
             table: super::band::Table::REST,
@@ -1211,11 +1188,12 @@ impl Reframe {
     /// A step of its own rather than an argument to [`Self::new`], for
     /// [`Self::with_table`]'s reason: every caller that asks this map about
     /// geometry rather than about pixels would otherwise have to say
-    /// something, and the thing it would be saying is 8-bit full range, which
-    /// is what this defaults to and what every `.insv` in the corpus is.
+    /// something. Geometry-only callers retain the 8-bit, full-range, BT.709
+    /// compatibility default; picture callers pass their actual frame metadata.
     pub fn with_samples(mut self, samples: kjerag_media::Samples) -> Self {
         self.wide = f32::from(u8::from(samples.wide));
         self.limited = f32::from(u8::from(samples.limited));
+        self.source_matrix = source_matrix(samples.matrix);
         self
     }
 
@@ -1264,9 +1242,22 @@ impl Reframe {
     /// A step of its own, like [`Self::with_table`]: every caller that is not
     /// running the follow - every instrument, every test, the blank pane - gets
     /// zero without saying so, and zero is the geometric handover.
+    /// Where the drawn 50/50 line sits relative to the geometric seam, in
+    /// radians. Instrument only.
+    pub fn handover_shift(&self) -> f32 {
+        self.handover_shift
+    }
+
     pub fn with_shift(mut self, shift: f32) -> Self {
-        let allowance = 0.5 * self.crossover;
-        self.handover_shift = shift.clamp(-allowance, allowance);
+        // Studio's ONE X2 base alpha has no anchor term. Keep the field zero
+        // as well as leaving it unread in `handover`, so the CPU block tells
+        // the same truth as the shader instead of carrying an inert offset.
+        if self.one_xs > 0.5 {
+            self.handover_shift = 0.0;
+        } else {
+            let allowance = 0.5 * self.crossover;
+            self.handover_shift = shift.clamp(-allowance, allowance);
+        }
         self
     }
 
@@ -1279,7 +1270,16 @@ impl Reframe {
     /// the great circle perpendicular to the difference of those two rows.
     /// This is that difference, normalized.
     ///
-    /// Zero for a one-stream file, which has no seam.
+    /// **NOT zero for a one-stream file any more, and callers must not assume
+    /// it is.** That held while this was the difference of two mounting rows,
+    /// which is zero when there is only one. The single-axis surfaces return a
+    /// row of a rotation, so a file with no seam gets a full fictitious seam
+    /// circle: `[0,0,1]`, spread 2, and `seam_ray_at` will happily place rays
+    /// on it. Nothing reads it there - [`SeamAnchor::hold`] returns on
+    /// `lens_count <= 1.0` before any of this - and the guard in
+    /// [`Self::seam_ray_at`] is kept for the bisector arm, where the spread
+    /// really can collapse. Recorded because the old sentence was load
+    /// bearing for anyone adding a caller.
     pub fn seam_normal(&self) -> [f32; 3] {
         let apart = self.seam_apart();
         let reach = norm3(apart);
@@ -1294,9 +1294,18 @@ impl Reframe {
     /// [`Self::seam_spread`]'s length, in one place so the two cannot
     /// disagree.
     fn seam_apart(&self) -> [f32; 3] {
-        std::array::from_fn(|c| {
-            self.lenses[0].view_to_lens[c][2] - self.lenses[1].view_to_lens[c][2]
-        })
+        // **Whichever vector the handover actually reads**, so the anchor and
+        // the ramp cannot end up on different circles - see `seam_cosine`.
+        // Doubled on the single-axis arms so the spread stays 2 and
+        // `seam_spread`'s documented scale holds under all three: for
+        // back-to-back lenses `row0 - row1` IS very near `2 * row0`.
+        match seam_surface() {
+            Surface::Nominal => std::array::from_fn(|c| 2.0 * self.view_to_body[c][2]),
+            Surface::Cone => std::array::from_fn(|c| 2.0 * self.lenses[0].view_to_lens[c][2]),
+            Surface::Bisector => std::array::from_fn(|c| {
+                self.lenses[0].view_to_lens[c][2] - self.lenses[1].view_to_lens[c][2]
+            }),
+        }
     }
 
     /// How long that difference is: the scale between an angle off the seam
@@ -1313,16 +1322,50 @@ impl Reframe {
     /// How far a view ray is across the seam from the 50/50 locus, in radians,
     /// positive on lens 0's side.
     ///
-    /// **The handover's own measure and not a second one.** [`crossover`]
-    /// reads `apart / (2 * reach * band)`; this is that first quotient, so a
-    /// shift of exactly minus this value puts this ray at 50/50 by
-    /// construction. The two cosines stand in for the two angles the same way
-    /// and to the same accuracy the handover already relies on.
+    /// **The handover's own measure and not a second one, and it has to follow
+    /// the handover.** The invariant is that a shift of exactly minus this
+    /// value puts the ray at 50/50, and [`share_at`] computes two different
+    /// things either side of [`Surface::is_angular`]: `apart / (2 * reach * band)`
+    /// on the bisector and `asin(apart / reach) / band` on Studio's. This
+    /// returns the matching quotient for whichever is running.
+    ///
+    /// **It did not, between 2026-08-13's surface change and the review that
+    /// caught it.** The cone became the default while this kept reporting the
+    /// bisector's measure, so [`SeamAnchor::hold`] - which is on by default -
+    /// held the line on a great circle the renderer no longer blended on. The
+    /// two disagreed by up to 0.1494 degrees on the fixture and left the ramp
+    /// 0.0249 off a half at the anchored line, which is exactly the
+    /// cone-versus-bisector gap. `the_across_seam_measure_inverts_the_running_ramp`
+    /// pins the invariant on both arms so it cannot come apart again.
     pub fn across_seam(&self, view_ray: [f32; 3]) -> f32 {
         let reach = norm3(view_ray);
-        match reach > 0.0 {
-            true => (self.axis_of(0, view_ray) - self.axis_of(1, view_ray)) / (2.0 * reach),
-            false => 0.0,
+        if reach <= 0.0 {
+            return 0.0;
+        }
+        let axis: [f32; MAX_LENSES] = std::array::from_fn(|lens| self.axis_of(lens, view_ray));
+        let apart = self.seam_cosine(view_ray, axis);
+        match seam_surface().is_angular() {
+            true => (apart / reach).clamp(-1.0, 1.0).asin(),
+            false => apart / (2.0 * reach),
+        }
+    }
+
+    /// The one quantity the whole handover turns on: the ray against whichever
+    /// vector the running surface measures from, un-normalized.
+    ///
+    /// **It exists so the ramp and the anchor cannot read different things.**
+    /// They did, between the surface change and the review that caught it, and
+    /// the seam anchor spent that time holding its line on a great circle the
+    /// renderer no longer blended on. `axis` is the two lenses' own cosines,
+    /// already computed by [`Self::blend`], so the single-axis arms cost
+    /// nothing extra and the nominal one costs a dot product.
+    fn seam_cosine(&self, view_ray: [f32; 3], axis: [f32; MAX_LENSES]) -> f32 {
+        match seam_surface() {
+            // The body frame's own axis - `view_to_body` with the mounting
+            // left off, which is the frame Studio builds its map in.
+            Surface::Nominal => (0..3).map(|c| self.view_to_body[c][2] * view_ray[c]).sum(),
+            Surface::Cone => axis[0],
+            Surface::Bisector => axis[0] - axis[1],
         }
     }
 
@@ -1330,16 +1373,55 @@ impl Reframe {
     /// direction.
     ///
     /// The locus is a great circle, so the nearest point on it is the ray with
-    /// its component along [`Self::seam_normal`] taken out. Down either lens's
-    /// own axis there is no nearest point and the ray comes back unchanged;
-    /// nothing there is near a seam anyway.
+    /// its component along [`Self::seam_normal`] taken out.
+    ///
+    /// **Down the normal itself every point of the circle is equidistant, and
+    /// that direction is the DEFAULT VIEW.** A back-to-back rig puts its seam
+    /// 90 degrees from lens 0, so looking straight ahead is looking along the
+    /// seam normal and "the nearest piece of seam" has no answer. This used to
+    /// return the ray unchanged there, which handed [`SeamAnchor::hold`] a
+    /// centre that was not on the seam at all; it only stayed out of sight
+    /// because lens 0's mounting put the old normal 0.1235 degrees off the
+    /// view axis, so the projection was tiny rather than empty and the centre
+    /// came out of the rounding. Studio's nominal surface (`studio-seam-re.md`
+    /// 19.8) removes that accident and makes the degeneracy exact, which is
+    /// how it was found.
+    ///
+    /// It now answers with a definite point of the circle instead: the one
+    /// nearest whichever cardinal direction the normal leans on least. It is
+    /// ON the seam and it is the same one every frame, which the old answer
+    /// was neither.
+    ///
+    /// **It is NOT continuous, and an earlier version of this paragraph
+    /// claimed it was.** Measured by walking away from the pole at four
+    /// azimuths, the fallback point sits 90 degrees from where the limit
+    /// lands at two of them and 180 degrees - the antipode - at a third. That
+    /// is unavoidable: at the pole every point of the circle is equidistant,
+    /// so the limit depends on the direction of approach and no single answer
+    /// can match all of them. What it costs is real and is recorded rather
+    /// than smoothed over: a view crossing the pole between redraws moves
+    /// [`SeamAnchor::hold`]'s centre to another part of the same circle, and
+    /// the offset it reads there can change sign. The alternative - the old
+    /// unchanged ray - was off the seam entirely, which is worse.
     pub fn seam_nearest(&self, view_ray: [f32; 3]) -> [f32; 3] {
         let normal = self.seam_normal();
         let along: f32 = (0..3).map(|c| normal[c] * view_ray[c]).sum();
         let flat: [f32; 3] = std::array::from_fn(|c| view_ray[c] - normal[c] * along);
         let reach = norm3(flat);
+        if reach > 1e-6 {
+            return flat.map(|c| c / reach);
+        }
+        if norm3(normal) <= 0.0 {
+            return view_ray;
+        }
+        let least = match normal[0].abs() < normal[2].abs() {
+            true => [1.0, 0.0, 0.0],
+            false => [0.0, 0.0, 1.0],
+        };
+        let on = cross(normal, least);
+        let reach = norm3(on);
         match reach > 0.0 {
-            true => flat.map(|c| c / reach),
+            true => on.map(|c| c / reach),
             false => view_ray,
         }
     }
@@ -1365,7 +1447,12 @@ impl Reframe {
         }
         let normal = self.seam_normal();
         let base = self.seam_nearest(view_ray);
-        let rise = (2.0 * across / spread).clamp(-1.0, 1.0);
+        // The exact inverse of [`Self::across_seam`] on each arm: the cone
+        // reports an ANGLE through `asin`, so its rise is the sine of it.
+        let rise = match seam_surface().is_angular() {
+            true => across.sin(),
+            false => (2.0 * across / spread).clamp(-1.0, 1.0),
+        };
         let run = (1.0 - rise * rise).max(0.0).sqrt();
         std::array::from_fn(|c| base[c] * run + normal[c] * rise)
     }
@@ -1421,7 +1508,7 @@ impl Reframe {
     /// picture; it would hand the outer edge of the handover to the coverage
     /// taper instead of to the ramp.
     fn afforded(&self) -> f32 {
-        let asked = crossover_deg().to_radians();
+        let asked = CROSSOVER_DEG.to_radians();
         match self.overlap() {
             // The overlap itself, and that is the whole bound. An UNSHIFTED
             // handover of width `w` reaches `w / 2` off the seam on either side
@@ -1463,7 +1550,7 @@ impl Reframe {
             // No file, so no camera and no baseline: every ray misses every
             // lens and the band is never asked anything.
             baseline: [0.0; 3],
-            _baseline_pad: 0.0,
+            one_xs: 0.0,
             screen: Screen::new(Camera::default(), aspect),
             frame_width: 1.0,
             frame_height: 1.0,
@@ -1472,13 +1559,15 @@ impl Reframe {
             row_axis: [0.0; 2],
             // Every ray misses every lens, so no plane is ever sampled.
             sharpen: Sampling::default().limits(),
-            // One lens and no overlap, so nothing is ever handed over: the ask
-            // itself, which is what a camera with room for it would get.
-            crossover: crossover_deg().to_radians(),
+            // One lens and no overlap, so nothing is ever handed over: the
+            // shipped width, which is what a camera with room for it would get.
+            crossover: CROSSOVER_DEG.to_radians(),
             // No seam, so no line to hold anywhere.
             handover_shift: 0.0,
             wide: 0.0,
             limited: 0.0,
+            image_circle_centres: [0.0; 4],
+            source_matrix: source_matrix(kjerag_media::ColorMatrix::default()),
             // No file, so no camera and no calibration to carry.
             table: super::band::Table::REST,
         }
@@ -1504,6 +1593,10 @@ impl Reframe {
         self.screen.ray(uv)
     }
 
+    pub(crate) fn is_rectilinear(&self) -> bool {
+        self.screen.shrink == 1.0
+    }
+
     /// How much of this ray each lens shows, and where in its frame.
     ///
     /// Each lens stakes a [`claim`] on the ray and the claims are normalized
@@ -1521,8 +1614,16 @@ impl Reframe {
     /// **model**: [`Self::within`] is one dot product and it decides whether
     /// the projection runs at all (issue #10).
     ///
-    /// **THE RAY IS THE RAY, and this is the flat seam** (owner's ruling,
-    /// 2026-08-08). Nothing the band measures moves a sample here. Between
+    /// **THE RAY IS THE RAY unless a HELD belt field says otherwise** (owner's
+    /// ruling 2026-08-08, amended 2026-08-13). Nothing the band measures
+    /// LIVE moves a sample here, and that is the part of the ruling that
+    /// stands: the refusal was of a per-frame estimate that swam, not of
+    /// displacement itself. `studio-seam-re.md` 21 shows Studio displaces too -
+    /// its flow is composed into the lookup map - and 21.5 shows why its
+    /// picture is still anyway: the field is produced off the draw, cached,
+    /// and selected by time rather than re-fitted every frame. [`Self::epi`]
+    /// is that, taken to its limit: landed once, held for the file, incapable
+    /// of shimmering. It is `REST` on every shipped run. Between
     /// stage 2 and 2026-08-08 it did: each lens was projected at a ray bent by
     /// the other lens's weight times what the two lenses disagreed by at this
     /// ray's azimuth, on both of the seam's axes, and the width of the
@@ -1568,7 +1669,7 @@ impl Reframe {
         // is what keeps this pass costing what it cost before the crossover
         // existed ([`Self::handover`]).
         let axis: [f32; MAX_LENSES] = std::array::from_fn(|lens| self.axis_of(lens, view_ray));
-        let front = self.handover(axis, reach, self.crossover);
+        let front = self.handover(view_ray, axis, reach, self.crossover);
         for lens in 0..MAX_LENSES {
             if !self.covers(lens, axis[lens], reach) {
                 continue;
@@ -1577,9 +1678,15 @@ impl Reframe {
                 0 => front,
                 _ => 1.0 - front,
             };
+            // THE RAY IS THE RAY: each lens is projected at the undisplaced
+            // ray, and nothing the band measures moves a sample.
             landings[lens] = self.project(lens, view_ray);
             if lens < self.lens_count as usize {
-                weights[lens] = claim(landings[lens], share);
+                weights[lens] = if self.one_xs > 0.5 {
+                    if landings[lens].inside { share } else { 0.0 }
+                } else {
+                    claim(landings[lens], share)
+                };
             }
         }
         let total: f32 = weights.iter().sum();
@@ -1618,9 +1725,15 @@ impl Reframe {
     /// (`one_stream_keeps_the_whole_of_its_picture`).
     ///
     /// WGSL twin: `handover`.
-    fn handover(&self, axis: [f32; MAX_LENSES], reach: f32, band: f32) -> f32 {
+    fn handover(&self, view_ray: [f32; 3], axis: [f32; MAX_LENSES], reach: f32, band: f32) -> f32 {
         match self.lens_count > 1.0 {
-            true => crossover(axis[0] - axis[1], reach, band, self.handover_shift),
+            true if self.one_xs > 0.5 => one_xs_alpha(normalize(self.lenses[0].lens_ray(view_ray))),
+            true => crossover(
+                self.seam_cosine(view_ray, axis),
+                reach,
+                band,
+                self.handover_shift,
+            ),
             false => 1.0,
         }
     }
@@ -1643,6 +1756,86 @@ impl Reframe {
     /// this no longer reads.
     pub fn handover_width(&self) -> f32 {
         self.crossover
+    }
+
+    /// Whether this block is a complete selected ONE X2 lens pair.
+    ///
+    /// The static camera-mask reconstruction is meaningful only for the
+    /// route whose constants were recovered. Keeping the check beside the
+    /// uniform's own route bit and lens count prevents an instrument from
+    /// independently guessing either identity.
+    pub(crate) fn is_one_xs_pair(&self) -> bool {
+        self.one_xs > 0.5 && self.lens_count == 2.0
+    }
+
+    /// The delivered per-lens frame size used by this projection.
+    pub(crate) const fn frame_size(&self) -> [f32; 2] {
+        [self.frame_width, self.frame_height]
+    }
+
+    /// Exact source decode coefficients for the prepared picture's representation.
+    /// This exposes the prepared picture's metadata, not a camera-name default.
+    pub(crate) const fn source_color_matrix(&self) -> [f32; 4] {
+        self.source_matrix
+    }
+
+    /// Whether the final RGB shader converts gamma-coded values to linear light.
+    pub(crate) const fn linearizes_output(&self) -> bool {
+        self.linearize > 0.5
+    }
+
+    /// One lens's Studio crop-translated static image-circle centre in
+    /// delivered-frame pixels. It is intentionally not the projection
+    /// principal point retained in [`LensBlock`].
+    pub(crate) fn lens_image_circle_centre(&self, lens: usize) -> [f32; 2] {
+        let start = 2 * lens;
+        [
+            self.image_circle_centres[start],
+            self.image_circle_centres[start + 1],
+        ]
+    }
+
+    /// The ordinary calibrated projection circle for one populated lens.
+    ///
+    /// Unlike [`Self::lens_image_circle_centre`], this is the principal point
+    /// and valid-image radius used by [`LensBlock`] and therefore by the
+    /// generic projection's own coverage test. A calibrated resident camera
+    /// can build its support from this same geometry without borrowing the
+    /// ONE X2-specific Offset circle and lobe law.
+    pub(crate) fn calibrated_image_circle(&self, lens: usize) -> ([f32; 2], f32) {
+        let lens = &self.lenses[lens];
+        ([lens.cx, lens.cy], lens.image_radius)
+    }
+
+    /// Studio's scalar image-circle radius for an `offset_v3` ONE X2 lens.
+    ///
+    /// Mac 6.0.2 `Offset::setOffset` reads the lens type's 200-degree FOV,
+    /// evaluates the radial Mei map at its 100-degree half-angle in binary64,
+    /// then multiplies by the binary32 geometric mean of `fx` and `fy` and
+    /// narrows the result to binary32. The three coefficients are the radial
+    /// `offset_v3` terms; its two tangential terms do not enter this scalar.
+    /// Keeping the mixed-width schedule here is load-bearing: on the owner's
+    /// calibration it produces the two runtime-captured radii bit for bit.
+    pub(crate) fn one_xs_v3_image_circle_radius(&self, lens: usize) -> f32 {
+        let block = &self.lenses[lens];
+        debug_assert_eq!(block.model, MEI);
+
+        const FOV_DEG: f64 = 200.0;
+        let half_angle = FOV_DEG * std::f64::consts::PI / 360.0;
+        let (sin, cos) = half_angle.sin_cos();
+        let denominator = cos + f64::from(block.xi);
+        let x = sin / denominator;
+        let y = 0.0 / denominator;
+        let squared_radius = x.mul_add(x, y * y);
+        let mut radius = squared_radius.sqrt();
+        let mut power = squared_radius * radius;
+        for coefficient in &block.coefficients[..3] {
+            radius = f64::from(*coefficient).mul_add(power, radius);
+            power *= squared_radius;
+        }
+
+        let focal_scale = (block.fx * block.fy).sqrt();
+        (radius * f64::from(focal_scale)) as f32
     }
 
     /// A view-space ray in the camera body's own frame, which is where the
@@ -1684,6 +1877,322 @@ impl Reframe {
         let reach = body[0].hypot(body[1]);
         (reach > 0.0)
             .then(|| super::band::Ring::at([body[0] / reach, body[1] / reach, 0.0], self.baseline))
+    }
+
+    /// The audited Windows/legacy Studio optical-flow apply, decoded
+    /// instruction-exact (docs/research/studio-seam-re.md §40,
+    /// `gpu_getLineSphereMap`): displace
+    /// this lens's SAMPLE COORDINATE on the belt by its share of the DIS flow —
+    /// BOTH components, in belt/sample pixels, 1:1 — then look the displaced
+    /// coordinate back up.
+    ///
+    /// The flow field lives in the belt Studio's `projectPanoPointToBelt`
+    /// decodes (§37): the column is longitude, the row is colatitude about
+    /// body-z. This finds the ray's own place `c = (col, row)` on that belt,
+    /// bilinearly samples the flow `f = (u, v)` there, displaces the sample
+    /// coordinate `q = c + sign·(1 − alpha)·f`, and looks `q` back up through the
+    /// forward strip law (`belt_dir(q)`) — which, composed with
+    /// [`Self::project`] in [`Self::blend_flow`], is that route's
+    /// `lookup_L(q)`. Native ONE X2 Flow On uses the same split with its
+    /// separately selected 16-degree common SphereAlpha gate.
+    ///
+    /// Two things are per-lens (§40): the DIRECTED flow — our DIS field is
+    /// lens0→lens1 (l2r), so lens 0 takes `−field` (r2l) and lens 1 takes
+    /// `+field` — and the SPLIT, the per-pixel `(1 − alpha)` where `alpha` is
+    /// this lens's selected flow-gate share. On the audited legacy route its
+    /// 32-degree gate is also the final blend weight. ONE X2 selects a captured
+    /// 16-degree common gate for displacement and carries a separate final
+    /// Template alpha. At the seam centre (`alpha = 0.5`) each lens moves half;
+    /// where the flow share → 1 it stops, and where it fades out the guard below
+    /// keeps the base.
+    ///
+    /// Unchanged (the ray itself) outside the strip's colatitude support, for a
+    /// one-lens file, where `alpha` is not strictly inside `(0, 1)` (Studio's
+    /// `if !(0 < a < 1): keep base`), or where the field displaces nothing — so
+    /// nothing off the seam moves and there is no edge to feather.
+    ///
+    /// WGSL twin: `flow_shift`.
+    pub fn flow_shift(
+        &self,
+        lens: usize,
+        view_ray: [f32; 3],
+        disp: &super::flow::compose::Displacement,
+        alpha: f32,
+    ) -> [f32; 3] {
+        use super::band::{STRIP_H, STRIP_W};
+        if self.lens_count <= 1.0 {
+            return view_ray;
+        }
+        // Studio: outside the overlap (this lens's gate is 0 or 1), keep base.
+        if !(alpha > 0.0 && alpha < 1.0) {
+            return view_ray;
+        }
+        let body = self.body_ray(view_ray);
+        let len = norm3(body);
+        if len <= 0.0 {
+            return view_ray;
+        }
+        let phi = body[1].atan2(body[0]);
+        let tau = std::f32::consts::TAU;
+        let pi = std::f32::consts::PI;
+        // `c = coordinate(ray)`: Studio's belt law inverted (§37/§42.3), FULL
+        // colatitude, NO half-pixel: `phi = TAU - col·TAU/W` → `col = W·(TAU −
+        // phi_mod)/TAU`, `theta = row·π/(H−1)` → `row = theta·(H−1)/π`. R =
+        // identity (§42.2): the ray's belt colatitude is `acos(body.z/len)`.
+        let theta = (body[2] / len).clamp(-1.0, 1.0).acos();
+        // CLAMP `c` to the belt dims on both axes (§40/§41 MED: the kernel
+        // clamps the sample coordinate — do NOT column-wrap or band-cut).
+        let (cw, ch) = (STRIP_W as f32 - 1.0, STRIP_H as f32 - 1.0);
+        let col = (STRIP_W as f32 * (tau - phi.rem_euclid(tau)) / tau).clamp(0.0, cw);
+        let row = (theta * (STRIP_H as f32 - 1.0) / pi).clamp(0.0, ch);
+        // Lens 0 samples r2l `[0xae8]`, lens 1 samples l2r `[0xa88]` — two
+        // separately-estimated fields (§38/§40), not one negated.
+        let f = disp.sample(lens, col, row);
+        if f == [0.0, 0.0] {
+            return view_ray;
+        }
+        // `q = clamp(c + (1 - alpha) * f)`, both components, 1:1 in belt pixels.
+        // POSITIVE add for BOTH lenses — the directedness is in the two separate
+        // fields, not a sign flip (§40/§41 item 1). CLAMP `q` to the belt dims.
+        let w = 1.0 - alpha;
+        let qcol = (col + w * f[0]).clamp(0.0, cw);
+        let qrow = (row + w * f[1]).clamp(0.0, ch);
+        // `belt_dir(q)`: the FORWARD belt law (§37). `project(belt_dir(q))` in
+        // `blend_flow` is Studio's `lookup_L(q)`.
+        let nphi = tau - qcol / STRIP_W as f32 * tau;
+        let ntheta = qrow / (STRIP_H as f32 - 1.0) * pi;
+        let (nst, nct) = ntheta.sin_cos();
+        self.view_ray_from_body([nphi.cos() * nst, nphi.sin() * nst, nct])
+    }
+
+    /// Apply one lens of the selected ONE X2 captured field in its native
+    /// 1080-row by 60-column coordinate system.
+    ///
+    /// Unlike [`Self::flow_shift`], this does not reinterpret the field as a
+    /// legacy spherical belt. The body ray supplies Studio's shared initial
+    /// coordinate `c`, the lens's directed field is sampled there, and
+    /// `q = c + (1 - alpha_lens) * f` is converted back through the same ONE
+    /// X2 layout before the ordinary calibrated projection consumes it.
+    pub fn one_xs_flow_shift(
+        &self,
+        lens: usize,
+        view_ray: [f32; 3],
+        disp: &super::flow::one_xs::Displacement,
+        alpha_lens: f32,
+    ) -> [f32; 3] {
+        use super::flow::one_xs::{BodyRay, Layout, Lens};
+
+        if lens >= MAX_LENSES
+            || self.lens_count <= 1.0
+            || self.one_xs <= 0.5
+            || !(alpha_lens > 0.0 && alpha_lens < 1.0)
+        {
+            return view_ray;
+        }
+        let Some(body_ray) = BodyRay::new(self.body_ray(view_ray)) else {
+            return view_ray;
+        };
+        let Some(c) = Layout.sample(body_ray) else {
+            return view_ray;
+        };
+        let field_lens = if lens == 0 { Lens::A } else { Lens::B };
+        let flow = disp.sample(field_lens, c);
+        let weight = 1.0 - alpha_lens;
+        if flow == Default::default() || weight == 0.0 {
+            return view_ray;
+        }
+        let Some(q) = c.checked_displaced(flow, weight) else {
+            return view_ray;
+        };
+        self.view_ray_from_body(Layout.body_ray(q).components())
+    }
+
+    /// Studio's feathered flow-coverage gate (§42.1/§42.3), lens 0's share
+    /// `alpha_A`: `clamp01(((90 + w) − theta_deg) / (2·w))`, where `w` is half
+    /// the selected total transition width and `theta_deg` is the ray's
+    /// across-seam colatitude in the belt frame (`acos(body.z)` in degrees —
+    /// §42.1's `polar = acos(vx)`, which is our `theta` because the seam is the
+    /// belt equator). Legacy routes select [`GATE_WIDTH_DEG`] (32 degrees).
+    /// Captured native ONE X2 selects [`ONE_XS_FLOW_GATE_WIDTH_DEG`] (16
+    /// degrees); its optional 32-degree config override was false.
+    ///
+    /// `alpha_A = 1` for `theta < 90 − w`, ramps linearly to 0 across
+    /// `[90 − w, 90 + w]`, 0 beyond. Lens 1's share is `1 − alpha_A` (§42.1
+    /// CONFIRMED). This gate drives the flow displacement weight `(1 − alpha)`
+    /// and, on the audited legacy path, the colour blend between the two
+    /// displaced lens samples. ONE X2's final colour uses its separate captured
+    /// Template alpha. 1 for a one-stream file, which has no seam. WGSL twin:
+    /// `gate_alpha`.
+    pub fn gate_alpha(&self, view_ray: [f32; 3]) -> f32 {
+        if self.lens_count <= 1.0 {
+            return 1.0;
+        }
+        let body = self.body_ray(view_ray);
+        let len = norm3(body);
+        if len <= 0.0 {
+            return 1.0;
+        }
+        let theta_deg = (body[2] / len).clamp(-1.0, 1.0).acos().to_degrees();
+        let width = if self.one_xs > 0.5 {
+            ONE_XS_FLOW_GATE_WIDTH_DEG
+        } else {
+            GATE_WIDTH_DEG
+        };
+        let w = 0.5 * width;
+        (((90.0 + w) - theta_deg) / (2.0 * w)).clamp(0.0, 1.0)
+    }
+
+    /// [`Self::blend`] with Studio's optical-flow apply, IN THE FLOW PATH ONLY
+    /// (`KJERAG_FLOW`): each COVERED lens samples at its flow-displaced belt
+    /// coordinate. On the legacy route the colour blend between the two
+    /// displaced samples is the 32-degree SphereAlpha overlap gate
+    /// [`Self::gate_alpha`] — the SAME weight that drives the displacement,
+    /// taken independently as a separate step, NOT the narrow
+    /// [`Self::handover`]. The native ONE X2 type-2 renderer reads packed UV
+    /// and the camera's captured `leftAlphaLookupMap` as separate resources.
+    /// Kjerag therefore uses ONE X2's captured 16-degree common SphereAlpha
+    /// only for composing flow into UV, and uses that camera's selected Template
+    /// map for final colour.
+    ///
+    /// **Read from Studio's PTX (§80), not approximated.** Per lens the UV apply is
+    /// `q_lens = c + (1 − alpha_lens)·f_lens` (a geometric warp of the sample
+    /// coordinate feeding the UV lookup, both components, 1:1, positive add —
+    /// [`Self::flow_shift`]), where `alpha_lens` is this lens's SphereAlpha
+    /// (`alpha_A` for lens 0, its complement `1 − alpha_A` for lens 1) and
+    /// `f_lens` is this lens's own directional DIS field (r2l for lens 0, l2r for
+    /// lens 1). On that audited legacy route the SphereAlpha COLOUR blend is a
+    /// separate step whose weight is that same per-lens SphereAlpha, applied to
+    /// the displaced landings. Native ONE X2 instead supplies packed UV and its
+    /// selected Template alpha as separate final resources. The native Flow On
+    /// capture closes the common displacement gate at 16 degrees, while the
+    /// captured alpha and owner ON/OFF pixels settle the separate final colour
+    /// share.
+    ///
+    /// **Why the two-lens output does NOT cancel (§80 CORRECTS §70/§71).** The
+    /// §70 cancellation (`net output shift ≡ 0`) was a wrong-space artefact: the
+    /// old apply rotated the output ray and re-projected, so a complementary
+    /// colour weight averaged the two lenses back to the flow-OFF centroid. With
+    /// the GEOMETRIC warp each lens's sample POINT moves to the true feature
+    /// position on the belt, so both lenses read the SAME content and the colour
+    /// blend delivers it — the de-doubling §70 was chasing — whatever the weight.
+    /// The PTX read REFUTES the §71 "decouple" for that Windows route. It does
+    /// not override the captured native ONE X2 final-resource split.
+    ///
+    /// Mirrors [`Self::blend`]'s coverage and normalization exactly, so a lens
+    /// with no picture still drops out and the weights still sum to 1 — only the
+    /// LANDING (displaced, not the raw ray) and, on legacy routes, the selected
+    /// 32-degree gate that both displaces and blends it change. WGSL twin:
+    /// `blend_flow`, which [`crate::twin`] holds in step.
+    pub fn blend_flow(
+        &self,
+        view_ray: [f32; 3],
+        disp: &super::flow::compose::Displacement,
+    ) -> Blend {
+        let mut landings = [Landing::MISSED; MAX_LENSES];
+        let mut weights = [0.0; MAX_LENSES];
+        let reach = norm3(view_ray);
+        let axis: [f32; MAX_LENSES] = std::array::from_fn(|lens| self.axis_of(lens, view_ray));
+        // The selected common SphereAlpha, lens 0's flow share: 32 degrees on
+        // legacy routes and the captured 16 degrees on ONE X2. It always drives
+        // the per-lens displacement weight inside `flow_shift`. Legacy Studio
+        // routes also use it for the final colour blend. The captured ONE X2
+        // type-2 route uploads packed UV and left alpha as independent
+        // resources, so its colour share remains the selected static OneXS map
+        // even while flow changes the UV lookup.
+        let flow_alpha_a = self.gate_alpha(view_ray);
+        let colour_alpha_a = if self.one_xs > 0.5 {
+            one_xs_alpha(normalize(self.lenses[0].lens_ray(view_ray)))
+        } else {
+            flow_alpha_a
+        };
+        for lens in 0..MAX_LENSES {
+            if !self.covers(lens, axis[lens], reach) {
+                continue;
+            }
+            // This lens's selected flow share and final colour share. They are
+            // the same on legacy routes and deliberately distinct on ONE X2.
+            let flow_alpha_lens = match lens {
+                0 => flow_alpha_a,
+                _ => 1.0 - flow_alpha_a,
+            };
+            let colour_alpha_lens = match lens {
+                0 => colour_alpha_a,
+                _ => 1.0 - colour_alpha_a,
+            };
+            let mut land =
+                self.project(lens, self.flow_shift(lens, view_ray, disp, flow_alpha_lens));
+            if !land.inside {
+                // §80: the displaced sample landed on an invalid/border fisheye
+                // UV → keep the base (undisplaced) UV for this lens.
+                land = self.project(lens, view_ray);
+            }
+            landings[lens] = land;
+            if lens < self.lens_count as usize {
+                weights[lens] = if self.one_xs > 0.5 {
+                    if land.inside { colour_alpha_lens } else { 0.0 }
+                } else {
+                    claim(land, colour_alpha_lens)
+                };
+            }
+        }
+        let total: f32 = weights.iter().sum();
+        if total > 0.0 {
+            for weight in &mut weights {
+                *weight = share(*weight, total);
+            }
+        }
+        Blend { landings, weights }
+    }
+
+    /// Blend the selected ONE X2 route using its captured native flow fields.
+    ///
+    /// Flow changes each lens's lookup coordinate. The final colour split is
+    /// still the independent captured Template alpha, and an invalid displaced
+    /// landing falls back to that lens's undisplaced projection.
+    pub fn blend_one_xs_flow(
+        &self,
+        view_ray: [f32; 3],
+        disp: &super::flow::one_xs::Displacement,
+    ) -> Blend {
+        let mut landings = [Landing::MISSED; MAX_LENSES];
+        let mut weights = [0.0; MAX_LENSES];
+        let reach = norm3(view_ray);
+        let axis: [f32; MAX_LENSES] = std::array::from_fn(|lens| self.axis_of(lens, view_ray));
+        let flow_alpha_a = self.gate_alpha(view_ray);
+        let colour_alpha_a = one_xs_alpha(normalize(self.lenses[0].lens_ray(view_ray)));
+
+        for lens in 0..MAX_LENSES {
+            if !self.covers(lens, axis[lens], reach) {
+                continue;
+            }
+            let flow_alpha_lens = if lens == 0 {
+                flow_alpha_a
+            } else {
+                1.0 - flow_alpha_a
+            };
+            let colour_alpha_lens = if lens == 0 {
+                colour_alpha_a
+            } else {
+                1.0 - colour_alpha_a
+            };
+            let shifted = self.one_xs_flow_shift(lens, view_ray, disp, flow_alpha_lens);
+            let mut landing = self.project(lens, shifted);
+            if !landing.inside {
+                landing = self.project(lens, view_ray);
+            }
+            landings[lens] = landing;
+            if lens < self.lens_count as usize && landing.inside {
+                weights[lens] = colour_alpha_lens;
+            }
+        }
+
+        let total: f32 = weights.iter().sum();
+        if total > 0.0 {
+            for weight in &mut weights {
+                *weight = share(*weight, total);
+            }
+        }
+        Blend { landings, weights }
     }
 
     /// What the band holds at a ray's azimuth, in radians, interpolated
@@ -2309,6 +2818,68 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     (0..3).map(|axis| a[axis] * b[axis]).sum()
 }
 
+/// The selected ONE X2 base-alpha map's half-width at one azimuth.
+///
+/// Mac rotates lens 0's unit ray `l` to `q = [l.z, l.y, -l.x]`; `z` here is
+/// that `q.z`. The ordinary half-width `H` is three degrees. Below the
+/// equator it falls linearly toward `P = 1 degree`, with a ten-degree interval
+/// around the bottom pole held almost entirely at `P`. The interval's first
+/// and last tenths interpolate to and from the unmodified curve, exactly as
+/// the recovered producer does.
+///
+/// WGSL twin: `one_xs_half_width`.
+fn one_xs_half_width(z: f32) -> f32 {
+    if z >= 0.0 {
+        return ONE_XS_HALF_WIDTH;
+    }
+
+    let q = ONE_XS_HALF_WIDTH + z * (ONE_XS_HALF_WIDTH - ONE_XS_POLE_HALF_WIDTH);
+    let a = -1.0;
+    let b = ONE_XS_TAPER_END;
+    let c = a + 0.1 * (b - a);
+    let d = b - 0.1 * (b - a);
+    if !(a..=b).contains(&z) {
+        return q;
+    }
+
+    let at_a = ONE_XS_HALF_WIDTH + a * (ONE_XS_HALF_WIDTH - ONE_XS_POLE_HALF_WIDTH);
+    let at_b = ONE_XS_HALF_WIDTH + b * (ONE_XS_HALF_WIDTH - ONE_XS_POLE_HALF_WIDTH);
+    if z <= c {
+        let t = (z - a) / (c - a);
+        return at_a + t * (ONE_XS_POLE_HALF_WIDTH - at_a);
+    }
+    if z <= d {
+        return ONE_XS_POLE_HALF_WIDTH.min(q);
+    }
+    let t = (z - d) / (b - d);
+    ONE_XS_POLE_HALF_WIDTH + t * (at_b - ONE_XS_POLE_HALF_WIDTH)
+}
+
+/// Lens 0's effective base share on Studio's ordinary ONE X2 path.
+///
+/// The captured final `leftAlphaLookupMap` and its type-2 upload carry this
+/// lens-0/source-0 value directly. There is deliberately no [`SeamAnchor`]
+/// term: the selected producer is a static camera map.
+///
+/// WGSL twin: `one_xs_alpha`.
+fn one_xs_alpha(lens_ray: [f32; 3]) -> f32 {
+    let half_width = one_xs_half_width(-lens_ray[0]);
+    (0.5 + lens_ray[2].clamp(-1.0, 1.0).asin() / (2.0 * half_width)).clamp(0.0, 1.0)
+}
+
+/// The capture-static selected ONE X2 Template alpha at a body direction.
+///
+/// Reading the calibration directly keeps user view and horizon state out of
+/// the static resource producer. A [`Reframe`] only retains the lens matrix
+/// after composing that state, which is the wrong ownership boundary here.
+pub(crate) fn one_xs_alpha_at_body(lenses: &[Lens], body_ray: [f32; 3]) -> Option<f32> {
+    if !is_one_xs_lens_pair(lenses) {
+        return None;
+    }
+    let lens_ray = one_xs_lens_from_body(&lenses[0], 0).mul_vec(body_ray);
+    Some(one_xs_alpha(normalize(lens_ray)))
+}
+
 /// The **front** lens's share of a ray, from how far apart the two lenses'
 /// axis dot products are: 1 well inside its own hemisphere, 1/2 on the seam,
 /// 0 once the ray is half a crossover past it (issue #48).
@@ -2361,9 +2932,271 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 /// deleting it is deleting a function that had become one - see
 /// docs/research/studio-parity.md.
 ///
+/// `alphaNormalized`, transcribed from one of Studio's shipped fragment
+/// shaders (docs/research/studio-seam-re.md 8.2).
+///
+/// **It is NOT the selected path's curve, and this doc used to say it was.**
+/// Section 9, 2026-08-13: the image holds 243 shader blocks rather than the
+/// five 8.2 read, and the fragment shader that actually links with the
+/// `colorAdjustMap` vertex shader computes no alpha at all - it samples
+/// `leftAlphaLookupMap`, which the CPU builds with a LINEAR ramp over `2g`
+/// degrees - 6 for this camera (`studio-seam-re.md` 19.3). The "ten degrees
+/// that section 1 recovered" this used to say is refuted by 19.4. `alphaNormalized` belongs to a different
+/// program. Kept as an instrument because it is transcribed exactly and the
+/// measurements below are real; it must not be read as parity, and the three
+/// reasons it is off are now four.
+///
+/// ```glsl
+/// float lamda = 5.19999980926513671875;
+/// if (x <= 0.5) { x = 0.5 * pow(2.0 * x, lamda); }
+/// else          { x = 1.0 - (0.5 * pow(2.0 * (1.0 - x), lamda)); }
+/// ```
+///
+/// **Research only, and off unless [`BLEND_CURVE`] asks for it.** It is
+/// RE-exact and it is not shipped, for three reasons measured on the day it
+/// was written:
+///
+/// 1. It is a seam mechanism, and the owner's plan sequences the static stitch
+///    first (docs/seam-parity-plan.md 4.2). The curve's slope at its midpoint
+///    is `lamda`, so a misplaced 50/50 line is about five times as visible
+///    under it as under the ramp - sampling the weight at the seam read 0.5414
+///    where the geometry offset is under a hundredth.
+/// 2. It changes three recorded corpus measurements, all re-measured and none
+///    of them wrong: the 0.9-to-0.1 handover span goes 4.80-4.89 degrees to
+///    1.84 of eight, and the anchor's delivered hold goes 0.617 to 0.868 on
+///    the X4 Air and 0.510 to 0.784 on the X2 class, because a line held
+///    inside a narrow handover moves the picture almost one for one.
+/// 3. It defeats `the_anchored_handover_leaves_no_hole_and_no_cliff`'s own
+///    positive control. Breaking the coverage taper to a hard edge steps the
+///    delivered weight by 0.0065 under this curve against the 0.10 the control
+///    demands - because where the taper matters the blend has already
+///    committed to one lens, so the hard edge never reaches the picture. That
+///    is a real property of the curve rather than a fault in it, but it leaves
+///    that guard unable to discriminate and it needs a replacement before this
+///    ships.
+///
+/// 4. **It is the wrong curve.** See above - the selected path's blend shape
+///    is a linear ramp in a lookup map, not an S-curve in a shader.
+///
+/// What it buys is the reason it was worth transcribing: `alpha` sits inside
+/// `[0.05, 0.95]`
+/// over 35.8 per cent of the band against a linear ramp's 90, so the two
+/// lenses are averaged together over less than half as much picture. Each
+/// fisheye darkens toward its rim, so a handover averages two darkened rims
+/// and leaves a dip down the seam - 1.5 to 1.7 codes of it, measured on flat
+/// sky (docs/seam-parity-plan.md 1.1). The chromatic arm cannot touch that: its
+/// field is antisymmetric and mean-centred, so it corrects differences and a
+/// dip is common mode. Narrowing what is actually mixed would help - but
+/// section 9.7 found what Studio actually does about the rims, and it is
+/// `compensateFisheyeEdgeIntensity`, a per-lens map multiplied into the blend
+/// and then renormalised, not a narrower curve.
+///
+/// WGSL twin: `alpha_normalized`.
+fn alpha_normalized(x: f32) -> f32 {
+    // The shader's literal is `5.19999980926513671875`, which is the f32
+    // nearest 5.2 written out in full; `5.2` parses to the same bits, and
+    // writing the long form is excess precision that rounds to it anyway.
+    const LAMDA: f32 = 5.2;
+    match x <= 0.5 {
+        true => 0.5 * (2.0 * x).powf(LAMDA),
+        false => 1.0 - 0.5 * (2.0 * (1.0 - x)).powf(LAMDA),
+    }
+}
+
+/// How much of the handover the two lenses are genuinely MIXED over, as a
+/// half-width in radians.
+///
+/// Not the band: the band is where the fade has any effect at all, and under a
+/// steep curve most of it is spent at one lens or the other. This is the part
+/// where `alpha` is inside `[0.05, 0.95]`, which is what decides how much
+/// picture carries a blend of two lenses - and therefore how wide the
+/// chromatic evidence has to reach (`super::chroma::evidence_rows`).
+///
+/// A linear ramp spends 90 per cent of its band there. Studio's
+/// `alpha_normalized` spends **35.8 per cent**, measured off the curve itself
+/// rather than assumed.
+pub fn mixing_half_width() -> f32 {
+    // `alphaNormalized` reaches 0.05 at `x = 0.321` and 0.95 at `x = 0.679`,
+    // so the mixed span is `0.358` of the band; the linear ramp's is `0.90`.
+    let share = match studio_curve() {
+        true => 0.358,
+        false => 0.90,
+    };
+    0.5 * share * CROSSOVER_DEG.to_radians()
+}
+
+/// Research only: whether this run blends on `alphaNormalized` instead of the
+/// ramp, from `KJERAG_BLEND_CURVE=studio`.
+///
+/// A mechanism the owner has to judge by eye, staged so it can be judged
+/// without being shipped, the same seat `KJERAG_SEAM_AT` occupies. The `=studio`
+/// spelling is now a misnomer and is kept only because it is what the owner's
+/// notes and the plan already say - the curve is Studio's code but not
+/// Studio's selected path (docs/research/studio-seam-re.md 9).
+const BLEND_CURVE: &str = "KJERAG_BLEND_CURVE";
+
+/// Which surface the legacy handover puts its 50/50 line on, from
+/// `KJERAG_SEAM_AT`.
+///
+/// **The default is `cone`, as the code below says.** An earlier reading
+/// called `nominal` Studio's selected surface; the recovered ONE X2 producer
+/// supersedes that claim for this camera. ONE X2 bypasses this switch and
+/// reads lens 0's calibrated ray in [`one_xs_alpha`]. These remain the legacy
+/// camera path and its two research arms.
+///
+/// | value | 50/50 surface | depends on |
+/// | --- | --- | --- |
+/// | `cone` (default) | the great circle about lens 0's calibrated axis | lens 0 |
+/// | `nominal` | the great circle about the body's own axis | nothing |
+/// | `bisector` | where the two lenses' cosines are equal | both lenses |
+///
+/// The exact OneXS evidence does not establish a surface for any other camera,
+/// so it does not silently change them. `nominal` and `bisector` stay
+/// selectable for the existing instruments until their own camera paths are
+/// settled.
+const SEAM_AT: &str = "KJERAG_SEAM_AT";
+
+/// Which of the three surfaces this run draws.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Surface {
+    /// The great circle about the body's own (nominal) axis.
+    Nominal,
+    /// The legacy default: the great circle about lens 0's calibrated axis.
+    Cone,
+    /// Where the two lenses' cosines are equal.
+    Bisector,
+}
+
+impl Surface {
+    /// Whether the ramp reads an ANGLE (`asin` of one cosine) rather than a
+    /// cosine difference. Both single-axis surfaces do; the bisector does not.
+    fn is_angular(self) -> bool {
+        self != Self::Bisector
+    }
+}
+
+/// Whether the running 50/50 surface FOLLOWS a lens's calibration, for the one
+/// instrument outside this crate that has to know.
+///
+/// **It exists so nothing re-parses `KJERAG_SEAM_AT`.** `kjerag_spike`'s
+/// crossing tracer asks a different question of the contour depending on the
+/// surface, and when it read the variable itself the two `match` arms fell out
+/// of sync the moment the default moved - which is exactly the class of bug
+/// `seam_cosine` exists to prevent inside this crate.
+pub fn seam_follows_a_lens() -> bool {
+    seam_surface() != Surface::Nominal
+}
+
+fn seam_surface() -> Surface {
+    static AT: OnceLock<Surface> = OnceLock::new();
+    *AT.get_or_init(|| {
+        // Validated, because the arm this selects is a percept change and the
+        // owner's A/B is the merge gate: a typo that silently ran the arm
+        // under test while the operator believed he was on the control would
+        // be the worst failure this switch could have.
+        let ask = std::env::var(SEAM_AT).unwrap_or_default();
+        let surface = match ask.as_str() {
+            "" | "cone" => Surface::Cone,
+            "nominal" => Surface::Nominal,
+            "bisector" => Surface::Bisector,
+            other => {
+                eprintln!(
+                    "kjerag: {SEAM_AT}={other} is not a surface. It takes `cone` for the great \
+                     circle about lens 0's calibrated axis, `nominal` for the body's own axis, \
+                     or `bisector` for the two lenses' bisector. This run draws `nominal`"
+                );
+                Surface::Nominal
+            }
+        };
+        println!(
+            "blend:  the legacy 50/50 surface is {}. ONE X2 uses its camera-specific static map",
+            match surface {
+                Surface::Cone => "the great circle about lens 0's CALIBRATED axis",
+                Surface::Nominal =>
+                    "the great circle about the body's own NOMINAL axis - research only, from \
+                     KJERAG_SEAM_AT=nominal",
+                Surface::Bisector =>
+                    "the two lenses' BISECTOR - research only, from KJERAG_SEAM_AT=bisector. It \
+                     is the only one of the three that reads lens 1 at all, which nothing in \
+                     Studio's leaf does",
+            }
+        );
+        surface
+    })
+}
+
+fn studio_curve() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var(BLEND_CURVE).is_ok_and(|ask| ask == "studio");
+        if on {
+            println!(
+                "blend:  research curve on, {BLEND_CURVE}=studio: the handover fades on \
+                 alphaNormalized (lamda 5.2) instead of the linear ramp, so the two lenses \
+                 are mixed over about a fifth of the band rather than all of it. NOT parity - \
+                 the selected export path blends on a linear ramp in a lookup map \
+                 (studio-seam-re.md 9)"
+            );
+        }
+        on
+    })
+}
+
 /// WGSL twin: `crossover`.
 fn crossover(apart: f32, reach: f32, band: f32, shift: f32) -> f32 {
-    (0.5 + apart / (2.0 * reach * band) + shift / band).clamp(0.0, 1.0)
+    let share = share_at(apart, reach, band, shift, seam_surface().is_angular());
+    match studio_curve() {
+        true => alpha_normalized(share),
+        false => share,
+    }
+}
+
+/// The front lens's share, either side of the switch, as a pure function so
+/// both can be tested in one process. `angular` is whether the surface reads
+/// an ANGLE off one axis ([`Surface::is_angular`]),
+/// and `apart` is the two lenses' cosine difference when it is false and the
+/// front lens's own cosine when it is true.
+fn share_at(apart: f32, reach: f32, band: f32, shift: f32, angular: bool) -> f32 {
+    match angular {
+        false => (0.5 + apart / (2.0 * reach * band) + shift / band).clamp(0.0, 1.0),
+        // The angle from ONE axis, 50/50 at exactly 90 degrees from it, which
+        // is Studio's MECHANISM and the part that is settled. WHICH axis is
+        // not: Studio rotates the ray by a rig matrix built from the
+        // calibration's euler angles and then measures against a fixed one, so
+        // its surface is calibration DEPENDENT, and whether that composition
+        // equals lens 0's own axis - what the shipped arm uses - is unproven
+        // (`studio-seam-re.md` 19.12).
+        //
+        // **`asin` and not `90 - acos`.** `pi/2 - acos(c)` and `asin(c)` are
+        // the same function; this form is here because the OTHER one is not
+        // computed the same way on a GPU.
+        //
+        // **The reason is WGSL's `acos`, and an earlier version of this
+        // comment blamed the wrong thing.** It claimed the win came from
+        // avoiding catastrophic cancellation in `pi/2 - acos` near the seam.
+        // A review split the change across the two halves and measured each
+        // on RADV PHOENIX, worst weight on the `mei` arm against a 2e-5 bar:
+        //
+        // ```text
+        // Rust `pi/2 - acos`, WGSL `HALF_PI - acos`   1.2566e-4   fail
+        // Rust `asin`,        WGSL `HALF_PI - acos`   1.2514e-4   fail
+        // Rust `pi/2 - acos`, WGSL `asin`             2.265e-6    pass
+        // Rust `asin`,        WGSL `asin`             1.848e-6    pass
+        // ```
+        //
+        // Reproduced here before this comment was rewritten. Fixing only the
+        // Rust half moves the number by 5e-7; fixing only the shader moves it
+        // by 1.23e-4. The cancellation is real but worth under 1e-6 - a direct
+        // f32 sweep of the two forms over `c` in [-1,1] at this band puts it at
+        // 9.8e-7 - so it cannot account for the 1.26e-4 that was observed.
+        // What this file used to record, that "the cone needs `acos`, whose
+        // precision WGSL leaves to the implementation", was CORRECT and should
+        // not have been deleted. The substitution still earns its place: it is
+        // the shader's `acos` it routes around.
+        true => {
+            (0.5 + (apart / reach).clamp(-1.0, 1.0).asin() / band + shift / band).clamp(0.0, 1.0)
+        }
+    }
 }
 
 impl LensBlock {
@@ -2499,12 +3332,13 @@ fn camera_rotation(camera: Camera) -> Mat3 {
 }
 
 /// The lens's own mounting, over the nominal arrangement it is mounted in
-/// ([`opposed`]).
+/// ([`opposed`]) for the generic residual-pose path.
 ///
-/// The three angles and the quarter-turn datum they are measured against live
-/// in `kjerag_meta::Pose::lens_from_body`, because the IMU needs the same
-/// rotation to get out of the front lens's frame and into the body's, and one
-/// settled convention wants one definition.
+/// The generic three-angle composition and its quarter-turn datum live in
+/// `kjerag_meta::Pose::lens_from_body`, because the IMU needs that mounting to
+/// get out of the front lens's frame and into the body's. Studio's captured
+/// ONE X2 image map establishes the renderer-local exception below; it stays
+/// here so it does not silently change the IMU or other Insta360 cameras.
 ///
 /// A file that records the **whole** rotation rather than a residual against
 /// the arrangement takes it verbatim and gets no [`opposed`] composed onto it:
@@ -2514,8 +3348,128 @@ fn camera_rotation(camera: Camera) -> Mat3 {
 fn lens_from_body(lens: &Lens, index: usize) -> Mat3 {
     match lens.mounting {
         Some(whole) => Mat3::from(whole.rows()),
+        None if lens.lens_type == ONE_XS_LENS_TYPE => one_xs_lens_from_body(lens, index),
         None => Mat3::from(lens.pose.lens_from_body().rows()).mul(opposed(index)),
     }
+}
+
+/// Studio's Template mounting observed on the selected ONE X2 path.
+///
+/// This is not the generic Insta360 `offset_v3` composition. Native Mac 6.0.2
+/// builds `Ry(pitch + 90) Rz(yaw) Rx(roll)`, turns lens 0 by another 180
+/// degrees about its local z axis, then maps Kjerag's body coordinates to the
+/// producer's sphere coordinates as `[body.z, body.x, body.y]`. The captured
+/// target-frame packed UV map independently fingerprints these two matrices;
+/// their relative mounting is 4.02 degrees away from the generic composition.
+/// The exact real-frame factorial establishes this mounting as jointly
+/// necessary with the captured OneXS alpha for the reported broad near-mount
+/// duplicate.
+///
+/// Keep this renderer-local. [`kjerag_meta::Pose`] also owns the IMU mounting,
+/// while Kjerag's caller scopes this formula to lens type `0x29` because
+/// upstream dispatch and the runtime packed-UV capture close that path. The
+/// native Template map worker itself has no `0x29` comparison. The X4 model-6
+/// parent adapter now shares the raw Template helper with its independently
+/// verified source association; other native camera families remain unverified.
+fn one_xs_lens_from_body(lens: &Lens, index: usize) -> Mat3 {
+    let mounting = one_xs_template_mounting(lens, index);
+
+    // `sphere = [body.z, body.x, body.y]`.
+    mounting.mul(Mat3([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]))
+}
+
+/// The native ONE X2 Template mounting before its body-to-sphere basis.
+fn one_xs_template_mounting(lens: &Lens, index: usize) -> Mat3 {
+    let mut mounting = template_mounting_base(lens.pose);
+    if index == 0 {
+        mounting = mounting.mul(Mat3::rot_z(std::f64::consts::PI));
+    }
+    mounting
+}
+
+fn template_mounting_base(pose: Pose) -> Mat3 {
+    Mat3::rot_y((pose.pitch_deg + 90.0).to_radians())
+        .mul(Mat3::rot_z(pose.yaw_deg.to_radians()))
+        .mul(Mat3::rot_x(pose.roll_deg.to_radians()))
+}
+
+/// Studio's binary64 `xyzw` lens quaternion for the selected ONE X2 parent.
+///
+/// The host first converts the Template matrix through Eigen's trace/largest
+/// diagonal assignment.  Lens zero of a two-lens pair then postmultiplies by
+/// `(0,0,1,0)`.  That branch, rather than a generic positive-`w` convention,
+/// fixes the observed quaternion sign.
+pub(crate) fn one_xs_parent_lens_quaternion(lens: &Lens, index: usize) -> Quat {
+    template_parent_lens_quaternion(lens.pose, index)
+}
+
+/// The native Template law shared by the captured ONE X2 and X4 models.
+/// This image mounting does not alter the metadata-owned IMU mounting.
+pub(crate) fn template_parent_lens_quaternion(pose: Pose, index: usize) -> Quat {
+    let mut quaternion = eigen_quaternion(template_mounting_base(pose));
+    if index == 0 {
+        let [x, y, z] = quaternion.v;
+        quaternion = Quat {
+            w: -z,
+            v: [y, -x, quaternion.w],
+        };
+    }
+    quaternion
+}
+
+/// The calibrated Mei parent's lens rotation in the fixed type-2 sphere frame.
+///
+/// The shared parent raster expresses a camera-body ray as
+/// `sphere = [body.z, body.x, body.y]`.  Unlike the selected ONE X2 adapter,
+/// this path uses the ordinary calibrated lens mounting already owned by the
+/// renderer.  Postmultiplying by the inverse body-to-sphere rotation makes
+/// the invariant explicit:
+///
+/// `lens_from_sphere * sphere_from_body == lens_from_body`.
+///
+/// Keep [`one_xs_parent_lens_quaternion`] separate. Its Template mounting and
+/// deterministic sign are captured native semantics, not the generic
+/// calibrated mounting used here.
+pub(crate) fn calibrated_parent_lens_quaternion(lens: &Lens, index: usize) -> Quat {
+    let sphere_from_body_inverse = Mat3([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]);
+    eigen_quaternion(lens_from_body(lens, index).mul(sphere_from_body_inverse))
+}
+
+/// Eigen's deterministic `Matrix3d -> Quaterniond` assignment.
+fn eigen_quaternion(matrix: Mat3) -> Quat {
+    let m = matrix.0;
+    let trace = m[0][0] + m[1][1] + m[2][2];
+    if trace > 0.0 {
+        let root = (trace + 1.0).sqrt();
+        let w = 0.5 * root;
+        let scale = 0.5 / root;
+        return Quat {
+            w,
+            v: [
+                (m[2][1] - m[1][2]) * scale,
+                (m[0][2] - m[2][0]) * scale,
+                (m[1][0] - m[0][1]) * scale,
+            ],
+        };
+    }
+
+    let mut largest = 0;
+    if m[1][1] > m[0][0] {
+        largest = 1;
+    }
+    if m[2][2] > m[largest][largest] {
+        largest = 2;
+    }
+    let next = (largest + 1) % 3;
+    let last = (next + 1) % 3;
+    let root = (m[largest][largest] - m[next][next] - m[last][last] + 1.0).sqrt();
+    let mut vector = [0.0; 3];
+    vector[largest] = 0.5 * root;
+    let scale = 0.5 / root;
+    let w = (m[last][next] - m[next][last]) * scale;
+    vector[next] = (m[next][largest] + m[largest][next]) * scale;
+    vector[last] = (m[last][largest] + m[largest][last]) * scale;
+    Quat { w, v: vector }
 }
 
 /// The nominal pose lens `index` is mounted in, which its extrinsics are a
@@ -2633,6 +3587,11 @@ impl Mat3 {
         Self([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
     }
 
+    fn rot_z(angle: f64) -> Self {
+        let (s, c) = angle.sin_cos();
+        Self([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    }
+
     fn mul_vec(self, v: [f32; 3]) -> [f32; 3] {
         let v = v.map(f64::from);
         std::array::from_fn(|row| (0..3).map(|k| self.0[row][k] * v[k]).sum::<f64>() as f32)
@@ -2682,7 +3641,19 @@ pub(crate) fn wgsl() -> String {
     let lanes = super::band::AZIMUTHS / 4;
     format!(
         "const MAX_LENSES = {MAX_LENSES}u;\nconst READOUT_STEPS = {READOUT_STEPS}u;\n\
-         const TABLE_LANES = {lanes}u;\nconst THETA = {THETA:?};\n{WGSL}"
+         const TABLE_LANES = {lanes}u;\nconst THETA = {THETA:?};\n\
+         const ONE_XS_HALF_WIDTH = {ONE_XS_HALF_WIDTH:?};\n\
+         const ONE_XS_POLE_HALF_WIDTH = {ONE_XS_POLE_HALF_WIDTH:?};\n\
+         const ONE_XS_TAPER_END = {ONE_XS_TAPER_END:?};\n\
+         const STUDIO_CURVE = {curve}u;\nconst SEAM_ANGULAR = {angular}u;\nconst SEAM_NOMINAL = {nominal}u;\n\
+         {WGSL}",
+        // Baked into the source rather than carried in the block: it is read
+        // once before any file is open, and adding a field to `Reframe` means
+        // adding it to both halves in the same order - the one mistake this
+        // file's twin exists to catch and the one it cannot catch by size.
+        curve = u32::from(studio_curve()),
+        angular = u32::from(seam_surface().is_angular()),
+        nominal = u32::from(seam_surface() == Surface::Nominal),
     )
 }
 
@@ -2739,9 +3710,10 @@ struct Reframe {
   baseline_x: f32,
   baseline_y: f32,
   baseline_z: f32,
-  // A `vec3` in a uniform block is padded to sixteen bytes. Rust twin:
-  // `Reframe::_baseline_pad`.
-  baseline_pad: f32,
+  // Whether this is Studio's OneXS camera, the ONE X2. This occupies the pad
+  // word of the vec3 above, so the block does not grow. Rust twin:
+  // `Reframe::one_xs`.
+  one_xs: f32,
   screen: Screen,
   frame_width: f32,
   frame_height: f32,
@@ -2769,9 +3741,15 @@ struct Reframe {
   // Studio swing rather than the whole range. Rust twin: `Reframe::limited`,
   // read by `levels`.
   limited: f32,
-  // The three words above are what put the table below on its own 16-byte
-  // boundary; they were padding until each became a number the shader reads,
-  // so there is no `pad` member here any more and none in the Rust twin.
+  // Studio's crop-translated static image-circle centres, lens A then lens B.
+  // No shader path reads them; the CPU mask reconstruction reads the Rust
+  // twin. Keeping the declaration here preserves the one uniform layout.
+  image_circle_centres: vec4<f32>,
+  // R/Cr, G/Cb magnitude, G/Cr magnitude, B/Cb. Read by source_rgb;
+  // independent of the camera calibration and range normalization.
+  source_matrix: vec4<f32>,
+  // The three scalar words above put this vec4 on a 16-byte boundary; the
+  // source-matrix vec4 and the table follow on successive boundaries.
   // What the along-seam axis still disagrees by after a pose, direction by
   // direction, in radians, four to a lane. Rust twin: `Reframe::table`.
   //
@@ -2782,6 +3760,15 @@ struct Reframe {
 };
 
 @group(0) @binding(0) var<uniform> reframe: Reframe;
+
+// Y and centred Cb/Cr have already been range-normalized by the caller.
+// Keep subtraction order shared by both draw paths and the source sampler.
+fn source_rgb(y: f32, c: vec2<f32>) -> vec3<f32> {
+  let m = reframe.source_matrix;
+  return vec3<f32>(y + m.x * c.g, y - m.y * c.r - m.z * c.g,
+    y + m.w * c.r);
+}
+
 
 struct Landing {
   pixel: vec2<f32>,
@@ -2845,7 +3832,7 @@ fn blend(ray: vec3<f32>) -> Blend {
   // twin: `Reframe::blend`.
   let axis0 = axis_of(reframe.lenses[0], ray);
   let axis1 = axis_of(reframe.lenses[1], ray);
-  let front = handover(axis0, axis1, reach, reframe.crossover);
+  let front = handover(ray, axis0, axis1, reach, reframe.crossover);
   for (var index = 0u; index < MAX_LENSES; index += 1u) {
     let lens = reframe.lenses[index];
     // Zero, which is `Landing::MISSED`: a lens the ray cannot reach is never
@@ -2854,8 +3841,12 @@ fn blend(ray: vec3<f32>) -> Blend {
     var claimed = 0.0;
     if within(lens, select(axis1, axis0, index == 0u), reach) {
       let share = select(1.0 - front, front, index == 0u);
+      // THE RAY IS THE RAY: the lens is projected at the undisplaced ray.
+      // Rust twin: the `project` call inside `Reframe::blend`.
       landing = project(lens, ray);
-      claimed = select(0.0, claim(landing, share), f32(index) < reframe.lens_count);
+      let one_xs_claim = select(0.0, share, landing.inside);
+      let lens_claim = select(claim(landing, share), one_xs_claim, reframe.one_xs > 0.5);
+      claimed = select(0.0, lens_claim, f32(index) < reframe.lens_count);
     }
     out.landings[index] = landing;
     out.weights[index] = claimed;
@@ -2908,17 +3899,59 @@ fn claim(landing: Landing, share: f32) -> f32 {
   return share * landing.depth;
 }
 
+// Studio's selected ONE X2 map half-width at q.z, where its fixed coordinate
+// shuffle is q = [l.z, l.y, -l.x] for lens 0's unit ray l. Rust twin:
+// `one_xs_half_width`.
+fn one_xs_half_width(z: f32) -> f32 {
+  if z >= 0.0 {
+    return ONE_XS_HALF_WIDTH;
+  }
+  let q = ONE_XS_HALF_WIDTH + z * (ONE_XS_HALF_WIDTH - ONE_XS_POLE_HALF_WIDTH);
+  let a = -1.0;
+  let b = ONE_XS_TAPER_END;
+  let c = a + 0.1 * (b - a);
+  let d = b - 0.1 * (b - a);
+  if z < a || z > b {
+    return q;
+  }
+  let at_a = ONE_XS_HALF_WIDTH + a * (ONE_XS_HALF_WIDTH - ONE_XS_POLE_HALF_WIDTH);
+  let at_b = ONE_XS_HALF_WIDTH + b * (ONE_XS_HALF_WIDTH - ONE_XS_POLE_HALF_WIDTH);
+  if z <= c {
+    let t = (z - a) / (c - a);
+    return at_a + t * (ONE_XS_POLE_HALF_WIDTH - at_a);
+  }
+  if z <= d {
+    return min(ONE_XS_POLE_HALF_WIDTH, q);
+  }
+  let t = (z - d) / (b - d);
+  return ONE_XS_POLE_HALF_WIDTH + t * (at_b - ONE_XS_POLE_HALF_WIDTH);
+}
+
+// Lens 0's effective share from the captured final ONE X2 left-alpha map and
+// its type-2 upload. There is no seam-anchor term. Rust twin: `one_xs_alpha`.
+fn one_xs_alpha(lens_ray: vec3<f32>) -> f32 {
+  let half_width = one_xs_half_width(-lens_ray.x);
+  return clamp(0.5 + asin(clamp(lens_ray.z, -1.0, 1.0)) / (2.0 * half_width), 0.0, 1.0);
+}
+
 // The front lens's share of the ray, and 1 for a one-stream file, which has
-// no seam to hand over at.
-//
-// The drawn 50/50 line is moved across the seam by `reframe.handover_shift`,
-// which is the seam anchor's one number and a whole term of its own inside
-// `crossover`. Rust twin: `Reframe::handover`.
-fn handover(axis0: f32, axis1: f32, reach: f32, band: f32) -> f32 {
+// no seam to hand over at. ONE X2 uses its selected static producer above;
+// every other camera keeps the existing surface and optional research arms.
+// Rust twin: `Reframe::handover`.
+fn handover(ray: vec3<f32>, axis0: f32, axis1: f32, reach: f32, band: f32) -> f32 {
   if reframe.lens_count <= 1.0 {
     return 1.0;
   }
-  return crossover(axis0 - axis1, reach, band, reframe.handover_shift);
+  if reframe.one_xs > 0.5 {
+    return one_xs_alpha(normalize(reframe.lenses[0].view_to_lens * ray));
+  }
+  // Rust twin: `Reframe::seam_cosine`. These are the legacy camera path and
+  // its research alternatives; ONE X2's recovered producer bypasses them.
+  var apart = select(axis0 - axis1, axis0, SEAM_ANGULAR == 1u);
+  if SEAM_NOMINAL == 1u {
+    apart = (reframe.view_to_body * ray).z;
+  }
+  return crossover(apart, reach, band, reframe.handover_shift);
 }
 
 // The front lens's share, from how far apart the two dot products are, across
@@ -2926,8 +3959,28 @@ fn handover(axis0: f32, axis1: f32, reach: f32, band: f32) -> f32 {
 // radians. A linear ramp and nothing on top of it: the exponent that used to
 // re-spend this share inside a narrower part of the same support existed to
 // keep a bend fold-free, and there is no bend. Rust twin: `crossover`.
+fn alpha_normalized(x: f32) -> f32 {
+  let lamda = 5.1999998;
+  if x <= 0.5 {
+    return 0.5 * pow(2.0 * x, lamda);
+  }
+  return 1.0 - 0.5 * pow(2.0 * (1.0 - x), lamda);
+}
+
 fn crossover(apart: f32, reach: f32, band: f32, shift: f32) -> f32 {
-  return clamp(0.5 + apart / (2.0 * reach * band) + shift / band, 0.0, 1.0);
+  // Rust twin: `share_at`. `apart` is the two lenses' cosine difference on the
+  // bisector arm and a single axis's cosine on the two angular ones.
+  var share = clamp(0.5 + apart / (2.0 * reach * band) + shift / band, 0.0, 1.0);
+  if SEAM_ANGULAR == 1u {
+    // `asin` and not `HALF_PI - acos`, and THIS half is the one that matters:
+    // this implementation's `acos` is what put the twin 1.26e-4 of a weight
+    // apart. Rust twin: `share_at`, whose comment carries the split measurement.
+    share = clamp(0.5 + asin(clamp(apart / reach, -1.0, 1.0)) / band + shift / band, 0.0, 1.0);
+  }
+  if STUDIO_CURVE == 1u {
+    return alpha_normalized(share);
+  }
+  return share;
 }
 
 // The forward map, with the readout taken out of it. Rust twin:
@@ -3061,6 +4114,61 @@ fn frame_uv(pixel: vec2<f32>) -> vec2<f32> {
 fn texel_ratio(pixel: vec2<f32>) -> f32 {
   return max(length(dpdx(pixel)), length(dpdy(pixel)));
 }
+// A 16-bit little endian word read back out of the two 8-bit components it
+// was imported as, against P010's own full scale.
+//
+// 255 puts each component back on its own byte, 256 puts the high one where
+// it belongs, and 65472 is 1023 shifted up by six, which is where P010 keeps
+// full scale: its ten bits sit at the top of the word and the low six are
+// zero. Interpolation is linear, so a filtered pair recombines into exactly
+// the filtered word.
+fn plane_word(pair: vec2<f32>) -> f32 {
+  return (pair.x + pair.y * 256.0) * 255.0 / 65472.0;
+}
+
+// A scale and an offset per channel, taking a sampled plane value to Y, Cb
+// and Cr.
+//
+// Full range is the identity on luma and a half off chroma, which is what
+// every Insta360 capture is and what this pass did before there was a second
+// answer. Studio swing is the other one, and its endpoints scale with the
+// plane's own depth: black is 16 of 255 at eight bits and 64 of 1023 at ten,
+// which is the same 16 shifted up rather than the same fraction.
+//
+// **Both rows carry a whole excursion, not half of one.** The full-range row
+// above sets the convention the matrix in `ycbcr` is written for: chroma
+// arrives as `raw - 0.5`, so it runs -1/2 to +1/2 across the whole plane. A
+// studio-swing chroma plane runs 16 to 240 at eight bits, which is 224 codes
+// end to end, so 224 is what takes it to that same -1/2 to +1/2 - the same way
+// 219 rather than 109.5 takes studio-swing luma to 0 to 1 one line up. Written
+// as 112 this doubled every colour a DJI capture had and left every Insta360
+// one alone, because only studio swing comes through here: greens went neon
+// and the owner's eye caught it on the first `.OSV` played (2026-08-08).
+// Measured on `1 8k30p standard 10bit iso max 800-003.OSV` frame 0, over 451
+// flat patches against swscale's own decode of the same frame: mean absolute
+// error per channel fell from 45.4 / 8.0 / 0.9 codes to 2.0 / 1.8 / 0.9, and
+// the mean chroma spread from 171.4 to 124.1 against swscale's 125.1.
+struct Levels {
+  luma: vec2<f32>,
+  chroma: vec2<f32>,
+};
+
+fn levels() -> Levels {
+  var out: Levels;
+  out.luma = vec2<f32>(1.0, 0.0);
+  out.chroma = vec2<f32>(1.0, -0.5);
+  if reframe.limited > 0.5 {
+    let full = select(255.0, 1023.0, reframe.wide > 0.5);
+    let step = select(1.0, 4.0, reframe.wide > 0.5);
+    let span = 219.0 * step;
+    let reach = 224.0 * step;
+    out.luma = vec2<f32>(full / span, -16.0 * step / span);
+    out.chroma = vec2<f32>(full / reach, -128.0 * step / reach);
+  }
+  return out;
+}
+
+
 "#;
 
 #[cfg(test)]
@@ -3073,6 +4181,11 @@ pub(crate) mod tests {
     pub(crate) const FRAME: Size = Size {
         width: 3840,
         height: 3840,
+    };
+
+    pub(crate) const ONE_XS_FRAME: Size = Size {
+        width: 2880,
+        height: 2880,
     };
 
     /// The X4 Air fixture in delivered-frame pixels: what `kjerag-meta`
@@ -3090,6 +4203,8 @@ pub(crate) mod tests {
                     cx: 1918.94,
                     cy: 1927.21,
                 },
+                crop_centre: [1_918.903_448_275_862_3, 1_927.458_620_689_655_2],
+                image_circle_centre: [1918.94, 1927.21],
                 distortion: Distortion {
                     k1: 0.95820886,
                     k2: -1.80141151,
@@ -3115,6 +4230,8 @@ pub(crate) mod tests {
                     cx: 1935.35,
                     cy: 1935.09,
                 },
+                crop_centre: [1_935.879_310_344_828_1, 1_935.610_344_827_586],
+                image_circle_centre: [1935.35, 1935.09],
                 distortion: Distortion {
                     k1: 0.97158086,
                     k2: -2.08655882,
@@ -3132,6 +4249,87 @@ pub(crate) mod tests {
                 },
                 lens_type: 131,
             },
+        ]
+    }
+
+    /// The owner's reported mount/riser point in the camera body's frame.
+    /// Unlike a lens-space ray inverted through the matrix under test, this is
+    /// fixed independently and therefore catches a wrong ONE X2 mounting.
+    pub(crate) const ONE_XS_TARGET_BODY_RAY: [f32; 3] =
+        [-0.057_628_15, -0.998_248_75, 0.013_357_71];
+
+    /// A fixed body direction derived to put ONE X2 alpha inside the ramp
+    /// rather than at the saturated target. Both lenses cover it, and the
+    /// unequal coverage depths would bias a legacy `claim` away from 75/25.
+    pub(crate) const ONE_XS_FLOW_BLEND_BODY_RAY: [f32; 3] =
+        [-0.057_944_93, -0.998_303_95, -0.005_622_23];
+
+    /// Where the native lens-0 matrix above maps [`ONE_XS_TARGET_BODY_RAY`].
+    const ONE_XS_TARGET_LENS_RAY: [f32; 3] = [0.997_643_23, -0.062_772_43, 0.027_706_03];
+
+    /// The owner's ONE X2 optics in delivered-frame pixels, stripped of serial,
+    /// GPS and capture time. These are the same `offset_v3` values whose native
+    /// Mac packed UV and alpha maps were captured at the reported frame.
+    pub(crate) fn one_xs_lenses() -> Vec<Lens> {
+        let lens = |intrinsics, crop_centre, image_circle_centre, distortion, pose| Lens {
+            intrinsics,
+            crop_centre,
+            image_circle_centre,
+            distortion,
+            model: Model::Mei,
+            mounting: None,
+            pose,
+            lens_type: ONE_XS_LENS_TYPE,
+        };
+        vec![
+            lens(
+                Intrinsics {
+                    xi: 1.72859,
+                    fx: 2326.25,
+                    fy: 2325.95,
+                    cx: 1_449.397_894_736_842,
+                    cy: 1449.54,
+                },
+                [1449.92, 1450.07],
+                [f32::from_bits(0x44b5_3d71), f32::from_bits(0x44b5_423d)],
+                Distortion {
+                    k1: 0.226_921_54,
+                    k2: -0.144_496_89,
+                    k3: -0.978_097_2,
+                    p1: -0.000_850_27,
+                    p2: 0.000_308_11,
+                },
+                kjerag_meta::Pose {
+                    yaw_deg: 0.957,
+                    pitch_deg: -0.884,
+                    roll_deg: -179.717,
+                    translation_m: [0.0; 3],
+                },
+            ),
+            lens(
+                Intrinsics {
+                    xi: 1.72859,
+                    fx: 2321.46,
+                    fy: 2321.70,
+                    cx: 1439.28,
+                    cy: 1_431.871_578_947_368,
+                },
+                [1_439.239_999_999_999_8, 1431.42],
+                [f32::from_bits(0x44b3_e7b0), f32::from_bits(0x44b2_ed71)],
+                Distortion {
+                    k1: 0.251_100_33,
+                    k2: -0.283_471_35,
+                    k3: -0.744_952_14,
+                    p1: 0.000_647_61,
+                    p2: -0.000_561_68,
+                },
+                kjerag_meta::Pose {
+                    yaw_deg: -0.889,
+                    pitch_deg: -1.236,
+                    roll_deg: 0.963,
+                    translation_m: [0.000_292, -0.001_511, -0.021_103],
+                },
+            ),
         ]
     }
 
@@ -3153,6 +4351,8 @@ pub(crate) mod tests {
                 cx,
                 cy,
             },
+            crop_centre: [cx, cy],
+            image_circle_centre: [cx as f32, cy as f32],
             distortion: Distortion {
                 k1: 0.0,
                 k2: 0.0,
@@ -3245,6 +4445,11 @@ pub(crate) mod tests {
         reframe.lenses.iter().all(|lens| lens.model == THETA)
     }
 
+    /// Whether this block selected the camera-specific ONE X2 alpha law.
+    pub(crate) fn runs_one_xs(reframe: &Reframe) -> bool {
+        reframe.one_xs > 0.5
+    }
+
     /// The quarter turn `kjerag_meta::Pose` measures roll against, undone so
     /// that a zero pose above is a lens looking straight down `+z`.
     const ROLL_DATUM_DEG: f64 = -90.0;
@@ -3297,6 +4502,126 @@ pub(crate) mod tests {
         held(camera, Held::default())
     }
 
+    fn one_xs_fixture(camera: Camera) -> Reframe {
+        Reframe::new(
+            &one_xs_lenses(),
+            ONE_XS_FRAME,
+            camera,
+            Held::default(),
+            1.0,
+            false,
+            Sampling::default(),
+        )
+    }
+
+    #[test]
+    fn calibrated_parent_quaternion_maps_the_fixed_sphere_through_generic_mounting() {
+        let sphere_from_body = Mat3([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        for (index, lens) in fixture_lenses().iter().enumerate() {
+            let parent = calibrated_parent_lens_quaternion(lens, index);
+            let lens_from_sphere = Mat3::from(parent.matrix().rows());
+            let reconstructed = lens_from_sphere.mul(sphere_from_body);
+            let expected = lens_from_body(lens, index);
+            for row in 0..3 {
+                for column in 0..3 {
+                    assert!(
+                        (reconstructed.0[row][column] - expected.0[row][column]).abs() < 1e-12,
+                        "lens {index} matrix [{row}][{column}] is {} rather than {}",
+                        reconstructed.0[row][column],
+                        expected.0[row][column]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn calibrated_image_circle_is_the_generic_x4_projection_coverage() {
+        let reframe = fixture(Camera::default());
+        let (centre_a, radius_a) = reframe.calibrated_image_circle(0);
+        let (centre_b, radius_b) = reframe.calibrated_image_circle(1);
+
+        assert_eq!(centre_a, [1918.94_f32, 1927.21_f32]);
+        assert_eq!(centre_b, [1935.35_f32, 1935.09_f32]);
+        assert_eq!(radius_a, 1912.79_f32);
+        assert_eq!(radius_b, 1904.65_f32);
+    }
+
+    #[test]
+    fn one_xs_v3_circle_radii_match_the_captured_studio_offset() {
+        let reframe = one_xs_fixture(Camera::default());
+        assert_eq!(
+            reframe.one_xs_v3_image_circle_radius(0).to_bits(),
+            0x44b9_01f3
+        );
+        assert_eq!(
+            reframe.one_xs_v3_image_circle_radius(1).to_bits(),
+            0x44b9_1623
+        );
+    }
+
+    #[test]
+    fn selected_one_xs_identity_is_owned_by_the_first_stream_and_requires_a_pair() {
+        let same_answer = |lenses: &[Lens]| {
+            let packed = Reframe::new(
+                lenses,
+                ONE_XS_FRAME,
+                Camera::default(),
+                Held::default(),
+                1.0,
+                false,
+                Sampling::default(),
+            );
+            assert_eq!(
+                is_one_xs_lens_pair(lenses),
+                packed.is_one_xs_pair(),
+                "lens types {:?}",
+                lenses.iter().map(|lens| lens.lens_type).collect::<Vec<_>>()
+            );
+        };
+
+        let pair = one_xs_lenses();
+        same_answer(&[]);
+        same_answer(&pair[..1]);
+        same_answer(&pair);
+
+        let mut three = pair.clone();
+        three.push(pair[0].clone());
+        same_answer(&three);
+
+        let mut first_owned = pair.clone();
+        first_owned[1].lens_type = 0;
+        same_answer(&first_owned);
+        assert!(is_one_xs_lens_pair(&first_owned));
+
+        let mut second_only = pair;
+        second_only[0].lens_type = 0;
+        same_answer(&second_only);
+        assert!(!is_one_xs_lens_pair(&second_only));
+    }
+
+    fn one_xs_displacement(
+        a_to_b: [f32; 2],
+        b_to_a: [f32; 2],
+    ) -> crate::flow::one_xs::Displacement {
+        use crate::flow::dis::FlowField;
+        use crate::flow::one_xs::{AtoBField, BtoAField, COLS, DirectedFields, ROWS};
+
+        let field = |[dcol, drow]: [f32; 2]| FlowField {
+            width: COLS,
+            height: ROWS,
+            u: vec![dcol; ROWS * COLS],
+            v: vec![drow; ROWS * COLS],
+            valid: vec![true; ROWS * COLS],
+            residual: vec![0.0; ROWS * COLS],
+        };
+        let fields = DirectedFields::new(
+            AtoBField::from_solver(field(a_to_b)).unwrap(),
+            BtoAField::from_solver(field(b_to_a)).unwrap(),
+        );
+        crate::flow::one_xs::Displacement::compose(&fields)
+    }
+
     /// The same optics with the image circle cropped, which is the only knob
     /// there is for asking a narrower camera a question here.
     ///
@@ -3347,10 +4672,17 @@ pub(crate) mod tests {
     /// and not that camera's.
     const X2_CLASS: u32 = 3803;
 
-    /// A camera that overlaps by 7.43 degrees, which is narrower than the 8 the
+    /// A camera that overlaps by 4.81 degrees, which is narrower than the 6 the
     /// picture asks for. Nothing in the corpus is this tight; it exists so that
     /// [`Reframe::afforded`]'s clamp has something to bind on.
-    const UNDER_THE_ASK: u32 = 3790;
+    ///
+    /// **Re-cut from 3790 to 3770 on 2026-08-13**, when the ask went from 8 to
+    /// Studio's 6 (`studio-seam-re.md` 16.8). At 3790 this fixture overlapped
+    /// by 7.43 degrees, which was under the old ask and is over the new one -
+    /// so it stopped binding the clamp and the test stopped testing anything.
+    /// A fixture that no longer exercises what it is named for is worse than
+    /// no fixture.
+    const UNDER_THE_ASK: u32 = 3770;
 
     /// The same fixture with the camera body somewhere other than level,
     /// which is what horizon lock has to take back out.
@@ -3387,6 +4719,366 @@ pub(crate) mod tests {
             (actual - expected).abs() <= tolerance,
             "{actual} is not within {tolerance} of {expected}"
         );
+    }
+
+    /// Mac's ONE X2 producer narrows the three-degree half-width toward the
+    /// bottom pole and holds its innermost ten degrees almost flat at one.
+    /// These probes reach the ordinary line, the linear taper, the override,
+    /// and the point where the unmodified taper resumes.
+    #[test]
+    fn the_one_xs_bottom_taper_is_the_recovered_map() {
+        near(one_xs_half_width(0.5).to_degrees(), 3.0, 1e-5);
+        near(one_xs_half_width(0.0).to_degrees(), 3.0, 1e-5);
+        near(one_xs_half_width(-0.5).to_degrees(), 2.0, 1e-5);
+        near(one_xs_half_width(-1.0).to_degrees(), 1.0, 1e-5);
+        near(one_xs_half_width(-0.99).to_degrees(), 1.0, 1e-5);
+        near(one_xs_half_width(-0.98).to_degrees(), 1.04, 1e-5);
+        near(
+            one_xs_half_width(ONE_XS_TAPER_END).to_degrees(),
+            1.030_384_5,
+            1e-5,
+        );
+    }
+
+    /// Direct nodes from attempt 5's selected final alpha payload. Unlike the
+    /// piecewise boundary checks above, these values are not derived from this
+    /// implementation. The grid uses Studio's captured sphere raster, then
+    /// reaches `one_xs_alpha` through the production ONE X2 mounting. Pole
+    /// rows are intentionally absent because the payload copies its adjacent
+    /// rows there while the continuous evaluator has no row-copy operation.
+    #[test]
+    fn the_one_xs_alpha_matches_captured_payload_nodes() {
+        let reframe = one_xs_fixture(Camera::default());
+        let nodes = [
+            (25, 49, 0.496_809_66),
+            (49, 50, 0.337_490_08),
+            (75, 50, 0.491_351_13),
+            (75, 149, 0.518_656_6),
+        ];
+
+        for (row, column, expected) in nodes {
+            let theta = row as f32 * PI / 99.0;
+            let phi = 2.0 * PI - column as f32 * 2.0 * PI / 200.0;
+            let (sin_theta, cos_theta) = theta.sin_cos();
+            let (sin_phi, cos_phi) = phi.sin_cos();
+            let body = [sin_theta * sin_phi, cos_theta, sin_theta * cos_phi];
+            let ray = reframe.view_ray_from_body(body);
+            let lens_ray = normalize(reframe.lenses[0].lens_ray(ray));
+            near(one_xs_alpha(lens_ray), expected, 7.13e-6);
+        }
+    }
+
+    /// The native Template formula fixes both mounting matrices, and the
+    /// captured ONE X2 packed UV independently fingerprints them. This is the
+    /// regression the old lens-space target could not provide: these are fixed
+    /// body-space oracles, so deriving a body ray with the same wrong matrix
+    /// under test cannot make the test pass.
+    #[test]
+    fn the_selected_one_x2_mounting_matches_the_native_formula() {
+        let expected = [
+            [
+                [
+                    0.004_680_996_495_110,
+                    -0.999_870_055_781_518,
+                    -0.015_425_946_430_516,
+                ],
+                [
+                    0.999_848_314_937_361,
+                    0.004_938_572_729_247,
+                    -0.016_702_024_317_943,
+                ],
+                [
+                    0.016_776_036_144_811,
+                    -0.015_345_424_427_572,
+                    0.999_741_507_871_112,
+                ],
+            ],
+            [
+                [
+                    0.017_137_447_092_036,
+                    0.999_620_492_629_139,
+                    0.021_567_999_977_844,
+                ],
+                [
+                    0.999_738_403_593_553,
+                    -0.016_804_706_342_072,
+                    -0.015_515_354_490_668,
+                ],
+                [
+                    -0.015_147_022_393_264,
+                    0.021_828_251_433_253,
+                    -0.999_646_985_266_291,
+                ],
+            ],
+        ];
+        for (index, lens) in one_xs_lenses().iter().enumerate() {
+            let actual = lens_from_body(lens, index).0;
+            for row in 0..3 {
+                for column in 0..3 {
+                    assert!(
+                        (actual[row][column] - expected[index][row][column]).abs() < 1e-12,
+                        "lens {index} [{row}][{column}]: {} != {}",
+                        actual[row][column],
+                        expected[index][row][column],
+                    );
+                }
+            }
+        }
+    }
+
+    /// Kjerag's `0x29` guard is a narrow evidence boundary, not a claim that
+    /// Studio's common Template worker branches on that value. Changing only
+    /// the type leaves the same poses on the generic composition.
+    #[test]
+    fn a_non_one_xs_type_keeps_the_generic_mounting() {
+        let mut lenses = one_xs_lenses();
+        for (index, lens) in lenses.iter_mut().enumerate() {
+            lens.lens_type = 0;
+            let expected = Mat3::from(lens.pose.lens_from_body().rows()).mul(opposed(index));
+            assert_eq!(lens_from_body(lens, index).0, expected.0);
+        }
+    }
+
+    /// Six points from the target-frame packed UV map exercise the actual
+    /// production projection: native mounting, ONE X2 down-frame readout and
+    /// the implicit landing-row solve. The first four span the equatorial
+    /// plane; the final two have nonzero body z, so a wrong three-dimensional
+    /// mounting cannot hide behind a coplanar oracle. The old generic mounting
+    /// misses the equatorial points by 17 to 56 pixels; omitting readout still
+    /// misses them by 5.5 to 9 pixels.
+    #[test]
+    fn the_one_xs_projection_matches_the_native_packed_uv() {
+        let held = Held {
+            rolling: Some(Rolling {
+                turn: [-0.004_911_108, 0.003_433_161_6, -0.012_683_974],
+                axis: [0.0, 1.0],
+            }),
+            ..Held::default()
+        };
+        let reframe = Reframe::new(
+            &one_xs_lenses(),
+            ONE_XS_FRAME,
+            Camera::default(),
+            held,
+            1.0,
+            false,
+            Sampling::default(),
+        );
+        // Keep the decimal values as captured; the production projection
+        // consumes the body direction as f32 below, while the native pixel
+        // oracle can retain the dump's decimal precision for the distance.
+        let cases: [([f64; 3], [[f64; 2]; MAX_LENSES]); 6] = [
+            (
+                [-0.712_694_17, 0.701_474_9, 0.0],
+                [[472.759_58, 457.492_1], [2_369.255, 445.111_4]],
+            ),
+            (
+                [-0.999_874_1, 0.015_865_965, 0.0],
+                [[1_430.105_7, 58.678_036], [1_428.775_3, 69.265_63]],
+            ),
+            (
+                [0.999_874_1, 0.015_865_965, 0.0],
+                [[1_443.182_9, 2_814.106], [1_476.082, 2_817.593_3]],
+            ),
+            (
+                [0.690_079, -0.723_734, 0.0],
+                [[2_442.788_6, 2_378.963], [441.316_16, 2_407.769_8]],
+            ),
+            (
+                [-0.503_950_881, 0.701_474_888, 0.503_950_881],
+                [[682.925_05, 897.749_45], [2_695.257_81, 486.519_50]],
+            ),
+            (
+                [0.487_959_549, -0.723_734_038, -0.487_959_549],
+                [[2_754.406_25, 2_315.781_98], [645.329_04, 1_983.477_78]],
+            ),
+        ];
+        for (body, expected) in cases {
+            let body = body.map(|component| component as f32);
+            let ray = reframe.view_ray_from_body(body);
+            for (lens, expected) in expected.iter().enumerate() {
+                let actual = reframe.project(lens, ray);
+                let distance = (f64::from(actual.pixel[0]) - expected[0])
+                    .hypot(f64::from(actual.pixel[1]) - expected[1]);
+                assert!(
+                    distance <= 1.0,
+                    "lens {lens}, body {body:?}: {:?} is {distance} px from native {expected:?}",
+                    actual.pixel,
+                );
+            }
+        }
+    }
+
+    /// The reported mount/riser pixel is the discriminating ray: the ordinary
+    /// three-degree half-width leaves lens 0 at about 0.765, and Kjerag's held
+    /// line moved it to about 0.555. Studio's ONE X2 bottom taper makes the
+    /// half-width one degree there and has no held-line term, so lens 0 owns
+    /// it completely.
+    #[test]
+    fn the_one_xs_target_uses_the_bottom_taper_and_no_anchor() {
+        let lens_ray = normalize(ONE_XS_TARGET_LENS_RAY);
+        let seam = lens_ray[2].asin();
+        near(seam.to_degrees(), 1.587_642, 2e-5);
+        near(one_xs_half_width(-lens_ray[0]).to_degrees(), 1.0, 1e-5);
+        assert_eq!(one_xs_alpha(lens_ray), 1.0);
+
+        let legacy = share_at(lens_ray[2], 1.0, CROSSOVER_DEG.to_radians(), 0.0, true);
+        near(legacy, 0.7646, 1e-4);
+        let anchored = share_at(
+            lens_ray[2],
+            1.0,
+            CROSSOVER_DEG.to_radians(),
+            -1.258_835_f32.to_radians(),
+            true,
+        );
+        near(anchored, 0.5548, 1e-4);
+
+        let reframe = one_xs_fixture(Camera::default()).with_shift(2.5f32.to_radians());
+        assert!(runs_one_xs(&reframe));
+        assert_eq!(reframe.handover_shift, 0.0);
+        let ray = reframe.view_ray_from_body(ONE_XS_TARGET_BODY_RAY);
+        let actual_lens_ray = normalize(reframe.lenses[0].lens_ray(ray));
+        for component in 0..3 {
+            near(actual_lens_ray[component], lens_ray[component], 2e-7);
+        }
+        let axis = std::array::from_fn(|lens| reframe.axis_of(lens, ray));
+        let front = reframe.handover(ray, axis, norm3(ray), reframe.handover_width());
+        assert_eq!(front, 1.0);
+        let plain = reframe.blend(ray);
+        assert_eq!(plain.weights, [1.0, 0.0]);
+
+        // A zero field is deliberately not a null discriminator for the final
+        // colour split here. The captured 16-degree common flow gate gives this
+        // ray only 0.547828251 to lens 0, while the independently uploaded ONE
+        // X2 final alpha gives it wholly to lens 0. Flow ON must preserve that
+        // selected colour alpha even when there is no displacement to hide a
+        // wrong blend behind.
+        near(reframe.gate_alpha(ray), 0.547_828_26, 2e-5);
+        let flowed = reframe.blend_flow(ray, &crate::flow::compose::Displacement::zeros());
+        assert_eq!(flowed.landings, plain.landings);
+        assert_eq!(flowed.weights, [1.0, 0.0]);
+
+        let legacy = fixture(Camera::default()).with_shift(2.5f32.to_radians());
+        assert!(!runs_one_xs(&legacy));
+        near(legacy.handover_shift.to_degrees(), 2.5, 1e-5);
+        let legacy_ray = legacy.view_ray_from_body(ONE_XS_TARGET_BODY_RAY);
+        near(legacy.gate_alpha(legacy_ray), 0.523_917_6, 2e-5);
+    }
+
+    /// Flow ON changes the two UV lookups, not the separately selected ONE X2
+    /// colour map. This unsaturated 75/25 point is load-bearing: multiplying
+    /// the same alpha by the two unequal coverage depths, as legacy `claim`
+    /// does, moves the result to about 80/20 and therefore cannot pass by
+    /// saturation or normalization cancellation.
+    #[test]
+    fn one_xs_flow_keeps_the_unsaturated_final_alpha_outside_legacy_claim() {
+        let reframe = one_xs_fixture(Camera::default());
+        let ray = reframe.view_ray_from_body(ONE_XS_FLOW_BLEND_BODY_RAY);
+        near(reframe.gate_alpha(ray), 0.479_868_65, 2e-5);
+        let plain = reframe.blend(ray);
+        let flowed = reframe.blend_flow(ray, &crate::flow::compose::Displacement::zeros());
+
+        assert!(plain.landings.iter().all(|landing| landing.inside));
+        assert_eq!(flowed.landings, plain.landings);
+        for (actual, expected) in plain
+            .weights
+            .into_iter()
+            .chain(flowed.weights)
+            .zip([0.75, 0.25, 0.75, 0.25])
+        {
+            near(actual, expected, 2e-5);
+        }
+
+        let claims = [
+            claim(plain.landings[0], 0.75),
+            claim(plain.landings[1], 0.25),
+        ];
+        let total = claims.iter().sum();
+        let legacy = [share(claims[0], total), share(claims[1], total)];
+        near(legacy[0], 0.7993, 2e-4);
+        near(legacy[1], 0.2007, 2e-4);
+    }
+
+    #[test]
+    fn one_xs_flow_shift_uses_native_coordinates_and_cross_directed_fields() {
+        use crate::flow::one_xs::{BodyRay, Layout, Sample};
+
+        let reframe = one_xs_fixture(Camera {
+            yaw: 31.0_f32.to_radians(),
+            pitch: -17.0_f32.to_radians(),
+            fov: 70.0_f32.to_radians(),
+        });
+        let c = Sample::new(420.25, 28.5).unwrap();
+        let view_ray = reframe.view_ray_from_body(Layout.body_ray(c).components());
+        let disp = one_xs_displacement([8.0, -12.0], [-4.0, 6.0]);
+
+        for (lens, alpha, flow) in [(0, 0.25, [-4.0, 6.0]), (1, 0.75, [8.0, -12.0])] {
+            let actual = reframe.one_xs_flow_shift(lens, view_ray, &disp, alpha);
+            let actual_body = BodyRay::new(reframe.body_ray(actual)).unwrap();
+            let actual_q = Layout.sample(actual_body).unwrap();
+            let expected = Sample::new(
+                c.row() + (1.0 - alpha) * flow[1],
+                c.col() + (1.0 - alpha) * flow[0],
+            )
+            .unwrap()
+            .clamped();
+            near(actual_q.row(), expected.row(), 2e-4);
+            near(actual_q.col(), expected.col(), 2e-4);
+        }
+    }
+
+    #[test]
+    fn one_xs_zero_flow_preserves_base_landings_and_template_alpha() {
+        let reframe = one_xs_fixture(Camera::default());
+        let ray = reframe.view_ray_from_body(ONE_XS_FLOW_BLEND_BODY_RAY);
+        let base = reframe.blend(ray);
+        let flowed = reframe.blend_one_xs_flow(ray, &crate::flow::one_xs::Displacement::zeros());
+
+        assert_eq!(flowed, base);
+        for (actual, expected) in flowed.weights.into_iter().zip([0.75, 0.25]) {
+            near(actual, expected, 2e-5);
+        }
+    }
+
+    #[test]
+    fn one_xs_flow_shift_keeps_base_at_saturated_gate_shares() {
+        use crate::flow::one_xs::{Layout, Sample};
+
+        let reframe = one_xs_fixture(Camera::default());
+        let c = Sample::new(420.25, 28.5).unwrap();
+        let ray = reframe.view_ray_from_body(Layout.body_ray(c).components());
+        let disp = one_xs_displacement([8.0, -12.0], [-4.0, 6.0]);
+
+        assert_eq!(reframe.one_xs_flow_shift(0, ray, &disp, 0.0), ray);
+        assert_eq!(reframe.one_xs_flow_shift(0, ray, &disp, 1.0), ray);
+        assert_eq!(reframe.one_xs_flow_shift(MAX_LENSES, ray, &disp, 0.5), ray);
+    }
+
+    #[test]
+    fn one_xs_flow_falls_back_when_a_displaced_landing_leaves_the_lens() {
+        use crate::flow::one_xs::{CENTRE_COL, Layout, ROWS, Sample};
+
+        let reframe = one_xs_fixture(Camera::default());
+        let disp = one_xs_displacement([10_000.0, 10_000.0], [10_000.0, 10_000.0]);
+        for row in (0..ROWS).step_by(12) {
+            let c = Sample::new(row as f32, CENTRE_COL).unwrap();
+            let ray = reframe.view_ray_from_body(Layout.body_ray(c).components());
+            let alpha_a = reframe.gate_alpha(ray);
+            for lens in 0..MAX_LENSES {
+                let alpha_lens = if lens == 0 { alpha_a } else { 1.0 - alpha_a };
+                let base = reframe.project(lens, ray);
+                let shifted = reframe.project(
+                    lens,
+                    reframe.one_xs_flow_shift(lens, ray, &disp, alpha_lens),
+                );
+                if base.inside && !shifted.inside {
+                    let blended = reframe.blend_one_xs_flow(ray, &disp);
+                    assert_eq!(blended.landings[lens], base);
+                    return;
+                }
+            }
+        }
+        panic!("fixture did not exercise an invalid displaced ONE X2 landing");
     }
 
     /// The two directions of the body/view boundary are one rotation, so a
@@ -3599,7 +5291,7 @@ pub(crate) mod tests {
         // width there is since the seam went flat (#176) - this was
         // `crossover_at(0.0)`, an azimuth's own widened band, and there is no
         // longer a per-azimuth width to ask about.
-        near(reframe.handover_width().to_degrees(), 8.0, 1e-3);
+        near(reframe.handover_width().to_degrees(), 6.0, 1e-3);
     }
 
     /// **The five-term polynomial is a map and not a fold.** The four
@@ -3967,9 +5659,9 @@ pub(crate) mod tests {
             };
             let span = at(0.9) - at(0.1);
             assert!(
-                (4.79..4.91).contains(&span),
+                (3.88..4.00).contains(&span),
                 "the handover at {phi} spends {span} degrees of {width} going from nine \
-                 tenths to one tenth, not the 4.80 to 4.89 on record"
+                 tenths to one tenth, not the 3.90 to 3.95 re-measured at 6 degrees"
             );
         }
     }
@@ -4061,21 +5753,6 @@ pub(crate) mod tests {
                     "the weights at theta {theta} phi {phi} sum to {total}",
                 );
             }
-        }
-    }
-
-    /// A run that does not ask draws the width the owner validated, and an ask
-    /// the width cannot be read out of leaves it there too.
-    #[test]
-    fn the_handover_is_the_shipped_crossover_unless_a_width_is_asked_for() {
-        assert_eq!(handover("4"), Ok(4.0));
-        assert_eq!(handover("0.5"), Ok(0.5));
-        assert_eq!(handover(&OVERLAP_DEG.to_string()), Ok(OVERLAP_DEG));
-        for refused in ["0", "-2", "wide", "", "nan", "inf", "14.5", "90"] {
-            assert!(
-                handover(refused).is_err(),
-                "{HANDOVER_DEG}={refused} was taken as a handover width"
-            );
         }
     }
 
@@ -4172,31 +5849,121 @@ pub(crate) mod tests {
     /// lenses' own angles buys: without that it would cross wherever the two
     /// image circles happen to end.
     ///
-    /// Not exactly half: this fixture's two axes are 0.3 degrees from opposed,
-    /// so a direction 90 degrees off lens 0 is up to 0.3 degrees off the line
-    /// where the two lenses are equally far off theirs. What that is worth in
-    /// weight is the width's business, and the width has moved twice. Measured
-    /// on this fixture: **0.008** across the 14-degree overlap, **0.06** at the
-    /// 2 issue #48 shipped, and **0.0264** at the 8 the picture draws since
-    /// 2026-08-05. It is centred on the lenses at every one of them; what moves
-    /// is how quickly weight answers an angle, and it answers 2.3 times less
-    /// quickly at 8 than at 2 rather than four times, which is the same
-    /// non-linearity
-    /// `the_along_seam_correction_hands_over_across_the_whole_crossover` reads
-    /// on the ramp.
+    /// **Rewritten 2026-08-13 for Studio's surface, and the paragraph that
+    /// used to be here described the other one.** It said the residual was
+    /// "what naming the seam by the two lenses' own angles buys" and quoted
+    /// 0.0264 at a width of 8. Studio's surface names the seam by ONE lens
+    /// (`studio-seam-re.md` 19.7), the width is 6 since `1770336`, and the
+    /// sweep is no longer the equator.
     ///
-    /// The bar is 0.04 because the effect is 0.0264. It was 0.08 when the
-    /// effect was 0.06, and a bar three times what it watches is a test that
-    /// has stopped watching.
+    /// Not exactly half, and the reason changed with the surface. The circle
+    /// swept here IS the 50/50 line by construction, so the ramp sits exactly
+    /// on a half over the whole sweep and every departure below is [`claim`]'s
+    /// coverage-depth term instead - each lens is a different depth into its
+    /// own picture at the same angle off the seam. Measured by instrumenting
+    /// this loop: **0.0205** on the shipped arm, 0.0210 on `nominal`, 0.0207
+    /// on `bisector`.
+    ///
+    /// **The bar is 0.024 because the effect is 0.0205**, by the same rule the
+    /// old paragraph set and then stopped following: a bar much more than what
+    /// it watches is a test that has stopped watching. It was 0.04 against
+    /// 0.0264 at a width of 8.
+    ///
+    /// (This said **0.0263** over "36 azimuths at seven elevations" until a
+    /// review instrumented it. There is no elevation loop - every probe is on
+    /// the 50/50 line by construction - and 0.0263 was a delivered weight
+    /// measured on a different surface before `75d880f` moved it. A fixture
+    /// that does not exist was described and a number 28 per cent high was
+    /// attributed to it.)
+    ///
+    /// **What this test no longer catches**, recorded because it is a real
+    /// loss and not an improvement: sweeping a circle built from lens 0's own
+    /// axis cannot see lens 0's own mounting error. A review measured the old
+    /// equator sweep catching a 0.2 degree front-lens error and this one
+    /// needing about 0.7. What watches the front lens now is
+    /// `the_across_seam_measure_inverts_the_running_ramp`, which ties the
+    /// anchor's measure to the ramp, and the twin.
     #[test]
     fn the_crossover_sits_on_the_seam() {
         let reframe = fixture(Camera::default());
+        // **Sweep the seam the running surface actually defines, which is the
+        // whole content of this test.** Studio's is the great circle 90
+        // degrees from the FRONT LENS'S OWN axis; the bisector's is the circle
+        // between the two lenses, which on a perfectly opposed pair is the
+        // equator. They are the same circle only for a perfect rig, and this
+        // fixture's is tilted 0.1235 degrees - so a sweep hard-coded to the
+        // equator would be measuring that tilt rather than the crossover
+        // (`studio-seam-re.md` 19.7).
+        // The surface's own normal, which is what `seam_normal` reports and
+        // what the ramp measures from - all three arms in one line.
+        let normal = reframe.seam_normal();
+        // Any two orthonormal spans of the plane will do; take the world axis
+        // the normal leans on least so the cross product is well conditioned.
+        let least = match normal[0].abs() < normal[2].abs() {
+            true => [1.0, 0.0, 0.0],
+            false => [0.0, 0.0, 1.0],
+        };
+        let u = normalize(cross(normal, least));
+        let v = normalize(cross(normal, u));
 
         for phi in 0..36 {
-            let blend = reframe.blend(direction(90.0, phi as f32 * 10.0));
-            near(blend.weights[0], 0.5, 0.04);
-            near(blend.weights[1], 0.5, 0.04);
+            let (sin, cos) = (phi as f32 * 10.0).to_radians().sin_cos();
+            let ray = std::array::from_fn(|c| u[c] * cos + v[c] * sin);
+            // On the seam by construction, so the surface's own cosine is zero
+            // and the ramp is at its midpoint before coverage is applied.
+            let blend = reframe.blend(ray);
+            near(blend.weights[0], 0.5, 0.024);
+            near(blend.weights[1], 0.5, 0.024);
         }
+    }
+
+    /// **The anchor's measure and the ramp it feeds must be inverses**, on
+    /// whichever surface is running.
+    ///
+    /// [`Reframe::across_seam`] exists so that a shift of minus its value puts
+    /// a ray on the 50/50 line; [`SeamAnchor::hold`] relies on exactly that and
+    /// is on by default. When the 50/50 surface moved to Studio's cone on
+    /// 2026-08-13 this broke silently: `across_seam` kept computing the
+    /// bisector's quotient while the ramp had moved to `asin`, so the anchor
+    /// held its line on a great circle the renderer no longer blended on. A
+    /// review measured the two 0.1494 degrees apart, leaving the ramp 0.0249
+    /// off a half at the anchored line. Nothing tied them together; this does.
+    ///
+    /// **Asserted on the RAMP and not on the delivered weights**, because a
+    /// delivered weight is the share times each lens's own coverage depth,
+    /// renormalised after ([`claim`]) - at two degrees off the seam that alone
+    /// moves a half to 0.672, which says nothing about where the line is.
+    /// `a_map_with_no_line_held_on_it_draws_the_geometry` makes the same
+    /// distinction.
+    #[test]
+    fn the_across_seam_measure_inverts_the_running_ramp() {
+        let base = fixture(Camera::default());
+        // `with_shift` clamps to half the band, so only rays the anchor could
+        // actually reach are asked about.
+        let allowance = 0.5 * base.handover_width();
+        let (mut worst, mut asked) = (0.0f32, 0usize);
+        for theta in [86.0f32, 88.0, 89.0, 90.0, 91.0, 92.0, 94.0] {
+            for phi in (0..24).map(|k| k as f32 * 15.0) {
+                let ray = direction(theta, phi);
+                let want = -base.across_seam(ray);
+                if want.abs() > allowance {
+                    continue;
+                }
+                let held = base.with_shift(want);
+                assert_eq!(held.handover_shift, want, "the shift was clamped");
+                let reach = norm3(ray);
+                let axis: [f32; MAX_LENSES] = std::array::from_fn(|lens| held.axis_of(lens, ray));
+                let share = held.handover(ray, axis, reach, held.handover_width());
+                asked += 1;
+                worst = worst.max((share - 0.5).abs());
+            }
+        }
+        assert!(asked > 80, "only {asked} rays were inside the allowance");
+        assert!(
+            worst < 1e-6,
+            "a ray shifted onto its own 50/50 line puts the ramp {worst} off a half, so \
+             `across_seam` and the running ramp are not inverses",
+        );
     }
 
     /// Continuity, which is the property the eye actually reads: swept
@@ -4309,6 +6076,45 @@ pub(crate) mod tests {
         }
     }
 
+    /// The cone and the bisector, measured against each other rather than
+    /// asserted about. `studio-seam-re.md` 16.11 puts the gap at 0.0249 of a
+    /// weight on this fixture; this is that number, in the tree, so it moves
+    /// when the geometry does.
+    ///
+    /// **Named for the two arms and not for Studio.** It was
+    /// `studios_cone_and_our_bisector_...` until 19.12, which is a claim the
+    /// RE does not support: Studio's surface is calibration dependent, but
+    /// whether its axis IS lens 0's is unproven.
+    #[test]
+    fn the_cone_and_the_bisector_differ_by_a_measured_amount() {
+        let reframe = fixture(Camera::default());
+        let band = reframe.handover_width();
+        let mut worst = 0.0f32;
+        for phi in 0..36 {
+            let d = direction(90.0, phi as f32 * 10.0);
+            let reach = norm3(d);
+            let (a0, a1) = (reframe.axis_of(0, d), reframe.axis_of(1, d));
+            let bisector = share_at(a0 - a1, reach, band, 0.0, false);
+            let cone = share_at(a0, reach, band, 0.0, true);
+            worst = worst.max((bisector - cone).abs());
+        }
+        assert!(
+            (0.020..0.030).contains(&worst),
+            "the cone and the bisector differ by {worst:.5} of a weight on the seam, not the \
+             0.0249 on record - the lens geometry or one of the two forms has moved",
+        );
+        // The cone's own definition, asserted on the function rather than on a
+        // direction: a ray perpendicular to the front lens's axis has cosine
+        // zero, and Studio's form puts it at exactly a half whatever the other
+        // lens is doing. That is what makes the two forms differ at all - the
+        // bisector's half depends on both lenses and this one does not.
+        near(share_at(0.0, 1.0, band, 0.0, true), 0.5, 1e-6);
+        // And it is a half at the same place for any band, which the bisector
+        // is too - the forms differ in WHERE the half lands, not in whether
+        // there is one.
+        near(share_at(0.0, 1.0, 2.0 * band, 0.0, true), 0.5, 1e-6);
+    }
+
     /// **The widest band stays inside the overlap while the line is on the
     /// seam - and runs past it as soon as the line is held.**
     ///
@@ -4364,20 +6170,36 @@ pub(crate) mod tests {
         // four words. At the allowance the support runs a whole band off the
         // seam on one side, which is 0.78 degrees PAST the shared picture on
         // the roomiest camera there is and 3.41 past it on an X2-class one.
-        for (name, reframe) in [
-            ("the fixture", fixture(Camera::default())),
-            ("an X2-class camera", cropped(X2_CLASS)),
+        // **Re-stated 2026-08-13, when the ask went from 8 to Studio's 6**
+        // (`studio-seam-re.md` 16.8). The overshoot is now CAMERA-DEPENDENT,
+        // and that is the finding rather than an inconvenience: at 6 degrees
+        // the roomiest cameras keep their anchored band inside the shared
+        // picture, where at 8 every camera overshot. The X4 Air fixture
+        // reaches 6.00 against 7.22 a side and stays in; an X2-class one
+        // reaches 6.00 against 4.59 and still runs past.
+        //
+        // Asserting one direction for both would now be false for one of them,
+        // so each is asserted in the direction it is true in, and the
+        // expectation is carried in the table rather than in the code.
+        for (name, reframe, overshoots) in [
+            ("the fixture", fixture(Camera::default()), false),
+            ("an X2-class camera", cropped(X2_CLASS), true),
         ] {
             let overlap = reframe.overlap().expect("two lenses").to_degrees();
             let band = reframe.handover_width().to_degrees();
             let farthest = 0.5 * band + 0.5 * band;
-            assert!(
+            assert_eq!(
                 farthest > 0.5 * overlap,
-                "{name} holds its line inside the overlap after all: a band of {band:.2} at the \
-                 {:.2} degree allowance reaches {farthest:.2} against {:.2} a side, so the claim \
-                 this test used to make would be true and the doc on Reframe::afforded is wrong",
+                overshoots,
+                "{name}: a band of {band:.2} at the {:.2} degree allowance reaches \
+                 {farthest:.2} against {:.2} a side, so it {} the shared picture - which is not \
+                 what this camera is recorded as doing",
                 0.5 * band,
                 0.5 * overlap,
+                match farthest > 0.5 * overlap {
+                    true => "runs past",
+                    false => "stays inside",
+                },
             );
         }
     }
@@ -4485,11 +6307,44 @@ pub(crate) mod tests {
                     planted = planted.max(walked(&held, phi as f32, hard_edged).1);
                 }
             }
+            // **The control forbids the ambiguous middle, and that is what
+            // makes it survive a change of width.**
+            //
+            // Breaking the taper is either catastrophic or irrelevant, and
+            // which one it is depends on how much share the ramp is still
+            // handing a lens when that lens runs out of picture. At an
+            // 8-degree handover that share is large - the planted cliff steps
+            // the weight by 0.36, a hundred times the bar - and the taper is
+            // the only thing preventing an edge. At 6 degrees the ramp has
+            // already committed to one lens by the time the rim arrives, the
+            // share at risk is 0.001668, and breaking the taper steps LESS
+            // than the shipped map does (0.002878): there is nothing there to
+            // protect.
+            //
+            // Both are healthy. What would not be is the middle: a share big
+            // enough that a broken taper visibly matters but small enough that
+            // this test's bar might not catch it. So the assertion is a
+            // disjunction, and it is the middle that fails.
+            //
+            // Measured 2026-08-13 across both fixtures: 0.36 at 8 degrees,
+            // 0.001668 at 6. Two orders either side of the gap.
             assert!(
-                planted > 0.10,
-                "{name}: breaking the coverage taper only steps the weight by {planted:.6}, so \
-                 this test would pass a map with no taper in it and proves nothing",
+                !(0.01..=0.10).contains(&planted),
+                "{name}: breaking the coverage taper steps the weight by {planted:.6}, which is \
+                 neither catastrophic (>0.10, the taper is load-bearing and this test can see it) \
+                 nor negligible (<0.01, the ramp never reaches that lens's rim). In between, this \
+                 test cannot tell a broken taper from a working one",
             );
+            // And when it IS negligible, say why in the same breath: the ramp
+            // must have committed to one lens before the rim, which is exactly
+            // what the shipped step being LARGER than the planted one means.
+            if planted < 0.01 {
+                assert!(
+                    planted <= worst_step,
+                    "{name}: the taper is supposedly irrelevant here, yet breaking it \
+                     ({planted:.6}) steps MORE than the shipped map does ({worst_step:.6})",
+                );
+            }
 
             // The control for the hole, and the measurement of what stops it.
             // A shift past the clamp by more than half the overlap puts the
@@ -4555,7 +6410,7 @@ pub(crate) mod tests {
                 asked,
             ),
             ("an X2-class camera", cropped(X2_CLASS), 9.18, asked),
-            ("a camera under the ask", cropped(UNDER_THE_ASK), 7.43, 7.43),
+            ("a camera under the ask", cropped(UNDER_THE_ASK), 4.81, 4.81),
         ] {
             let measured = reframe.overlap().expect("two lenses").to_degrees();
             assert!(
@@ -4610,7 +6465,7 @@ pub(crate) mod tests {
     fn hard_edged(reframe: &Reframe, ray: [f32; 3]) -> (f32, f32) {
         let reach = norm3(ray);
         let axis: [f32; MAX_LENSES] = std::array::from_fn(|lens| reframe.axis_of(lens, ray));
-        let front = reframe.handover(axis, reach, reframe.crossover);
+        let front = reframe.handover(ray, axis, reach, reframe.crossover);
         let mut weights = [0.0; MAX_LENSES];
         for (lens, weight) in weights.iter_mut().enumerate().take(2) {
             let share = match lens {
@@ -5083,6 +6938,7 @@ pub(crate) mod tests {
         let landings: [Landing; MAX_LENSES] =
             std::array::from_fn(|lens| reframe.project(lens, ray));
         let front = reframe.handover(
+            ray,
             std::array::from_fn(|lens| reframe.axis_of(lens, ray)),
             norm3(ray),
             // No band and no reading, so the width is the floor, which is the
@@ -5868,40 +7724,80 @@ pub(crate) mod tests {
         assert_eq!(std::mem::size_of::<LensBlock>(), 112);
         assert_eq!(std::mem::size_of::<Screen>(), 16);
         // 288 before the band's two fields, which add a padded mat3x3 and a
-        // padded vec3 (issue #103), and the table's own lane per four
-        // directions after them (stage 9).
+        // padded vec3 (issue #103), then the four scalar words, the image
+        // circle and source-matrix vec4s, and ONE table of a lane per four directions after
+        // them - the along-seam one from stage 9.
         let table = super::super::band::AZIMUTHS / 4 * 16;
         assert_eq!(std::mem::size_of::<super::super::band::Table>(), table);
-        assert_eq!(std::mem::size_of::<Reframe>(), 288 + 48 + 16 + table);
+        assert_eq!(std::mem::size_of::<Reframe>(), 288 + 48 + 16 + 32 + table);
         // The offset, not arithmetic that cannot fail: WGSL starts the table
         // at a multiple of sixteen and `repr(C)` does not have to, and
         // `min_binding_size` checks the block's size rather than any offset
         // inside it, so a table that slid twelve bytes would draw a wrong
         // picture rather than refuse a pipeline.
         assert_eq!(std::mem::offset_of!(Reframe, table) % 16, 0);
-        assert_eq!(std::mem::offset_of!(Reframe, table), 288 + 48 + 16);
-        // The three numbers that took the three padding words the table's
-        // alignment already needed, rather than being appended: the seam
-        // anchor's one, and the two that say how the planes are written. The
-        // block is the size it was and the table has not moved, which is what
-        // the two assertions above would otherwise have to be rewritten to
-        // say.
+        assert_eq!(
+            std::mem::offset_of!(Reframe, image_circle_centres),
+            288 + 48 + 16
+        );
+        assert_eq!(
+            std::mem::offset_of!(Reframe, source_matrix),
+            288 + 48 + 16 + 16
+        );
+        assert_eq!(std::mem::offset_of!(Reframe, table), 288 + 48 + 16 + 32);
+        // The three numbers that originally took the three padding words: the
+        // seam anchor's one, and the two that say how the planes are written.
         let after = |words: usize| std::mem::offset_of!(Reframe, crossover) + 4 * words;
         assert_eq!(std::mem::offset_of!(Reframe, handover_shift), after(1));
         assert_eq!(std::mem::offset_of!(Reframe, wide), after(2));
         assert_eq!(std::mem::offset_of!(Reframe, limited), after(3));
-        // And the table starts the word after the last of them, with nothing
-        // padding it there: all three are spoken for, so the next number added
-        // beside them lands ON the table's boundary and this is the assertion
-        // that says so first.
-        assert_eq!(std::mem::offset_of!(Reframe, table), after(4));
+        // The centre vec4 starts the word after the last scalar, with nothing
+        // padding it there; source matrix and table follow complete vec4s.
+        assert_eq!(
+            std::mem::offset_of!(Reframe, image_circle_centres),
+            after(4)
+        );
+        assert_eq!(std::mem::offset_of!(Reframe, source_matrix), after(8));
+        assert_eq!(std::mem::offset_of!(Reframe, table), after(12));
+    }
+
+    #[test]
+    fn source_matrix_is_file_metadata_not_lens_geometry() {
+        use kjerag_media::{ColorMatrix, Samples};
+
+        for matrix in [ColorMatrix::Bt601, ColorMatrix::Bt709] {
+            let samples = Samples {
+                matrix,
+                ..Samples::default()
+            };
+            let x4 = fixture(Camera::default()).with_samples(samples);
+            let x2 = Reframe::new(
+                &one_xs_lenses(),
+                ONE_XS_FRAME,
+                Camera::default(),
+                Held::default(),
+                1.0,
+                false,
+                Sampling::Bilinear,
+            )
+            .with_samples(samples);
+            assert_eq!(x4.source_matrix, source_matrix(matrix));
+            assert_eq!(x2.source_matrix, x4.source_matrix);
+            assert_eq!(x2.wide, 0.0);
+            assert_eq!(x2.limited, 0.0);
+        }
+        // Exact f32 anchors retained from the previous ONE X2 source sampler.
+        assert_eq!(
+            source_matrix(ColorMatrix::Bt601).map(f32::to_bits),
+            [0x3fb374bc, 0x3eb020c5, 0x3f36c8b4, 0x3fe2d0e5]
+        );
     }
 
     /// **The anchor's null.** A map nobody has held a line on draws the
     /// picture the geometry draws, and the term that carries the anchor is a
     /// literal zero.
     ///
-    /// This is what `KJERAG_ANCHOR=off` gets, what every instrument gets, what
+    /// This is what every instrument gets, what
     /// every test above gets, and what the blank pane gets. It matters because
     /// the offset is an ADDED term inside [`crossover`] rather than a factor
     /// folded into the quotient beside it: at zero the arithmetic is the
@@ -5928,8 +7824,16 @@ pub(crate) mod tests {
         let reach = 1.0f32;
         for asked_deg in [-2.0f32, -0.4, 0.4, 2.0] {
             let shift = asked_deg.to_radians();
-            // A ray at `across_seam = -shift` has `apart = 2 * reach * -shift`.
-            let apart = 2.0 * reach * -shift;
+            // A ray at `across_seam = -shift`, inverted through whichever
+            // surface is running. `apart` is not the same quantity in the two:
+            // the bisector's is a cosine DIFFERENCE, which is `2 * reach` per
+            // radian of angle, and Studio's is a single cosine, which inverts
+            // through `sin` because the ramp reads it through `asin`
+            // ([`share_at`]).
+            let apart = match seam_surface().is_angular() {
+                true => -reach * shift.sin(),
+                false => 2.0 * reach * -shift,
+            };
             near(crossover(apart, reach, band, shift), 0.5, 1e-6);
             // And it is the same line the geometry alone would have put at
             // that offset, moved by exactly the shift: nothing else in the
@@ -5960,7 +7864,7 @@ pub(crate) mod tests {
         // it twice on one frame is running it once.
         for degrees in [-4.0, -1.0, 0.0, 0.7, 3.9, 12.0] {
             let target = (degrees as f32).to_radians();
-            assert_eq!(SeamAnchor::follow(target, 0.0, allowance).0, target);
+            assert_eq!(SeamAnchor::follow(target, 0.0, allowance), target);
         }
 
         // It never overshoots and never changes sign, whatever the step: the
@@ -5969,7 +7873,7 @@ pub(crate) mod tests {
         for degrees in [-30.0, -4.0, -2.5, -0.1, 0.1, 2.5, 4.0, 30.0] {
             let target = (degrees as f32).to_radians();
             for step in [0.001, 1.0 / 60.0, step, 0.25, 1.0] {
-                let (delta, _) = SeamAnchor::follow(target, step, allowance);
+                let delta = SeamAnchor::follow(target, step, allowance);
                 assert!(
                     delta.abs() <= target.abs() && delta.signum() == target.signum(),
                     "{degrees} deg over {step} s left the line at {} deg",
@@ -5981,7 +7885,7 @@ pub(crate) mod tests {
         // Standing still costs the line nothing. At a quarter of the allowance
         // - twice the shake this corpus puts on a parked airframe - one frame
         // moves the drawn line by under a ten-thousandth of a degree.
-        let (delta, _) = SeamAnchor::follow(1f32.to_radians(), step, allowance);
+        let delta = SeamAnchor::follow(1f32.to_radians(), step, allowance);
         assert!(
             (1.0 - delta.to_degrees()) < 1e-4,
             "a still camera moved the line by {} deg in one frame",
@@ -5993,9 +7897,7 @@ pub(crate) mod tests {
         // difference of it can never change abruptly. Sampled finely, no
         // second difference is more than a hundredth of a degree.
         let sample = |i: i32| {
-            SeamAnchor::follow((i as f32 * 0.01).to_radians(), step, allowance)
-                .0
-                .to_degrees()
+            SeamAnchor::follow((i as f32 * 0.01).to_radians(), step, allowance).to_degrees()
         };
         let mut roughest = 0.0f32;
         for i in -600..600 {
@@ -6032,7 +7934,7 @@ pub(crate) mod tests {
             let mut delta = 0.0f32;
             for _ in 0..600 {
                 let target = delta + drift_dps.to_radians() / 30.0;
-                delta = SeamAnchor::follow(target, 1.0 / 30.0, allowance).0;
+                delta = SeamAnchor::follow(target, 1.0 / 30.0, allowance);
             }
             delta.to_degrees()
         };
@@ -6093,14 +7995,12 @@ pub(crate) mod tests {
             near(closed_form, ceiling, 0.005);
             // The law itself, asked for an offset a hundred times the
             // allowance: what comes back is the ceiling and not the ask.
-            let reached = SeamAnchor::follow(100.0 * allowance, step, allowance)
-                .0
-                .to_degrees();
+            let reached = SeamAnchor::follow(100.0 * allowance, step, allowance).to_degrees();
             near(reached, ceiling, 0.01);
             // And a runaway drift settles there rather than climbing past it.
             let mut delta = 0.0f32;
             for _ in 0..400 {
-                delta = SeamAnchor::follow(delta + 40f32.to_radians(), step, allowance).0;
+                delta = SeamAnchor::follow(delta + 40f32.to_radians(), step, allowance);
             }
             assert!(
                 delta.to_degrees() <= ceiling + 0.01,
@@ -6158,7 +8058,7 @@ pub(crate) mod tests {
 
         // The control: at this step the law itself goes past the allowance, so
         // there is something for the clamp to catch.
-        let raw = SeamAnchor::follow(100.0 * allowance, step, allowance).0;
+        let raw = SeamAnchor::follow(100.0 * allowance, step, allowance);
         assert!(
             raw > allowance,
             "the follow stops at {} deg of a {} deg allowance on its own, so this test is empty",
@@ -6181,9 +8081,8 @@ pub(crate) mod tests {
             anchor.shift(),
         );
         // And the world anchor stands on the drawn line: read back through the
-        // same pose at a step of nothing, the target IS the drawn offset.
+        // same pose at a step of nothing, the shift IS the drawn offset.
         let again = SeamAnchor::hold(Some(anchor), &reframe, Held::default(), anchor.at);
-        near(again.target, anchor.shift(), 1e-6);
         near(again.shift(), anchor.shift(), 1e-6);
     }
 
@@ -6244,14 +8143,21 @@ pub(crate) mod tests {
             "a seek back to 4.0 s left the line {} deg off the geometry",
             back.shift().to_degrees(),
         );
-        assert_eq!(back.target, 0.0);
 
         // Forward, which is what the second half of it caught. A seek moves
         // the body as well as the clock, so the frame it lands on is held at a
         // pose from another part of the flight, and `was.on` read back through
         // THAT pose is the target the old code charged the follow with.
+        // **About X, and that is not arbitrary.** The case this test exists for
+        // needs the stale target to land BEYOND the allowance, which means the
+        // seek's pose has to carry `was.on` ACROSS the seam rather than along
+        // it. The `[0, 0.9, 0]` this used to use turned about the seam's own
+        // axis: it moved the point 51 degrees along the circle and only 1.86
+        // across, which stopped clearing the 3 degree allowance when the
+        // surface became Studio's nominal one (`studio-seam-re.md` 19.8) and
+        // the geometry moved with it. `[0.3, 0, 0]` reads 20.19 degrees across.
         let elsewhere = Held {
-            body_from_world: Quat::from_rotation_vector([0.0, 0.9, 0.0]).conjugate(),
+            body_from_world: Quat::from_rotation_vector([0.3, 0.0, 0.0]).conjugate(),
             ..Held::default()
         };
         let forward = SeamAnchor::hold(Some(was), &reframe, elsewhere, 16.0);
@@ -6261,7 +8167,6 @@ pub(crate) mod tests {
             "a seek on to 16.0 s left the line {} deg off the geometry",
             forward.shift().to_degrees(),
         );
-        assert_eq!(forward.target, 0.0);
 
         // And what that was worth, by running the arithmetic the old arm ran:
         // the stale target at the step it capped to. The answer is the
@@ -6284,11 +8189,13 @@ pub(crate) mod tests {
             stale.to_degrees(),
         );
         let drawn = SeamAnchor::follow(stale, ANCHOR_SEEK_SECS as f32, allowance)
-            .0
             .clamp(-allowance, allowance);
-        near(drawn.to_degrees(), 2.90, 0.01);
+        // Magnitude, not sign: which way the seek's pose carries the point
+        // across the seam depends on the surface, and what this asserts is the
+        // follow's own CEILING at that step.
+        near(drawn.abs().to_degrees(), 2.174, 0.01);
         near(
-            drawn.to_degrees(),
+            drawn.abs().to_degrees(),
             (allowance
                 / (f32::from(ANCHOR_FOLLOW_POWER as i16)
                     * ANCHOR_FOLLOW_RATE
@@ -6301,8 +8208,8 @@ pub(crate) mod tests {
         // The two boundaries of the arm, so the constant is pinned and not
         // decorative: a step of exactly `ANCHOR_SEEK_SECS` still follows, and
         // anything past it does not.
-        assert_ne!(held(10.0 + ANCHOR_SEEK_SECS).target, 0.0);
-        assert_eq!(held(10.0 + ANCHOR_SEEK_SECS + 1e-6).target, 0.0);
+        assert_ne!(held(10.0 + ANCHOR_SEEK_SECS).shift(), 0.0);
+        assert_eq!(held(10.0 + ANCHOR_SEEK_SECS + 1e-6).shift(), 0.0);
 
         // And the same instant twice is not a seek in either direction.
         let redrawn = held(10.0);
@@ -6351,11 +8258,11 @@ pub(crate) mod tests {
             (
                 "the X4 Air fixture",
                 fixture(Camera::default()),
-                0.643f32,
-                0.617f32,
-                2.54f32,
+                0.706f32,
+                0.681f32,
+                2.10f32,
             ),
-            ("an X2-class camera", cropped(X2_CLASS), 0.534, 0.510, 2.13),
+            ("an X2-class camera", cropped(X2_CLASS), 0.605, 0.581, 1.82),
         ] {
             let overlap = reframe.overlap().expect("two lenses").to_degrees();
             let band = reframe.handover_width().to_degrees();
@@ -6446,8 +8353,6 @@ pub(crate) mod tests {
                 .map(f64::from),
             delta,
             at,
-            target: delta,
-            gain: 0.0,
         }
     }
 

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["vendor/iced_core", "vendor/iced_wgpu"]
 # Plain `cargo run` starts the app, as it did before the split. Everything
 # else is reached with `-p`, and the gates use `--workspace` so no member is
 # skipped (AGENTS.md).
@@ -16,10 +17,6 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
-# The shell, which the instruments depend on for one thing: the saved seam
-# pool and the rule that answers off it, so `seam=pool` draws what the app
-# draws rather than what a second reader of that file would think it says.
-kjerag = { path = "crates/app" }
 kjerag-media = { path = "crates/media" }
 kjerag-meta = { path = "crates/meta" }
 kjerag-render = { path = "crates/render" }
@@ -73,6 +70,7 @@ prost = "0.14"
 # calibration fixture that telemetry-parser wrote as JSON.
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sha2 = "0.11"
 # Only the timer, and only for the toast dismissal: libcosmic's default
 # features already bring tokio in as the app's executor.
 tokio = { version = "1", default-features = false, features = ["time"] }
@@ -123,3 +121,12 @@ features = ["wgpu"]
 # stays on the fork as the readable name for it.
 [patch.crates-io]
 wgpu = { git = "https://github.com/aeharding/wgpu", rev = "fb66f36c5cf1135c11523767652ea7a809b3e598" }
+
+# iced's fixed device descriptor otherwise caps shader widgets at eight
+# storage buffers, even on capable hardware. Only device-limit negotiation
+# differs from the pinned renderer. See vendor/iced_wgpu/KJERAG.md.
+[patch."https://github.com/pop-os/libcosmic"]
+iced_wgpu = { path = "vendor/iced_wgpu" }
+# Keep named content in the tree when the COSMIC header is inserted/removed.
+# Otherwise the Scene disappears for a rebuild, losing its media deadline.
+iced_core = { path = "vendor/iced_core" }

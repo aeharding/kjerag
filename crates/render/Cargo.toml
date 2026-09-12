@@ -25,3 +25,7 @@ ffmpeg-next = { workspace = true }
 # rules put them in the crate that owns the types, so the layer that draws
 # the pass is also the layer that names iced. The shell stays in `kjerag`.
 libcosmic = { workspace = true }
+
+[dev-dependencies]
+kjerag-media = { workspace = true, features = ["test-support"] }
+sha2 = { workspace = true }

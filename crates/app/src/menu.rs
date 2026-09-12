@@ -28,13 +28,20 @@ use crate::strings;
 /// The bar's id, which is how libcosmic remembers the width it collapses at.
 static MENU_ID: LazyLock<Id> = LazyLock::new(|| Id::new("kjerag-menu-bar"));
 
+pub(crate) struct MenuState {
+    pub has_file: bool,
+    pub can_transport: bool,
+    pub can_go_to_view: bool,
+    pub horizon_locked: bool,
+    pub can_lock: bool,
+    pub flow: Option<bool>,
+}
+
 pub fn menu_bar<'a>(
     core: &Core,
     state: &ConfigState,
     key_binds: &HashMap<KeyBind, Action>,
-    has_file: bool,
-    horizon_locked: bool,
-    can_lock: bool,
+    menu: MenuState,
 ) -> Element<'a, Message> {
     responsive_menu_bar()
         .item_height(ItemHeight::Dynamic(40))
@@ -51,16 +58,16 @@ pub fn menu_bar<'a>(
                     vec![
                         Item::Button(strings::OPEN_VIDEO.to_owned(), None, Action::FileOpen),
                         Item::Folder(strings::OPEN_RECENT.to_owned(), recent(state)),
-                        enabled(has_file, strings::CLOSE_VIDEO, Action::FileClose),
+                        enabled(menu.has_file, strings::CLOSE_VIDEO, Action::FileClose),
                         Item::Divider,
                         // Issue #15 gave these two something to do, and there
                         // is nothing to take a still of without a file.
-                        enabled(has_file, strings::SAVE_FRAME, Action::SaveFrame),
-                        enabled(has_file, strings::COPY_FRAME, Action::CopyFrame),
+                        enabled(menu.has_file, strings::SAVE_FRAME, Action::SaveFrame),
+                        enabled(menu.has_file, strings::COPY_FRAME, Action::CopyFrame),
                         // Under the two picture items rather than in `View`,
                         // which holds the things that move the view rather
                         // than the things that take something away from it.
-                        enabled(has_file, strings::COPY_VIEW, Action::CopyView),
+                        enabled(menu.has_file, strings::COPY_VIEW, Action::CopyView),
                         // The one item in this menu that is never drawn
                         // disabled. A reference carrying a whole path opens
                         // the video it names, so it has something to do with
@@ -68,7 +75,7 @@ pub fn menu_bar<'a>(
                         // be known here anyway, because reading it is a task
                         // whose answer arrives later and this runs on every
                         // redraw.
-                        Item::Button(strings::GO_TO_VIEW.to_owned(), None, Action::GoToView),
+                        enabled(menu.can_go_to_view, strings::GO_TO_VIEW, Action::GoToView),
                         Item::Divider,
                         Item::Button(strings::QUIT.to_owned(), None, Action::Quit),
                     ],
@@ -76,20 +83,24 @@ pub fn menu_bar<'a>(
                 (
                     strings::PLAYBACK.to_owned(),
                     vec![
-                        enabled(has_file, strings::PLAY_PAUSE, Action::PlayPause),
-                        enabled(has_file, strings::BACK_10, Action::SeekBackward),
-                        enabled(has_file, strings::FORWARD_10, Action::SeekForward),
+                        enabled(menu.can_transport, strings::PLAY_PAUSE, Action::PlayPause),
+                        enabled(menu.can_transport, strings::BACK_10, Action::SeekBackward),
+                        enabled(menu.can_transport, strings::FORWARD_10, Action::SeekForward),
                         Item::Divider,
-                        enabled(has_file, strings::PREVIOUS_FRAME, Action::PreviousFrame),
-                        enabled(has_file, strings::NEXT_FRAME, Action::NextFrame),
+                        enabled(
+                            menu.can_transport,
+                            strings::PREVIOUS_FRAME,
+                            Action::PreviousFrame,
+                        ),
+                        enabled(menu.can_transport, strings::NEXT_FRAME, Action::NextFrame),
                     ],
                 ),
                 (
                     strings::VIEW.to_owned(),
                     vec![
-                        enabled(has_file, strings::ZOOM_IN, Action::ZoomIn),
-                        enabled(has_file, strings::DEFAULT_VIEW, Action::DefaultView),
-                        enabled(has_file, strings::ZOOM_OUT, Action::ZoomOut),
+                        enabled(menu.has_file, strings::ZOOM_IN, Action::ZoomIn),
+                        enabled(menu.has_file, strings::DEFAULT_VIEW, Action::DefaultView),
+                        enabled(menu.has_file, strings::ZOOM_OUT, Action::ZoomOut),
                         Item::Divider,
                         // A checkbox rather than a pair of items, which is
                         // what cosmic-files does for every setting that is a
@@ -104,11 +115,11 @@ pub fn menu_bar<'a>(
                         // has no such variant, and this module's own rule is
                         // that a capability which is not there is a disabled
                         // button.
-                        match can_lock {
+                        match menu.can_lock {
                             true => Item::CheckBox(
                                 strings::LOCK_HORIZON.to_owned(),
                                 None,
-                                horizon_locked,
+                                menu.horizon_locked,
                                 Action::LockHorizon,
                             ),
                             false => Item::ButtonDisabled(
@@ -117,6 +128,11 @@ pub fn menu_bar<'a>(
                                 Action::LockHorizon,
                             ),
                         },
+                        // The selected ONE X2 route runs automatically and must
+                        // not fall through the legacy route. The preference
+                        // remains editable with no file open or with a camera
+                        // whose legacy route is supported.
+                        optical_flow(menu.flow),
                         Item::Divider,
                         Item::Button(strings::FULLSCREEN.to_owned(), None, Action::Fullscreen),
                         Item::Divider,
@@ -154,5 +170,38 @@ fn enabled(yes: bool, label: &str, action: Action) -> Item<Action, String> {
     match yes {
         true => Item::Button(label.to_owned(), None, action),
         false => Item::ButtonDisabled(label.to_owned(), None, action),
+    }
+}
+
+fn optical_flow(flow: Option<bool>) -> Item<Action, String> {
+    match flow {
+        Some(on) => Item::CheckBox(
+            strings::OPTICAL_FLOW.to_owned(),
+            None,
+            on,
+            Action::OpticalFlow,
+        ),
+        None => Item::ButtonDisabled(strings::OPTICAL_FLOW.to_owned(), None, Action::OpticalFlow),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_optical_flow_is_a_disabled_button_not_a_checkbox() {
+        assert!(matches!(
+            optical_flow(None),
+            Item::ButtonDisabled(_, _, Action::OpticalFlow)
+        ));
+        assert!(matches!(
+            optical_flow(Some(false)),
+            Item::CheckBox(_, _, false, Action::OpticalFlow)
+        ));
+        assert!(matches!(
+            optical_flow(Some(true)),
+            Item::CheckBox(_, _, true, Action::OpticalFlow)
+        ));
     }
 }

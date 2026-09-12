@@ -12,23 +12,24 @@
 //! rendered one all reach for it: it moved into `media` when the seam fit
 //! started running at open in the app as well (issue #48).
 //!
-//! [`Seam`] is the fourth: five instruments take the same `seam=` argument,
-//! and one of its values reads the app's own saved pool, which is the whole
-//! point of it (`seam.rs`). That is why this crate depends on the shell
-//! crate, which is the one edge in the workspace that points upwards
-//! (docs/ARCHITECTURE.md).
+//! [`Seam`] is the fourth: the instruments take the same `seam=` argument, now
+//! `factory` (the parity base, and the default) or the five knobs written out
+//! (`seam.rs`). The `file` and `pool` values that read a per-capture content
+//! fit were the non-parity mechanism and were removed with it (2026-08-15), and
+//! the workspace's one upward edge to the shell crate went with them.
 
 pub mod crossing;
 mod offscreen;
 mod picture;
 pub mod registration;
 mod seam;
+pub mod seam_trace;
 mod skyline;
 
 pub use kjerag_media::{Chroma, Pair, Plane, Walk};
 pub use offscreen::{Gpu, Offscreen};
 pub use picture::{Difference, FORMAT, Picture, Render, aspect};
-pub use seam::{Seam, fit_arg, pooled};
+pub use seam::{Seam, fit_arg};
 pub use skyline::{Skyline, skyline};
 
 /// One camera's along-seam table, off the file `kjerag-spike --bin table`

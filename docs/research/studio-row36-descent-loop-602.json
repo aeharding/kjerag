@@ -1,0 +1,332 @@
+{
+  "schema": "kjerag.studio-row36-descent-loop-delayed-oracle.v1",
+  "studio_version": "6.0.2",
+  "worker_sha256": "0a34f593198a0a7a29239ccded91231af3d7bc94e04213c67a2d44a04076a452",
+  "claim": "One delayed-adopted cold A-to-B level-two pass-zero masked-unweighted row-36 column-zero seed latch, four-attempt descent trajectory, final guard inputs, and terminal STORE.",
+  "parity_claimed": false,
+  "rendered_pixels_claimed": false,
+  "riser_fix_claimed": false,
+  "coordinates": {
+    "direction": "ab",
+    "level": 2,
+    "pass": 0,
+    "output_row": 36,
+    "output_col": 0,
+    "source_row": 108,
+    "source_col": 0,
+    "row_mode": "masked_unweighted",
+    "configured_max_descents": 6
+  },
+  "authenticated_inputs": {
+    "full_planes": {
+      "source_image": {
+        "rows": 270,
+        "cols": 15,
+        "row_bytes": 15,
+        "sha256": "fa0ab394af7068edbe72fb9d176f017aa082c33e9d866a12148e5f4db23ca0ed"
+      },
+      "target_image": {
+        "rows": 270,
+        "cols": 15,
+        "row_bytes": 15,
+        "sha256": "625b6fe9e3597ff97bb32b91e17f24ad0e6b2fc33c39ee1deb2e559e935e9963"
+      },
+      "source_mask": {
+        "rows": 270,
+        "cols": 15,
+        "row_bytes": 15,
+        "sha256": "e30f604d1d1edb23dab753dfca8724b3caf070aeb4fd3a9a3accb306cd173ce9"
+      },
+      "target_mask": {
+        "rows": 270,
+        "cols": 15,
+        "row_bytes": 15,
+        "sha256": "e30f604d1d1edb23dab753dfca8724b3caf070aeb4fd3a9a3accb306cd173ce9"
+      },
+      "target_image_padded": {
+        "rows": 302,
+        "cols": 47,
+        "row_bytes": 47,
+        "sha256": "484856941bb03734ebe8ad09af789645422e9ffbb7c4ca6cd030f47ea7485508"
+      },
+      "target_mask_padded": {
+        "rows": 302,
+        "cols": 47,
+        "row_bytes": 47,
+        "sha256": "e901ee11dce14697d25e72c2e9ff4662f20694d453f177289bfad617309072cc"
+      },
+      "gradient_row_i16": {
+        "rows": 270,
+        "cols": 15,
+        "row_bytes": 30,
+        "sha256": "fd7185976e1e6cb54551b792aea166f3d94e17396e9e372f8a7a8bef1ecb4270"
+      },
+      "gradient_col_i16": {
+        "rows": 270,
+        "cols": 15,
+        "row_bytes": 30,
+        "sha256": "58554eab80066c102bed7a7db710078a11f46d09f1e67a3a867ed88722e1e787"
+      },
+      "raw_weight_f32": {
+        "rows": 270,
+        "cols": 15,
+        "row_bytes": 60,
+        "sha256": "08fa436db72c82ca823189965c4d8316d32f917abf40b1882005ce77aa4efff5"
+      },
+      "main_u_f32": {
+        "rows": 270,
+        "cols": 15,
+        "row_bytes": 60,
+        "sha256": "9dd76d9311e87123c936ab0d956e9ead34dae3fb68beb075b6ee6fee9b08d9e0"
+      },
+      "main_v_f32": {
+        "rows": 270,
+        "cols": 15,
+        "row_bytes": 60,
+        "sha256": "9dd76d9311e87123c936ab0d956e9ead34dae3fb68beb075b6ee6fee9b08d9e0"
+      },
+      "aux_hint_u_f32": {
+        "rows": 270,
+        "cols": 15,
+        "row_bytes": 60,
+        "sha256": "9dd76d9311e87123c936ab0d956e9ead34dae3fb68beb075b6ee6fee9b08d9e0"
+      },
+      "aux_hint_v_f32": {
+        "rows": 270,
+        "cols": 15,
+        "row_bytes": 60,
+        "sha256": "9dd76d9311e87123c936ab0d956e9ead34dae3fb68beb075b6ee6fee9b08d9e0"
+      }
+    },
+    "logical_structure_prefixes": {
+      "h_row_row": "42bf6d92181a256ddb33b715c10e3636716c9fe24fb03a77f3b3fa9da15809b4",
+      "h_col_col": "bbe16757bb4c132c596763ca8aff67bb6ec6923043f3e585abfa3333be4ac545",
+      "h_col_row": "3ed35321c9369a358539fb4702bd9b8bcf11c49e3c89b9ee2e2801320777430e",
+      "gradient_row_sum": "988caec9e5812ebd8ed50a30fca429a36589172744ad9d9b886533b6c3b47457",
+      "gradient_col_sum": "7937824f0b88ad65014b506b9cbb9df86491d6138b6bb45668fad391603a6050",
+      "weight_or_energy_sum": "b97670d0b587fed07235f57d8926f2508f74cfd19aabc1512864594bb00d1f24",
+      "logical_rows": 88,
+      "logical_cols": 3,
+      "logical_bytes_each": 1056
+    },
+    "d8_level2": {
+      "canonical_bytes": 16,
+      "canonical_hex": "ff3f00fc81fe0000ffffff0000000000",
+      "logical_bits": 88,
+      "sha256": "23b16ea2aab8780bee8a8b761fc9916b38bca0e23270cfe711e347ecbc0fceb6",
+      "selected_row": 36,
+      "selected_row_weighted": false,
+      "selected_row_mode": "masked_unweighted"
+    }
+  },
+  "captured_seed": {
+    "flow": ["0x00000000", "0x00000000"],
+    "candidate_score": "0x44429700",
+    "hint_candidate_present": true,
+    "hint_flow": ["0x00000000", "0x00000000"],
+    "horizontal_available": false,
+    "stack_skip_u32": 0,
+    "fds_0x9c": 0,
+    "initial_previous_residual": "0x501502f9"
+  },
+  "captured_structure": {
+    "cell": [36, 0],
+    "hessian": {
+      "row_row": "0x469cf800",
+      "col_col": "0x46925800",
+      "col_row": "0x44b30000"
+    },
+    "inverse_labels": {
+      "inv10": "0x3851e609",
+      "inv11": "0x3861234a",
+      "inv13": "0xb6805e54"
+    },
+    "gradient_sums": {
+      "row": "0xc2880000",
+      "col": "0x42800000"
+    },
+    "weight_or_energy_sum": "0x44b31137"
+  },
+  "captured_attempts": [
+    {
+      "ordinal": 1,
+      "old_flow": ["0x00000000", "0x00000000"],
+      "translated_target_origin": {
+        "row": "0x42f80000",
+        "col": "0x41800000"
+      },
+      "fixed_bilinear_coefficients": ["0x3f800000", "0x00000000", "0x00000000", "0x00000000"],
+      "survivors": 64,
+      "mean_divisor": 64,
+      "raw_s": "0xc3998000",
+      "raw_q": "0x450cb000",
+      "raw_rhs": {
+        "row": "0xc3070000",
+        "col": "0x44714000"
+      },
+      "corrected_rhs": {
+        "row": "0xc3e69800",
+        "col": "0x449f0000"
+      },
+      "corrected_residual": "0x44429700",
+      "previous_residual": "0x501502f9",
+      "delta": ["0x3d8f71f3", "0xbce4ee98"],
+      "updated_flow": ["0xbd8f71f3", "0x3ce4ee98"],
+      "accepted": true,
+      "accepted_before": 0,
+      "accepted_after": 1
+    },
+    {
+      "ordinal": 2,
+      "old_flow": ["0xbd8f71f3", "0x3ce4ee98"],
+      "translated_target_origin": {
+        "row": "0x42f80e4f",
+        "col": "0x417ee11c"
+      },
+      "fixed_bilinear_coefficients": ["0x3d8b6fc0", "0x3f676a88", "0x3b004803", "0x3cd4e700"],
+      "survivors": 64,
+      "mean_divisor": 64,
+      "raw_s": "0xc39ade1d",
+      "raw_q": "0x450d0c1b",
+      "raw_rhs": {
+        "row": "0xc2b7d256",
+        "col": "0x4431d008"
+      },
+      "corrected_rhs": {
+        "row": "0xc3d28094",
+        "col": "0x447f3f16"
+      },
+      "corrected_residual": "0x443d707e",
+      "previous_residual": "0x44429700",
+      "delta": ["0x3d67127f", "0xbccc9786"],
+      "updated_flow": ["0xbe017d99", "0x3d58c30f"],
+      "accepted": true,
+      "accepted_before": 1,
+      "accepted_after": 2
+    },
+    {
+      "ordinal": 3,
+      "old_flow": ["0xbe017d99", "0x3d58c30f"],
+      "translated_target_origin": {
+        "row": "0x42f81b18",
+        "col": "0x417dfa0a"
+      },
+      "fixed_bilinear_coefficients": ["0x3df546a0", "0x3f53cb2c", "0x3bdb4604", "0x3d3d573f"],
+      "survivors": 64,
+      "mean_divisor": 64,
+      "raw_s": "0xc39bec90",
+      "raw_q": "0x450e1746",
+      "raw_rhs": {
+        "row": "0xc2418a2a",
+        "col": "0x43ff257c"
+      },
+      "corrected_rhs": {
+        "row": "0xc3bddc9e",
+        "col": "0x444d8906"
+      },
+      "corrected_residual": "0x443c7bd4",
+      "previous_residual": "0x443d707e",
+      "delta": ["0x3d3ab508", "0xbcb56fc8"],
+      "updated_flow": ["0xbe302adb", "0x3d99bd7a"],
+      "accepted": true,
+      "accepted_before": 2,
+      "accepted_after": 3
+    },
+    {
+      "ordinal": 4,
+      "old_flow": ["0xbe302adb", "0x3d99bd7a"],
+      "translated_target_origin": {
+        "row": "0x42f8266f",
+        "col": "0x417d3f55"
+      },
+      "fixed_bilinear_coefficients": ["0x3e22f162", "0x3f440c27", "0x3c5395d8", "0x3d7e928a"],
+      "survivors": 64,
+      "mean_divisor": 64,
+      "raw_s": "0xc39cbe2f",
+      "raw_q": "0x450f640f",
+      "raw_rhs": {
+        "row": "0xc0c6cee0",
+        "col": "0x43af411c"
+      },
+      "corrected_rhs": {
+        "row": "0xc3a9a54e",
+        "col": "0x4425ffa6"
+      },
+      "corrected_residual": "0x443daee2",
+      "previous_residual": "0x443c7bd4",
+      "delta": ["0x3d174da5", "0xbc9fe7a4"],
+      "updated_flow": ["0xbe55fe44", "0x3dc1b763"],
+      "accepted": false,
+      "accepted_before": 3,
+      "accepted_after": 3
+    }
+  ],
+  "captured_termination": {
+    "completed_attempts": 4,
+    "accepted_count": 3,
+    "reason": "non_improvement",
+    "previous_residual": "0x443c7bd4",
+    "rejected_residual": "0x443daee2",
+    "tentative_flow": ["0xbe55fe44", "0x3dc1b763"],
+    "predecessor_scope": "LIVE_COMPARE_PLUS_PINNED_BRANCH"
+  },
+  "captured_final_guard": {
+    "distance_f64_bits": "0x3fcd5c917545a987",
+    "distance_limit_f64_bits": "0x4020000000000000",
+    "configured_distance_i32": 8,
+    "route": "default_interval",
+    "route_provenance": "DERIVED_FROM_LIVE_SNAPSHOT_AND_STATIC_READ",
+    "first_endpoint": ["0xc0700000", "0xbdfffc66"],
+    "second_endpoint": ["0x3e7ffc66", "0x3dfffc66"],
+    "tentative_flow": ["0xbe55fe44", "0x3dc1b763"],
+    "retained_before_store": ["0x00000000", "0x00000000"],
+    "outcome": "disparity_store",
+    "store_action": "STORE",
+    "terminal_action_provenance": "LIVE_AUTHENTICATED_FROM_B660_OR_B664_AND_EXACT_CELL_STATE",
+    "stored_index": 108,
+    "stored_byte_offset": 432,
+    "stored_flow": ["0xbe55fe44", "0x3dc1b763"],
+    "completion_boundary": "common_join_entry_after_v_store"
+  },
+  "capture_provenance": {
+    "capture_source_commit": "1c3b4a08b95b49a18c1047c48ea322f3b45ad4b5",
+    "delayed_adoption_verifier_commit": "37a57b43ab35f7395a6524f5d5333dd044fe7997",
+    "verification_schema": "kjerag.v9-row36-descent-loop-delayed-seal.v1",
+    "verification_verdict": "accepted_delayed_seal",
+    "evidence_sha256": "32ec691a2d42324bb15b3431a2fb6b3d203fb71a996c79e01df06b6968eb83bd",
+    "report_sha256": "fef45940a1fc9bfccf9a5739d525d8c0a66121a7719f02fab31a9b0de9e0325d",
+    "process_receipt_sha256": "d6cfdc8e655aaf2d1d5525140c8e02f1488bc70a9c3de1bd6fe4e9852ecc6a3d",
+    "packet_log_sha256": "54986972dbffdde5236c8befb96e99ceba55d730fcf2e0270ccd35d44a7b8ef7",
+    "packet_log_bytes": 67386761,
+    "original_capture_pins_sha256": "8c833a66d5cf96bd0c1e3189cd7726cdf26993a534f4781ba5662f7558190986",
+    "delayed_verifier_pins_sha256": "9a0339f481021a50cd3ba4808bef8c479bb21af56aa0d105d6621227f70dbb5e",
+    "delayed_verifier_source_sha256": "0d30c781c8053b7c2cd57e67003ab1d88f6a259fe24a8cefadf73a3f101b1103",
+    "status": "success",
+    "lifecycle": {
+      "capture_complete": true,
+      "teardown_complete": true,
+      "detached": true,
+      "debugger_state_restored": true,
+      "process_group_empty": true,
+      "timed_out": false,
+      "returncode": 0
+    }
+  },
+  "delayed_adoption": {
+    "not_original_launch_receipt": true,
+    "original_launch_receipt_present": false,
+    "ordinary_postflight_passed": false,
+    "fresh_postflight_passed": false,
+    "contemporaneous_outer_hash_for_evidence": null,
+    "contemporaneous_outer_hash_for_report": null,
+    "contemporaneous_outer_hash_for_armed_marker": null,
+    "historical_adversarial_immutability_claimed": false,
+    "statement": "delayed adoption under the current pinned verifier, not a reconstruction of the missing original receipt"
+  },
+  "limitations": [
+    "The original outer validator refused the runtime's real row-36 receipt dialect before publishing a final launch receipt. This oracle is adopted later by the distinct pinned delayed-seal verifier.",
+    "The process receipt contemporaneously binds the packet and LLDB logs, but there is no contemporaneous outer hash for the evidence, report, or armed marker. The delayed seal establishes current-byte consistency, reviewed-source semantics, and a clean lifecycle, not historical adversarial immutability.",
+    "The default final-guard route is derived from a live snapshot plus static READ. The predicted terminal sink and exact stored cell were observed live, while the intermediate same-sink branch identity and memory immutability across resume were not.",
+    "This is one cold cell, not a complete field, warm-state replay, target-time replay, seam trace, rendered output, Studio pixel parity, playback wiring, a riser fix, or owner approval."
+  ]
+}

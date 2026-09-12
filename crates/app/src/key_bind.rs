@@ -51,6 +51,7 @@ pub enum Action {
     LockHorizon,
     Mute,
     NextFrame,
+    OpticalFlow,
     PlayPause,
     PreviousFrame,
     Quit,
@@ -82,6 +83,7 @@ impl MenuAction for Action {
             // and redraws by the path the dropdown already uses.
             Self::Mute => Message::AudioToggle,
             Self::NextFrame => Message::StepFrame(1),
+            Self::OpticalFlow => Message::OpticalFlow,
             Self::PlayPause => Message::PlayPause,
             Self::PreviousFrame => Message::StepFrame(-1),
             Self::Quit => Message::Quit,

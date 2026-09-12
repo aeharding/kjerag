@@ -10,6 +10,168 @@ expands a tilde, which makes such a paste a silent no-op (issue #157).
 Agents: read this at the start of any seam task;
 add new owner references here with date, category, and status.
 
+## X4 Air moving ground seam (2026-09-08, owner-confirmed reproduction)
+
+```text
+/home/aeharding/Videos/VID_20260410_185407_00_004.insv time=607.574 yaw=-76.84 pitch=-55.87 fov=108.79 lock=1
+```
+
+The owner confirms that the captured Scene sequence reproduces the seam defect
+and describes it as "almost like blotting". The earlier description was that
+the seam "wiggles/doesn't look quite right in certain circumstances vs studio".
+The owner separately said chromatic calibration "looks really good" and pausing
+"seems ok on initial glance". That is positive color feedback and preliminary
+pause feedback, not acceptance of this remaining seam defect or authorization
+to merge.
+
+The opt-in `reported_seam_review_sequence` reuses the existing post-seek
+capture helper for consecutive sources through ordinary Scene source/map/color
+ownership, with automatic correction retained. Whether the symptom depends on
+uninterrupted history, seeking or view motion is not yet established. Do not
+infer a cause from the view alone. No stitching arithmetic or refresh cadence
+changes.
+
+The first capture completes: sources 18209..18269, 607.573633..609.575633,
+1280x720, same capture with adjacent forward steps after one exact seek. Actual
+Scene screenshots, packed maps, alpha and color ratios are retained under
+`scratch/x4-ground-seam-20260908-01/run-01/`. The 61-frame `reported-view.mp4`
+is the owner-confirmed reproduction. All 61 alpha maps are byte-identical. The
+no-color, zero-public-flow and two solo-lens diagnostic arms complete over the
+first 31 sources; their work leaves the original source maps and screenshots
+unchanged. These arms isolate components only and neither establish a cause nor
+propose a fix. This is the native Scene path, not a recording of installed
+Flatpak window timing or uninterrupted frame-zero history. The owner requires a
+direct Studio/Kjerag A/B at this exact view before assuming the products differ
+or choosing a fix. A new actual Studio export now covers this interval; see the
+direct comparison record below. Cause remains open.
+
+After viewing the direct Studio A/B, the owner explicitly confirms Kjerag is
+worse: blotting along its seam is absent from Studio. He clarifies "flickering
+blotting", explicitly endorses the moving A/B as the fix acceptance oracle,
+and doubts stills could distinguish the products. This is the confirmed product
+difference to fix; still-image similarity is not its acceptance test. It does
+not authenticate frame-exact association, identify the mechanism, or extend
+confirmation to July/August.
+
+Follow-up source18209/18224/18239 overlays place the computed saved-alpha 0.5
+trace on the original Scene pixels, preserving every unmarked pixel. The
+inspected mottled corridor remains in the no-color and no-public-flow controls.
+The test-only `sampling` mode captures the same installed Scene at 2560x1440
+at those three sources. A fixed offline 2x2 area reduction reduces fine
+speckling but leaves the broader pattern. All 155 original artifacts over the
+31-source rerun remain byte-identical. This is sampling sensitivity, not a
+Studio-matching filter, a motion-quality verdict or a chosen seam fix.
+
+The follow-up test-only `sampling-sequence` retains all 61 sources and their
+original history, maps, alpha and color. It captures the exact Scene at
+5120x2880 and reduces each frame by a fixed 4x4 coded-RGBA area mean. All 305
+original artifacts remain byte-identical. Independent reduction of the retained
+high-resolution anchor and reconstruction of its raw RGBA hash pass. The muted
+current/control and control/Studio movies in the comparison directory's
+`april-sampling-sequence-02/` are for motion review, not a selected production
+filter or a proposal to render every live frame at 16x pixel count. The Studio
+half reuses the original A/B and its stated association/encoding limits.
+The owner watched current/control and reports "Those look the same". Record
+this as no useful visible improvement, not a candidate fix. It does not rule
+out all sampling mechanisms or establish a temporal-solver cause. The original
+moving Kjerag/Studio comparison remains the acceptance oracle.
+
+The follow-up drawing candidate is test-only: a 200x99-cell mesh connects the
+existing map nodes instead of the native 100x50-cell resampling. The April
+31-source Scene run leaves all packed maps, alpha and color ratios byte-exact;
+three lens-isolation anchors improve local zero-offset correspondence at eight
+of nine previously computed trace locations. Residual offsets remain and this
+is not a motion-quality verdict. The private review is
+`scratch/studio-seam-ab-20260908-01/april-map-node-mesh-01/map-node-mesh-vs-studio-loop-muted.mp4`:
+candidate left, existing Studio right, sources18209..18239 repeated six times
+at native cadence. The Studio pane inherits the original fixed registration,
+source-association and encoding limits. No new Studio export or fitted output
+correction was made. The owner watched it and reports "left has same issue".
+The candidate is rejected as the flicker fix and its test hook was removed.
+CPU/GPU topology and bounded ONE X2/August Scene tests passed before that
+verdict, but did not establish temporal quality; further candidate qualification
+was stopped. The installed app is unchanged. `docs/ROADMAP.md` records the
+diagnostic basis and rejected temporal controls.
+
+The next diagnostic is
+`scratch/studio-seam-ab-20260908-01/april-color-motion-control-01/current-vs-color-off-loop-muted.mp4`:
+current Kjerag left, the same sources with final color correction bypassed
+right. This reuses all 31 existing component-control frames, preserving source,
+geometry, alpha and cadence, and repeats the segment six times. On 2026-09-09
+the owner reports "no flicker just line" and explicitly confirms the right-hand
+no-color view is stable while current Kjerag left still flickers. This implicates
+photometric correction's contribution without identifying the remaining line's
+cause. It is not a proposed color-feature removal, a Studio comparison, or an
+isolation of coefficient timing by itself.
+
+The next moving discriminator is
+`scratch/studio-seam-ab-20260908-01/april-fixed-color-01/review/current-vs-fixed-color-loop-muted.mp4`:
+current Kjerag left, first-source color ratios held constant right. Both retain
+the same current source/geometry/alpha and ordinary producer history. All 155
+original artifacts remain byte-identical and the first fixed draw equals the
+same-consumer baseline exactly. This is a test-only time-invariant coefficient
+control, not a selected permanent freeze. On 2026-09-09 the owner confirms
+"yeah right free of flicker". This establishes that holding the correction
+coefficients removes the reported flicker in this comparison, not that Studio
+freezes or smooths them. The owner requested checking actual Studio update
+behavior before considering a proposed Kjerag-specific smoothing workaround;
+that unqualified draft was removed from the active code without a build or
+installation.
+
+## X4 Air broader smoothing report (2026-09-08, capture awaiting owner confirmation)
+
+```text
+/home/aeharding/Videos/Insta/VID_20260714_193252_00_006.insv time=1616.348 yaw=109.01 pitch=-1.50 fov=66.70 lock=1
+```
+
+This is a second, broader-smoothing report and is not assumed to have the same
+cause as the owner-confirmed April blotting defect. An initial native Scene
+capture completes for sources 48442..48472, 31 adjacent sources after the exact
+seek. Owner confirmation that this new capture shows the reported symptom is
+pending. The full source is now hash-verified on the Mac, and an actual Studio
+export covers this interval. Do not infer a shared cause or a fix merely from
+the report; see the direct comparison record below.
+
+## X4 Air third seam report (2026-09-08, capture awaiting owner confirmation)
+
+```text
+/home/aeharding/Videos/Insta/debug-inside/VID_20260814_145120_00_001.insv time=19.686 yaw=-142.64 pitch=-19.92 fov=114.41 lock=1
+```
+
+This is a third exact owner view. Its native Scene capture completes for sources
+590..620, and an actual Studio export covers the interval. Owner confirmation
+remains pending. Do not assume it differs from Studio or shares a cause with
+either earlier report. Direct Studio/Kjerag A/B comes before cause selection
+or a fix.
+
+### Direct comparison record for these three reports
+
+`scratch/studio-seam-ab-20260908-01/README.md` indexes the private source hashes,
+Studio projects/exports, registration manifests and muted A/B movies. Use the
+`april-direction-off-ab/`, `july-direction-off-ab/` and
+`august-direction-off-ab/` movies, with Kjerag left and Studio right. The initial
+Direction Lock ON July/August movies have a moving-view mismatch despite an
+aligned anchor, so their later frames cannot establish a seam difference.
+Direction Lock OFF, with stabilization and the original AI/Image Fusion settings
+retained, removes that large drift in the inspected samples. Full project diffs
+record only the lock change plus alias paths, generated identifiers/cache paths
+and timestamps. Aliases are hard links to verified original footage, not edited
+sources. This corrects the comparison settings, not the player.
+
+Studio's entire exported panorama receives one fixed rigid rotation per view;
+there is no per-frame, local, lens or FOV fit. The requested screen projection
+is retained, including August's existing curved projection above 110 degrees.
+Root inspected April 0/15/30/45/60 and July/August 0/15/30. Gross view
+correspondence holds, but residual framing and texture differences remain.
+Output association is index-derived from saved trims, not independently
+authenticated. The retained neighbor candidates do not bound uncertainty to
+one frame. Sampling/encoding differences are not isolated and the fitting
+bands were not proved seam-free. These are direct visual-review artifacts,
+not proof of seam parity or a chosen cause/fix. No production behavior changed.
+
+Historical pool instructions below describe retired behavior. Current work
+uses the factory/shared resident path as required by `MANDATES.md`.
+
 **A `seam=` on an acceptance line is `SeamPool::answer` over the pool this box held on the line's
 own date, and is never a knob-by-knob median of that pool.** The five knobs trade against each
 other inside one fit, so a middle taken knob by knob is a pose no capture ever asked for, and the
@@ -369,10 +531,16 @@ caveat in the Motion section, which is the same trap at a smaller size.
   seam. Stage 8's per-direction offset over wide support painted each direction's own noise along that
   direction's sweep. **Every acceptance statistic in this campaign straddles the seam and could not see
   it.** Any photometric work must now also pass the FIELD-INTERIOR COHERENCE metric
-  (`--bin colour`, the interior block): the applied correction sampled 4-60 deg OFF the seam on dark
+  (`--bin colour`, the interior block): the applied correction sampled 7-60 deg OFF the seam on dark
   content, binned by azimuth, reported as the rms of what a five-term harmonic cannot describe.
   Rejected build reads ROUGH 1.01%; nulls 0.000%; planted 0.5 and 2.0 code ripples read 2.07% and 8.27%.
   A correction that is smooth round the ring reads zero however large it is.
+  The current 7-degree inner boundary is the implemented rule documented in
+  seam-blending.md section 20; the old 4-degree wording above was stale.
+  Since 2026-09-08 the unchanged arithmetic lives in `kjerag_render::field_interior`,
+  shared by `colour` and the exact live-GPU ON/neutral Scene review. The older
+  numeric examples retain their original experiment scope, not a newly chosen
+  threshold for a different view or output path.
 
 ## Photometric: a green cast on the sun-facing lens (owner 2026-08-02, OPEN - stage 10 gate)
 - 2026-08-02 `VID_20260410_185407_00_004.insv time=594.027 yaw=-89.89 pitch=-62.95 fov=41.19 lock=1`

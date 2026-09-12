@@ -408,7 +408,30 @@ can identify a string by token count (MED, inferred from the fixture):
   terms**, i.e. a different and weaker camera model.
 
 The progression v1 to v2 to v3 is a progression in model richness, not
-just precision. Use `offset_v3`.
+just precision. Kjerag originally read only `offset_v3`; this is not a statement
+that Studio selects it on every camera. The later X4 analysis at commit
+`672f9f4f17e1633c29945e49c73279ff19e8990d`,
+`docs/research/studio-seam-re.md` sections 3.3 and 5.3, reads the selected
+Windows Studio 5.9.10 route choosing valid `offset_v6` (protobuf tag 111)
+before v3 and constructing the 13-coefficient `RadtanDistortPro` model.
+The owner's April X4 Air source contains that exact 523-byte, 56-token v6
+record, SHA-256
+`0950b9d7bb63fc131e698cf80cf81d7720a6cdae4d3f1c1f8514cba3e7fba3ef`,
+reverified directly from its indexed metadata on 2026-09-06. The later Mac
+6.0.2 captures independently establish model 6, the centered endpoint-scaled
+intrinsics and raw Template quaternions. Actual renderer source pixels also
+establish native record 0 as container stream 1 and record 1 as stream 0.
+The evidence is indexed in `studio-x4-video-reference-602.json`.
+
+Kjerag now parses optional `offset_v6` alongside v3. A v6 block has 27 fields:
+`xi, fx, fy, cx, cy, yaw, pitch, roll, tx, ty, tz`, thirteen coefficients,
+then `calib_w, calib_h, lensType`. V3 still owns the established IMU mounting,
+generic projection and camera key. The selected X4 parent uses v6, resolves
+its native calibration records to delivered stream order once, and applies a
+fixed body datum without fitting a clip. ONE X2 retains its established model-3
+path. The checked-in `x4air-offset-v6.txt` contains only this serial-free
+calibration string. Bounded actual-player sequence review shows the broad
+horizon defect improved; this does not establish whole-video Studio parity.
 
 ### 4.5 `offset` vs `original_offset`
 
@@ -943,6 +966,16 @@ gain was re-run at the same time and came back empty on a third capture and
 a later firmware: record 9 is 43280 samples of 48 bytes written once for
 the file, there is no second copy for the second lens, and no key of the
 record-1 protobuf is an exposure.
+
+**Record-9 global ISO decoded, 2026-09-10:** tracing Studio 6.0.2's actual
+denoiser metadata producer establishes a global ISO track in these 48-byte
+items. The value uses the word at offset 16, with a 19-bit shift, multiplication
+by 100 and a six-bit shift. Its time origin and 40-item prefix rule differ from
+the shutter tracks. This supplies automatic denoising inputs on both X4 Air and
+ONE X2; it still does not supply the missing per-lens gains or justify correcting
+colour from the shutter ratio. See `studio-denoise-iso-602.md` for the complete
+law, limits and file checks. The historical photometric conclusion above is
+unchanged.
 
 **And the ONE X2 does not carry the pair at all.** On
 `VID_20251018_191318_00_002.insv` the trailer holds records 1, 2, 3, 4, 5, 9

@@ -101,8 +101,10 @@ struct State {
     run: Option<Run>,
     /// Raised once a run outlasts [`STUCK_FOR`], and taken by the shell.
     raised: Option<Stall>,
-    /// Set when the bound trips and never cleared: this capture is over.
-    stopped: bool,
+    /// Set when the bound trips and never cleared: this capture is over. The
+    /// reason outlives `raised`, because another one-shot consumer may need
+    /// the same raw error after the shell has taken its alert.
+    terminal: Option<Stall>,
 }
 
 /// One unbroken run of failed imports: when it started, and how many frames
@@ -113,6 +115,25 @@ struct Run {
 }
 
 impl Stalled {
+    /// A deterministic drawing failure ended this capture immediately.
+    ///
+    /// Unlike [`Self::failed`], this is not a transient import failure and
+    /// therefore has no retry window. The failure's own message is handed to
+    /// the shell unchanged, the capture becomes terminal in the same call,
+    /// and later failures cannot replace or repeat it.
+    pub(crate) fn fail_now(&self, why: impl fmt::Display) {
+        let Ok(mut state) = self.0.lock() else {
+            return;
+        };
+        if state.terminal.is_some() {
+            return;
+        }
+        state.run = None;
+        let stall = Stall::new(why);
+        state.terminal = Some(stall.clone());
+        state.raised = Some(stall);
+    }
+
     /// One import failed.
     ///
     /// A capture that has already been given up on counts nothing and says
@@ -129,7 +150,7 @@ impl Stalled {
         let Ok(mut state) = self.0.lock() else {
             return;
         };
-        if state.stopped {
+        if state.terminal.is_some() {
             return;
         }
         let run = state.run.get_or_insert(Run {
@@ -143,15 +164,16 @@ impl Stalled {
         }
         let failures = run.failures;
         state.run = None;
-        state.stopped = true;
-        state.raised = Some(Stall::new(format!(
+        let stall = Stall::new(format!(
             "{failures} frames could not be imported over {:.1} s, last: {why}{}",
             lasted.as_secs_f64(),
             match has_frame {
                 true => "",
                 false => ", and no frame was ever shown, so the pane is empty",
             },
-        )));
+        ));
+        state.terminal = Some(stall.clone());
+        state.raised = Some(stall);
     }
 
     /// An import landed, so whatever run was in flight is over. Called on
@@ -177,7 +199,15 @@ impl Stalled {
     /// coming back. His way out is to open the file, which builds another
     /// `Scene` and another one of these.
     pub(crate) fn stopped(&self) -> bool {
-        self.0.lock().is_ok_and(|state| state.stopped)
+        self.0.lock().is_ok_and(|state| state.terminal.is_some())
+    }
+
+    /// The raw terminal reason, retained after [`Self::take`] consumes the
+    /// shell's alert. A still request is a separate one-shot consumer and
+    /// must receive the same failure rather than wait for a frame this
+    /// capture can no longer produce.
+    pub(crate) fn terminal(&self) -> Option<Stall> {
+        self.0.lock().ok()?.terminal.clone()
     }
 }
 
@@ -200,6 +230,66 @@ impl fmt::Debug for Stalled {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A deterministic failure has no useful retry. Its own line is ready for
+    /// the shell immediately and is not wrapped or rewritten here.
+    #[test]
+    fn a_deterministic_failure_stops_immediately_with_its_raw_error() {
+        let stalled = Stalled::default();
+
+        stalled.fail_now("ONE X2 stitch frames skipped from 41 to 43");
+
+        assert!(stalled.stopped());
+        assert_eq!(
+            stalled.take(),
+            Some(Stall::new("ONE X2 stitch frames skipped from 41 to 43"))
+        );
+        assert_eq!(stalled.take(), None);
+        assert_eq!(
+            stalled.terminal(),
+            Some(Stall::new("ONE X2 stitch frames skipped from 41 to 43"))
+        );
+    }
+
+    /// The immediate path may discover a deterministic error while imports
+    /// are already retrying. That old run cannot later manufacture a second
+    /// alert, even if an import lands after shutdown has begun.
+    #[test]
+    fn an_immediate_stop_cancels_a_transient_run_and_never_rearms() {
+        let stalled = Stalled::default();
+        let start = Instant::now();
+        stalled.failed(start, "EMFILE", true);
+
+        stalled.fail_now("ONE X2 stitch state rejected frame zero");
+        stalled.landed();
+        assert!(stalled.stopped());
+        assert_eq!(
+            stalled.take(),
+            Some(Stall::new("ONE X2 stitch state rejected frame zero"))
+        );
+
+        stalled.failed(start + STUCK_FOR, "EMFILE", true);
+        stalled.fail_now("replacement error");
+        assert!(stalled.stopped());
+        assert_eq!(stalled.take(), None);
+    }
+
+    /// Clones are the pipeline/scene handoff, so an immediate stop observed
+    /// through either handle must still be one terminal event for one open.
+    #[test]
+    fn an_immediate_stop_is_shared_by_every_handle() {
+        let pipeline = Stalled::default();
+        let scene = pipeline.clone();
+
+        pipeline.fail_now("ONE X2 stitch map could not be built");
+
+        assert!(scene.stopped());
+        assert_eq!(
+            scene.take(),
+            Some(Stall::new("ONE X2 stitch map could not be built"))
+        );
+        assert_eq!(pipeline.take(), None);
+    }
 
     /// A hiccup: half a second of failures, then the imports land again.
     /// Nothing is said, because nothing is wrong any more.

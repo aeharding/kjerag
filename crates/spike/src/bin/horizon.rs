@@ -64,13 +64,11 @@ fn main() -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
 
-    // An instrument has no stored calibration to read: the app keeps that in
-    // its own config, and this is not the app. So the seam is fitted off this
-    // file, which is what every instrument did before the calibration moved
-    // to the camera (issue #48).
+    // An instrument has no stored calibration to read, and this is not the
+    // app. It draws the factory calibration, the parity base: the per-capture
+    // seam fit was the non-parity mechanism and is gone (issue #48, 2026-08-15).
     let mut scene = Scene::still(&options.input, options.at())?;
-    scene.fit_seam(true);
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let target = Offscreen::new(&gpu.device, options.size, FORMAT);
     let aspect = options.size.width as f32 / options.size.height as f32;
     let mut runs: Vec<Vec<Option<Skyline>>> = vec![Vec::new(); variants.len()];
@@ -665,14 +663,12 @@ fn conventions_against_the_picture(
 ) -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
-    // An instrument has no stored calibration to read: the app keeps that in
-    // its own config, and this is not the app. So the seam is fitted off this
-    // file, which is what every instrument did before the calibration moved
-    // to the camera (issue #48).
+    // An instrument has no stored calibration to read, and this is not the
+    // app. It draws the factory calibration, the parity base: the per-capture
+    // seam fit was the non-parity mechanism and is gone (issue #48, 2026-08-15).
     let mut scene = Scene::still(&options.input, options.at())?;
-    scene.fit_seam(true);
     scene.set_horizon(Horizon::Free);
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let target = Offscreen::new(&gpu.device, options.size, FORMAT);
     let aspect = options.size.width as f32 / options.size.height as f32;
 

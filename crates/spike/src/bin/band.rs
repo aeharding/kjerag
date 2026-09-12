@@ -179,7 +179,7 @@ fn play(
 fn field(options: &Options) -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let reads = play(&gpu, options, &mut pipeline, |_, _| Ok(()))?;
 
     let last = reads.last().expect("play returns at least one frame");
@@ -669,7 +669,7 @@ fn stepped_by(reads: &[Read], at: impl Fn(&Read, usize, usize) -> f64) -> (f64, 
 fn trace(options: &Options) -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let reads = play(&gpu, options, &mut pipeline, |_, _| Ok(()))?;
     let last = reads.last().expect("play returns at least one frame");
 
@@ -1064,7 +1064,7 @@ struct Step {
 fn snap(options: &Options) -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let mut reads = play(&gpu, options, &mut pipeline, |_, _| Ok(()))?;
     // Kept before the plant goes in, so the run can be attributed twice and
     // the plant's own contribution read as the difference rather than as a
@@ -2244,7 +2244,7 @@ const FIRM: f32 = 0.80;
 fn over_time(options: &Options) -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let mut scene = Scene::still(&options.input, options.at())?;
     scene.set_horizon(match options.lock {
         true => Horizon::Locked,
@@ -2406,7 +2406,7 @@ fn cost(options: &Options) -> Fallible<()> {
     println!("gpu:    {}", gpu.name);
     let mut taken: Vec<(u32, Vec<f64>)> = Vec::new();
     for repeats in [1u32, 1 + REPEATS] {
-        let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+        let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
         let mut scene = Scene::still(&options.input, options.at())?;
         scene.set_horizon(match options.lock {
             true => Horizon::Locked,
@@ -2497,7 +2497,7 @@ const REPEATS: u32 = 16;
 fn sequence(options: &Options) -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     let out = options.out();
     std::fs::create_dir_all(&out)?;
     let stem = options.stem();
@@ -2525,7 +2525,7 @@ fn render(options: &Options) -> Fallible<()> {
     // The same frame both ways, so the two differ by the band and by nothing
     // else: same file, same instant, same run length, same pass, two opens.
     let draw = |off: bool| -> Fallible<Read> {
-        let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+        let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
         let mut options = options.clone();
         options.off = off;
         let mut reads = play(&gpu, &options, &mut pipeline, |_, _| Ok(()))?;
@@ -2689,7 +2689,8 @@ struct Options {
     /// the same calibration, and until stage 6 this instrument always fitted
     /// the file while `--bin seam mode=residual` always took the factory
     /// numbers, so the two were read side by side across two different
-    /// calibration paths (docs/research/seam-two-axis.md).
+    /// calibration paths (docs/research/seam-two-axis.md). The default is now
+    /// `factory`, the parity base; a fit is pasted in as `seam=roll:..,yaw:..`.
     seam: Seam,
 }
 
@@ -2711,10 +2712,10 @@ impl Options {
             save: None,
             region: [0, 0, 0, 0],
             arc: (93.0, 125.0),
-            seam: Seam::File,
+            seam: Seam::Factory,
             plant: Plant::None,
         };
-        let mut seam = String::from("file");
+        let mut seam = String::from("factory");
         for arg in args {
             match arg.split_once('=') {
                 None => options.input = PathBuf::from(arg),
@@ -2763,11 +2764,9 @@ impl Options {
         if options.input.as_os_str().is_empty() {
             return Err(USAGE.into());
         }
-        // Deferred out of the loop because `seam=pool` is resolved against the
-        // file and the file may be named anywhere on the line, but resolved
-        // before the rest of the checks so a bad `seam=` is still the first
-        // thing a bad line is told about.
-        options.seam = Seam::parse(&seam, &options.input)?;
+        // Resolved before the rest of the checks so a bad `seam=` is still the
+        // first thing a bad line is told about.
+        options.seam = Seam::parse(&seam)?;
         Ok(options)
     }
 
@@ -2804,4 +2803,4 @@ const USAGE: &str = "usage: band <file.insv> [mode=field|trace|sequence|render|c
      [count=frames] [yaw=deg] [pitch=deg] [fov=deg] [size=px] [lock=0] [control=1] [off=1] \
      [out=dir] [save=state.txt] [box=x,y,w,h] \
      [plant=none|cell:<cell>:<deg>|commit:<frame>:<deg>|arrive:<cell>:<frame>|hold:<frame>|still] \
-     [seam=factory|file|pool|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9]";
+     [seam=factory|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9]";

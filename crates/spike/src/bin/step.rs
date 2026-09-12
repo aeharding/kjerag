@@ -13,19 +13,16 @@
 //! # the owner's own view line, plus how the state was reached
 //! cargo run --release -p kjerag-spike --bin step -- <file.insv> \
 //!   time=2.836 yaw=111.83 pitch=4.12 fov=20.00 lock=1 warm=2.0 \
-//!   seam=pool
+//!   seam=factory
 //! # the same view with the band held off, which is stage 1's own picture
 //! cargo run --release -p kjerag-spike --bin step -- <file.insv> ... off=1
 //! ```
 //!
-//! **The `seam=` there was a literal string until 2026-08-07, and it was the
-//! wrong pose.** It said `roll:0.577,yaw:-2.077,pitch:-0.936,cx:-9.53,cy:-11.91`,
-//! which is the knob-by-knob median of the owner's pool and no member of it:
-//! the combination `SeamPool::answer` stopped shipping on 2026-08-05
-//! (docs/research/seam-two-axis.md 4), so the app had not drawn it since.
-//! `seam=pool` asks for the pose the app draws rather than copying it, and a
-//! run prints the five knobs it applied. **Nothing recorded below has been
-//! re-read at the drawn pose.**
+//! **`seam=pool` in that line is gone** (2026-08-15): the per-capture pool was
+//! the non-parity mechanism and was removed, so the app now draws the factory
+//! calibration. `seam=factory` is what it draws; a specific fit is pasted in as
+//! `seam=roll:..,yaw:..,pitch:..,cx:..,cy:..`, and a run prints the five knobs
+//! it applied. **Nothing recorded below has been re-read at the factory pose.**
 //!
 //! **That `yaw` is re-derived and a stale one runs without a word.** The lock
 //! became world-fixed on 2026-08-06, so the frame a `lock=1` yaw is measured
@@ -159,7 +156,7 @@ fn main() -> Fallible<()> {
     let gpu = Gpu::open()?;
     println!("gpu:    {}", gpu.name);
 
-    let mut pipeline = ScenePipeline::new(&gpu.device, FORMAT);
+    let mut pipeline = ScenePipeline::new(&gpu.device, &gpu.queue, FORMAT);
     pipeline.hold_band(options.off);
     let mut scene = Scene::still(&options.input, options.start())?;
     scene.use_table(options.table);
@@ -846,10 +843,10 @@ impl Options {
             off: false,
             guard: GUARD_DEG,
             trace: false,
-            seam: Seam::File,
+            seam: Seam::Factory,
             out: None,
         };
-        let mut seam = String::from("file");
+        let mut seam = String::from("factory");
         for arg in args {
             match arg.split_once('=') {
                 None => options.input = PathBuf::from(arg),
@@ -872,11 +869,9 @@ impl Options {
         if options.input.as_os_str().is_empty() {
             return Err(USAGE.into());
         }
-        // Deferred out of the loop because `seam=pool` is resolved against the
-        // file and the file may be named anywhere on the line, but resolved
-        // before the rest of the checks so a bad `seam=` is still the first
-        // thing a bad line is told about.
-        options.seam = Seam::parse(&seam, &options.input)?;
+        // Resolve the override before the remaining validation so an invalid
+        // `seam=` is the first thing a bad line is told about.
+        options.seam = Seam::parse(&seam)?;
         Ok(options)
     }
 
@@ -915,5 +910,5 @@ impl Options {
 
 const USAGE: &str = "usage: step <file.insv> [time=seconds] [warm=seconds] [yaw=deg] \
      [pitch=deg] [fov=deg] [size=px] [lock=0] [off=1] [guard=deg] [trace=1] \
-     [table=table.txt] [seam=factory|file|pool|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9] \
+     [table=table.txt] [seam=factory|roll:0.8,yaw:-2.3,pitch:-0.9,cx:-3.3,cy:-11.9] \
      [out=name.png]";
