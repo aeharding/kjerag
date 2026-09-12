@@ -900,33 +900,6 @@ impl InstalledGpuMapBinding {
         })
     }
 
-    /// Populate one compact-panorama vertex cache from this exact installed
-    /// map. The packed and alpha buffers remain private to their installed
-    /// owner; only the opaque cache result crosses this boundary.
-    pub(super) fn prepare_compact_vertex_cache(
-        &self,
-        expected_frame: &FrameStamp,
-        pipeline: &crate::direct_type2::DirectType2Pipeline,
-        device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
-    ) -> Fallible<crate::direct_type2::panorama::nv12_vertex_cache::Prepared> {
-        if &self.frame != expected_frame {
-            return Err("resident compact vertex cache map names a different source frame".into());
-        }
-        if self.context.device() != device {
-            return Err(
-                "resident compact vertex cache belongs to a different graphics device".into(),
-            );
-        }
-        pipeline.ensure_device(&self.context)?;
-        pipeline.vertex_cached_compact_nv12().prepare(
-            device,
-            encoder,
-            &self.packed,
-            &self.statics.alpha,
-        )
-    }
-
     pub(super) fn matches_root(
         &self,
         root: &super::resident_frame_gpu::GpuResidentIdentity,

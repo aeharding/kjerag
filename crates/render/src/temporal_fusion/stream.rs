@@ -138,7 +138,7 @@ impl Stream {
         )
     }
 
-    /// Performance/quality review candidate. The original source remains
+    /// Selected live correction field. The original source remains
     /// full resolution; only the correction uses this five-level field. This
     /// changes angular block support; ROADMAP records scoped owner acceptance.
     pub(crate) fn new_quarter_resolution_review(
@@ -204,7 +204,7 @@ impl Stream {
         self.remember_failure(result)
     }
 
-    /// Gamma-RGB ingestion retained by the explicit correction candidate.
+    /// Gamma-RGB ingestion used by the selected correction stream.
     pub(crate) fn push_rgb(
         &mut self,
         body: impl Into<RgbPanorama>,

@@ -4,6 +4,11 @@ Current checkpoint: 2026-09-12. PR #183 targets `main`; no merge or release has
 been performed. This page summarizes the cumulative delivery without requiring
 reviewers to reconstruct the chronological experiment log in ROADMAP.
 
+The active owner goal includes cleanup, merge and release. The living roadmap
+is now separated from its verbatim [historical record](ROADMAP-HISTORY-20260912.md),
+with a [research navigation index](research/README.md). Known native/Flatpak
+performance differences are tracked in [issue #186](https://github.com/aeharding/kjerag/issues/186).
+
 ## Accepted tradeoffs
 
 - The owner accepts the installed branch player: "looks good. not perfect but
@@ -51,6 +56,13 @@ against the remote on 2026-09-12. There are no main-only commits to integrate.
 Keep the tested runtime intact rather than reorder its dependent implementation
 commits. Preparation changes documentation, store description and ignores for
 local build/Python caches, not player code, shaders or dependency versions.
+
+The subsequent cleanup removes unreachable resident vertex-cache bridges and
+restricts that cache's module, pipeline state and shader builders to tests.
+Its full-field reference and comparison consumers remain. No selected shader,
+filter weight, source cadence, correction chart or scheduling rule changes;
+this reduces unused production surface, not a claimed speedup. Obsolete module
+comments are corrected to describe the selected GPU/temporal path.
 
 ## Exact owner-tested package
 
@@ -100,14 +112,20 @@ consistency, rename, five harness-startup checks, 14 controls-log tests,
 AppStream validation and the metadata tests with libav discovery disabled.
 Logs are in `scratch/merge-readiness-20260912/radeon-01/`.
 
+The final cleanup tree passes the same complete gate set: 1,496 workspace tests,
+52 explicitly ignored, and every ancillary check above. Its separate logs are
+`scratch/merge-readiness-20260912/cleanup-final-01/`. This includes the test-only
+vertex-cache restriction and removal of its unreachable production bridges.
+
 The first restricted-sandbox test run selected llvmpipe software rendering and
 failed 38 GPU checks. Its log is retained, not erased or called a pass. The
 successful rerun requires Radeon Vulkan explicitly (`KJERAG_REQUIRE_GPU=1`,
 `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json`, `WGPU_BACKEND=vulkan`)
 with serial tests. No runtime code or assertions were changed. Existing
 vendored dependency warnings remain; workspace Clippy exits successfully.
-Both-architecture GitHub CI must pass on the updated PR, not its older green
-commit. Release uses the existing hardware-independent CI policy; software-GPU
+Both-architecture GitHub CI passes on preparation head `fc0e6775` in run
+`34676341245`, all six jobs green. Later cleanup heads require their own CI.
+Release uses the existing hardware-independent CI policy; software-GPU
 arithmetic compatibility is not established by the Radeon qualification.
 
 ## Remaining scope and release plan
@@ -125,8 +143,9 @@ arithmetic compatibility is not established by the Radeon qualification.
 - Current tests bound the reported defects; they do not prove absence of every
   hitch, seam artifact, noisy patch or moving-detail difference.
 
-Recommend the next feature release as **0.3.0**. Do not bump the version or
-create a tag in this preparation PR. After explicit merge/release authorization,
+The active owner goal now explicitly includes cleanup, merge and release.
+The next feature release is **0.3.0**. Do not bump the version or create a tag
+in the preparation PR. After final cleanup gates,
 merge through PR, run the documented cargo-release dry run on clean main with
 real footage, then execute the minor release. The tag starts public bundle and
 signed-channel publication. Qualify the resulting x86_64 release bundle inside

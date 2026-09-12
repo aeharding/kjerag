@@ -1,12 +1,13 @@
 //! Studio-derived optical-flow seam estimators and their coordinate contracts.
 //!
 //! Two evidence domains live here and must not share an untyped payload. The
-//! existing Scene still runs the audited Windows/legacy belt through [`dis`],
-//! [`compose`] and [`Cadence`]. Native Mac Studio 6.0.2's selected ONE X2 VIDEO
+//! legacy route uses the audited Windows belt through [`dis`], [`compose`]
+//! and [`Cadence`]. Native Mac Studio 6.0.2's selected ONE X2 VIDEO
 //! route instead uses the 1080-row by 60-column narrow field in [`one_xs`],
 //! with its captured-staging-to-solver reduction closed in [`one_xs_belt`].
-//! The ONE X2 route is wired into ordinary playback as a capture-owned,
-//! sequential source-to-map transaction.
+//! The resident route is wired into ordinary ONE X2 and X4 Air playback as a
+//! shared, capture-owned GPU source-to-map transaction with camera-specific
+//! calibration inputs. Legacy and readable reference routes remain distinct.
 //!
 //! **This module is the replacement for the deleted belt/strip scaffold.**
 //! Everything the old scaffold invented - a patch-NCC search, a ring solve,
@@ -67,9 +68,9 @@ pub mod one_xs;
 /// frame through its capture-owned producer.
 pub mod one_xs_belt;
 
-/// GPU producer for the selected ONE X2 solver belts. Production playback
-/// reads its compact exact output into the retained CPU estimator; its packed
-/// buffer is also the boundary for migrating that estimator stage by stage.
+/// GPU producer and capture facade for the shared resident stitcher. Production
+/// keeps its belts, estimator and final maps on the GPU; readable CPU consumers
+/// remain available to instruments and regression tests.
 pub(crate) use one_xs::one_xs_belt_gpu;
 
 /// Chunk 4, the composition the draw applies: the TWO separately-estimated DIS

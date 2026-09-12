@@ -1,10 +1,12 @@
 //! Motion-compensated fusion after stitching, not gradual color-map updates.
 //!
 //! The normalized law and explicit inputs are documented in
-//! `docs/research/studio-image-fusion-temporal-602.md`. This module owns no
-//! history policy: callers supply the current image, ordered references,
+//! `docs/research/studio-image-fusion-temporal-602.md`. The fusion primitive
+//! below owns no history policy: callers supply the current image, ordered references,
 //! motion/confidence textures and effective parameters. In particular it
 //! cannot substitute a stale map for a new source or infer a seek history.
+//! The `stream` and `correction_stream` modules own the selected live source
+//! history separately; readable full-resolution/reference paths remain available.
 //!
 //! Two ordinary render passes store Y/R8 and UV/RG8, preserving normalized
 //! 8-bit output without requiring optional narrow storage-texture formats.
@@ -42,7 +44,7 @@ pub mod settings;
 
 pub(crate) mod stream;
 
-/// Explicit half-resolution temporal-correction candidate, not selected playback.
+/// Selected reduced-resolution temporal correction with source-exact controls.
 pub(crate) mod correction_stream;
 
 pub(crate) mod packed;

@@ -11,7 +11,7 @@
 //! Unlike Studio's selected serial controller, every block reads left, up and
 //! diagonal predictors from one immutable interpolated seed grid. It performs
 //! no bad-block count, uneven multi-hexagon search or cross-block mutation.
-//! This is a disclosed Kjerag execution candidate, not a Studio-parity claim.
+//! This is the selected Kjerag execution strategy, not a Studio-parity claim.
 
 use super::{pyramid::Level, search::FinestInput};
 use std::fmt;

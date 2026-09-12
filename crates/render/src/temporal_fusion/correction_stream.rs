@@ -1,8 +1,8 @@
 //! Reduced temporal correction ownership, without a display policy.
 //!
-//! This candidate keeps the existing seven-source cadence and motion/fusion
-//! laws over an explicit reduced field. The quarter-field review candidate
-//! uses five real levels. Each output carries the exact
+//! The selected live path keeps the seven-source cadence and motion/fusion
+//! laws over an explicit reduced field with five real levels.
+//! Each output carries the exact
 //! unfiltered RGB/NV12/RGB control for its filtered source. It does not own a
 //! high-resolution source snapshot, interpolate fields, or select playback.
 
@@ -49,7 +49,7 @@ impl CorrectionFrame {
     }
 }
 
-/// Sequential owner for the explicit reduced-resolution correction candidate.
+/// Sequential owner for the selected reduced-resolution temporal correction.
 pub(crate) struct CorrectionStream {
     device: wgpu::Device,
     queue: wgpu::Queue,

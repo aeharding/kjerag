@@ -1,7 +1,8 @@
-//! Body-equirect materialization and locked-view reprojection.
+//! Source-stamped panorama materialization and view reprojection.
 //!
-//! This path stays RGB. It deliberately does not choose the
-//! still-unread RGB-to-NV12 conversion needed by the temporal filter.
+//! The selected correction producer supplies a world-coordinate RGB panorama;
+//! body-fixed RGB references remain separate. Temporal consumers own their
+//! explicit RGB/NV12 conversion, and the compact NV12 route has its own producer.
 
 #[cfg(test)]
 use wgpu::util::DeviceExt;
@@ -12,6 +13,8 @@ use crate::{Extent, Fallible, FrameStamp, Size};
 #[cfg(test)]
 pub(crate) mod correction_review;
 pub(super) mod nv12;
+// Retain the rejected cache as a test-only full-field comparison oracle.
+#[cfg(test)]
 pub(crate) mod nv12_vertex_cache;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
