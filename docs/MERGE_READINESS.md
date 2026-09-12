@@ -1,6 +1,7 @@
 # GPU stitching delivery: merge and release review
 
 Current checkpoint: 2026-09-12. PR #183 is merged and 0.3.0 is published.
+Packaging-only PR #188 is also merged; 0.3.1 is published.
 Release qualification remains open because high-rate X4 playback falls behind
 in both the release and a restored accepted-build control. This page
 records the cumulative delivery without requiring reviewers to reconstruct
@@ -54,11 +55,12 @@ color-update policy is selected.
   licenses and provenance. Readable reference implementations, regression tests
   and research records are retained; personal video evidence stays untracked.
 
-The branch is based on main `67c7fea25ec57c0eb6e8d6d63940e9d63303dd67`, verified
-against the remote on 2026-09-12. There are no main-only commits to integrate.
-Keep the tested runtime intact rather than reorder its dependent implementation
-commits. Preparation changes documentation, store description and ignores for
-local build/Python caches, not player code, shaders or dependency versions.
+Before merge, the delivery branch was based on main
+`67c7fea25ec57c0eb6e8d6d63940e9d63303dd67`, verified against the remote on
+2026-09-12, with no main-only commits to integrate. The tested implementation
+commits were retained in order. Preparation changed documentation, store
+description and ignores for local build/Python caches, not player code,
+shaders or dependency versions.
 
 The subsequent cleanup removes unreachable resident vertex-cache bridges and
 restricts that cache's module, pipeline state and shader builders to tests.
@@ -253,12 +255,13 @@ metainfo, but no `LICENSE` file. The GitHub bundle's newer builder automatically
 records the source license; the separate signed-channel builder does not. The
 shared manifest now explicitly installs the repository's `LICENSE` into
 `/app/share/licenses/dev.harding.Kjerag/kjerag/LICENSE`. This packaging-only fix
-is pending a follow-up PR and release; it does not retroactively change 0.3.0.
-The next published package must be checked for that exact file and content.
-The local Builder successfully resolves the updated manifest; staging its
+landed in PR #188 and shipped in 0.3.1; it does not retroactively change 0.3.0.
+Both actual 0.3.1 payload checks are recorded below. Before publication, the
+local Builder successfully resolved the updated manifest; staging its
 actual license-install command produces a byte-identical copy of `LICENSE`
 (`0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0`).
-This is a manifest/command check, not a newly published-package pass.
+That staging receipt is a pre-publication manifest/command check, distinct from
+the subsequent actual-package verification.
 
 The follow-up tree's unchanged Rust code passes the complete local gates in
 `scratch/merge-readiness-20260912/release-record-gates-01/`: 1,496 workspace
@@ -269,6 +272,110 @@ The permanent release hook regenerates and checks offline sources, but now
 stops if the result differs from the reviewed commit. A generator change must
 land through a normal PR; it cannot silently enter an automatic release commit.
 A failed dry run can leave that generated diff for inspection.
+
+### Packaging-only 0.3.1
+
+PR #188 merged at `4b3bcbf1d4fe618ee31f8e6c87df7cb0f1f3327b` after independent
+review and all six CI checks in run `34681640290` on exact head `9f984443`.
+This merge explicitly uses the mandated `noreply@harding.dev` author address.
+Tag `0.3.1` names `1fb97b124dd33b507621080ad649d0aa86c14080`, also authored and
+committed with that address. The ordinary dry run and execution each pass 47
+native real-footage UI checks, including the new generated-source guard. No
+generated-source difference was accepted; offline sources remained identical.
+Release receipts are in `scratch/release-0.3.1-20260912/`.
+All ten jobs in release workflow `34682255167` pass, including both bundles
+and both signed-channel publications. Signed metadata authenticates both app
+refs and advertises both architectures' AppStream refs. The x86 AppStream
+client update succeeds and reports 0.3.1; ARM client playback remains untested.
+
+No Rust runtime code or shader changes between 0.3.0 and 0.3.1. The patch adds
+explicit license installation, documents qualification and hardens the release
+hook, with the usual workspace version and metainfo date changes.
+
+Both downloaded bundles match their published SHA256 sidecars and GitHub API
+asset digests:
+
+- x86_64 bundle: `e0ac8706c6ac1aeda6e26b2aaf3ff5dd8e806201540ee8831765fb4523e332a9`.
+- aarch64 bundle: `67d69b43fae5ced22a4bb461b559d5d80831083536e4c12df0fd4170f0bbfecd`.
+- Installed x86_64 bundle OSTree: `45a20e8dd939d5d12fe40aee7ca2bb977b9d4952cf6e4617129fc48ee12615b1`.
+- Its executable: `dd2c4c819313d8e887e624b3add083d5f714f92ebaa658f85469869ae479dcbd`.
+
+The installed download's explicit license file is byte-identical to the source
+`LICENSE`, with the expected SHA256 recorded above. Its unsigned bundle cannot
+replace the signed-origin deployment using `--reinstall`: the client correctly
+refused it for missing GPG signatures, leaving 0.3.0 intact. Qualification then
+removed only the exact app deployment, preserving settings and runtimes, and
+installed the bundle under its generated local origin. Signed-channel
+verification was never disabled. The actual installed bundle passes 40 X4 and
+44 ONE X2 UI checks, with both reported-view PPMs byte-for-byte equal to the
+owner-accepted package. Its receipt is
+`scratch/merge-readiness-20260912/release-031-bundle-ui-01/`.
+
+The final installed app is back on the signed public `kjerag` origin:
+
+- x86_64 OSTree: `b7ac816e7d8e6f80ea858fe09ab5d316ac5aaf23ea064a3ae6d62156ed8ea983`.
+- Executable: `b25ff421de8fe42629002ef08d636abfcd6d133c86516e8571fe84c98c6db54e`.
+- Published aarch64 app ref: `284d4adb79402d8e17dfd1e826c39a9b3392e59a1cfcdf82ac2e916c391a03aa`.
+
+Its actual installed license also matches the source LICENSE byte-for-byte.
+Its separate installed qualification passes 40 X4 and 44 ONE X2 UI checks,
+with both reported-view PPMs byte-for-byte equal to the accepted package.
+This result is measured, not inherited from the download or 0.3.0. Receipt:
+`scratch/merge-readiness-20260912/release-031-channel-ui-01/`. The documented
+isolated sound-device and import-fault skips still apply; the shader check uses
+the native twin. Both routes' metadata is byte-identical to the corresponding
+0.3.0 route, preserving permissions and runtime branch. The accepted test bundle
+remains available for rollback.
+
+Future unification of the two builds is already tracked in issue #146, now with
+the measured license and unsigned-reinstall failures. It is not part of this
+patch. Issue #186 was inadvertently auto-closed when GitHub parsed a negated
+closing phrase in PR #188; it has been reopened and the phrase corrected.
+The performance defect was not fixed or accepted.
+
+Final signed 0.3.1 capacity checks use the same authenticated process/source
+completion harness, 2256x1504 output, 40-second pan and active null-sink audio:
+
+| Camera / requested view rate | Completed redraws/s | Source advances/s | Completion p99 / max |
+| --- | ---: | ---: | ---: |
+| X4 Air / 300 Hz | 258.199 | 27.075 | 14.757 / 21.956 ms |
+| ONE X2 / 300 Hz | 314.999 | 29.975 | 10.971 / 24.469 ms |
+| X4 Air / 60 Hz | 62.375 | 29.975 | 30.465 / 32.403 ms |
+
+All traces are valid, with consecutive source advances and no reported drops,
+starvation or audio underruns. X4 high-rate playback accumulates 3.83 seconds
+of lag and fails the combined target; ONE X2 advances 1,199 sources at full
+cadence. The X4 normal-refresh control also advances 1,199 sources at full
+cadence, with worst reported lateness 17.1 ms. Completion spacing in a 60 Hz
+test is not a 240-capacity verdict; these results do not establish physical
+scanout or hitch-free playback. Receipts are
+`scratch/installed-capacity/release-031-channel-{x4,x2}-01/` and
+`scratch/installed-capacity/release-031-channel-x4-60hz-01/`.
+
+Functional package qualification is complete. The capacity/handoff decision
+remains open in #187, with the actual performance defect in #186. The final
+documentation-only handoff changes no runtime, shader or dependency; it does
+not require a further tag or transfer the historical capacity successes into
+a current unconditional pass.
+
+### Bounded performance diagnosis, not a fix
+
+The signed 0.3.0 X4 lifecycle run reproduces lag at 233.199 completed redraws/s
+and 28.350 source advances/s. UI redraw-event age stays below 0.056 ms p99,
+while the consecutive stitch-worker start interval averages 35.32 ms. The
+composite start-to-panorama span rises from roughly 10 to 12 ms before changing
+view to 32.68 ms mean during it; temporal filtering also becomes slower.
+
+A 60 Hz view-mode control with the same 1,000 Hz mouse input maintains 29.950
+source advances/s, with worst reported lateness 17.2 ms. Start-to-panorama
+falls to 13.39 ms mean, and start-to-complete from 51.66 to 27.82 ms. This
+implicates view-work contention rather than raw mouse-event starvation. These
+composite timers cannot split GPU/driver waiting from CPU import/encoding, and
+the instrumentation and variable host conditions prevent calling differences
+between cohorts a controlled speedup. Normal-refresh headless functionality is
+not physical scanout, absence of hitches, or completion of the 240-capacity goal.
+The saved interpretation is
+`scratch/merge-readiness-20260912/release-030-x4-lifecycle-classifier.md`.
 
 Release notes describe:
 

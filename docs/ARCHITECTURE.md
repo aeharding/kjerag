@@ -11,7 +11,7 @@ crates/app      kjerag         libcosmic shell + window. The view is an
                                `iced::widget::shader` around a Scene, and
                                the mouse reaches it through that widget.
 crates/render   kjerag-render  wgpu: dmabuf import, final WGSL pass (NV12 ->
-                               RGB + projection); selected ONE X2 compact GPU
+                               RGB + projection); shared ONE X2/X4 Air GPU
                                luma sampling, sparse PIS, retained state, dense
                                map construction and direct resident draw;
                                camera state and offscreen screenshot rendering
@@ -86,7 +86,7 @@ The shell is libcosmic, which pins wgpu 28, so `render` is written against
 28 and owns the one module that wgpu 30 would delete
 (`crates/render/src/dmabuf.rs`).
 
-The installed test build draws full-resolution prefiltered source/map
+The shipped player draws full-resolution prefiltered source/map
 samples with a reduced full-sphere temporal residual. The owner accepted the607
 quarter-field and subsequent prefilter moving comparisons, with exact responses
 recorded in ROADMAP; this is not broad footage or live smoothness acceptance. The two
@@ -97,7 +97,7 @@ views use the existing native mesh; curved views use the existing body-ray map.
 Correction textures extend picture group0, retaining map group1 and colour
 group2 within the native three-group limit. Pipelines cache by surface format.
 
-The installed branch test build materializes the selected temporal input in canonical
+The shipped player materializes the selected temporal input in canonical
 world coordinates, before filtering, for the1147 moving-line report. The owner
 accepts both the stabilized-input diagnostic and, on2026-09-12, the installed
 player ("looks good. not perfect but pretty damn good"). That exact package
@@ -672,9 +672,11 @@ module names remain available for comparison.
 
 Studio's Chromatic Calibration means photometric lens color/brightness
 matching. The shared resident capture applies it at the geometrically aligned
-source-sampling/fusion boundary. This automatic branch implementation is under
-qualification, not owner-accepted Studio parity. The old projection path's
-unaligned color estimator is not reused as a parity implementation.
+source-sampling/fusion boundary. The shipped automatic implementation is included
+in the owner-accepted installed-player result on the named footage. Exact
+isolated Studio Image Fusion parity remains open in issue #185. The old
+projection path's unaligned color estimator is not reused as a parity
+implementation.
 
 `field_interior` is a shared CPU diagnostic, not an estimator or playback step.
 It contains the existing dark-field coherence arithmetic previously private to
@@ -759,8 +761,9 @@ order for both. `FusionInputs::new_reference()` creates a matching cold CPU
 diagnostic with renderer-ordered outputs; `spatial::Reference::new()` remains
 the unconverted native replay boundary. Detached sampling replaces its cache
 when the admitted camera changes, and a seek preserves the camera conversion
-while resetting color history. The X4 correction is under moving-video owner
-review, not accepted parity; see `studio-image-fusion-temporal-602.md`.
+while resetting color history. The X4 correction is included in that reviewed
+installed result, not accepted as exact Studio parity; see
+`studio-image-fusion-temporal-602.md`.
 
 Existing sparse arithmetic, box
 reductions and trigonometric implementations are not claimed numerically
@@ -791,7 +794,7 @@ CG and box reductions use GPU float arithmetic. These disclosed implementation
 choices require real-output and playback-capacity qualification, not further
 optimization reverse engineering.
 
-The current photometric candidate writes the final ratio values into immutable
+The selected photometric implementation writes final ratio values into immutable
 RGBA32F textures in the existing remap pass. Hardware bilinear interpolation is
 selected only when optional full-f32 filtering is enabled on the device;
 otherwise the consumer uses explicit texture loads and wrap/clamp interpolation.
@@ -799,7 +802,8 @@ Saved-map CPU replay uses the same format and feature policy. Both the
 half-storage and due-source-priority trials were removed after they failed to
 improve the combined source-cadence and changing-view performance result.
 No half-precision storage or arithmetic remains. Full-f32 hardware interpolation
-rounding is separately qualified; this candidate is not owner-accepted.
+rounding is separately qualified; neither that arithmetic check nor whole-player
+visual acceptance establishes exact Studio parity.
 
 The full-f32 hardware consumer's adversarial fractional-UV test uses a
 separate half-of-one-8-bit-code bound; the explicit consumer retains `2e-6`.
@@ -807,7 +811,7 @@ On the test Radeon, their measured maxima are `0.00054196` and `1.79e-7`,
 respectively. The hardware maximum is at the synthetic map's discontinuous
 periodic join. Actual Scene comparisons retain their one-code-per-channel
 bound; none of these gates establishes whole-video or owner acceptance.
-The follow-up working-tree simplification publishes only those textures,
+The selected simplification publishes only those textures,
 removing two redundant 320,000-byte output buffers and their stores/bindings.
 The color producer needs eleven storage buffers instead of thirteen; the
 complete stitch path's fifteen-buffer requirement is unchanged. Explicit
@@ -815,19 +819,23 @@ diagnostics copy the exact texture texels into temporary padded staging and
 strip row padding. No live staging, readback or wait is added. All 51 color,
 three consumer and two actual-Scene checks pass. Across the two saved sequences,
 all 31 X4 and 61 X2 frames' pixels, packed maps, alpha and ratios remain
-byte-identical to the preceding implementation. Capacity qualification of this
-simplification shows no material gain: the next native run reaches only
+byte-identical to the preceding implementation. At that implementation
+checkpoint, capacity qualification showed no material gain: the next native run
+reached
 29.175 source fps and 239.20 changing commits/s on X4, while X2 reaches
 29.950/261.12. It removes duplicated publication, not the measured cadence
-defect. The owner's packaged review build is unchanged.
+defect. The owner's packaged review build was unchanged at that checkpoint;
+the later installed-player acceptance and current capacity limits are recorded
+at the top of this page and in ROADMAP.
 A bounded indexed-mesh trial preserved every triangle and all 460 saved frame
 artifacts, but did not produce a useful X4 gain: 29.475 source fps, 238.95 changing
 commits/s, commit p99/max 8.79/23.00 ms and still-growing lateness. X2 reached
 29.975/262.82, with p99/max 8.47/19.17 ms. Both strict pointer cohorts fail one
 source-less commit. The additional index-buffer code is rejected; the existing
 triangle draw is retained. Trial source and evidence remain in scratch.
-The retained texture-only implementation passes full gates (1,238 workspace
-tests, zero failures, 30 ignored) and 50 X4/54 ONE X2 native UI checks. The same
+At that implementation checkpoint, the retained texture-only implementation
+passed full gates (1,238 workspace tests, zero failures, 30 ignored) and
+50 X4/54 ONE X2 native UI checks. The same
 backward-seek and real mouse-scrubber checks now run on both named fixtures;
 earlier harness results covered those two interactions only on X2. These are
 correctness and interaction gates, not proof of uniform presentation timing.
@@ -1076,8 +1084,10 @@ Scene branches to this route before legacy prepare, import or draw. Admission
 and publication stay on the UI thread. The capture-shared worker now owns the
 whole computational transaction: the exact imported pair, existing GPU chain,
 final validity acknowledgement and unpublished temporal commit. This autonomous
-worker refactor is under qualification. Its bounded channel permits one active
-capture-service job and one queued job across capture restarts. A full channel
+worker is the selected production path. Current source-cadence and overall
+release qualification remain open in issues #186 and #187. Its bounded channel
+permits one active capture-service job and one queued job across capture
+restarts. A full channel
 does not authorize a source admission that has no worker to service it.
 UI preparation never waits for the worker or consumes an unfinished map.
 
@@ -1818,13 +1828,15 @@ on the X4 Air).
   correction. docs/research/insv-format.md 6.8 retains the measurements and
   transfer table; the selected ONE X2 route is the recovered type-2 map
   described above rather than a continuation of that fitting design.
-- **Exposure across the seam is still not corrected** (6.3), and when the
-  crossover was narrowed from 10 degrees to 2 there was less band to hide a
-  brightness step in. Measured then on the flattest, brightest content in this
-  footage, it did not become one: the luma profile across the seam is the same
+- The following legacy-seam exposure measurement predates the selected resident
+  path's automatic photometric matching; that older path did not correct lens
+  exposure (6.3). Exact Studio parity for the selected ONE X2/X4 matching remains
+  open in issue #185. When the legacy crossover narrowed from 10 degrees to 2,
+  there was less band to hide a brightness step in. Measured then on the flattest,
+  brightest content in this footage, it did not become one: the luma profile across the seam is the same
   ramp either way, 147.8 to 153.8 codes over 70 px before and 147.1 to 154.4
   after, because what differs between the two lenses there is vignetting
   inside each lens's own picture rather than a step at the handover. One view;
-  it is still the thing to look at first if a seam shows on flat sky. The
-  crossover is 8 degrees wide since 2026-08-05, which is band this reading was
-  not taken over.
+  it identified vignetting as a diagnostic lead, not proof about the current
+  photometric result. That crossover became 8 degrees wide on 2026-08-05,
+  a band this reading was not taken over.

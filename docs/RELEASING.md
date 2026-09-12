@@ -34,8 +34,8 @@ testing or tagging. Review and land that change through a normal PR first.
 Even a failed dry run can leave this generated diff in the checkout; inspect
 it rather than assuming a dry run cannot write files. Regeneration, source
 checking and UI testing were exercised by both the 0.3.0 dry run and execution
-using a one-off config. The default hook also guards against accepting an
-unexpected generated diff at release time.
+using a one-off config. The permanent hook, including its guard against an
+unexpected generated diff, passed both the ordinary 0.3.1 dry run and execution.
 
 `--execute` then bumps `[workspace.package] version`, refreshes `Cargo.lock`,
 stamps a dated `<release>` entry at the top of the metainfo's changelog,
@@ -86,6 +86,20 @@ already follows the signed public remote. Verify `flatpak info --show-origin`
 and the remote URL first: a scratch test origin does not follow the public
 channel. Record the installed OSTree commit and executable SHA256 for each
 route. Both install branch `stable`, so only one can be active per installation.
+
+The current GitHub bundle is unsigned. Installing it with `--reinstall` over
+an app owned by the signed channel fails GPG verification. Do not disable the
+channel's verification. For temporary bundle qualification, uninstall only
+`app/dev.harding.Kjerag/x86_64/stable` with `--user --no-related`, without
+`--delete-data`, then install the digest-verified bundle. Settings and runtimes
+remain; the bundle receives a local origin. After its tests, reinstall from
+the signed `kjerag` remote and verify the final origin and identity. Keep the
+previous verified package available for rollback throughout.
+
+Check the actual installed license payload on both routes:
+`/app/share/licenses/dev.harding.Kjerag/kjerag/LICENSE` must match the source
+`LICENSE`. The manifest installs it explicitly as of 0.3.1; automatic license
+collection differed between the two builders in 0.3.0.
 
 That last line is the release check. The dry run above proved a **binary**
 opens a window on this box; this proves the **bundle** plays real footage

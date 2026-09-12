@@ -31,7 +31,11 @@ on final cleanup head `2afef25c`, followed by 50 native X4 UI checks. Tag
 47 real-footage UI checks. All jobs in release workflow `34678413630` passed,
 and the GitHub bundles and signed channel are public. Post-publication package
 qualification remains open in [issue #187](https://github.com/aeharding/kjerag/issues/187);
-publication alone is not a completed qualification verdict.
+publication alone is not a completed qualification verdict. Packaging-only
+PR [#188](https://github.com/aeharding/kjerag/pull/188) then merged at `4b3bcbf1`
+after review and all six CI checks. Its **0.3.1** tag names `1fb97b12`; dry run
+and execution each passed 47 real-footage checks. All ten jobs in its release
+workflow `34682255167` passed; both downloads and the signed channel are public.
 
 The owner tested the installed Flatpak built from source
 `48e1d741f1bf7e7d8882624dff87754227bb8c7d` and accepted the actual branch
@@ -61,42 +65,31 @@ paths and are not release assets.
 
 ## Qualification summary
 
-The GitHub x86_64 bundle, whose executable hash begins `9a9241...`, installs and
-passes 40 X4 Air and 44 ONE X2 UI checks. Both reported-view PPMs are byte-for-byte
-identical to the owner-accepted `48e1d741` package. This verifies the tested
-paths and pictures, not the performance target.
+Both actual 0.3.1 x86_64 distribution routes independently pass 40 X4 Air and
+44 ONE X2 installed UI checks. Their reported views match the accepted
+`48e1d741` package byte-for-byte, and both include the exact source LICENSE,
+fixing the signed 0.3.0 omission. Permissions and runtime metadata are unchanged.
+The documented sandbox sound-device and import-fault skips still apply.
 
-At 2256x1504 over 40 seconds with the 300 Hz moving-view input, the published
-bundle measured:
+The signed 0.3.1 app is installed from the official GPG-verified channel. Its
+2256x1504, 40-second active-playback cohorts with 300 Hz requested view rate are:
 
-| Camera/run | Completed redraws/s | Source advances/s |
-| --- | ---: | ---: |
-| X4 Air, first | 255.174 | 27.175 |
-| X4 Air, repeat | 250.199 | 26.675 |
-| ONE X2 | 312.399 | 29.950 |
+| Camera | Completed redraws/s | Source advances/s | Completion p99 / max |
+| --- | ---: | ---: | ---: |
+| X4 Air | 258.199 | 27.075 | 14.757 / 21.956 ms |
+| ONE X2 | 314.999 | 29.975 | 10.971 / 24.469 ms |
 
-The X4 runs exceed 240 redraws/s but do not sustain full source cadence. A
-restored run of the exact owner-accepted `48e1d741` package likewise measured
-254.899 redraws/s and 27.225 source advances/s; a 250 Hz control measured
-232.049 and 27.150. The current slowdown is therefore not proven to be a 0.3.0
-code regression, but neither the published X4 package nor the restored accepted
-package currently qualifies the combined 240-redraw/full-source target.
+X4 exceeds 240 redraws/s but falls behind its 29.97 fps source, reaching
+3.83 seconds of lag. The same slowdown was reproduced in 0.3.0 and the exact
+restored accepted package. No runtime/shader change is included in 0.3.1, and
+this is not established as a new-release-only regression. Earlier successful
+cohorts remain historical evidence, not a current unconditional capacity pass.
+MERGE_READINESS preserves every earlier cohort and the host/Flatpak comparison;
+environment contributes to the difference but no unique cause is isolated.
 
-Earlier `48e1d741` cohorts of 280.499 redraws/s and 29.975 source advances/s on
-X4, and 318.024/29.975 on ONE X2, remain valid historical observations. They are
-not a current unconditional performance guarantee. The same SDK executable's
-228.174 host versus 272.850 Flatpak result remains evidence that environment
-contributes to the gap, without identifying a unique cause.
-
-The signed-channel x86_64 binary is a separate rebuild with a different hash; it
-separately passes 40 X4 and 44 ONE X2 UI checks, with both reported-view PPMs
-byte-identical to the accepted package. Separate capacity is 253.949 redraws/s
-and 27.600 source/s on X4, versus 314.724 and 29.975 on ONE X2. Both architectures' app and AppStream
-refs are authenticated and present in the signed-channel summaries. Actual
-aarch64 installation and playback are untested because this host exposes only
-x86_64/i386 clients.
-The signed 0.3.0 package omits the license text; an explicit shared-manifest
-install is prepared for the next patch package, tracked with #187.
+Both architectures' app and AppStream refs are authenticated and published;
+the x86 AppStream client reports 0.3.1. aarch64 install/playback is untested on
+hardware, not inferred from querying its refs on this x86_64/i386 host.
 
 The exact local gate counts, qualified Radeon environment, retained llvmpipe
 failure and logs are in MERGE_READINESS. Final cleanup CI passed all six jobs in
@@ -137,14 +130,21 @@ color-update policy is selected.
 
 ## Delivery next steps
 
-Feature release **0.3.0** is tagged and published through GitHub and the signed
-channel. Complete issue #187's qualification of the separately built signed
-x86_64 package and preserve the unresolved performance evidence in issue #186.
-The installed app now follows the signed public `kjerag` remote. Its separate
-UI qualification passes; the accepted `48e1d741` bundle remains available
-for rollback.
+Feature release **0.3.0** and packaging patch **0.3.1** are published through
+GitHub and the signed channel. Complete issue #187's capacity/handoff decision;
+publication, installed UI and license checks pass, while issue #186 retains
+the unresolved performance evidence.
+The installed 0.3.1 app follows the signed public `kjerag` remote; the accepted
+`48e1d741` bundle remains available for rollback. Issue #146 tracks deriving
+downloads from that same signed build, avoiding separate payload qualification.
+
+The signed 0.3.1 60 Hz X4 control maintains 29.975 source advances/s under
+the same 1,000 Hz mouse input, with 17.1 ms worst reported lateness. Earlier
+lifecycle diagnostics show a longer composite stitch span in the high-rate
+cohort without UI-event starvation; the remaining contention owner is not
+isolated. This is not a 240-capacity or hitch-free verdict (#186).
 
 The owner has been asked whether to keep the release goal open for performance
-work or hand off 0.3.0 with the limitation documented. No answer is recorded, so
+work or hand off the release with the limitation documented. No answer is recorded, so
 do not infer acceptance of the slowdown or closure of #187. The release flow is
 recorded in [RELEASING.md](RELEASING.md).
