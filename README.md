@@ -87,9 +87,10 @@ lens) plus a metadata trailer with full per-lens calibration (Mei/UCM
 model), raw gyro, and per-frame exposure. Kjerag decodes both streams via
 VA-API and imports the frames into wgpu through dmabuf, without a CPU pixel
 copy. Supported cameras share a GPU stitching engine with camera-specific
-calibration. Alignment, lens color matching and temporal filtering run at
-source-video cadence; GPU-owned pictures and correction fields are reused
-when the view moves. The final reframed view is drawn in one render pass.
+calibration. Alignment, lens color matching and temporal filtering run once per
+source frame, independently of view redraws; GPU-owned pictures and correction
+fields are reused when the view moves. The final reframed view is drawn in one
+render pass.
 
 Opening or seeking prepares the first complete picture before playback starts.
 Seeking restarts stitching history, so its first pictures can differ slightly
