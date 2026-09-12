@@ -99,9 +99,10 @@ group2 within the native three-group limit. Pipelines cache by surface format.
 
 The installed branch test build materializes the selected temporal input in canonical
 world coordinates, before filtering, for the1147 moving-line report. The owner
-accepts the stabilized-input diagnostic. This general implementation passes
-both-camera installed UI and rendering-capacity qualification (ROADMAP), but
-still requires owner acceptance in the player. Scene retains actual
+accepts both the stabilized-input diagnostic and, on2026-09-12, the installed
+player ("looks good. not perfect but pretty damn good"). This implementation
+passes both-camera installed UI and rendering-capacity qualification (ROADMAP).
+That is tested-build acceptance, not all-footage or exact Studio parity. Scene retains actual
 `body_from_world` independently of the display's horizon toggle. Its source
 Reframe has zero camera yaw/pitch and a fixed aspect, so mouse movement and
 window size cannot steer the temporal field. A separately cached world shader
@@ -118,8 +119,8 @@ redraw Reframe. This adds binding9 to picture group0, not another bind group or
 render pass. The matrix buffer is allocated at source cadence and shared by
 view redraws. Temporal weights, history, raster resolution, source cadence and
 high-detail prefilter remain unchanged. The world chart's different sampling
-grid can change motion/noise decisions, so diagnostic acceptance does not
-automatically qualify this implementation's pictures.
+grid can change motion/noise decisions; the owner tested the installed version
+separately rather than transferring the diagnostic's acceptance automatically.
 
 The source-rate prefilter changes only the corrected
 display's high term: it evaluates the existing native box at every source

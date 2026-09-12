@@ -17,7 +17,8 @@ the camera and press play. Zero configuration.
 
 - Drag to reframe, scroll to zoom
 - Gyro horizon lock
-- Blended lens seam
+- Automatic GPU stitching and lens color matching on supported cameras
+- Temporal filtering to reduce flickering seam differences
 - Screenshots
 - Copyable view references
 - Zero-copy hardware decode
@@ -45,10 +46,21 @@ Beta.
 
 | Camera | Support |
 |---|---|
-| Insta360 X4 Air | ✅ Fully Supported |
-| Insta360 ONE X2 | ✅ Fully Supported |
+| Insta360 X4 Air | ✅ Tested with real footage |
+| Insta360 ONE X2 | ✅ Tested with real footage |
 | Insta360 X3, X4, X5 | ⚠️ Unverified |
-| DJI, GoPro | ❌ Not supported |
+| DJI Osmo 360 `.osv` | Basic calibrated playback; not the shared stitcher |
+| Other DJI, GoPro | ❌ Not supported |
+
+The shared stitcher is verified on ONE X2 and X4 Air footage, not every
+recording mode or camera firmware. Stitching is Studio-like, not identical:
+seams and differences in noise or moving detail can remain. Playback requires
+working VA-API hardware decoding and a compatible Vulkan GPU. There is no
+software-decoding fallback.
+
+Existing Osmo 360 playback is separate from this Insta360 stitching work and
+is not requalified by it. Open `.osv` files from the command line or by dropping
+them into the player; the current file chooser filters for `.insv`.
 
 Have a camera that is unverified or missing?
 [Open an issue](https://github.com/aeharding/kjerag/issues) with a short
@@ -73,14 +85,23 @@ lock. The gap is real; this fills it.
 An X4-class `.insv` is an MP4 carrying two 3840×3840 HEVC streams (one per
 lens) plus a metadata trailer with full per-lens calibration (Mei/UCM
 model), raw gyro, and per-frame exposure. Kjerag decodes both streams via
-VA-API, imports the frames into wgpu zero-copy (dmabuf), and renders the
-reframed view in a single shader pass. Measured on an AMD Phoenix iGPU:
-dual-stream decode runs 2.4× realtime at 17% CPU.
+VA-API and imports the frames into wgpu through dmabuf, without a CPU pixel
+copy. Supported cameras share a GPU stitching engine with camera-specific
+calibration. Alignment, lens color matching and temporal filtering run at
+source-video cadence; GPU-owned pictures and correction fields are reused
+when the view moves. The final reframed view is drawn in one render pass.
+
+Opening or seeking prepares the first complete picture before playback starts.
+Seeking restarts stitching history, so its first pictures can differ slightly
+from uninterrupted playback. GPU rendering capacity and the display's refresh
+rate are separate limits; see the bounded measurements and remaining
+limitations in [the merge qualification record](docs/MERGE_READINESS.md).
 
 ## License
 
-AGPL-3.0. GPL-3.0 code from
-[Gyroflow](https://github.com/gyroflow/gyroflow) may be used where it helps
-(GPL-3.0 is one-way compatible with AGPL-3.0), and any file that takes it
-carries its own SPDX header. None does today: the projection math is written
-from the published Mei/OpenCV-omnidir description of the model.
+AGPL-3.0-only. Temporal motion-search code includes adaptations of MVTools by
+Manao and A. G. Balakhnin (Fizick), with per-file attribution and the elected
+[GPL-3.0-or-later license](crates/render/src/temporal_fusion/LICENSE-MVTOOLS).
+The local iced dependencies retain their MIT licenses and documented patches
+under `vendor/`. Projection math follows the published Mei/OpenCV-omnidir
+description of the lens model.

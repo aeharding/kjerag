@@ -1,5 +1,7 @@
 /target
+/.target
 /scratch
+__pycache__/
 
 # agent worktrees live inside the checkout
 .worktrees/

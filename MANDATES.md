@@ -18,6 +18,17 @@ sequences, the reported riser defect and the owner's eye remain the quality gate
 Keep the readable reference implementation and existing evidence for comparison.
 Broader optimization reverse engineering remains frozen.
 
+### Installed build acceptance and merge preparation, 2026-09-12
+
+After testing the installed source `48e1d741` Flatpak, the owner reports
+"looks good. not perfect but pretty damn good" and requests getting all work
+ready for merge/release. This accepts that actual branch-player result, including
+the source-owned world-coordinate temporal correction, not just the preceding
+fixed-view diagnostic. Do not ask for that same acceptance again. Preserve the
+qualified implementation while preparing the cumulative PR and release gates.
+This is not a claim of exact Studio parity, all-camera coverage or hitch-free
+playback, and does not waive required CI, sandbox or release verification.
+
 ### Color-update behavior, owner clarification 2026-09-09
 
 The owner rejected the proposed Kjerag-specific gradual color update:

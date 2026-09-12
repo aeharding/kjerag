@@ -14,13 +14,35 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
-**Installed world-coordinate fix ready for owner testing, 2026-09-11:** source
+**Owner accepts the installed build; merge preparation, 2026-09-12:** the owner
+reports "looks good. not perfect but pretty damn good" after testing the
+installed world-coordinate build, and requests preparing all accumulated work
+for merge/release. This clears the actual branch-player visual gate for that
+build, superseding the pending verdict below. It does not claim perfect Studio
+parity, every recording mode, or hitch-free playback. The runtime stays frozen
+at `48e1d741`; preparation records acceptance, checks the cumulative branch,
+updates the stale PR and runs the current merge gates. No new optimization or
+reverse engineering is selected. [MERGE_READINESS.md](MERGE_READINESS.md) is
+the compact release-review entry point; historical experiments remain below.
+No merge, version tag or public release is performed during preparation.
+
+The current standard-profile local gates pass on Rust1.97.1:1,496 workspace
+tests,52 ignored, formatting, Clippy, source/name checks, five startup and14
+controls-log tests, AppStream and metadata-without-libav. An initial restricted
+run selected llvmpipe and failed38 GPU checks; the required-Radeon rerun passes
+without changing runtime code or test assertions. Both logs are retained at
+`scratch/merge-readiness-20260912/`. README/store descriptions now name actual
+coverage and the source-rate pipeline; local-cache ignore rules preserve the
+existing build artifacts without making them release content. The PR needs
+fresh both-architecture CI after its branch update.
+
+**Installed world-coordinate qualification, 2026-09-11:** source
 `48e1d741f1bf7e7d8882624dff87754227bb8c7d` is committed on
 `perf/one-x2-gpu-pipeline` and installed as the branch Flatpak. The temporal
 input now removes camera rotation in a source-owned, view-independent world
 chart. Filter weights, history, source cadence and high-detail prefilter are
 unchanged. This carries the accepted stabilized diagnostic into the player;
-acceptance of the actual installed implementation remains pending.
+the owner's subsequent installed-build acceptance is recorded above.
 
 Installed qualification passes40 X4 and44 ONE X2 UI checks, including the
 reported views, pause, backward seek and the real scrubber. Existing isolated
@@ -42,9 +64,8 @@ permissions and origin are unchanged; the preceding verified bundle remains
 available for rollback. Evidence is in `scratch/flatpak-delivery-48e1d741/`
 and `scratch/installed-capacity/world1147-installed-candidate-01` /
 `world-x2-installed-candidate-01`. All build/test jobs are terminal. No push,
-merge or release; next is owner testing of this installed build, not another
-review of the already accepted diagnostic. This status supersedes the earlier
-pre-installation checkpoints below.
+merge or release at that checkpoint. The subsequent owner test is accepted
+above. This qualification supersedes the earlier pre-installation checkpoints.
 
 **Earlier fast-motion color-seam diagnosis, 2026-09-11:** the owner
 confirms the real Scene capture reproduces the reported1147.313-second X4 Air
