@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 
-use crate::direct_type2::BodyPanorama;
+use crate::direct_type2::RgbPanorama;
 use crate::{Fallible, FrameStamp};
 
 use super::HorizontalBoundary;
@@ -59,6 +59,8 @@ pub(crate) struct CorrectionStream {
     pending: VecDeque<Control>,
     finished: bool,
     failure: Option<String>,
+    #[cfg(test)]
+    review_shift: u32,
 }
 
 impl CorrectionStream {
@@ -80,17 +82,25 @@ impl CorrectionStream {
             pending: VecDeque::with_capacity(SOURCES),
             finished: false,
             failure: None,
+            #[cfg(test)]
+            review_shift: if std::env::var_os("KJERAG_CORRECTION_CYCLIC_REVIEW").is_some() {
+                assert!(field_size[0] > 512);
+                512
+            } else {
+                0
+            },
         })
     }
 
-    /// Admit one exact gamma-RGB body panorama. The independently encoded
+    /// Admit one exact gamma-RGB panorama. Coordinate ownership remains with
+    /// the source/display pairing, not the image-domain filter. The encoded
     /// control takes the same RGB/NV12/RGB path as the Stream's history input.
     pub(crate) fn push(
         &mut self,
-        body: BodyPanorama,
+        body: impl Into<RgbPanorama>,
         matrix: MatrixCoefficients,
     ) -> Fallible<Vec<CorrectionFrame>> {
-        let result = self.push_inner(body, matrix);
+        let result = self.push_inner(body.into(), matrix);
         self.remember_failure(result)
     }
 
@@ -101,11 +111,23 @@ impl CorrectionStream {
 
     fn push_inner(
         &mut self,
-        body: BodyPanorama,
+        body: RgbPanorama,
         matrix: MatrixCoefficients,
     ) -> Fallible<Vec<CorrectionFrame>> {
         self.ensure_active()?;
         self.validate_body(&body)?;
+        // Exact texel permutation before either RGB/NV12 path. The final
+        // fields are inversely permuted before display, leaving its source,
+        // map, prefilter, view shader and all texture coordinates unchanged.
+        #[cfg(test)]
+        let body = if self.review_shift != 0 {
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            let body = body.cyclic_shift_for_review(&self.device, &mut encoder, self.review_shift);
+            self.queue.submit([encoder.finish()]);
+            body
+        } else {
+            body
+        };
         let frame = body.frame().clone();
         if let Some(previous) = self.pending.back()
             && (!previous.frame.same_decode_epoch(&frame)
@@ -195,6 +217,25 @@ impl CorrectionStream {
                     "correction stream output differs from its retained control source".into(),
                 );
             }
+            #[cfg(test)]
+            let (control, filtered) = if self.review_shift != 0 {
+                let mut encoder = self.device.create_command_encoder(&Default::default());
+                let inverse = self.size[0] - self.review_shift;
+                let current =
+                    cyclic_shift_for_review(&self.device, &mut encoder, &control.texture, inverse);
+                let filtered =
+                    filtered.cyclic_shift_for_review(&self.device, &mut encoder, inverse);
+                self.queue.submit([encoder.finish()]);
+                (
+                    Control {
+                        texture: current,
+                        ..control
+                    },
+                    filtered,
+                )
+            } else {
+                (control, filtered)
+            };
             paired.push(CorrectionFrame {
                 frame: control.frame,
                 current: control.texture,
@@ -205,7 +246,7 @@ impl CorrectionStream {
         Ok(paired)
     }
 
-    fn validate_body(&self, body: &BodyPanorama) -> Fallible<()> {
+    fn validate_body(&self, body: &RgbPanorama) -> Fallible<()> {
         let texture = body.texture();
         if !body.belongs_to(&self.device)
             || [texture.width(), texture.height()] != self.size
@@ -248,4 +289,64 @@ impl CorrectionStream {
         }
         result
     }
+}
+
+/// Test-only exact rightward cyclic permutation; no sampler or color math.
+#[cfg(test)]
+pub(crate) fn cyclic_shift_for_review(
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    source: &wgpu::Texture,
+    shift: u32,
+) -> wgpu::Texture {
+    let width = source.width();
+    assert!(shift < width);
+    assert_eq!(source.format(), wgpu::TextureFormat::Rgba8Unorm);
+    assert_eq!(source.depth_or_array_layers(), 1);
+    assert!(source.usage().contains(wgpu::TextureUsages::COPY_SRC));
+    if shift == 0 {
+        return source.clone();
+    }
+    let output = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("exact cyclic temporal diagnostic permutation"),
+        size: source.size(),
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: source.format(),
+        usage: wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    for (src_x, dst_x, count) in [(0, shift, width - shift), (width - shift, 0, shift)] {
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: source,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: src_x,
+                    y: 0,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &output,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: dst_x,
+                    y: 0,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: count,
+                height: source.height(),
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    output
 }

@@ -16,27 +16,28 @@ pub(crate) mod nv12_vertex_cache;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// One gamma-RGB body panorama inseparably named by its decoded delivery.
+/// Coordinate-neutral ownership of one gamma-RGB panorama inseparably named
+/// by its decoded delivery.
 ///
 /// Construction is private to the exact map draw. Scene may retain this owner
 /// through a temporal window without separately pairing a texture and stamp.
-pub(crate) struct BodyPanorama {
+pub(crate) struct RgbPanorama {
     device: wgpu::Device,
     texture: wgpu::Texture,
     frame: FrameStamp,
 }
 
-impl BodyPanorama {
+impl RgbPanorama {
     pub(super) fn new(device: &wgpu::Device, frame: FrameStamp, size: Size) -> Fallible<Self> {
         if size.width == 0 || size.height == 0 || size.width != size.height.saturating_mul(2) {
             return Err(format!(
-                "body panorama must be nonzero 2:1, got {} by {}",
+                "RGB panorama must be nonzero 2:1, got {} by {}",
                 size.width, size.height
             )
             .into());
         }
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("source-stamped gamma RGB body panorama"),
+            label: Some("source-stamped gamma RGB panorama"),
             size: size.extent(),
             mip_level_count: 1,
             sample_count: 1,
@@ -65,6 +66,94 @@ impl BodyPanorama {
     pub(crate) fn belongs_to(&self, device: &wgpu::Device) -> bool {
         self.device == *device
     }
+
+    /// Diagnostic only: move the raster cut without resampling any source pixel.
+    #[cfg(test)]
+    pub(crate) fn cyclic_shift_for_review(
+        mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        shift: u32,
+    ) -> Self {
+        assert!(self.belongs_to(device));
+        self.texture = crate::temporal_fusion::correction_stream::cyclic_shift_for_review(
+            device,
+            encoder,
+            &self.texture,
+            shift,
+        );
+        self
+    }
+}
+
+/// One body-fixed gamma-RGB reference panorama.
+pub(crate) struct BodyPanorama {
+    rgb: RgbPanorama,
+}
+
+impl BodyPanorama {
+    pub(super) fn new(device: &wgpu::Device, frame: FrameStamp, size: Size) -> Fallible<Self> {
+        Ok(Self {
+            rgb: RgbPanorama::new(device, frame, size)?,
+        })
+    }
+
+    pub(crate) fn texture(&self) -> &wgpu::Texture {
+        self.rgb.texture()
+    }
+
+    pub(crate) fn frame(&self) -> &FrameStamp {
+        self.rgb.frame()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn belongs_to(&self, device: &wgpu::Device) -> bool {
+        self.rgb.belongs_to(device)
+    }
+
+    pub(crate) fn into_rgb(self) -> RgbPanorama {
+        self.rgb
+    }
+}
+
+impl From<BodyPanorama> for RgbPanorama {
+    fn from(panorama: BodyPanorama) -> Self {
+        panorama.into_rgb()
+    }
+}
+
+/// One canonical-world correction chart and the exact source transform used
+/// to materialize it. The transform cannot be detached without consuming the
+/// texture owner as well.
+pub(crate) struct WorldPanorama {
+    rgb: RgbPanorama,
+    body_from_world: [[f32; 4]; 3],
+}
+
+impl WorldPanorama {
+    pub(super) fn new(
+        device: &wgpu::Device,
+        frame: FrameStamp,
+        size: Size,
+        body_from_world: [[f32; 4]; 3],
+    ) -> Fallible<Self> {
+        Ok(Self {
+            rgb: RgbPanorama::new(device, frame, size)?,
+            body_from_world,
+        })
+    }
+
+    pub(crate) fn texture(&self) -> &wgpu::Texture {
+        self.rgb.texture()
+    }
+
+    pub(crate) fn frame(&self) -> &FrameStamp {
+        self.rgb.frame()
+    }
+
+    pub(crate) fn into_parts(self) -> (RgbPanorama, [[f32; 4]; 3]) {
+        (self.rgb, self.body_from_world)
+    }
 }
 
 /// The source/map consumer with only its output projection replaced.
@@ -72,51 +161,119 @@ pub(super) struct BodyPanoramaPipeline {
     pipeline: wgpu::RenderPipeline,
 }
 
+/// Explicit world-chart specialization. It is cached separately from the
+/// ordinary body materializer and selected only by correction ingestion.
+pub(super) struct WorldPanoramaPipeline {
+    pipeline: wgpu::RenderPipeline,
+}
+
+impl WorldPanoramaPipeline {
+    pub(super) fn new(device: &wgpu::Device, direct: &DirectType2Pipeline) -> Self {
+        #[cfg(test)]
+        {
+            assert!(
+                std::env::var_os("KJERAG_CORRECTION_STABILIZED_REVIEW").is_none(),
+                "stabilized correction review cannot override the production world materializer"
+            );
+            assert!(
+                std::env::var_os("KJERAG_CORRECTION_POLAR_REVIEW").is_none(),
+                "polar correction review cannot override the production world materializer"
+            );
+        }
+        let source = panorama_source(direct, BODY_PANORAMA_WGSL);
+        #[cfg(test)]
+        if let Some(output) = std::env::var_os("KJERAG_CORRECTION_FIELDS_DIR") {
+            std::fs::write(
+                std::path::PathBuf::from(&output).join("selected-body.wgsl"),
+                &source,
+            )
+            .expect("write selected world-panorama shader");
+            std::fs::write(
+                std::path::PathBuf::from(output).join("selected-coordinate-space.txt"),
+                "world\n",
+            )
+            .expect("write selected panorama coordinate space");
+        }
+        Self {
+            pipeline: panorama_pipeline_from_source(
+                device,
+                direct,
+                source,
+                "gamma RGB world panorama",
+                PanoramaCoordinates::World,
+            ),
+        }
+    }
+
+    pub(super) fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        picture: &wgpu::BindGroup,
+        map: &wgpu::BindGroup,
+    ) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, picture, &[]);
+        pass.set_bind_group(1, map, &[]);
+        pass.draw(0..3, 0..1);
+    }
+}
+
 impl BodyPanoramaPipeline {
     pub(super) fn new(device: &wgpu::Device, direct: &DirectType2Pipeline) -> Self {
         let hardware_fusion = direct.fusion_sampler.is_some();
         let fusion = direct.fusion_layout.is_some();
+        #[cfg(test)]
+        let body_shader = if std::env::var_os("KJERAG_CORRECTION_STABILIZED_REVIEW").is_some() {
+            assert!(
+                std::env::var_os("KJERAG_CORRECTION_POLAR_REVIEW").is_none(),
+                "stabilized and polar correction reviews are mutually exclusive"
+            );
+            assert!(
+                std::env::var_os("KJERAG_CORRECTION_CYCLIC_REVIEW").is_none(),
+                "stabilized and cyclic correction reviews are mutually exclusive"
+            );
+            let target = "let map = type2_mesh(body);";
+            assert_eq!(BODY_PANORAMA_WGSL.matches(target).count(), 1);
+            // Diagnostic only: materialize each source in the fixed requested
+            // view/world chart. Its exact source-stamped Reframe supplies the
+            // per-frame held orientation; the final correction draw applies
+            // the inverse transform for its matching center source.
+            BODY_PANORAMA_WGSL.replace(target, "let map = type2_mesh(reframe.view_to_body * body);")
+        } else if std::env::var_os("KJERAG_CORRECTION_POLAR_REVIEW").is_some() {
+            // Fixed proper Rx(+90deg) chart rotation, not a fitted camera pose.
+            // Only temporal materialization changes; lens maps and source
+            // sampling still receive actual body rays.
+            let target = "let map = type2_mesh(body);";
+            assert_eq!(BODY_PANORAMA_WGSL.matches(target).count(), 1);
+            BODY_PANORAMA_WGSL.replace(
+                target,
+                "let map = type2_mesh(vec3<f32>(body.x, -body.z, body.y));",
+            )
+        } else {
+            BODY_PANORAMA_WGSL.to_owned()
+        };
+        #[cfg(not(test))]
+        let body_shader = BODY_PANORAMA_WGSL;
         let source = format!(
             "{}\n{}",
             draw_wgsl_with_fusion_mode(fusion, hardware_fusion),
-            BODY_PANORAMA_WGSL
+            body_shader
         );
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("gamma RGB body panorama"),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
-        });
-        let mut layouts = vec![&direct.picture_layout, &direct.map_layout];
-        layouts.extend(direct.fusion_layout.as_ref());
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("gamma RGB body panorama"),
-            bind_group_layouts: &layouts,
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("gamma RGB body panorama"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("panorama_fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        #[cfg(test)]
+        if let Some(output) = std::env::var_os("KJERAG_CORRECTION_FIELDS_DIR") {
+            std::fs::write(
+                std::path::PathBuf::from(output).join("selected-body.wgsl"),
+                &source,
+            )
+            .expect("write selected body-panorama diagnostic shader");
+        }
+        let pipeline = panorama_pipeline_from_source(
+            device,
+            direct,
+            source,
+            "gamma RGB body panorama",
+            PanoramaCoordinates::Body,
+        );
         Self { pipeline }
     }
 
@@ -130,6 +287,80 @@ impl BodyPanoramaPipeline {
         pass.set_bind_group(0, picture, &[]);
         pass.set_bind_group(1, map, &[]);
         pass.draw(0..3, 0..1);
+    }
+}
+
+fn panorama_source(direct: &DirectType2Pipeline, shader: &str) -> String {
+    format!(
+        "{}\n{}",
+        draw_wgsl_with_fusion_mode(
+            direct.fusion_layout.is_some(),
+            direct.fusion_sampler.is_some()
+        ),
+        shader
+    )
+}
+
+fn panorama_pipeline_from_source(
+    device: &wgpu::Device,
+    direct: &DirectType2Pipeline,
+    source: String,
+    label: &'static str,
+    coordinates: PanoramaCoordinates,
+) -> wgpu::RenderPipeline {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let mut layouts = vec![&direct.picture_layout, &direct.map_layout];
+    layouts.extend(direct.fusion_layout.as_ref());
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: &layouts,
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("panorama_fs"),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: &[("panorama_world_coordinates", coordinates.shader_value())],
+                ..Default::default()
+            },
+            targets: &[Some(wgpu::ColorTargetState {
+                format: FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum PanoramaCoordinates {
+    Body,
+    World,
+}
+
+impl PanoramaCoordinates {
+    fn shader_value(self) -> f64 {
+        match self {
+            Self::Body => 0.0,
+            Self::World => 1.0,
+        }
     }
 }
 
@@ -496,12 +727,17 @@ fn projection_pipeline(
 }
 
 const BODY_PANORAMA_WGSL: &str = r#"
+override panorama_world_coordinates: bool = false;
+
 @fragment
 fn panorama_fs(in: Type2VsOut) -> @location(0) vec4<f32> {
   let phi = TYPE2_PI * in.uv.y;
   let theta = TYPE2_TAU * in.uv.x;
-  let body = vec3<f32>(sin(phi) * sin(theta), cos(phi),
+  var body = vec3<f32>(sin(phi) * sin(theta), cos(phi),
     -sin(phi) * cos(theta));
+  if panorama_world_coordinates {
+    body = reframe.view_to_body * body;
+  }
   let map = type2_mesh(body);
   if map.covered <= 0.5 { return vec4<f32>(0.0); }
   return type2_gamma_color(map);
@@ -603,6 +839,37 @@ mod tests {
     }
 
     #[test]
+    fn stabilized_review_matrix_pair_round_trips_view_rays() {
+        let reframe = Reframe::new(
+            &[],
+            Size::new(64, 32),
+            Camera {
+                yaw: -98.43_f32.to_radians(),
+                pitch: 26.98_f32.to_radians(),
+                fov: 78.2_f32.to_radians(),
+            },
+            Held::default(),
+            16.0 / 9.0,
+            false,
+            Sampling::default(),
+        );
+        for view in [
+            [0.0, 0.0, 1.0],
+            [0.6, -0.2, 0.7745967],
+            [-0.3, 0.8, 0.51961523],
+        ] {
+            let actual = reframe.view_ray_from_body(reframe.body_ray(view));
+            assert!(
+                actual
+                    .into_iter()
+                    .zip(view)
+                    .all(|(actual, expected)| (actual - expected).abs() < 2e-6),
+                "stabilized diagnostic matrix pair changed {view:?} to {actual:?}"
+            );
+        }
+    }
+
+    #[test]
     fn body_raster_cardinals_fix_seam_and_direction() {
         let near =
             |a: [f32; 3], b: [f32; 3]| a.into_iter().zip(b).all(|(a, b)| (a - b).abs() < 2e-6);
@@ -632,7 +899,13 @@ mod tests {
                 .unwrap_or_else(|error| panic!("panorama {name} WGSL did not validate: {error}"));
         }
         assert!(BODY_PANORAMA_WGSL.contains("type2_gamma_color(map)"));
-        assert!(!BODY_PANORAMA_WGSL.contains("reframe.view_to_body"));
+        // Body references must keep the transform disabled; only the
+        // explicitly selected world pipeline enables it. Both share shader
+        // text, so absence of the expression is no longer the right guard.
+        assert_eq!(PanoramaCoordinates::Body.shader_value(), 0.0);
+        assert_eq!(PanoramaCoordinates::World.shader_value(), 1.0);
+        assert!(BODY_PANORAMA_WGSL.contains("override panorama_world_coordinates: bool = false;"));
+        assert!(BODY_PANORAMA_WGSL.contains("if panorama_world_coordinates {"));
         assert!(PROJECT_WGSL.contains("atan2(body.x, -body.z)"));
         assert!(PROJECT_WGSL.contains("textureSample(panorama, panorama_sampler, uv)"));
         assert!(PROJECT_WGSL.contains("reframe.linearize > 0.5"));
@@ -680,9 +953,11 @@ mod tests {
         );
         let stamp = FrameStamp::for_test(41, Duration::from_secs(2), None);
         let panorama = BodyPanorama {
-            device: device.clone(),
-            texture,
-            frame: stamp.clone(),
+            rgb: RgbPanorama {
+                device: device.clone(),
+                texture,
+                frame: stamp.clone(),
+            },
         };
         let projector = PanoramaProjector::new(&device);
 

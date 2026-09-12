@@ -22,10 +22,10 @@ use crate::{Fallible, FrameStamp, MAX_LENSES, Planes};
 pub(crate) mod correction;
 pub(crate) mod panorama;
 mod source_snapshot;
-pub(crate) use panorama::BodyPanorama;
 pub(crate) use panorama::nv12::{
     CompactNv12Panorama, Prepared as CompactNv12Prepared, attachment as compact_nv12_attachment,
 };
+pub(crate) use panorama::{BodyPanorama, RgbPanorama, WorldPanorama};
 pub(crate) use source_snapshot::SourceSnapshot;
 
 /// Test-only cached compact producer borrowing one authenticated detached draw.
@@ -354,6 +354,7 @@ pub(crate) struct ImportedOneXsDrawBinding {
     gamma_output: bool,
     source_matrix: [f32; 4],
     source_size: [f32; 2],
+    body_from_view: [[f32; 4]; 3],
 }
 
 fn prepare_picture_binding(
@@ -385,6 +386,7 @@ fn prepare_picture_binding(
         gamma_output: !reframe.linearizes_output(),
         source_matrix: reframe.source_color_matrix(),
         source_size: reframe.frame_size(),
+        body_from_view: reframe.view_to_body_columns(),
     }
 }
 
@@ -480,6 +482,7 @@ pub(crate) struct DirectType2Pipeline {
     fusion_layout: Option<wgpu::BindGroupLayout>,
     fusion_sampler: Option<wgpu::Sampler>,
     panorama: OnceLock<panorama::BodyPanoramaPipeline>,
+    world_panorama: OnceLock<panorama::WorldPanoramaPipeline>,
     compact_nv12: OnceLock<panorama::nv12::Producer>,
     vertex_cached_compact_nv12: OnceLock<panorama::nv12_vertex_cache::Producer>,
     source_snapshot: OnceLock<source_snapshot::SnapshotPipeline>,
@@ -634,6 +637,7 @@ impl DirectType2Pipeline {
             fusion_layout,
             fusion_sampler,
             panorama: OnceLock::new(),
+            world_panorama: OnceLock::new(),
             compact_nv12: OnceLock::new(),
             vertex_cached_compact_nv12: OnceLock::new(),
             source_snapshot: OnceLock::new(),
@@ -787,6 +791,26 @@ impl DirectType2Pipeline {
         BodyPanorama::new(device, source.resident_frame(), size)
     }
 
+    /// Allocate a canonical-world target carrying the exact columns already
+    /// stored in this source's prepared picture binding.
+    pub(crate) fn resident_world_panorama_target(
+        &self,
+        device: &wgpu::Device,
+        source: &ImportedOneXsPicture,
+        binding: &ImportedOneXsDrawBinding,
+        size: crate::Size,
+    ) -> Fallible<WorldPanorama> {
+        if self.device != *device || self.device != *source.context.device() {
+            return Err("resident world panorama belongs to a different graphics device".into());
+        }
+        WorldPanorama::new(
+            device,
+            source.resident_frame(),
+            size,
+            binding.body_from_view,
+        )
+    }
+
     /// Draw body-equirect pixels from the private source/map/fusion bindings
     /// carried by the exact installed pass.
     pub(crate) fn draw_resident_panorama(
@@ -806,6 +830,26 @@ impl DirectType2Pipeline {
         }
         self.panorama
             .get_or_init(|| panorama::BodyPanoramaPipeline::new(&self.device, self))
+            .draw(pass, &binding.picture, map);
+    }
+
+    pub(crate) fn draw_resident_world_panorama(
+        &self,
+        binding: &ImportedOneXsDrawBinding,
+        map: &wgpu::BindGroup,
+        fusion: Option<&wgpu::BindGroup>,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        assert_eq!(
+            self.fusion_layout.is_some(),
+            fusion.is_some(),
+            "resident world panorama map and photometric binding presence differ"
+        );
+        if let Some(fusion) = fusion {
+            pass.set_bind_group(2, fusion, &[]);
+        }
+        self.world_panorama
+            .get_or_init(|| panorama::WorldPanoramaPipeline::new(&self.device, self))
             .draw(pass, &binding.picture, map);
     }
 

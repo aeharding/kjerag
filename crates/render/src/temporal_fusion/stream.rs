@@ -9,9 +9,9 @@ use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use crate::direct_type2::BodyPanorama;
 #[cfg(test)]
 use crate::direct_type2::CompactNv12Panorama;
+use crate::direct_type2::RgbPanorama;
 use crate::{Fallible, FrameStamp};
 
 use super::HorizontalBoundary;
@@ -57,6 +57,23 @@ impl FilteredPanorama {
 
     pub(crate) fn belongs_to(&self, device: &wgpu::Device) -> bool {
         self.device == *device
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cyclic_shift_for_review(
+        mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        shift: u32,
+    ) -> Self {
+        assert!(self.belongs_to(device));
+        self.texture = super::correction_stream::cyclic_shift_for_review(
+            device,
+            encoder,
+            &self.texture,
+            shift,
+        );
+        self
     }
 }
 
@@ -190,10 +207,13 @@ impl Stream {
     /// Gamma-RGB ingestion retained by the explicit correction candidate.
     pub(crate) fn push_rgb(
         &mut self,
-        body: BodyPanorama,
+        body: impl Into<RgbPanorama>,
         matrix: MatrixCoefficients,
     ) -> Fallible<Vec<FilteredPanorama>> {
-        let result = self.push_inner(Source::Rgb { body, matrix });
+        let result = self.push_inner(Source::Rgb {
+            body: body.into(),
+            matrix,
+        });
         self.remember_failure(result)
     }
 
@@ -607,7 +627,7 @@ enum Source {
     #[cfg(test)]
     Compact(CompactNv12Panorama),
     Rgb {
-        body: BodyPanorama,
+        body: RgbPanorama,
         matrix: MatrixCoefficients,
     },
 }
@@ -645,7 +665,7 @@ fn validate_full(full: [u32; 2]) -> Fallible<()> {
     Ok(())
 }
 
-fn validate_body(body: &BodyPanorama, device: &wgpu::Device, full: [u32; 2]) -> Fallible<()> {
+fn validate_body(body: &RgbPanorama, device: &wgpu::Device, full: [u32; 2]) -> Fallible<()> {
     let texture = body.texture();
     if !body.belongs_to(device) {
         return Err("temporal stream body panorama belongs to a different graphics device".into());

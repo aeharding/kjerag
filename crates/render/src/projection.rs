@@ -1120,6 +1120,13 @@ fn source_matrix(matrix: kjerag_media::ColorMatrix) -> [f32; 4] {
 }
 
 impl Reframe {
+    /// Exact shader-precision columns written into `Reframe::view_to_body`.
+    /// Typed source owners use this read-only copy to retain the transform
+    /// paired with the uniform consumed by their materializer.
+    pub(crate) fn view_to_body_columns(&self) -> [[f32; 4]; 3] {
+        self.view_to_body
+    }
+
     /// The block for one camera pose and the lenses of one file, in file
     /// order. Anything past [`MAX_LENSES`] is dropped.
     pub fn new(

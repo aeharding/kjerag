@@ -275,6 +275,7 @@ impl SourceSnapshot {
         pipeline: &super::correction::CorrectionPipeline,
         reframe: &crate::Reframe,
         correction: &crate::temporal_fusion::correction_stream::CorrectionFrame,
+        coordinates: &super::correction::CorrectionCoordinates,
     ) -> Fallible<super::correction::CorrectionPictureBinding> {
         if &self.frame != correction.frame() {
             return Err("temporal correction names a different source snapshot".into());
@@ -283,7 +284,37 @@ impl SourceSnapshot {
             return Err("temporal correction belongs to a different graphics device".into());
         }
         let reframe = self.exact_reframe(reframe)?;
-        pipeline.prepare_picture(&reframe, [&self.planes[0], &self.planes[1]], correction)
+        pipeline.prepare_picture(
+            &reframe,
+            [&self.planes[0], &self.planes[1]],
+            correction,
+            coordinates,
+        )
+    }
+
+    /// Prepare the exact selected picture with its temporal contribution
+    /// reduced to zero. This exists only for real-source diagnostics.
+    #[cfg(test)]
+    pub(crate) fn prepare_correction_picture_without_temporal_for_review(
+        &self,
+        pipeline: &super::correction::CorrectionPipeline,
+        reframe: &crate::Reframe,
+        correction: &crate::temporal_fusion::correction_stream::CorrectionFrame,
+        coordinates: &super::correction::CorrectionCoordinates,
+    ) -> Fallible<super::correction::CorrectionPictureBinding> {
+        if &self.frame != correction.frame() {
+            return Err("temporal correction names a different source snapshot".into());
+        }
+        if !correction.belongs_to(self.context.device()) {
+            return Err("temporal correction belongs to a different graphics device".into());
+        }
+        let reframe = self.exact_reframe(reframe)?;
+        pipeline.prepare_picture_without_temporal_for_review(
+            &reframe,
+            [&self.planes[0], &self.planes[1]],
+            correction,
+            coordinates,
+        )
     }
 
     fn exact_reframe(&self, reframe: &crate::Reframe) -> Fallible<crate::Reframe> {

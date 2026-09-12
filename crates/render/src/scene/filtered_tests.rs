@@ -22,7 +22,7 @@ fn reported_filtered_correction_fields() {
     let (path, view) = crate::Framing::read_line(&line).expect("invalid review view line");
     assert_eq!(view.horizon, Horizon::Locked);
     std::fs::create_dir(&output).expect("review output must be a new directory");
-    for arm in ["current", "filtered", "shown"] {
+    for arm in ["current", "filtered", "shown", "temporal-off"] {
         std::fs::create_dir(output.join(arm)).unwrap();
     }
     std::fs::write(output.join("request.txt"), format!("{line}\n")).unwrap();
@@ -98,6 +98,48 @@ fn reported_filtered_correction_fields() {
             shot.height,
             &shot.rgba,
         );
+        let primitive = scene.primitive(view.camera);
+        let shown = primitive.shown.get().expect("review lost its shown source");
+        assert_eq!(shown.frames.stamp(), stamp);
+        let source_reframe = super::filtered::filtered_source_reframe(&shown, primitive.sampling);
+        let coordinates = installed.coordinates_for_review();
+        assert_eq!(coordinates, source_reframe.view_to_body_columns());
+        std::fs::write(
+            output.join(format!("frame-{:010}.coordinates.bin", stamp.index())),
+            coordinate_bytes(coordinates),
+        )
+        .unwrap();
+        let reframe = pipeline.resident_reframe(&primitive, &shown, 16.0 / 9.0);
+        std::fs::write(
+            output.join(format!("frame-{:010}.reframe.bin", stamp.index())),
+            reframe.bytes(),
+        )
+        .unwrap();
+        let normal = installed
+            .prepare_view(&device, &reframe, wgpu::TextureFormat::Rgba8Unorm)
+            .unwrap();
+        assert_eq!(
+            capture_correction_draw(&normal, &device, &queue, shot.width, shot.height),
+            shot.rgba,
+            "diagnostic draw must reproduce the exact shown pixels before removing the temporal term"
+        );
+        let temporal_off = installed
+            .prepare_view_without_temporal_for_review(
+                &device,
+                &reframe,
+                wgpu::TextureFormat::Rgba8Unorm,
+            )
+            .unwrap();
+        assert_eq!(temporal_off.frame(), &stamp);
+        let pixels =
+            capture_correction_draw(&temporal_off, &device, &queue, shot.width, shot.height);
+        super::tests::write_review_ppm_sized(
+            &output.join("temporal-off"),
+            stamp.index(),
+            shot.width,
+            shot.height,
+            &pixels,
+        );
         writeln!(
             log,
             "{}\t{}\t{}\t{}\t{stamp:?}",
@@ -109,7 +151,7 @@ fn reported_filtered_correction_fields() {
         .unwrap();
         log.flush().unwrap();
         eprintln!(
-            "correction-fields: source {} exact installed current/filtered/shown",
+            "correction-fields: source {} exact installed current/filtered/shown/temporal-off",
             stamp.index()
         );
         previous = Some(stamp);
@@ -118,6 +160,58 @@ fn reported_filtered_correction_fields() {
             scene.step(Instant::now(), 1);
         }
     }
+}
+
+fn coordinate_bytes(columns: [[f32; 4]; 3]) -> Vec<u8> {
+    columns
+        .into_iter()
+        .flatten()
+        .flat_map(f32::to_ne_bytes)
+        .collect()
+}
+
+fn capture_correction_draw(
+    draw: &PreparedCorrectionDraw,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("filtered Scene temporal-off diagnostic target"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("filtered Scene temporal-off diagnostic draw"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        draw.draw(&mut pass);
+    }
+    let read = super::panorama_review::PendingReadback::encode(device, &mut encoder, &texture);
+    let submission = queue.submit([encoder.finish()]);
+    read.read(device, submission)
 }
 
 #[test]
@@ -308,6 +402,7 @@ fn assert_filtered_scene(
     assert_eq!(filtered.accepted_stamp().unwrap().unwrap().index(), 6);
     assert!(!raw.acknowledged(&first).unwrap());
     assert!(raw.installed_stamp().unwrap().is_none());
+    assert_installed_source_coordinates(&scene, Camera::default(), &first);
     let before_recreation =
         capture_shown(&scene, &mut pipeline, &device, &queue, Camera::default());
     assert_eq!(before_recreation.index, first.index());
@@ -322,15 +417,66 @@ fn assert_filtered_scene(
     // A view-only redraw consumes the exact installed filtered panorama. It
     // must neither admit another source nor move the presentation head.
     let accepted = filtered.accepted_stamp().unwrap();
+    let installed = filtered
+        .installed()
+        .unwrap()
+        .expect("the first filtered source is not installed");
+    let coordinates = installed.coordinates_for_review();
+    let locked = scene
+        .primitive(Camera::default())
+        .shown
+        .get()
+        .expect("the first filtered source is not shown");
+    assert_eq!(locked.held.body_from_world, locked.body_from_world);
     let changed = Camera {
         yaw: 0.31,
         pitch: -0.17,
         fov: Camera::default().fov,
     };
-    prepare_and_draw(&scene, &mut pipeline, &device, &queue, changed);
+    prepare_and_draw_at_aspect(&scene, &mut pipeline, &device, &queue, changed, 1.0);
     assert_eq!(filtered.accepted_stamp().unwrap(), accepted);
     assert_eq!(filtered.installed_stamp().unwrap().as_ref(), Some(&first));
     assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+    let changed_primitive = scene.primitive(changed);
+    let changed_shown = changed_primitive
+        .shown
+        .get()
+        .expect("the changed-camera redraw lost its shown source");
+    assert!(Arc::ptr_eq(&changed_shown.frames, &locked.frames));
+    let changed_installed = filtered.installed().unwrap().unwrap();
+    assert!(Arc::ptr_eq(&changed_installed, &installed));
+    assert_eq!(changed_installed.coordinates_for_review(), coordinates);
+
+    scene.set_horizon(Horizon::Free);
+    prepare_and_draw_at_aspect(&scene, &mut pipeline, &device, &queue, changed, 4.0 / 3.0);
+    assert_eq!(filtered.accepted_stamp().unwrap(), accepted);
+    let free_primitive = scene.primitive(changed);
+    let free_shown = free_primitive
+        .shown
+        .get()
+        .expect("the free-horizon redraw lost its shown source");
+    assert_eq!(free_shown.held.body_from_world, Quat::IDENTITY);
+    assert_eq!(free_shown.body_from_world, locked.body_from_world);
+    assert!(Arc::ptr_eq(&free_shown.frames, &locked.frames));
+    let free_installed = filtered.installed().unwrap().unwrap();
+    assert!(Arc::ptr_eq(&free_installed, &installed));
+    assert_eq!(free_installed.coordinates_for_review(), coordinates);
+    assert_installed_source_coordinates(&scene, changed, &first);
+
+    // The pixel comparison below names the original locked display policy.
+    scene.set_horizon(Horizon::Locked);
+    prepare_and_draw(&scene, &mut pipeline, &device, &queue, Camera::default());
+    let relocked = scene
+        .primitive(Camera::default())
+        .shown
+        .get()
+        .expect("restoring horizon lock lost the shown source");
+    assert_eq!(relocked.held.body_from_world, relocked.body_from_world);
+    assert_eq!(filtered.accepted_stamp().unwrap(), accepted);
+    assert!(Arc::ptr_eq(
+        &filtered.installed().unwrap().unwrap(),
+        &installed
+    ));
 
     // Recreating iced's renderer state on the same context restores the
     // capture-owned panorama. It does not rerun or acknowledge the raw path.
@@ -369,6 +515,7 @@ fn assert_filtered_scene(
         );
         assert!(!raw.acknowledged(&next).unwrap());
         assert!(raw.installed_stamp().unwrap().is_none());
+        assert_installed_source_coordinates(&scene, Camera::default(), &next);
         current = next;
     }
 
@@ -400,6 +547,7 @@ fn assert_filtered_scene(
     assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&landing));
     assert!(fresh.acknowledged(&landing).unwrap());
     assert!(!old_filtered.acknowledged(&landing).unwrap());
+    assert_installed_source_coordinates(&scene, review_camera, &landing);
 
     if let Some(output) = review_dir {
         save_review_sequence(
@@ -453,6 +601,30 @@ fn settle_filtered(
     }
 }
 
+fn assert_installed_source_coordinates(scene: &Scene, camera: Camera, expected: &FrameStamp) {
+    let primitive = scene.primitive(camera);
+    let shown = primitive
+        .shown
+        .get()
+        .expect("an installed filtered source must also be shown");
+    assert_eq!(&shown.frames.stamp(), expected);
+    let capture = primitive
+        .filtered_capture
+        .as_ref()
+        .expect("the filtered Scene lost its capture");
+    let installed = capture
+        .installed()
+        .unwrap()
+        .expect("the acknowledged filtered source is not installed");
+    assert_eq!(installed.frame(), expected);
+    let source = super::filtered::filtered_source_reframe(&shown, primitive.sampling);
+    assert_eq!(
+        installed.coordinates_for_review(),
+        source.view_to_body_columns(),
+        "installed correction retained another source pose"
+    );
+}
+
 fn prepare_and_draw(
     scene: &Scene,
     pipeline: &mut ScenePipeline,
@@ -460,7 +632,18 @@ fn prepare_and_draw(
     queue: &wgpu::Queue,
     camera: Camera,
 ) {
-    pipeline.prepare(&scene.primitive(camera), device, queue, 16.0 / 9.0);
+    prepare_and_draw_at_aspect(scene, pipeline, device, queue, camera, 16.0 / 9.0);
+}
+
+fn prepare_and_draw_at_aspect(
+    scene: &Scene,
+    pipeline: &mut ScenePipeline,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    camera: Camera,
+    aspect: f32,
+) {
+    pipeline.prepare(&scene.primitive(camera), device, queue, aspect);
     assert!(pipeline.filtered_draw.is_some());
     draw_test_pass(pipeline, device, queue);
 }

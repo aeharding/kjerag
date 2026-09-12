@@ -2301,19 +2301,22 @@ impl Show {
     fn view_for(&self, frames: Arc<Frames>, held: Holding) -> View {
         let at = self.held.instant(&frames, held.clock);
         let world_from_body = held.forced.unwrap_or_else(|| self.held.orientation.at(at));
+        let body_from_world = world_from_body.conjugate();
+        let rolling = self
+            .held
+            .rolling(at, held.readout.unwrap_or(self.held.readout));
         View {
             held: Held {
                 body_from_world: match held.horizon {
-                    Horizon::Locked => world_from_body.conjugate(),
+                    Horizon::Locked => body_from_world,
                     Horizon::Free => Quat::IDENTITY,
                 },
                 // Not under the horizon toggle: the readout is the camera's
                 // own motion during the frame, and a view that rides the body
                 // has the same skew in it as one that does not.
-                rolling: self
-                    .held
-                    .rolling(at, held.readout.unwrap_or(self.held.readout)),
+                rolling,
             },
+            body_from_world,
             lenses: self.lenses(),
             table: self.table.get(),
             frames,
@@ -2754,6 +2757,9 @@ struct View {
     /// Where the body was when these frames were taken, already inverted for
     /// the pass. Identity with the lock off.
     held: Held,
+    /// The exact source pose independently of the display's horizon policy.
+    /// This is never identity merely because the view rides the camera.
+    body_from_world: Quat,
     /// Capture-owned sequential stitch state. `None` for every other camera
     /// and for stepped diagnostic scenes.
     one_xs: Option<Arc<OneXsCapture>>,

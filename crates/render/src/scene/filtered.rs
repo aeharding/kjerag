@@ -142,7 +142,7 @@ impl ScenePipeline {
                 })
                 .find(|view| resident_stamp_follows(accepted.as_ref(), &view.frames.stamp()));
             if let Some(view) = next {
-                let reframe = filtered_source_reframe(primitive, view, aspect);
+                let reframe = filtered_source_reframe(view, primitive.sampling);
                 admitted = capture.try_submit(view.frames.clone(), reframe)?;
                 if admitted {
                     primitive.stalled.landed();
@@ -302,18 +302,135 @@ impl ScenePipeline {
     }
 }
 
-/// The worker materializes a gamma-RGB body panorama. Surface transfer is
-/// applied only by the later projector draw.
-fn filtered_source_reframe(primitive: &ScenePrimitive, view: &View, aspect: f32) -> Reframe {
+/// The worker materializes a gamma-RGB canonical world panorama. Its chart is
+/// source-owned: display camera, window shape and horizon policy cannot move
+/// it or advance a different temporal history. Surface transfer is applied
+/// only by the later projector draw.
+pub(super) fn filtered_source_reframe(view: &View, sampling: Sampling) -> Reframe {
     Reframe::new(
         &view.lenses,
         view.frames.size,
-        primitive.camera,
-        view.held,
-        aspect,
+        Camera::default(),
+        Held {
+            body_from_world: view.body_from_world,
+            rolling: view.held.rolling,
+        },
+        2.0,
         false,
-        primitive.sampling,
+        sampling,
     )
     .with_samples(view.frames.samples)
     .with_table(view.table)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn view(body_from_world: Quat, held: Held) -> View {
+        let stamp = FrameStamp::for_test(7, Duration::from_millis(233), None);
+        View {
+            lenses: Arc::from([]),
+            table: Table::REST,
+            frames: Arc::new(Frames::empty_for_test(
+                stamp,
+                Size {
+                    width: 1920,
+                    height: 960,
+                },
+            )),
+            held,
+            body_from_world,
+            one_xs: None,
+            resident_one_xs: None,
+            filtered: None,
+            one_xs_profile: None,
+        }
+    }
+
+    #[test]
+    fn display_camera_aspect_and_horizon_do_not_change_the_source_reframe() {
+        let source_held = Held {
+            body_from_world: Quat::from_rotation_vector([0.19, -0.31, 0.47]).conjugate(),
+            rolling: Some(Rolling {
+                turn: [0.003, -0.007, 0.011],
+                axis: [0.0, 1.0],
+            }),
+        };
+        let locked = view(source_held.body_from_world, source_held);
+        let free = view(
+            source_held.body_from_world,
+            Held {
+                body_from_world: Quat::IDENTITY,
+                rolling: source_held.rolling,
+            },
+        );
+        let locked_camera = Camera {
+            yaw: -1.4,
+            pitch: 0.6,
+            fov: 1.1,
+        };
+        let free_camera = Camera {
+            yaw: 2.2,
+            pitch: -0.3,
+            fov: 2.0,
+        };
+
+        let locked_display = Reframe::new(
+            &locked.lenses,
+            locked.frames.size,
+            locked_camera,
+            locked.held,
+            16.0 / 9.0,
+            false,
+            Sampling::default(),
+        );
+        let free_display = Reframe::new(
+            &free.lenses,
+            free.frames.size,
+            free_camera,
+            free.held,
+            1.0,
+            false,
+            Sampling::default(),
+        );
+        assert_ne!(locked_display.bytes(), free_display.bytes());
+
+        let locked_source = filtered_source_reframe(&locked, Sampling::default());
+        let free_source = filtered_source_reframe(&free, Sampling::default());
+        assert_eq!(locked_source.bytes(), free_source.bytes());
+    }
+
+    #[test]
+    fn a_free_display_retains_the_nonidentity_canonical_source_pose() {
+        let pose = Quat::from_rotation_vector([-0.23, 0.41, 0.17]).conjugate();
+        let source_held = Held {
+            body_from_world: pose,
+            rolling: None,
+        };
+        let free = view(
+            pose,
+            Held {
+                body_from_world: Quat::IDENTITY,
+                rolling: None,
+            },
+        );
+
+        assert_ne!(free.body_from_world, Quat::IDENTITY);
+        assert_eq!(free.body_from_world, pose);
+        let source = filtered_source_reframe(&free, Sampling::default());
+        let expected = Reframe::new(
+            &free.lenses,
+            free.frames.size,
+            Camera::default(),
+            source_held,
+            2.0,
+            false,
+            Sampling::default(),
+        )
+        .with_samples(free.frames.samples)
+        .with_table(free.table);
+        assert_eq!(source.bytes(), expected.bytes());
+    }
 }

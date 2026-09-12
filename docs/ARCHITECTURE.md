@@ -86,7 +86,7 @@ The shell is libcosmic, which pins wgpu 28, so `render` is written against
 28 and owns the one module that wgpu 30 would delete
 (`crates/render/src/dmabuf.rs`).
 
-The branch and installed test build draw full-resolution prefiltered source/map
+The installed test build draws full-resolution prefiltered source/map
 samples with a reduced full-sphere temporal residual. The owner accepted the607
 quarter-field and subsequent prefilter moving comparisons, with exact responses
 recorded in ROADMAP; this is not broad footage or live smoothness acceptance. The two
@@ -96,6 +96,29 @@ RGB8, clamped, then transferred to the surface in one render pass. Rectilinear
 views use the existing native mesh; curved views use the existing body-ray map.
 Correction textures extend picture group0, retaining map group1 and colour
 group2 within the native three-group limit. Pipelines cache by surface format.
+
+The working branch now materializes the selected temporal input in canonical
+world coordinates, before filtering, for the1147 moving-line report. The owner
+accepts the stabilized-input diagnostic; this general implementation still
+requires branch-player qualification and acceptance. Scene retains actual
+`body_from_world` independently of the display's horizon toggle. Its source
+Reframe has zero camera yaw/pitch and a fixed aspect, so mouse movement and
+window size cannot steer the temporal field. A separately cached world shader
+specialization samples the existing source/map with that transform; ordinary
+body/full reference constructors keep their body-fixed chart.
+
+`WorldPanorama` seals the exact prepared source-uniform columns to its stamped
+RGB texture. `CorrectionInput` retains those columns with the same source/map
+owner while the coordinate-neutral `RgbPanorama` enters the unchanged temporal
+stream. Each completed center source carries its own48-byte immutable matrix
+buffer. The final correction lookup transforms the actual displayed body ray
+back into that source's world chart; it never derives the transform from the
+redraw Reframe. This adds binding9 to picture group0, not another bind group or
+render pass. The matrix buffer is allocated at source cadence and shared by
+view redraws. Temporal weights, history, raster resolution, source cadence and
+high-detail prefilter remain unchanged. The world chart's different sampling
+grid can change motion/noise decisions, so diagnostic acceptance does not
+automatically qualify this implementation's pictures.
 
 The source-rate prefilter changes only the corrected
 display's high term: it evaluates the existing native box at every source

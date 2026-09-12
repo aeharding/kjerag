@@ -2321,6 +2321,15 @@ impl InstalledOneXsPass {
             pass,
         );
     }
+
+    fn draw_world_panorama(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.draw.pipeline.draw_resident_world_panorama(
+            &self.binding,
+            self.draw.map.read(),
+            self.draw.map.fusion_read(),
+            pass,
+        );
+    }
 }
 
 /// Carrier-first whole-frame install. Declaration order is load-bearing:
@@ -2478,6 +2487,49 @@ impl InstalledOneXsReady {
         Ok(output)
     }
 
+    fn arm_and_encode_world_panorama(
+        self,
+        retirements: &IcedDrawRetirements<InstalledOneXsPass>,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        size: crate::Size,
+    ) -> Fallible<crate::direct_type2::WorldPanorama> {
+        let draw = self
+            .pass
+            .expect("resident world panorama must retain its exact private picture binding");
+        if !draw.binding.is_gamma_output() {
+            return Err("resident world panorama requires gamma-encoded source output".into());
+        }
+        let output = draw.draw.pipeline.resident_world_panorama_target(
+            device,
+            &draw.draw.source,
+            &draw.binding,
+            size,
+        )?;
+        if output.frame() != draw.draw.map.frame() {
+            return Err("resident world panorama source and map name different frames".into());
+        }
+        let target = output.texture().create_view(&Default::default());
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("resident world panorama snapshot"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        retirements.arm_and_draw(self.permit, &mut pass, draw, |draw, pass| {
+            draw.draw_world_panorama(pass);
+        });
+        drop(pass);
+        Ok(output)
+    }
+
     /// Detach the exact displayed source/map while producing its reduced
     /// temporal input. Every imported-source read is in this one encoder.
     /// The first pass arms submission-complete retirement before sampling;
@@ -2494,7 +2546,8 @@ impl InstalledOneXsReady {
         installed.source.ensure_resident_context(context)?;
         let frame = installed.frame();
         let map = installed.map.snapshot(&frame, context)?;
-        let body = self.arm_and_encode_panorama(retirements, context.device(), encoder, size)?;
+        let world =
+            self.arm_and_encode_world_panorama(retirements, context.device(), encoder, size)?;
         #[cfg(test)]
         gpu_profile.mark(encoder, "body_panorama");
         let result = (|| {
@@ -2506,7 +2559,7 @@ impl InstalledOneXsReady {
             #[cfg(test)]
             gpu_profile.mark(encoder, "original_plane_copies");
             corrected::CorrectionInput::new(
-                body,
+                world,
                 source,
                 map,
                 Arc::clone(&installed.pipeline),

@@ -1,5 +1,5 @@
 use super::*;
-use std::{path::PathBuf, sync::mpsc};
+use std::{io::Write, path::PathBuf, sync::mpsc};
 use wgpu::util::DeviceExt;
 
 const RATIO_TOLERANCE: f32 = 1.0 / 510.0;
@@ -659,6 +659,312 @@ fn captured_warm_sequence_matches_reference_on_every_publish_and_hold() {
     eprintln!(
         "fusion warm sequence sources={first_source}..={last_source} observations={observations} admissions={admissions} holds={holds} worst_error={worst_error}"
     );
+}
+
+/// Replay one exact captured sequence twice. The control preserves ordinary
+/// sparse admission; the diagnostic clears only the admission-initialized
+/// word before each observation, forcing that observation through the
+/// existing solve without resetting its metric, seed or warm-field history.
+#[test]
+#[ignore = "requires a saved multi-frame fusion-input sequence and output directory"]
+fn captured_x4_sequence_isolates_sparse_admission() {
+    let root = PathBuf::from(
+        std::env::var_os("KJERAG_FUSION_SEQUENCE_FIXTURE")
+            .expect("KJERAG_FUSION_SEQUENCE_FIXTURE must name a fusion-inputs directory"),
+    );
+    let output = PathBuf::from(
+        std::env::var_os("KJERAG_FUSION_FORCE_ADMIT_DIR")
+            .expect("KJERAG_FUSION_FORCE_ADMIT_DIR must name a new output directory"),
+    );
+    std::fs::create_dir(&output).expect("force-admit output must be a new directory");
+    let normal_dir = output.join("normal");
+    let forced_dir = output.join("force-admit");
+    std::fs::create_dir(&normal_dir).unwrap();
+    std::fs::create_dir(&forced_dir).unwrap();
+    let review_100 = std::env::var_os("KJERAG_FUSION_REVIEW_100_BUDGET").is_some();
+    let normal_100_dir = output.join("normal-100");
+    let forced_100_dir = output.join("force-admit-100");
+    if review_100 {
+        std::fs::create_dir(&normal_100_dir).unwrap();
+        std::fs::create_dir(&forced_100_dir).unwrap();
+    }
+
+    let manifest = std::fs::read_to_string(root.join("manifest.tsv")).unwrap();
+    let rows: Vec<_> = manifest
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with("frame\t"))
+        .map(|line| {
+            let fields: Vec<_> = line.split('\t').collect();
+            assert_eq!(fields.len(), 6, "malformed fusion sequence row: {line}");
+            (
+                fields[0].parse::<u64>().unwrap(),
+                fields[1].to_owned(),
+                fields[2].to_owned(),
+                fields[3].to_owned(),
+            )
+        })
+        .collect();
+    assert!(!rows.is_empty(), "fusion sequence has no observations");
+    assert!(
+        rows.windows(2).all(|pair| pair[1].0 == pair[0].0 + 1),
+        "fusion sequence source indices are not contiguous"
+    );
+    let retained = root
+        .parent()
+        .expect("fusion-inputs directory has no retained-output parent");
+    let Some((device, queue)) = gpu() else { return };
+    let mut normal = Producer::new(&device, StitchCamera::CalibratedMei).unwrap();
+    let mut forced = Producer::new(&device, StitchCamera::CalibratedMei).unwrap();
+    normal.state = diagnostic_state(&device, "normal fusion replay state");
+    forced.state = diagnostic_state(&device, "force-admit fusion replay state");
+    let mut normal_100 = review_100.then(|| {
+        let mut producer = Producer::new(&device, StitchCamera::CalibratedMei).unwrap();
+        producer.state = diagnostic_state(&device, "normal 100-step fusion replay state");
+        replace_solve_with_100_step_review(&device, &mut producer);
+        producer
+    });
+    let mut forced_100 = review_100.then(|| {
+        let mut producer = Producer::new(&device, StitchCamera::CalibratedMei).unwrap();
+        producer.state = diagnostic_state(&device, "force-admit 100-step fusion replay state");
+        replace_solve_with_100_step_review(&device, &mut producer);
+        producer
+    });
+    let mut states =
+        std::io::BufWriter::new(std::fs::File::create_new(output.join("state.tsv")).unwrap());
+    writeln!(
+        states,
+        "frame\tnormal_initialized\tnormal_changed\tnormal_solve_active\tnormal_current_metric\tnormal_retained_metric\tnormal_retained_budget\tnormal_first_valid\tnormal_seeds\tnormal_control_valid\tforce_initialized\tforce_changed\tforce_solve_active\tforce_current_metric\tforce_retained_metric\tforce_retained_budget\tforce_first_valid\tforce_seeds\tforce_control_valid"
+    )
+    .unwrap();
+    let mut budget_deltas = review_100.then(|| {
+        let mut log = std::io::BufWriter::new(
+            std::fs::File::create_new(output.join("budget-100-max-delta.tsv")).unwrap(),
+        );
+        writeln!(
+            log,
+            "frame\tnormal_100_vs_normal\tforce_admit_100_vs_force_admit"
+        )
+        .unwrap();
+        log
+    });
+
+    for (ordinal, (frame, left, right, invalid)) in rows.into_iter().enumerate() {
+        let left = std::fs::read(root.join(left)).unwrap();
+        let right = std::fs::read(root.join(right)).unwrap();
+        let invalid = std::fs::read(root.join(invalid)).unwrap();
+        let normal_ratios = observe(
+            &device,
+            &queue,
+            &mut normal,
+            [&left, &right],
+            &invalid,
+            u32::MAX,
+        );
+        for (lens, name) in ["left", "right"].into_iter().enumerate() {
+            let expected =
+                std::fs::read(retained.join(format!("frame-{frame:010}.fusion-{name}.float4")))
+                    .unwrap();
+            assert_eq!(
+                float4_as_bytes(&normal_ratios[lens]),
+                expected.as_slice(),
+                "normal replay differs from retained GPU output at frame {frame} lens {name}"
+            );
+        }
+        write_ratios(&normal_dir, frame, &normal_ratios);
+        let normal_state = read_replay_state(&device, &queue, &normal.state);
+
+        queue.write_buffer(&forced.state, 18 * 4, words_as_bytes(&[0]));
+        let forced_ratios = observe(
+            &device,
+            &queue,
+            &mut forced,
+            [&left, &right],
+            &invalid,
+            u32::MAX,
+        );
+        if ordinal == 0 {
+            for lens in 0..2 {
+                assert_eq!(
+                    float4_as_bytes(&forced_ratios[lens]),
+                    float4_as_bytes(&normal_ratios[lens]),
+                    "forcing the already-cold first observation changed lens {lens}"
+                );
+            }
+        }
+        write_ratios(&forced_dir, frame, &forced_ratios);
+        let forced_state = read_replay_state(&device, &queue, &forced.state);
+        assert_eq!(
+            forced_state[0], 1,
+            "frame {frame} did not restore initialized state"
+        );
+        assert_eq!(forced_state[1], 1, "frame {frame} was not force-admitted");
+        if let (Some(normal_100), Some(forced_100), Some(budget_deltas)) = (
+            normal_100.as_mut(),
+            forced_100.as_mut(),
+            budget_deltas.as_mut(),
+        ) {
+            let normal_100_ratios = observe(
+                &device,
+                &queue,
+                normal_100,
+                [&left, &right],
+                &invalid,
+                u32::MAX,
+            );
+            queue.write_buffer(&forced_100.state, 18 * 4, words_as_bytes(&[0]));
+            let forced_100_ratios = observe(
+                &device,
+                &queue,
+                forced_100,
+                [&left, &right],
+                &invalid,
+                u32::MAX,
+            );
+            if ordinal == 0 {
+                for lens in 0..2 {
+                    assert_eq!(
+                        float4_as_bytes(&normal_100_ratios[lens]),
+                        float4_as_bytes(&normal_ratios[lens]),
+                        "100-step normal cold output changed lens {lens}"
+                    );
+                    assert_eq!(
+                        float4_as_bytes(&forced_100_ratios[lens]),
+                        float4_as_bytes(&forced_ratios[lens]),
+                        "100-step force-admit cold output changed lens {lens}"
+                    );
+                }
+            }
+            write_ratios(&normal_100_dir, frame, &normal_100_ratios);
+            write_ratios(&forced_100_dir, frame, &forced_100_ratios);
+            let normal_delta = max_error(
+                &normal_100_ratios,
+                [&normal_ratios[0][..], &normal_ratios[1][..]],
+            );
+            let forced_delta = max_error(
+                &forced_100_ratios,
+                [&forced_ratios[0][..], &forced_ratios[1][..]],
+            );
+            writeln!(budget_deltas, "{frame}\t{normal_delta}\t{forced_delta}").unwrap();
+        }
+        writeln!(
+            states,
+            "{frame}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            normal_state[0],
+            normal_state[1],
+            normal_state[2],
+            normal_state[3],
+            normal_state[4],
+            normal_state[5],
+            normal_state[6],
+            normal_state[7],
+            normal_state[8],
+            forced_state[0],
+            forced_state[1],
+            forced_state[2],
+            forced_state[3],
+            forced_state[4],
+            forced_state[5],
+            forced_state[6],
+            forced_state[7],
+            forced_state[8],
+        )
+        .unwrap();
+    }
+    states.flush().unwrap();
+    if let Some(log) = budget_deltas.as_mut() {
+        log.flush().unwrap();
+    }
+}
+
+/// Replace only the test-owned solve pipeline. This is a non-production
+/// counterfactual and makes no claim about Studio's iteration policy.
+fn replace_solve_with_100_step_review(device: &wgpu::Device, producer: &mut Producer) {
+    const SELECTED_BUDGET: &str =
+        "let budget = select(state[RETAINED_BUDGET], 100u, state[SEEDS] == 0u);";
+    let source = include_str!("../gpu.wgsl");
+    assert_eq!(
+        source.matches(SELECTED_BUDGET).count(),
+        1,
+        "100-step review did not find exactly one selected solve budget"
+    );
+    let source = source.replacen(SELECTED_BUDGET, "let budget = 100u;", 1);
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("image fusion 100-step review solve"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("image fusion 100-step review solve"),
+        bind_group_layouts: &[&producer.layout],
+        immediate_size: 0,
+    });
+    assert_eq!(STAGES[3], "solve");
+    producer.pipelines[3] = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("image fusion 100-step review solve"),
+        layout: Some(&layout),
+        module: &module,
+        entry_point: Some("solve"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+}
+
+fn diagnostic_state(device: &wgpu::Device, label: &str) -> wgpu::Buffer {
+    let mut state = vec![0u32; STATE_WORDS];
+    state[22] = 20;
+    state[23] = 1;
+    state[24] = 1;
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents: words_as_bytes(&state),
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC,
+    })
+}
+
+fn write_ratios(output: &std::path::Path, frame: u64, ratios: &[Vec<[f32; 4]>; 2]) {
+    for (lens, name) in ["left", "right"].into_iter().enumerate() {
+        std::fs::write(
+            output.join(format!("frame-{frame:010}.fusion-{name}.float4")),
+            float4_as_bytes(&ratios[lens]),
+        )
+        .unwrap();
+    }
+}
+
+/// Read state words 18 through 26 after an observation has completed.
+fn read_replay_state(device: &wgpu::Device, queue: &wgpu::Queue, state: &wgpu::Buffer) -> [u32; 9] {
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("fusion replay state readback"),
+        size: 9 * 4,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("fusion replay state readback"),
+    });
+    encoder.copy_buffer_to_buffer(state, 18 * 4, &staging, 0, 9 * 4);
+    let submission = queue.submit([encoder.finish()]);
+    let slice = staging.slice(..);
+    let (send, receive) = mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |answer| {
+        let _ = send.send(answer);
+    });
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        })
+        .unwrap();
+    receive.recv().unwrap().unwrap();
+    let mapped = slice.get_mapped_range();
+    let words = std::array::from_fn(|index| {
+        let at = index * 4;
+        u32::from_ne_bytes(mapped[at..at + 4].try_into().unwrap())
+    });
+    drop(mapped);
+    staging.unmap();
+    words
 }
 
 fn assert_bit_exact_hold(frame: u64, previous: &[Vec<[f32; 4]>; 2], actual: &[Vec<[f32; 4]>; 2]) {

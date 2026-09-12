@@ -212,6 +212,13 @@ pub(super) fn prepare_correction_input(
     size: Size,
     permit: crate::draw_retirement::DrawPermit,
 ) -> Fallible<super::corrected::CorrectionInput> {
+    #[cfg(test)]
+    if let Some(output) = std::env::var_os("KJERAG_CORRECTION_FIELDS_DIR") {
+        std::fs::write(
+            std::path::Path::new(&output).join(format!("input-{:010}.reframe.bin", stamp.index())),
+            reframe.bytes(),
+        )?;
+    }
     let draw = prepare_panorama_draw(session, frames, reframe, stamp, permit)?;
     let mut encoder =
         session

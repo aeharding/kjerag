@@ -11,8 +11,10 @@ use std::sync::Arc;
 
 use super::map_patch_gpu::MapSnapshot;
 use super::native_capacity;
-use crate::direct_type2::correction::{CorrectionPictureBinding, CorrectionPipeline};
-use crate::direct_type2::{BodyPanorama, DirectType2Pipeline, SourceSnapshot};
+use crate::direct_type2::correction::{
+    CorrectionCoordinates, CorrectionPictureBinding, CorrectionPipeline,
+};
+use crate::direct_type2::{DirectType2Pipeline, RgbPanorama, SourceSnapshot, WorldPanorama};
 use crate::flow::one_xs::gpu_context::OneXsGpuContext;
 use crate::temporal_fusion::color::MatrixCoefficients;
 use crate::temporal_fusion::correction_stream::{CorrectionFrame, CorrectionStream};
@@ -24,21 +26,23 @@ struct DisplaySource {
     map: MapSnapshot,
     pipeline: Arc<DirectType2Pipeline>,
     context: OneXsGpuContext,
+    coordinates: CorrectionCoordinates,
 }
 
 pub(super) struct CorrectionInput {
-    body: BodyPanorama,
+    body: RgbPanorama,
     display: DisplaySource,
 }
 
 impl CorrectionInput {
     pub(super) fn new(
-        body: BodyPanorama,
+        panorama: WorldPanorama,
         source: SourceSnapshot,
         map: MapSnapshot,
         pipeline: Arc<DirectType2Pipeline>,
         context: &OneXsGpuContext,
     ) -> Fallible<Self> {
+        let (body, body_from_world) = panorama.into_parts();
         source.ensure_context(context)?;
         map.ensure_context(context)?;
         if !body.belongs_to(context.device()) {
@@ -54,6 +58,7 @@ impl CorrectionInput {
                 map,
                 pipeline,
                 context: context.clone(),
+                coordinates: CorrectionCoordinates::new(context.device(), body_from_world),
             },
         })
     }
@@ -143,6 +148,11 @@ impl CorrectedFrame {
         &self.correction
     }
 
+    #[cfg(test)]
+    pub(crate) fn coordinates_for_review(&self) -> [[f32; 4]; 3] {
+        self.display.coordinates.columns()
+    }
+
     pub(crate) fn prepare_view(
         &self,
         device: &wgpu::Device,
@@ -153,10 +163,44 @@ impl CorrectedFrame {
             return Err("corrected view belongs to a different graphics device".into());
         }
         let pipeline = self.display.pipeline.correction_pipeline(device, format)?;
-        let picture =
-            self.display
-                .source
-                .prepare_correction_picture(&pipeline, reframe, &self.correction)?;
+        let picture = self.display.source.prepare_correction_picture(
+            &pipeline,
+            reframe,
+            &self.correction,
+            &self.display.coordinates,
+        )?;
+        Ok(PreparedCorrectionDraw {
+            picture,
+            map: self.display.map.read().clone(),
+            fusion: self.display.map.fusion_read().cloned(),
+            pipeline,
+            frame: self.frame().clone(),
+            native_capacity: native_capacity::DrawMarker::for_reframe(reframe),
+        })
+    }
+
+    /// Prepare the exact selected draw with `current` bound as both low
+    /// temporal terms, so the additive temporal contribution is zero.
+    #[cfg(test)]
+    pub(crate) fn prepare_view_without_temporal_for_review(
+        &self,
+        device: &wgpu::Device,
+        reframe: &Reframe,
+        format: wgpu::TextureFormat,
+    ) -> Fallible<PreparedCorrectionDraw> {
+        if self.display.context.device() != device {
+            return Err("corrected view belongs to a different graphics device".into());
+        }
+        let pipeline = self.display.pipeline.correction_pipeline(device, format)?;
+        let picture = self
+            .display
+            .source
+            .prepare_correction_picture_without_temporal_for_review(
+                &pipeline,
+                reframe,
+                &self.correction,
+                &self.display.coordinates,
+            )?;
         Ok(PreparedCorrectionDraw {
             picture,
             map: self.display.map.read().clone(),

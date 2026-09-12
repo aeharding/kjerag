@@ -15,6 +15,57 @@ use super::{DirectType2Pipeline, draw_wgsl_with_fusion_mode};
 const LOW_CURRENT_BINDING: u32 = 6;
 const LOW_FILTERED_BINDING: u32 = 7;
 const LOW_SAMPLER_BINDING: u32 = 8;
+const COORDINATES_BINDING: u32 = 9;
+
+/// Immutable coordinate transform created once for one admitted source.
+/// The source owner retains the exact columns used to materialize its world
+/// panorama. View redraws borrow this buffer, never recomputing the transform
+/// from mouse direction or the display's horizon policy.
+pub(crate) struct CorrectionCoordinates {
+    device: wgpu::Device,
+    uniform: wgpu::Buffer,
+    #[cfg(test)]
+    columns: [[f32; 4]; 3],
+}
+
+impl CorrectionCoordinates {
+    pub(crate) fn new(device: &wgpu::Device, columns: [[f32; 4]; 3]) -> Self {
+        use wgpu::util::DeviceExt;
+        let bytes = columns.map(|column| column.map(f32::to_ne_bytes));
+        Self {
+            device: device.clone(),
+            uniform: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("source-owned world correction coordinates"),
+                contents: bytes.as_flattened().as_flattened(),
+                usage: wgpu::BufferUsages::UNIFORM,
+            }),
+            #[cfg(test)]
+            columns,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn columns(&self) -> [[f32; 4]; 3] {
+        self.columns
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LowTexture {
+    Current,
+    Filtered,
+}
+
+const TEMPORAL_LOW_BINDINGS: [(u32, LowTexture); 2] = [
+    (LOW_CURRENT_BINDING, LowTexture::Current),
+    (LOW_FILTERED_BINDING, LowTexture::Filtered),
+];
+
+#[cfg(test)]
+const NO_TEMPORAL_LOW_BINDINGS: [(u32, LowTexture); 2] = [
+    (LOW_CURRENT_BINDING, LowTexture::Current),
+    (LOW_FILTERED_BINDING, LowTexture::Current),
+];
 
 /// Immutable target-format pipelines and bindings shared by corrected draws.
 ///
@@ -41,6 +92,7 @@ pub(crate) struct CorrectionPipeline {
 pub(crate) struct CorrectionPictureBinding {
     read: wgpu::BindGroup,
     _uniforms: wgpu::Buffer,
+    _coordinates: wgpu::Buffer,
     rectilinear: bool,
 }
 
@@ -52,6 +104,9 @@ impl CorrectionPipeline {
     ) -> Fallible<Self> {
         if direct.device != *device {
             return Err("corrected direct view belongs to a different graphics device".into());
+        }
+        if device.limits().max_uniform_buffers_per_shader_stage < 2 {
+            return Err("world correction needs two uniform buffers per shader stage".into());
         }
         if !matches!(
             output_format,
@@ -67,10 +122,15 @@ impl CorrectionPipeline {
         }
 
         let fusion = direct.fusion_layout.is_some();
-        let source = format!(
-            "{}\n{CORRECTION_WGSL}",
-            draw_wgsl_with_fusion_mode(fusion, direct.fusion_sampler.is_some())
-        );
+        let source = shader_source(fusion, direct.fusion_sampler.is_some());
+        #[cfg(test)]
+        if let Some(output) = std::env::var_os("KJERAG_CORRECTION_FIELDS_DIR") {
+            std::fs::write(
+                std::path::PathBuf::from(output).join("selected-correction.wgsl"),
+                &source,
+            )
+            .expect("write selected correction diagnostic shader");
+        }
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ONE X2 corrected direct view"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -147,9 +207,49 @@ impl CorrectionPipeline {
         reframe: &Reframe,
         lenses: [&Planes; MAX_LENSES],
         correction: &CorrectionFrame,
+        coordinates: &CorrectionCoordinates,
+    ) -> Fallible<CorrectionPictureBinding> {
+        self.prepare_picture_with_low_bindings(
+            reframe,
+            lenses,
+            correction,
+            coordinates,
+            TEMPORAL_LOW_BINDINGS,
+        )
+    }
+
+    /// Bind a zero temporal residual while retaining the exact selected
+    /// source, map, colour and projection path. This is diagnostic-only.
+    #[cfg(test)]
+    pub(super) fn prepare_picture_without_temporal_for_review(
+        &self,
+        reframe: &Reframe,
+        lenses: [&Planes; MAX_LENSES],
+        correction: &CorrectionFrame,
+        coordinates: &CorrectionCoordinates,
+    ) -> Fallible<CorrectionPictureBinding> {
+        self.prepare_picture_with_low_bindings(
+            reframe,
+            lenses,
+            correction,
+            coordinates,
+            NO_TEMPORAL_LOW_BINDINGS,
+        )
+    }
+
+    fn prepare_picture_with_low_bindings(
+        &self,
+        reframe: &Reframe,
+        lenses: [&Planes; MAX_LENSES],
+        correction: &CorrectionFrame,
+        coordinates: &CorrectionCoordinates,
+        low_bindings: [(u32, LowTexture); 2],
     ) -> Fallible<CorrectionPictureBinding> {
         if !correction.belongs_to(&self.device) {
             return Err("temporal correction belongs to a different graphics device".into());
+        }
+        if coordinates.device != self.device {
+            return Err("correction coordinates belong to a different graphics device".into());
         }
         if reframe.linearizes_output() != self.output_format.is_srgb() {
             return Err(
@@ -187,9 +287,11 @@ impl CorrectionPipeline {
         let current = correction
             .current_texture()
             .create_view(&Default::default());
-        let filtered = correction
-            .filtered_texture()
-            .create_view(&Default::default());
+        let filtered = match low_bindings[1].1 {
+            LowTexture::Current => correction.current_texture(),
+            LowTexture::Filtered => correction.filtered_texture(),
+        }
+        .create_view(&Default::default());
         let mut entries = vec![wgpu::BindGroupEntry {
             binding: 0,
             resource: uniforms.as_entire_binding(),
@@ -209,16 +311,20 @@ impl CorrectionPipeline {
                 resource: wgpu::BindingResource::Sampler(&self.source_sampler),
             },
             wgpu::BindGroupEntry {
-                binding: LOW_CURRENT_BINDING,
+                binding: low_bindings[0].0,
                 resource: wgpu::BindingResource::TextureView(&current),
             },
             wgpu::BindGroupEntry {
-                binding: LOW_FILTERED_BINDING,
+                binding: low_bindings[1].0,
                 resource: wgpu::BindingResource::TextureView(&filtered),
             },
             wgpu::BindGroupEntry {
                 binding: LOW_SAMPLER_BINDING,
                 resource: wgpu::BindingResource::Sampler(&self.low_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: COORDINATES_BINDING,
+                resource: coordinates.uniform.as_entire_binding(),
             },
         ]);
         let read = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -229,6 +335,7 @@ impl CorrectionPipeline {
         Ok(CorrectionPictureBinding {
             read,
             _uniforms: uniforms,
+            _coordinates: coordinates.uniform.clone(),
             rectilinear: reframe.is_rectilinear(),
         })
     }
@@ -298,6 +405,16 @@ fn picture_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
         count: None,
     });
+    entries.push(wgpu::BindGroupLayoutEntry {
+        binding: COORDINATES_BINDING,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: std::num::NonZeroU64::new(std::mem::size_of::<[[f32; 4]; 3]>() as u64),
+        },
+        count: None,
+    });
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("ONE X2 corrected direct picture"),
         entries: &entries,
@@ -330,7 +447,6 @@ fn validate_low(texture: &wgpu::Texture, role: &str) -> Fallible<[u32; 2]> {
     Ok(size)
 }
 
-#[cfg(test)]
 fn shader_source(fusion: bool, hardware_fusion: bool) -> String {
     format!(
         "{}\n{CORRECTION_WGSL}",
@@ -342,9 +458,10 @@ const CORRECTION_WGSL: &str = r#"
 @group(0) @binding(6) var correction_current: texture_2d<f32>;
 @group(0) @binding(7) var correction_filtered: texture_2d<f32>;
 @group(0) @binding(8) var correction_sampler: sampler;
+@group(0) @binding(9) var<uniform> correction_body_from_world: mat3x3<f32>;
 
 fn correction_body_uv(body_unscaled: vec3<f32>) -> vec2<f32> {
-  let body = normalize(body_unscaled);
+  let body = normalize(transpose(correction_body_from_world) * body_unscaled);
   var theta = atan2(body.x, -body.z);
   if theta < 0.0 { theta += TYPE2_TAU; }
   return vec2<f32>(theta / TYPE2_TAU,
@@ -473,5 +590,13 @@ mod tests {
         assert_eq!(descriptor.address_mode_v, wgpu::AddressMode::ClampToEdge);
         assert!(CORRECTION_WGSL.contains("atan2(body.x, -body.z)"));
         assert!(CORRECTION_WGSL.contains("acos(clamp(body.y, -1.0, 1.0))"));
+    }
+
+    #[test]
+    fn no_temporal_control_changes_only_the_filtered_texture_binding() {
+        assert_eq!(TEMPORAL_LOW_BINDINGS[0], NO_TEMPORAL_LOW_BINDINGS[0]);
+        assert_eq!(TEMPORAL_LOW_BINDINGS[1].0, NO_TEMPORAL_LOW_BINDINGS[1].0);
+        assert_eq!(TEMPORAL_LOW_BINDINGS[1].1, LowTexture::Filtered);
+        assert_eq!(NO_TEMPORAL_LOW_BINDINGS[1].1, LowTexture::Current);
     }
 }

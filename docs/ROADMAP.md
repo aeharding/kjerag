@@ -14,6 +14,166 @@ acceptance before main changes.
 [Issue #184](https://github.com/aeharding/kjerag/issues/184) owns this
 shared-camera engine work.
 
+**New fast-motion color-seam report under diagnosis, 2026-09-11:** the owner
+confirms the real Scene capture reproduces the reported1147.313-second X4 Air
+view (yaw-98.43,pitch26.98,FOV78.20,locked). This is not acceptance of the
+installed build or a proven difference from Studio at this interval.
+The owner now answers the matched temporal control: "Only visible in
+\"Installed Algorithm\"", and localizes a faint line moving down the
+middle-left about halfway through the clip. The exact source, prefilter,
+geometry and color are shared between arms, so the temporal contribution is
+necessary for this reported line in this interval. This reopens diagnosis at
+the temporal representation/motion boundary; slow color updates alone do not
+explain the matched result. Studio's separate1147 comparison still has no
+explicit verdict. No fix is selected or installed.
+
+**Latest owner verdict:** "Right removes the line and looks acceptable" on
+`stabilized-review-01/review.mkv`. This supersedes the earlier grain/smearing
+uncertainty and accepts the moving result in that exact diagnostic, not all
+footage or a production build. Do not ask for the same review again.
+A direct existing-Studio LEFT /
+stabilized-candidate RIGHT comparison is now available at
+`scratch/chromatic1147/stabilized-studio-review-01/review.mkv`; its31 decoded
+picture pairs equal the original inputs byte-for-byte. The candidate shows
+stronger fine sky texture in inspected pixels, but Studio's prior HEVC export
+and bilinear view projection are different from the candidate's native PPM
+path. Still inspection cannot clear temporal smearing, and this sky-heavy
+view cannot qualify fine ground detail. No new Studio export is needed.
+The implementation direction is a source-owned world-coordinate temporal
+input, independent of mouse direction and the display's horizon toggle,
+paired with the exact same source matrix at final correction lookup. That
+view-independent implementation is now implemented, not installed; the older
+body/full temporal references remain unchanged.
+
+The source-owned world candidate passes8 Scene regression tests with both
+real-camera inputs, including nonidentity pose ownership, changed camera and
+aspect, Free/Locked horizon, delayed center outputs, history wrap and seek/EOF
+lineage. Its exact1147 capture passes31source-matrix associations; all31 zero
+temporal-contribution pictures equal the installed-algorithm controls. Rerun
+full/half reference pictures also equal all62 previous PPMs. The retained
+canonical/accepted and canonical/Studio movies are under
+`scratch/chromatic1147/world-review-01`; inspected images show no gross new
+difference, not owner acceptance of the canonical build. Workspace tests pass
+1496 with52 explicitly ignored; release workspace/all-target Clippy, formatting,
+source-lock and rename checks pass. Native release executable SHA256 is
+`3b88f08d31d43fce60b585f1f88f56cddfc3b356a9c6ddbefaae2d8660ce38f5`.
+Its initial40-second2256x1504 X4 capacity run is BELOW target:217.949 completed
+redraws/s and28.575 consecutive source advances/s, p99/max completion spacing
+15.409/24.189ms. This is not performance qualification. The machine reports
+AC disconnected. The unchanged installed baseline at the SAME1147 interval
+reaches267.224 completed redraws/s with normal source playback, also on battery.
+This does not isolate native compilation/runtime effects from coordinate cost;
+the candidate needs measurement in the same Flatpak runtime. Earlier native
+and installed results also differed materially. No power policy, installed
+build, public PR or main has been changed by this implementation yet.
+
+Two subsequent test-only coordinate counterfactuals retain byte-exact baseline
+Scene controls. An exact512-pixel cyclic permutation of each quarter temporal
+input and inverse permutation of both outputs retains all31 current and
+temporal-off pictures exactly. Its amplified residual structure does not
+convincingly follow the relocated horizontal cut, so partial coarse-tail
+interpolation is not selected as a fix. A fixed90-degree polar-axis rotation
+was subsequently found INVALID: its inverse change was attached only to a
+shader-validation helper, while the actual draw constructor still concatenated
+the original shader. The grain and old-pole persistence from that experiment
+cannot reject a pole-related cause. The test wiring is being corrected before
+any conclusion or candidate selection. The owner confirms "The line is on both sides" of the
+full-versus-quarter reference movie. The quarter raster, residual-addition
+display and prefilter therefore are not necessary for this symptom; shared
+temporal processing/source representation is the next diagnostic boundary.
+This does not isolate one common operation or establish Studio's1147 result.
+The exact mechanism remains unproven. Evidence and all controls remain in
+`scratch/chromatic1147`; no new Studio export, installation or broad RE.
+
+The actual correction constructor now shares shader construction with its
+validation helper, with unchanged non-test source. A corrected polar rerun and
+new stabilization-before-filtering diagnostic each pass the real Scene path.
+All124 unflagged baseline images equal prior captures; both experiments retain
+all31 temporal-off pictures exactly. The actual GPU-constructor shader strings
+are saved and checked for both paired transforms; the stabilized run's31
+source/view matrices also match exactly. Both corrected experiments remove
+the former radial residual pattern in inspected images, but that is not the
+owner's moving-line verdict by itself. The lossless native-cadence comparison at
+`scratch/chromatic1147/stabilized-review-01/review.mkv`, installed LEFT and
+stabilize-before-filter RIGHT, now has the scoped owner verdict above.
+Decoded picture bodies equal all62 source PPMs.
+The diagnostic uses the fixed requested camera as its stable coordinate frame;
+it is not yet a view-independent player architecture or a shipped fix.
+Existing Studio captures put BlockDenois after the rendered panorama; already
+stabilized native inputs are a strong inference, not recovered pose-provider
+authority. No source cadence, filter weights or color updates are changed.
+
+A test-only matched temporal-contribution control preserves the same source,
+prefilter, geometry, color and Reframe. Its normal draw equals the Scene
+screenshot on all31sources, and all93current/filtered/shown captures equal the
+original diagnostic byte-for-byte. The broad sun/sky gradient remains without
+the temporal contribution, but it must not be substituted for the reported
+moving defect: the calculated alpha0.5 seam is diagonal. The owner's new
+temporal-control verdict above supersedes the earlier pending observations.
+
+A saved-input GPU intervention reproduces all62normal ratio textures exactly,
+then forces admission on every source without resetting warm solver history.
+Normal admission updates14times and holds17, including five held sources
+34401..34405. Both arms keep the same continuing five-step budget; inner
+support does not block any forced update. Corrected lens mismatch sampled on
+the calculated seam changes in mixed directions, with near convergence after
+ordinary admission34406. This does not establish that skipping color updates
+causes the visible defect or that forcing every source is a fix. A single
+ordinary33-frame Studio360export is completed and source-trim-associated with
+the same interval. Its fixed rigid display registration and all controls are
+retained under`scratch/chromatic1147`. No selected playback policy or installed
+Flatpak changes; new code is diagnostic access/replay, not a proposed fix.
+
+A second test-only counterfactual raises only the continuing warm-solve loop
+limit from5 to100 while preserving separate chronological admission, seeds,
+fields and control history. It measurably changes ratios, by at most0.005970359
+in normal history and0.005287826 in forced-admission history, so five steps are
+not byte-converged. Signed corrected-lens RGB sampled on the exact rendered
+diagonal seam and +/-32/96-pixel decoys changes in mixed directions rather than
+consistently improving through held sources34401..34405 or admission34406.
+Thus sparse admission alone and a five-step continuation limit alone do not
+consistently explain the discrepancy in these bounded native-box diagnostics.
+This is not proof that either mechanism is irrelevant to the moving report,
+not a selected prefiltered temporal comparison, and not evidence of Studio's
+iteration policy. Authenticated movies, ratio maps and per-point receipts are
+under`scratch/chromatic1147/budget-100-01`; owner motion review and the Studio
+Image Fusion comparison were diagnosis gates, not accepted fixes. The switch
+comparison is now completed below; owner motion review remains open.
+
+The controlled Studio Image Fusion OFF export is now complete, with the
+project restored and semantically verified ON afterward. OFF differs from ON
+only by the fusion flag and save time; the earlier immediate snapshot caught
+Studio's asynchronous save before any export and is not used. The fixed
+existing registration supplies31 four-panel Studio ON/OFF and Kjerag spatial
+ON/OFF frames. Both show the same broad red correction placement and sign
+around the calculated diagonal seam, while Kjerag's amplitude is often weaker.
+Exact on-seam values and other channels are small or mixed, and Studio's two
+lossy exports include downstream filtering. This supports only a possible
+spatial-amplitude difference, not a sign/placement failure, moving-defect cause
+or quality verdict. The separate matched temporal point reads and X320/640/960
+time strips likewise do not localize a cause. Receipts, restored-state hashes
+and review artifacts are retained in `scratch/chromatic1147/fusion-switch-01`
+and `temporal-trace-01`; no playback policy or production behavior changes.
+
+An exact Reframe capture now locates the correction panorama's south pole
+inside all31 reported views, including pixel(245.46,425.41) on source34405.
+The diagnostic's124 previous image outputs remain byte-identical. The pole
+coincides with radial structure in the amplified temporal residual, but this
+does not establish the reported trail's cause or justify a pole-handling fix.
+Two owner checks are queued for return from AFK: whether temporal-off retains
+the exact trail, and whether Studio is actually better at this new interval.
+No new correction strength, cadence, smoother, mask or rearchitecture is
+selected without that localization. Evidence:`scratch/chromatic1147/README.md`.
+
+The existing full/half temporal reference also runs at1147 without code changes:
+1/1pass in5.40s, all31ordinary spatial pictures exactly match prior controls.
+Its pose matches the selected view; only an unconsumed legacy handover scalar
+differs. Full/half change boundary, source representation, angular motion
+support and history endpoints as well as size, so they do not isolate a
+resolution-only cause. Moving comparisons are retained in
+`scratch/chromatic1147/full-temporal-01`; no fixed/accepted output or new
+installation is claimed. The two already queued owner checks remain open.
+
 **Sky680 test Flatpak installed, 2026-09-11:** after the owner requests
 "continue I want flatpak", the accepted periodic-horizontal fix is packaged
 from source `dad5d7092052266df6eebc82f04c43f1389f3891` and installed as
