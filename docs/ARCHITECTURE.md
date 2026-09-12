@@ -100,9 +100,13 @@ group2 within the native three-group limit. Pipelines cache by surface format.
 The installed branch test build materializes the selected temporal input in canonical
 world coordinates, before filtering, for the1147 moving-line report. The owner
 accepts both the stabilized-input diagnostic and, on2026-09-12, the installed
-player ("looks good. not perfect but pretty damn good"). This implementation
-passes both-camera installed UI and rendering-capacity qualification (ROADMAP).
-That is tested-build acceptance, not all-footage or exact Studio parity. Scene retains actual
+player ("looks good. not perfect but pretty damn good"). That exact package
+passed both-camera UI and an earlier rendering-capacity cohort. Current release
+qualification reproduces the accepted pictures but does not sustain full X4
+source cadence, including after restoring the accepted package; those cohorts,
+the unresolved target and the separately rebuilt signed package are distinguished
+in ROADMAP. This is tested-build visual acceptance, not a current unconditional
+performance guarantee, all-footage coverage or exact Studio parity. Scene retains actual
 `body_from_world` independently of the display's horizon toggle. Its source
 Reframe has zero camera yaw/pitch and a fixed aspect, so mouse movement and
 window size cannot steer the temporal field. A separately cached world shader
@@ -146,8 +150,8 @@ changed noise/motion-edge output were disclosed before the owner accepted the
 607 moving Studio comparison ("Yes, looks acceptable"). That approval is not
 acceptance of all footage, live-player performance or a merge. The
 preceding quarter bundle passed40 X4 and44 ONE X2 UI checks; ROADMAP records
-the current prefilter package's separate installed qualification and exact
-source/executable identity. The preceding package is retained for recovery.
+that dated prefilter package's installed qualification and exact source/executable
+identity. The preceding package is retained for recovery.
 
 The selected quarter path uses a periodic-horizontal temporal specialization
 for the owner-confirmed680-second sky defect. The visible boundary follows the
@@ -162,8 +166,9 @@ remain clamped. The owner accepts the moving Studio comparison and calls the
 old/new result "Looks fixed" for sky680. The installed source `dad5d709` Flatpak
 contains this same specialization;
 ROADMAP records its exact package identity, both-camera installed UI checks
-and separate capacity measurements. The owner's installed live-player verdict
-is still pending. History, source cadence and filter weights do
+and separate historical capacity measurements. Its installed live-player verdict
+was pending at that checkpoint; the later world-coordinate package received the
+owner verdict recorded above. History, source cadence and filter weights do
 not change. Evidence and moving comparisons: `scratch/sky680/quarter-periodic-01`.
 
 The resident source worker encodes the reduced RGB body and display snapshots

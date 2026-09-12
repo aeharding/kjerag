@@ -25,9 +25,13 @@ stitch result across view redraws. The detailed ownership and frame path are in
 ## Current delivery
 
 PR [#183](https://github.com/aeharding/kjerag/pull/183) is the cumulative GPU
-stitching delivery. At preparation checkpoint `fc0e6775`, it is ready for review,
-non-draft, and all six fresh CI checks pass. No merge, version tag or public
-release has been performed yet.
+stitching delivery. It merged at `53ecc929` after all six fresh CI checks passed
+on final cleanup head `2afef25c`, followed by 50 native X4 UI checks. Tag
+`0.3.0` names release commit `c21afcd0`; its dry run and execution each passed
+47 real-footage UI checks. All jobs in release workflow `34678413630` passed,
+and the GitHub bundles and signed channel are public. Post-publication package
+qualification remains open in [issue #187](https://github.com/aeharding/kjerag/issues/187);
+publication alone is not a completed qualification verdict.
 
 The owner tested the installed Flatpak built from source
 `48e1d741f1bf7e7d8882624dff87754227bb8c7d` and accepted the actual branch
@@ -57,28 +61,46 @@ paths and are not release assets.
 
 ## Qualification summary
 
-The owner-tested installed package passed 40 X4 Air and 44 ONE X2 UI checks,
-including the reported views, pause, backward seek and actual scrubber paths.
-At 2256x1504, 40-second installed-player cohorts measured:
+The GitHub x86_64 bundle, whose executable hash begins `9a9241...`, installs and
+passes 40 X4 Air and 44 ONE X2 UI checks. Both reported-view PPMs are byte-for-byte
+identical to the owner-accepted `48e1d741` package. This verifies the tested
+paths and pictures, not the performance target.
 
-| Camera | Completed redraws/s | Source advances/s | Completion p99 / max |
-| --- | ---: | ---: | ---: |
-| X4 Air | 280.499 | 29.975 | 13.813 / 23.463 ms |
-| ONE X2 | 318.024 | 29.975 | 9.729 / 23.788 ms |
+At 2256x1504 over 40 seconds with the 300 Hz moving-view input, the published
+bundle measured:
 
-Both cohorts advanced 1,199 consecutive sources with no reported drops,
-starvation or audio underruns. These are rendering-capacity measurements during
-playback, not 240 distinct decoded frames or 240 Hz physical presentation.
+| Camera/run | Completed redraws/s | Source advances/s |
+| --- | ---: | ---: |
+| X4 Air, first | 255.174 | 27.175 |
+| X4 Air, repeat | 250.199 | 26.675 |
+| ONE X2 | 312.399 | 29.950 |
 
-The standard local gates pass on Rust 1.97.1: formatting, workspace/all-target
-Clippy, 1,496 workspace tests with 52 explicitly ignored, source consistency,
-rename, harness-startup, controls-log, AppStream and metadata-without-libav
-checks. The required-Radeon rerun with hardware access passes; the retained first
-run selected llvmpipe and failed 38 GPU checks. See MERGE_READINESS for the
-qualified command environment and logs.
-The final code/documentation cleanup passes the same complete local gate set;
-its logs are `scratch/merge-readiness-20260912/cleanup-final-01/`. Its new head
-still requires fresh CI before merge.
+The X4 runs exceed 240 redraws/s but do not sustain full source cadence. A
+restored run of the exact owner-accepted `48e1d741` package likewise measured
+254.899 redraws/s and 27.225 source advances/s; a 250 Hz control measured
+232.049 and 27.150. The current slowdown is therefore not proven to be a 0.3.0
+code regression, but neither the published X4 package nor the restored accepted
+package currently qualifies the combined 240-redraw/full-source target.
+
+Earlier `48e1d741` cohorts of 280.499 redraws/s and 29.975 source advances/s on
+X4, and 318.024/29.975 on ONE X2, remain valid historical observations. They are
+not a current unconditional performance guarantee. The same SDK executable's
+228.174 host versus 272.850 Flatpak result remains evidence that environment
+contributes to the gap, without identifying a unique cause.
+
+The signed-channel x86_64 binary is a separate rebuild with a different hash; it
+separately passes 40 X4 and 44 ONE X2 UI checks, with both reported-view PPMs
+byte-identical to the accepted package. Separate capacity is 253.949 redraws/s
+and 27.600 source/s on X4, versus 314.724 and 29.975 on ONE X2. Both architectures' app and AppStream
+refs are authenticated and present in the signed-channel summaries. Actual
+aarch64 installation and playback are untested because this host exposes only
+x86_64/i386 clients.
+The signed 0.3.0 package omits the license text; an explicit shared-manifest
+install is prepared for the next patch package, tracked with #187.
+
+The exact local gate counts, qualified Radeon environment, retained llvmpipe
+failure and logs are in MERGE_READINESS. Final cleanup CI passed all six jobs in
+run `34677590261`; tag CI passed all jobs in release workflow `34678413630`.
 
 ## Accepted tradeoffs and boundaries
 
@@ -97,12 +119,12 @@ color-update policy is selected.
 ## Remaining work
 
 - **Native/SDK performance gap, issue
-  [#186](https://github.com/aeharding/kjerag/issues/186):** the installed X4 Air cohort exceeds the 240
-  redraw/s capacity target, while the native result remains below it at 217.949
-  redraws/s and 28.575 source advances/s. The runtime gap is unexplained.
-- **Frame-time spikes:** installed throughput clears the average capacity target,
-  but p99 and maximum completion spacing remain well above the 4.17 ms capacity
-  budget. Do not call playback hitch-free.
+  [#186](https://github.com/aeharding/kjerag/issues/186):** current X4 runs show
+  shared source-cadence slowdowns across the published and restored accepted
+  packages. Host/Flatpak measurements show an environment contribution but do
+  not isolate the cause.
+- **Frame-time spikes, issue #186:** throughput averages do not retire the 4.17
+  ms capacity budget or hitch risk. Do not call playback hitch-free.
 - **Exact photometric parity, issue
   [#185](https://github.com/aeharding/kjerag/issues/185):** automatic lens color
   matching is implemented and visually reviewed. An isolated proof of exact
@@ -115,13 +137,14 @@ color-update policy is selected.
 
 ## Delivery next steps
 
-The next feature release is **0.3.0**. Keep the accepted runtime intact through
-merge. After PR #183 is merged, follow [RELEASING.md](RELEASING.md): run the
-documented cargo-release dry run on clean `main` with real footage, execute the
-minor release, then qualify the resulting x86_64 release bundle inside its
-sandbox on both cameras. The branch-package qualification does not replace the
-post-tag release-bundle check.
+Feature release **0.3.0** is tagged and published through GitHub and the signed
+channel. Complete issue #187's qualification of the separately built signed
+x86_64 package and preserve the unresolved performance evidence in issue #186.
+The installed app now follows the signed public `kjerag` remote. Its separate
+UI qualification passes; the accepted `48e1d741` bundle remains available
+for rollback.
 
-Do not claim the release complete until the tag-driven GitHub Release and signed
-channel publication have succeeded and the resulting bundle has passed that
-qualification.
+The owner has been asked whether to keep the release goal open for performance
+work or hand off 0.3.0 with the limitation documented. No answer is recorded, so
+do not infer acceptance of the slowdown or closure of #187. The release flow is
+recorded in [RELEASING.md](RELEASING.md).
