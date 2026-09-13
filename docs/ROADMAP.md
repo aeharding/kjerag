@@ -97,6 +97,15 @@ Both architectures' app and AppStream refs are authenticated and published;
 the x86 AppStream client reports 0.3.1. aarch64 install/playback is untested on
 hardware, not inferred from querying its refs on this x86_64/i386 host.
 
+An unchanged signed 0.3.1 recheck on 2026-09-13, with AC online and the battery
+charging throughout, measures 285.024 completed redraws/s and 29.950 source
+advances/s at the same 2256x1504, 40-second pan. Worst reported lateness is
+10.2 ms; completion p99/max is 13.645/26.368 ms. That cohort meets the average
+throughput/source requirement, but does not explain or erase the earlier
+failures, prove hitch-free output, or establish a code fix. Native controls
+also regain full source cadence while remaining below 240 redraws/s. Issue
+#186 retains the unexplained variability and native/runtime difference.
+
 The exact local gate counts, qualified Radeon environment, retained llvmpipe
 failure and logs are in MERGE_READINESS. Final cleanup CI passed all six jobs in
 run `34677590261`; tag CI passed all jobs in release workflow `34678413630`.
@@ -136,6 +145,15 @@ color-update policy is selected.
 
 ## Delivery next steps
 
+Issue [#191](https://github.com/aeharding/kjerag/issues/191) removes unused and
+unreachable code from the two local UI-library patches and adds an explicit
+compiler-warning gate for them. Because they are excluded from the workspace,
+`bash scripts/check-vendor-warnings.sh` selects each package through the root
+lockfile and denies compiler warnings in the resolved application feature
+graph. It does not claim a standalone all-features matrix or introduce a new
+Clippy policy for the copied dependency code. No stitching, cadence or live
+presentation behavior is changed by this cleanup.
+
 Feature release **0.3.0** and packaging patch **0.3.1** are published through
 GitHub and the signed channel. Complete issue #187's capacity/handoff decision;
 publication, installed UI and license checks pass, while issue #186 retains
@@ -150,7 +168,8 @@ lifecycle diagnostics show a longer composite stitch span in the high-rate
 cohort without UI-event starvation; the remaining contention owner is not
 isolated. This is not a 240-capacity or hitch-free verdict (#186).
 
-The owner has been asked whether to keep the release goal open for performance
-work or hand off the release with the limitation documented. No answer is recorded, so
-do not infer acceptance of the slowdown or closure of #187. The release flow is
-recorded in [RELEASING.md](RELEASING.md).
+On 2026-09-13 the owner directed continued performance work and other justified
+code-quality attention after the published-release handoff. This is not
+acceptance of the slowdown or a reason to close #186; the source cadence,
+picture and actual-player verification requirements remain. The release flow
+is recorded in [RELEASING.md](RELEASING.md).

@@ -3,9 +3,18 @@
 Source: `iced/wgpu` in libcosmic commit
 `dc1cf9f00cbe2902a52166492654bb9fee8a73d1`, including its iced MIT license.
 The local changes are in `src/window/compositor.rs`, `src/engine.rs`,
-`src/lib.rs` and `src/primitive.rs`.
+`src/lib.rs`, `src/layer.rs` and `src/primitive.rs`.
 The manifest expands that workspace's inherited values and keeps sibling
 packages at the exact same git revision. It disables publishing.
+
+Unused imports copied from that snapshot are removed. The snapshot's private,
+uncalled `Renderer::draw_overlay` helper is removed as dead code; it was not a
+declared feature path or part of Kjerag's renderer patch.
+
+`bash scripts/check-vendor-warnings.sh` explicitly compiles this excluded
+package with compiler warnings denied, through the root lockfile and the
+application's resolved features. It does not use a separate vendor lockfile or
+claim an all-features build.
 
 The compositor requests the adapter's supported storage-buffer count
 instead of leaving shader widgets at wgpu's default limit of eight. It also

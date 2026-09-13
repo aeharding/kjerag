@@ -104,12 +104,18 @@ binary got is `readelf -d <binary> | grep NEEDED`: ffmpeg 7.1 is
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+bash scripts/check-vendor-warnings.sh
 cargo test --workspace
 scripts/name-check.sh
 ```
 
 The `--workspace` and `--all` are load-bearing: without them cargo only
 looks at `default-members`, which is the app crate alone.
+
+The vendor-warning check separately selects the local `iced_core` and
+`iced_wgpu` patches, which are excluded from the workspace. It uses the root
+lockfile and the application's resolved features, with compiler warnings
+denied. It is not a standalone vendor all-features or Clippy gate.
 
 The last one is the rename lock (issue #75). The project had another name
 until 2026-08-01 and the owner's terms for the sweep were that it exist

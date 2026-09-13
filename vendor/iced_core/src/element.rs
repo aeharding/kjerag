@@ -1,4 +1,4 @@
-use crate::event::{self, Event};
+use crate::event::Event;
 use crate::id::Id;
 use crate::layout;
 use crate::mouse;

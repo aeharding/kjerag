@@ -2,9 +2,19 @@
 
 Source: `iced/core` in libcosmic commit
 `dc1cf9f00cbe2902a52166492654bb9fee8a73d1`, including its iced MIT license.
-The local change is in `src/widget/tree.rs`. The manifest expands that
+The functional local change is in `src/widget/tree.rs`. The manifest expands that
 workspace's inherited values, keeps sibling packages at the exact same git
 revision and disables publishing.
+
+Unused imports copied from that snapshot are removed. Its unreachable
+`Settings` conversion for an undeclared `winit` feature is removed too; this
+vendored crate declares neither that feature nor an `iced_winit` dependency.
+The cleanup changes no declared feature path.
+
+`bash scripts/check-vendor-warnings.sh` explicitly compiles this excluded
+package with compiler warnings denied, through the root lockfile and the
+application's resolved features. It does not use a separate vendor lockfile or
+claim an all-features build.
 
 The pinned child-tree reconciliation matched named children by identity but
 left a match in its old vector slot. Inserting a new named child before an

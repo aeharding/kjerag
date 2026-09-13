@@ -73,6 +73,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The two local UI patches are excluded from --workspace. Select them
+      # explicitly in the resolved app graph to enforce compiler warnings.
+      - run: bash scripts/check-vendor-warnings.sh
       - run: cargo test --workspace
 
   # A change to Cargo.lock is a change to flatpak/cargo-sources.json, and two
