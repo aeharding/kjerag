@@ -145,6 +145,16 @@ color-update policy is selected.
 
 ## Delivery next steps
 
+Issue [#193](https://github.com/aeharding/kjerag/issues/193) hardens filtered
+capture failure and cancellation. Restart honors a worker error recorded before
+the final retirement transaction; terminal normalization preserves the first raw
+error and installed picture even after state-lock poison. Unpublished temporal
+history is canceled outside the state lock, with worker-exit cleanup covering
+cancellation that loses the initial try-lock race. Deterministic regressions use
+the real X4/ONE X2 filtered Scene, source history, stopped screenshots and seek
+path. This changes failure-path lifetime and reporting, not successful stitching
+arithmetic, source cadence or color policy, and is not a performance fix for #186.
+
 Issue [#191](https://github.com/aeharding/kjerag/issues/191) removes unused and
 unreachable code from the two local UI-library patches and adds an explicit
 compiler-warning gate for them. Because they are excluded from the workspace,

@@ -185,6 +185,16 @@ Near-EOF seeks prepare the last seven real sources without showing pre-target
 outputs. A whole capture shorter than seven sources reports unavailable
 filtered output rather than inventing padding.
 
+Terminal worker failure cancels unpublished temporal history without discarding
+the independently installed picture. Cancellation never waits for the stream
+mutex: an idle stream drops immediately, and executing work rechecks cancellation
+after releasing its stream guard, including when cancellation wins after its
+last in-operation check. The capture-state lock is released before cancellation.
+A poisoned filtered-state mutex is made readable only after normalization to a
+sticky terminal failure; this preserves the first raw error and stopped-picture
+access, not permission to resume processing. Restart rechecks failure under its
+final retirement lock, so replacement construction cannot hide an earlier error.
+
 There is no coefficient EMA, invented gradual color transition, skipped source
 refresh, correction interpolation, or reduced seam refresh cadence.
 

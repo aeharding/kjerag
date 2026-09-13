@@ -202,9 +202,7 @@ impl FilteredCaptureFacade {
         // Cancellation never blocks the UI behind the temporal worker.
         {
             let mut previous = self.state()?;
-            previous.retired = true;
-            previous.ready.clear();
-            previous.due_waiter = None;
+            commit_restart(&mut previous)?;
         }
         if let Some(old) = old_session {
             old.epoch.cancel();
@@ -500,6 +498,74 @@ impl FilteredCaptureFacade {
         assert!(previous.epoch.is_canceled());
     }
 
+    /// Force the actual terminal-worker path for Scene ownership regressions.
+    #[cfg(test)]
+    pub(crate) fn fail_for_test(&self, message: &str, poison_state: bool) {
+        if poison_state {
+            let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _state = self.inner.state.lock().unwrap();
+                panic!("injected filtered capture state poison");
+            }));
+            assert!(
+                poisoned.is_err(),
+                "filtered state poison injection returned"
+            );
+        }
+        self.inner.fail_worker(message);
+    }
+
+    /// Assert terminal cleanup without routing through the healthy-state API.
+    #[cfg(test)]
+    pub(crate) fn assert_history_released_for_test(&self) {
+        let state = match self.inner.state.lock() {
+            Ok(state) => state,
+            Err(poison) => poison.into_inner(),
+        };
+        let session = state
+            .session
+            .as_ref()
+            .expect("filtered history assertion needs an attached session");
+        session.epoch.assert_released_for_test();
+    }
+
+    /// Prove a real Scene has unpublished work before a failure-release check.
+    #[cfg(test)]
+    pub(crate) fn assert_unpublished_history_for_test(&self) {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .expect("filtered history precondition state is poisoned");
+        assert!(
+            !state.expected.is_empty(),
+            "filtered history precondition has no unpublished source"
+        );
+        let session = state
+            .session
+            .as_ref()
+            .expect("filtered history precondition needs an attached session");
+        session.epoch.assert_active_for_test();
+    }
+
+    /// Hold the actual populated epoch history across a concurrent state change.
+    #[cfg(test)]
+    pub(crate) fn with_locked_history_for_test<T>(&self, work: impl FnOnce() -> T) -> T {
+        let epoch = {
+            let state = match self.inner.state.lock() {
+                Ok(state) => state,
+                Err(poison) => poison.into_inner(),
+            };
+            Arc::clone(
+                &state
+                    .session
+                    .as_ref()
+                    .expect("filtered history lock needs an attached session")
+                    .epoch,
+            )
+        };
+        epoch.with_locked_history_for_test(work)
+    }
+
     fn attached_session(&self) -> Fallible<Arc<FilteredSession>> {
         let state = self.state()?;
         self.ensure_healthy(&state)?;
@@ -703,13 +769,10 @@ impl FilteredCaptureInner {
     }
 
     pub(super) fn fail_worker(&self, message: &str) {
-        let (wake, report) = match self.state.lock() {
-            Ok(mut state) => record_failure(&mut state, message),
-            Err(poison) => {
-                let mut state = poison.into_inner();
-                record_failure(&mut state, message)
-            }
-        };
+        let (wake, report, epoch) = record_worker_failure(&self.state, message);
+        if let Some(epoch) = epoch {
+            epoch.cancel();
+        }
         if let Some(wake) = wake {
             wake.notify();
         }
@@ -717,6 +780,35 @@ impl FilteredCaptureInner {
             eprintln!("{message}");
         }
     }
+}
+
+/// Finalize the old façade only after the replacement epoch is ready.
+/// This is the restart transaction's failure-versus-retirement boundary.
+fn commit_restart(previous: &mut State) -> Fallible<()> {
+    ensure_healthy_state(previous)?;
+    previous.retired = true;
+    previous.ready.clear();
+    previous.due_waiter = None;
+    Ok(())
+}
+
+fn record_worker_failure(
+    state: &Mutex<State>,
+    message: &str,
+) -> (Option<ReadyWake>, bool, Option<Arc<TemporalEpoch>>) {
+    let mut guard = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (wake, report) = record_failure(&mut guard, message);
+    let epoch = guard
+        .session
+        .as_ref()
+        .map(|session| Arc::clone(&session.epoch));
+    // The state is terminal and normalized before another caller can acquire
+    // it. Preserve the underlying worker error, not poison. This is a no-op
+    // for an ordinarily acquired mutex.
+    state.clear_poison();
+    (wake, report, epoch)
 }
 
 fn record_failure(state: &mut State, message: &str) -> (Option<ReadyWake>, bool) {
@@ -905,11 +997,60 @@ mod stage_tests {
     #[test]
     fn concurrent_stage_failures_preserve_the_first_error() {
         let mut state = State::new();
-        let (_, first_reported) = record_failure(&mut state, "underlying GPU error");
-        let (_, second_reported) = record_failure(&mut state, "secondary pending mismatch");
+        let expected = stamp(4, None);
+        state.due_waiter = Some((expected, ReadyWake::default()));
+        let (first_wake, first_reported) = record_failure(&mut state, "underlying GPU error");
+        let (second_wake, second_reported) =
+            record_failure(&mut state, "secondary pending mismatch");
         assert!(first_reported);
+        assert!(first_wake.is_some(), "the first failure lost its waiter");
         assert!(!second_reported);
+        assert!(second_wake.is_none(), "the waiter was returned twice");
         assert_eq!(state.failure.as_deref(), Some("underlying GPU error"));
+    }
+
+    #[test]
+    fn restart_commit_rejects_a_failure_recorded_after_its_snapshot() {
+        let mut previous = State::new();
+        assert!(
+            previous.failure.is_none(),
+            "the restart snapshot was not healthy"
+        );
+
+        record_failure(&mut previous, "exact worker failure during restart");
+        let error = commit_restart(&mut previous)
+            .expect_err("restart masked a worker failure that won before retirement");
+
+        assert_eq!(error.to_string(), "exact worker failure during restart");
+        assert!(!previous.retired, "failed restart retired its old façade");
+    }
+
+    #[test]
+    fn restart_commit_retires_a_healthy_state_and_clears_its_waiter() {
+        let mut previous = State::new();
+        previous.due_waiter = Some((stamp(4, None), ReadyWake::default()));
+
+        commit_restart(&mut previous).unwrap();
+
+        assert!(previous.retired);
+        assert!(previous.due_waiter.is_none());
+    }
+
+    #[test]
+    fn worker_failure_normalizes_poison_before_exposing_the_raw_error() {
+        let state = Mutex::new(State::new());
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _state = state.lock().unwrap();
+            panic!("exact panic while filtered state was locked");
+        }));
+        assert!(poisoned.is_err(), "state poison injection returned");
+
+        let (_, reported, _) = record_worker_failure(&state, "exact worker panic");
+        assert!(reported);
+        let state = state
+            .lock()
+            .expect("terminal normalization left filtered state poisoned");
+        assert_eq!(state.failure.as_deref(), Some("exact worker panic"));
     }
 
     #[test]
