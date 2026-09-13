@@ -62,14 +62,3 @@ impl Default for Settings {
         }
     }
 }
-
-#[cfg(feature = "winit")]
-impl From<Settings> for iced_winit::Settings {
-    fn from(settings: Settings) -> iced_winit::Settings {
-        iced_winit::Settings {
-            id: settings.id,
-            fonts: settings.fonts,
-            is_daemon: settings.is_daemon,
-        }
-    }
-}

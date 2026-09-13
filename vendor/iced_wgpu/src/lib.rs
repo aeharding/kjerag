@@ -67,8 +67,7 @@ pub use geometry::Geometry;
 
 use crate::core::renderer;
 use crate::core::{
-    Background, Color, Font, Pixels, Point, Radians, Rectangle, Size,
-    Transformation, Vector, image::FilterMethod,
+    Background, Color, Font, Pixels, Point, Rectangle, Size, Transformation,
 };
 use crate::graphics::mesh;
 use crate::graphics::text::{Editor, Paragraph};
@@ -826,51 +825,6 @@ impl Renderer {
                 })
                 .count()
         });
-    }
-
-    fn draw_overlay(
-        &mut self,
-        overlay: &[impl AsRef<str>],
-        viewport: &Viewport,
-    ) {
-        use crate::core::Renderer as _;
-        use crate::core::alignment;
-        use crate::core::text::Renderer as _;
-
-        self.with_layer(
-            Rectangle::with_size(viewport.logical_size()),
-            |renderer| {
-                for (i, line) in overlay.iter().enumerate() {
-                    let text = crate::core::Text {
-                        content: line.as_ref().to_owned(),
-                        bounds: viewport.logical_size(),
-                        size: Pixels(20.0),
-                        line_height: core::text::LineHeight::default(),
-                        font: Font::MONOSPACE,
-                        align_x: core::text::Alignment::Left,
-                        align_y: alignment::Vertical::Top,
-                        shaping: core::text::Shaping::Advanced,
-                        wrapping: core::text::Wrapping::Word,
-                        ellipsize: core::text::Ellipsize::None,
-                    };
-
-                    renderer.fill_text(
-                        text.clone(),
-                        Point::new(11.0, 11.0 + 25.0 * i as f32),
-                        Color::from_rgba(0.9, 0.9, 0.9, 1.0),
-                        Rectangle::with_size(Size::INFINITE),
-                    );
-
-                    renderer.fill_text(
-                        text,
-                        Point::new(11.0, 11.0 + 25.0 * i as f32)
-                            + Vector::new(-1.0, -1.0),
-                        Color::BLACK,
-                        Rectangle::with_size(Size::INFINITE),
-                    );
-                }
-            },
-        );
     }
 }
 
