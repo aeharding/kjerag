@@ -331,6 +331,124 @@ fn one_x2_filtered_scene_preserves_exact_source_ownership() {
     );
 }
 
+#[test]
+fn x4_filtered_failure_releases_history_and_preserves_stopped_picture() {
+    let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
+        return;
+    };
+    assert_filtered_failure(Path::new(&path), false, false);
+}
+
+#[test]
+fn one_x2_filtered_failure_releases_history_and_preserves_stopped_picture() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    assert_filtered_failure(Path::new(&path), false, false);
+}
+
+#[test]
+fn x4_filtered_failure_after_poison_preserves_raw_error_and_stopped_picture() {
+    let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
+        return;
+    };
+    assert_filtered_failure(Path::new(&path), true, false);
+}
+
+#[test]
+fn one_x2_filtered_failure_after_poison_preserves_raw_error_and_stopped_picture() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    assert_filtered_failure(Path::new(&path), true, false);
+}
+
+#[test]
+fn x4_filtered_failure_during_temporal_work_releases_history() {
+    let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
+        return;
+    };
+    assert_filtered_failure(Path::new(&path), false, true);
+}
+
+#[test]
+fn one_x2_filtered_failure_during_temporal_work_releases_history() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    assert_filtered_failure(Path::new(&path), false, true);
+}
+
+fn assert_filtered_failure(path: &Path, poison: bool, busy: bool) {
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let mut scene = Scene::open(path).unwrap();
+    scene.set_muted(true);
+    scene.enable_temporal_for_review().unwrap();
+    scene.pause(Instant::now());
+    let first = super::tests::wait_for_new_scene_frame(&scene, None);
+    let camera = Camera::default();
+    let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    settle_filtered(&scene, &mut pipeline, &device, &queue, &first, camera, None);
+    let capture = scene.primitive(camera).filtered_capture.unwrap();
+    let installed = capture.installed().unwrap().unwrap();
+    let before = capture_shown(&scene, &mut pipeline, &device, &queue, camera);
+    assert_eq!(capture.accepted_stamp().unwrap().unwrap().index(), 6);
+    capture.assert_unpublished_history_for_test();
+
+    let message = "injected exact filtered worker failure";
+    let fail = || {
+        capture.fail_for_test(message, poison);
+        capture.fail_for_test("secondary worker failure must not replace the first", false);
+    };
+    if busy {
+        // Deterministically cancel after the worker's last in-operation check,
+        // while it still holds history, then use its real post-guard cleanup.
+        capture.with_locked_history_for_test(fail);
+    } else {
+        fail();
+    }
+    match scene.pump(Instant::now()) {
+        Next::Stopped(error) => assert_eq!(error.to_string(), message),
+        next => panic!("filtered worker failure did not stop its Scene: {next:?}"),
+    }
+    assert!(!scene.is_playing());
+    assert_eq!(capture.restart().unwrap_err().to_string(), message);
+    assert_eq!(capture.accepted_stamp().unwrap_err().to_string(), message);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+    assert!(Arc::ptr_eq(
+        &capture.installed().unwrap().unwrap(),
+        &installed
+    ));
+
+    // This is the real terminal branch in prepare_filtered/shoot_filtered,
+    // not a direct draw that bypasses the failed capture-state accessor.
+    prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
+    let after = capture_shown(&scene, &mut pipeline, &device, &queue, camera);
+    assert_eq!(after.index, before.index);
+    assert_eq!((after.width, after.height), (before.width, before.height));
+    assert_eq!(
+        after.rgba, before.rgba,
+        "terminal failure changed the shown picture"
+    );
+    capture.assert_history_released_for_test();
+
+    // Controls and repeated preparation cannot resurrect a terminal epoch or
+    // publish one of its previously queued outputs.
+    scene.play();
+    scene.seek(Duration::from_secs(1), Accuracy::Exact);
+    for _ in 0..3 {
+        scene.pump(Instant::now());
+        prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
+    }
+    assert!(!scene.is_playing());
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+    assert!(Arc::ptr_eq(
+        &capture.installed().unwrap().unwrap(),
+        &installed
+    ));
+    capture.assert_history_released_for_test();
+}
+
 fn assert_filtered_scene(
     path: &Path,
     seek: Duration,
@@ -523,7 +641,10 @@ fn assert_filtered_scene(
     // Shown until the requested target's own seven-source window is ready.
     let old_shown = scene.displayed_frame_stamp().unwrap();
     let old_filtered = filtered;
-    scene.seek(seek, Accuracy::Exact);
+    // Retirement can win while the old temporal worker still holds its
+    // stream. Its post-operation cleanup must release that canceled history.
+    old_filtered.with_locked_history_for_test(|| scene.seek(seek, Accuracy::Exact));
+    old_filtered.assert_history_released_for_test();
     assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&old_shown));
     let landing = super::tests::wait_for_new_scene_frame(&scene, Some(&current));
     assert!(!landing.same_decode_epoch(&current));

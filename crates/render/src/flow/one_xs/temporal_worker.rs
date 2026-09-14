@@ -110,6 +110,49 @@ impl TemporalEpoch {
             Err(std::sync::TryLockError::WouldBlock) => {}
         }
     }
+
+    #[cfg(test)]
+    pub(super) fn assert_active_for_test(&self) {
+        assert!(
+            !self.is_canceled(),
+            "filtered temporal epoch was already canceled"
+        );
+        let stream = self
+            .stream
+            .try_lock()
+            .expect("filtered temporal epoch was not idle before failure");
+        assert!(
+            stream.is_some(),
+            "filtered temporal history was already released"
+        );
+    }
+
+    #[cfg(test)]
+    pub(super) fn assert_released_for_test(&self) {
+        assert!(
+            self.is_canceled(),
+            "filtered temporal epoch was not canceled"
+        );
+        let stream = match self.stream.try_lock() {
+            Ok(stream) => stream,
+            Err(std::sync::TryLockError::Poisoned(poison)) => poison.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                panic!("filtered temporal epoch was still executing")
+            }
+        };
+        assert!(stream.is_none(), "filtered temporal history was retained");
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_locked_history_for_test<T>(&self, work: impl FnOnce() -> T) -> T {
+        with_epoch_cleanup(self, || {
+            let _stream = match self.stream.lock() {
+                Ok(stream) => stream,
+                Err(poison) => poison.into_inner(),
+            };
+            work()
+        })
+    }
 }
 
 enum ExecutorJob {
@@ -127,9 +170,31 @@ impl TemporalJob {
             Self::Push { owner, .. } | Self::Finish { owner, .. } => Arc::clone(owner),
         }
     }
+
+    fn epoch(&self) -> Arc<TemporalEpoch> {
+        match self {
+            Self::Push { epoch, .. } | Self::Finish { epoch, .. } => Arc::clone(epoch),
+        }
+    }
 }
 
 fn service(job: TemporalJob) -> Fallible<()> {
+    let epoch = job.epoch();
+    with_epoch_cleanup(&epoch, || service_inner(job))
+}
+
+fn with_epoch_cleanup<T>(epoch: &TemporalEpoch, work: impl FnOnce() -> T) -> T {
+    let result = work();
+    // A cancel that lost try_lock while `work` held the stream is completed
+    // here after that guard has dropped. If cancellation starts after this
+    // check, no guard remains, so that cancel takes and releases the stream.
+    if epoch.is_canceled() {
+        epoch.cancel();
+    }
+    result
+}
+
+fn service_inner(job: TemporalJob) -> Fallible<()> {
     match job {
         TemporalJob::Push {
             owner,
