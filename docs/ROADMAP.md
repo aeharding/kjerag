@@ -227,6 +227,30 @@ returns are included, so this is not hardware qualification. Full workspace
   PR #197 remains installed and unmerged. Private source, executable
   identities, controls and moving comparisons are retained under
   `scratch/source-prefilter-phases-20260914/`.
+- **Exact periodic-wrap simplification, issue #186:** a follow-on candidate
+  replaces the temporal motion shader's inner signed remainder pair with one
+  conditional subtraction. The existing outer landing wrap and admitted image
+  dimensions prove the smaller coordinate range; source cadence, sample order,
+  temporal/color policy and resource ownership are unchanged. An exhaustive CPU
+  coordinate test and a same-device original-shader comparison pass. The named
+  31-source X4 world and ONE X2 riser replays preserve source/coordinate fields
+  and every displayed RGB8 sample exactly against the native-grid candidate.
+  The full temporal Stream cyclic-shift regression also passes. A bounded
+  native X4 baseline/candidate/baseline at 2256x1504 measures
+  282.474 / 282.449 / 271.549 completed views/s, with 29.975 source advances/s
+  throughout. Completion p99 is 13.275 / 10.487 / 13.913 ms; completion-spacing
+  p99 is 12.683 / 11.319 / 12.279 ms. This supports further qualification of an
+  upper-tail improvement, not a proven throughput gain or the 4.17 ms target.
+  Median spacing does not improve, and thermal/fan state differs between runs.
+  The device-hidden workspace reports 1,516 passes, 52 ignored and no failures,
+  including unavailable-GPU/media returns rather than hardware coverage.
+  Full Clippy, vendor warnings, formatting, naming and Cargo-source checks pass.
+  Native UI passes 45 X4 and 46 ONE X2 checks with no failures; isolated runs
+  exclude sound and portal services, and the recorded exact-view and paired-file
+  hardlink checks skip. The candidate remains uninstalled and unmerged, with
+  package qualification pending. Private identities, comparisons and receipts
+  are retained in `scratch/temporal-periodic-wrap-20260914/`. This changes no
+  July sky-line diagnosis or owner picture-acceptance status.
 - **Frame-time spikes, issue #186:** throughput averages do not retire the 4.17
   ms capacity budget or hitch risk. Do not call playback hitch-free.
 - **Exact photometric parity, issue

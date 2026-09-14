@@ -36,6 +36,27 @@ fn shader_validates_without_optional_capabilities() {
 }
 
 #[test]
+fn periodic_quad_wrap_matches_modulo_over_every_admitted_coordinate() {
+    // Periodic image widths are 16..8191 pixels and divisible by four, so the
+    // packed width is 4..2047 quads. execute_batch normalizes landing.x before
+    // reading no farther than first_x + 4, admitting exactly this domain.
+    for quad_width in 4_i32..=2047 {
+        for coordinate in 0_i32..=quad_width + 3 {
+            let modulo = ((coordinate % quad_width) + quad_width) % quad_width;
+            let subtraction = if coordinate >= quad_width {
+                coordinate - quad_width
+            } else {
+                coordinate
+            };
+            assert_eq!(
+                subtraction, modulo,
+                "quad width {quad_width}, coordinate {coordinate}"
+            );
+        }
+    }
+}
+
+#[test]
 fn half_resolution_review_lowers_only_the_finest_entry_bound() {
     for dimensions in [[1_920, 960], [1_440, 720]] {
         assert!(!dimensions_in_range(dimensions, &(MIN_DIMENSION..8_192)));
@@ -105,6 +126,131 @@ fn periodic_search_matches_signed_motion_across_both_panorama_edges() {
         let at = (17 * (width / 16) + column) * 12;
         assert_eq!(&actual.bytes[at..at + 12], raw_bytes(&[[dx, 0, 0]]));
         assert_ne!(&control.bytes[at..at + 12], &actual.bytes[at..at + 12]);
+    }
+}
+
+fn periodic_builder_with_original_modulo_shader(device: &wgpu::Device) -> Builder {
+    let mut builder = Builder::with_boundary(device, HorizontalBoundary::Periodic);
+    let optimized = "let x = select(coordinate.x, coordinate.x - width, coordinate.x >= width);";
+    let original = "let x = ((coordinate.x % width) + width) % width;";
+    let source = include_str!("../gpu.wgsl");
+    assert_eq!(
+        source.matches(optimized).count(),
+        1,
+        "the reference must replace exactly the optimized periodic wrap"
+    );
+    let source = source.replacen(optimized, original, 1);
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("parallel finest original modulo reference"),
+        bind_group_layouts: &[&builder.layout],
+        immediate_size: 0,
+    });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("parallel finest original modulo reference"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    builder.pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("parallel finest original modulo reference"),
+        layout: Some(&layout),
+        module: &shader,
+        entry_point: Some("refine_blocks"),
+        compilation_options: wgpu::PipelineCompilationOptions {
+            constants: &[("PERIODIC_X", 1.0)],
+            ..Default::default()
+        },
+        cache: None,
+    });
+    builder
+}
+
+#[test]
+fn periodic_single_subtraction_matches_original_modulo_raw_records() {
+    let Some((device, queue)) = gpu() else {
+        return;
+    };
+    let optimized = Builder::with_boundary(&device, HorizontalBoundary::Periodic);
+    let original = periodic_builder_with_original_modulo_shader(&device);
+    let extreme_dx = [-8192, -8191, -8190, -8189, 8188, 8189, 8190, 8191];
+
+    for width in [1024_usize, 1040] {
+        let height = 1024;
+        let current_level = patterned_level(width, height, 0x1234_5678);
+        let reference_levels = [
+            patterned_level(width, height, 0x9e37_79b9),
+            patterned_level(width, height, 0x6a09_e667),
+        ];
+        assert!(
+            current_level
+                .pixels
+                .iter()
+                .skip(1)
+                .any(|pixel| *pixel != current_level.pixels[0]),
+            "the width {width} fixture must not be constant"
+        );
+        let count = (width / 16) * (height / 16);
+        let inputs = [-8191, 8191].map(|global_x| FinestInput {
+            seeds: (0..count)
+                .map(|index| {
+                    let dx = if index % (width / 16) == width / 16 - 1 {
+                        // At the rightmost source block this lands on the last
+                        // pixel. An unaligned 16-pixel read reaches the exact
+                        // maximum reference coordinate, quad_width + 3.
+                        15
+                    } else {
+                        extreme_dx[index % extreme_dx.len()]
+                    };
+                    [dx, 0, 0]
+                })
+                .collect(),
+            global: [global_x, 0],
+        });
+
+        let mut phases = [false; 4];
+        let mut negative_wrap = false;
+        let mut positive_wrap = false;
+        for dx in inputs
+            .iter()
+            .flat_map(|input| input.seeds.iter().map(|seed| seed[0]))
+            .chain(inputs.iter().map(|input| input.global[0]))
+        {
+            let landing = dx.rem_euclid(width as i32);
+            phases[landing as usize % 4] = true;
+            negative_wrap |= dx < 0;
+            positive_wrap |= dx >= width as i32;
+        }
+        assert!(phases[1..].iter().all(|covered| *covered));
+        assert!(negative_wrap && positive_wrap);
+        assert_eq!((width - 16 + 15) / 4 + 4, width / 4 + 3);
+
+        let current = upload(&device, &queue, &current_level);
+        let references = reference_levels
+            .each_ref()
+            .map(|reference| upload(&device, &queue, reference));
+        let reference_views = references.each_ref();
+        let optimized_run = run(
+            &device,
+            &queue,
+            &optimized,
+            &current,
+            &reference_views,
+            &inputs,
+        );
+        let original_run = run(
+            &device,
+            &queue,
+            &original,
+            &current,
+            &reference_views,
+            &inputs,
+        );
+        assert_eq!(optimized_run.blocks, original_run.blocks);
+        assert_eq!(optimized_run.references, original_run.references);
+        assert_eq!(
+            optimized_run.bytes,
+            original_run.bytes,
+            "logical width {width}, packed width {}",
+            width / 4
+        );
     }
 }
 
