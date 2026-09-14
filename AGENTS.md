@@ -108,9 +108,13 @@ SDK builds without the owner's explicit approval. Automatic goal continuation
 is not that approval. CPU-only checks must select inspected tests and use
 bounded resources; removing `KJERAG_REQUIRE_GPU` does not disable GPU tests.
 After the September 14 resumption, the single one-pixel GPU regression passed.
-Permission review blocked the heavier X4 test before launch; obtain explicit
-approval for real-footage GPU checks before proceeding. Do not bypass that
-rejection or treat another automatic continuation as approval.
+Permission review initially blocked the heavier X4 test before launch. The
+owner subsequently explicitly approved one-at-a-time real-footage GPU tests
+with resource limits and health checks, acknowledging remaining driver-freeze
+risk. Under that approval, X4 and ONE X2 draw-deferral checks and the previously
+failed X4 overlap check passed in separate processes with normal post-test
+health. This does not authorize broad GPU loops, playback stress, UI suites or
+SDK builds, or establish that the desktop-freeze cause is fixed.
 
 Some failure-path tests deliberately quarantine GPU owners for process life.
 `--test-threads=1` limits concurrency but does not prevent accumulation across
