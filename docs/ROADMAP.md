@@ -138,7 +138,10 @@ color-update policy is selected.
   workspace reports 1,513 passes, 52 ignored and no failures, including unavailable
   GPU/media returns rather than hardware coverage. Full Clippy, vendor warnings,
   formatting, naming and Cargo-source checks pass. The native X4 UI suite passes
-  45 checks; ONE X2 UI and CI qualification are in progress. This enables
+  45 checks and ONE X2 passes 46. Audio and portal services are excluded;
+  cross-bind-mount paired-file hardlinks also skip in this isolated ONE X2 run.
+  PR [#199](https://github.com/aeharding/kjerag/pull/199) carries this diagnostic
+  change; CI and review remain separate merge gates. This enables
   investigation of the reported July sky boundary, not a seam-quality fix
   or evidence of a difference from Studio.
 - **GPU resource safety, issue
