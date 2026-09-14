@@ -126,6 +126,15 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **View references, issue
+  [#174](https://github.com/aeharding/kjerag/issues/174):** the unchanged player
+  reproduces failed clipboard navigation with a space-containing filename.
+  Branch parsing now preserves the raw path before the view-term suffix;
+  application classification tests and a real-window spaced-path copy/paste
+  regression cover it. Branch verification and owner retest are required
+  before merge. This does not implement shell quoting or tilde expansion
+  ([#157](https://github.com/aeharding/kjerag/issues/157)), change the written
+  reference format, or change any stitching, color or rendering arithmetic.
 - **GPU resource safety, issue
   [#195](https://github.com/aeharding/kjerag/issues/195):** the owner reported a
   frozen desktop requiring a hard reset during a real-GPU workspace gate on
@@ -159,8 +168,13 @@ color-update policy is selected.
   1,511 reported passes and 52 ignored tests; unavailable-GPU and absent-media
   returns are included, so this is not hardware qualification. Full workspace
   Clippy and vendor warning checks passed, and the branch player rebuilt.
-  Normal player UI qualification and CI are next. The desktop-freeze cause
-  remains unproven.
+  Normal native player suites subsequently passed 47 X4 and 51 ONE X2 checks;
+  branch app-path Flatpak suites passed 36 X4 and 37 ONE X2 checks with the
+  documented reduced-service skips. All six CI jobs passed on `f2e8e222`.
+  After explicit owner approval, PR
+  [#196](https://github.com/aeharding/kjerag/pull/196) merged as `6cf8963f` on
+  September 14. The installed signed app is unchanged. The desktop-freeze
+  cause remains unproven, and issue #195 stays open for that investigation.
 - **Native/SDK performance gap, issue
   [#186](https://github.com/aeharding/kjerag/issues/186):** current X4 runs show
   shared source-cadence slowdowns across the published and restored accepted

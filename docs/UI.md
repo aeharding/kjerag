@@ -593,6 +593,11 @@ Notes:
   a pilot's report lands in a public issue, and the directories above a video
   are nobody's business.
 
+  Copy references with spaces in the filename exactly as written. Clipboard
+  parsing preserves the raw path before the view terms, including repeated
+  spaces. To use that same path in a shell command, quote the path yourself.
+  Clipboard paste does not interpret shell quotes or expand `~` (issue #157).
+
   Every capture prints the line too, because a still cannot carry it: the
   JPEG's name says which video and which moment (issue #15) and nothing
   anywhere says which direction, so a picture sent back months later would
