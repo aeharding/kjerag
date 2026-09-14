@@ -130,10 +130,12 @@ color-update policy is selected.
   [#195](https://github.com/aeharding/kjerag/issues/195):** the owner reported a
   frozen desktop requiring a hard reset during a real-GPU workspace gate on
   September 13. The preceding kernel log records AMD command-allocation
-  failures. Broad GPU gates, playback stress, UI suites and SDK builds remain
-  stopped pending separate owner approval. Source review identifies a teardown
-  leak that keeps even completion-proven draw owners alive; a branch correction and CPU-only
-  regressions address that bounded defect without polling the device or
+  failures. Broad hardware test loops remain disabled. The owner has resumed
+  continued work with the full computer available; merge preparation uses a
+  device-hidden workspace test gate and separate bounded player UI checks.
+  Source review identifies a teardown leak that keeps even completion-proven
+  draw owners alive; a branch correction and CPU-only regressions address
+  that bounded defect without polling the device or
   weakening unresolved-work quarantine. Its contribution to the desktop
   failure is not established. The performance experiment is parked, and the
   installed signed 0.3.1 app remains unchanged. Additional source audit found
@@ -153,7 +155,12 @@ color-update policy is selected.
   matched the preflight values, memory-pressure averages stayed zero, swap
   remained unused, and the kernel journal had no new entries. These isolated
   integration checks do not qualify a full workspace gate, playback performance,
-  or a release. The desktop-freeze cause remains unproven.
+  or a release. A subsequent device-hidden full workspace run passed with
+  1,511 reported passes and 52 ignored tests; unavailable-GPU and absent-media
+  returns are included, so this is not hardware qualification. Full workspace
+  Clippy and vendor warning checks passed, and the branch player rebuilt.
+  Normal player UI qualification and CI are next. The desktop-freeze cause
+  remains unproven.
 - **Native/SDK performance gap, issue
   [#186](https://github.com/aeharding/kjerag/issues/186):** current X4 runs show
   shared source-cadence slowdowns across the published and restored accepted

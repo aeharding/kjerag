@@ -113,8 +113,11 @@ owner subsequently explicitly approved one-at-a-time real-footage GPU tests
 with resource limits and health checks, acknowledging remaining driver-freeze
 risk. Under that approval, X4 and ONE X2 draw-deferral checks and the previously
 failed X4 overlap check passed in separate processes with normal post-test
-health. This does not authorize broad GPU loops, playback stress, UI suites or
-SDK builds, or establish that the desktop-freeze cause is fixed.
+health. The owner then directed continued work with the full computer available.
+Merge qualification now uses a device-hidden full workspace run and separate
+normal player UI checks, with bounded resources and health checks. Broad
+hardware test loops remain disabled; none of these passes establishes that
+the desktop-freeze cause is fixed.
 
 Some failure-path tests deliberately quarantine GPU owners for process life.
 `--test-threads=1` limits concurrency but does not prevent accumulation across
@@ -126,8 +129,10 @@ shared desktop. The runner caps host CPU, RAM, swap, scope lifetime and each
 output file (64 MiB), but it does not cap GPU memory or guarantee protection
 from driver failure. Its approval flag acknowledges permission obtained
 separately; it grants none.
-GPU-less CI keeps the normal workspace gate below. Isolated local cases are
-not a substitute for a complete qualification result, which remains pending.
+GPU-less CI keeps the normal workspace gate below. A local GPU-absent workspace
+run must physically hide hardware devices and desktop sockets, not merely unset
+REQUIRE_GPU. Report its unavailable-GPU paths separately from executed hardware
+regressions. Isolated cases do not substitute for full workspace and UI gates.
 
 ```sh
 cargo fmt --all --check
