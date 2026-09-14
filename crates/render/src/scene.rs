@@ -1563,19 +1563,16 @@ impl Scene {
         Some(self.show.as_ref()?.files.clone())
     }
 
-    /// Return the selected ONE X2 map for an instrument inspecting the exact
+    /// Return the selected resident map for an instrument inspecting the exact
     /// delivery currently held by this scene.
     ///
     /// This is deliberately narrower than exposing the capture owner or its
-    /// retained state. A map is returned only when selected ONE X2 playback
+    /// retained state. A map is returned only when selected resident playback
     /// owns this capture and its ready transaction carries the complete opaque
     /// [`FrameStamp`] of the scene's current aligned pair. An index and time
     /// match after a seek or reopen is therefore not enough.
     pub fn diagnostic_one_xs_map(&self) -> Fallible<Option<OneXsMapFrame>> {
         let Some(show) = self.show.as_ref() else {
-            return Ok(None);
-        };
-        let Some(capture) = show.one_xs.clone() else {
             return Ok(None);
         };
         let Some(current) = show
@@ -1591,17 +1588,25 @@ impl Scene {
             return Ok(None);
         };
         let shown_stamp = shown.frames.stamp();
-        let same_capture = shown
-            .resident_one_xs
-            .as_ref()
-            .is_some_and(|shown_capture| shown_capture.same_capture(&capture));
+        let same_capture = match &show.filtered {
+            Some(capture) => shown
+                .filtered
+                .as_ref()
+                .is_some_and(|shown_capture| shown_capture.same_capture(capture)),
+            None => show.one_xs.as_ref().is_some_and(|capture| {
+                shown
+                    .resident_one_xs
+                    .as_ref()
+                    .is_some_and(|shown_capture| shown_capture.same_capture(capture))
+            }),
+        };
         if !exact_selected_display(&current, Some(&shown_stamp), same_capture) {
             return Ok(None);
         }
-        capture.diagnostic_installed_map(&current)
+        self.diagnostic_one_xs_displayed_map()
     }
 
-    /// Read the selected ONE X2 map belonging to the exact installed display.
+    /// Read the selected resident map belonging to the exact installed display.
     ///
     /// This explicit diagnostic differs from [`Self::diagnostic_one_xs_map`]
     /// only while a newer source pair is offered but not installed. It follows
@@ -1613,6 +1618,15 @@ impl Scene {
         let Some(shown) = self.shown.get() else {
             return Ok(None);
         };
+        if let Some(capture) = &shown.filtered {
+            let Some(installed) = capture.installed()? else {
+                return Ok(None);
+            };
+            if installed.frame() != &shown.frames.stamp() {
+                return Err("filtered stitch map differs from the displayed Scene frame".into());
+            }
+            return installed.diagnostic_map().map(Some);
+        }
         let Some(capture) = shown.resident_one_xs.clone() else {
             return Ok(None);
         };
