@@ -209,8 +209,22 @@ returns are included, so this is not hardware qualification. Full workspace
   Cargo-source checks pass. Native UI passes 45 X4 and 46 ONE X2 checks,
   with sound-device, portal, exact-view and paired-file fixture skips recorded.
   The odd-width chroma fixture is byte-exact against the original shader.
-  CI, installed-package qualification and owner picture review remain pending;
-  the installed PR #197 test package is unchanged. Private source, executable
+  Draft PR [#200](https://github.com/aeharding/kjerag/pull/200) carries the
+  candidate; all six CI jobs passed on code commit `0f4ce99b`. The separate
+  native ONE X2 controls retain recorded source cadence near the requested
+  300 Hz view rate, with no claimed additional throughput headroom.
+  The exact SDK package also builds. Without replacing the installed app,
+  `--app-path` runtime checks measure 305.224 X4 and 307.299 ONE X2 completed
+  views/s with 29.950 and 29.975 source advances/s at 2256x1504. Completion
+  p99/max remains 12.143/30.465 ms and 12.562/32.786 ms, not hitch-free.
+  The healthy initial packaged X4 control measures 265.974 views/s; the final
+  control falls behind after external GPU-memory conditions change. Package
+  bases also differ by the pending clipboard and merged diagnostic changes,
+  so the runtime comparison corroborates, rather than independently isolates,
+  the phase optimization. The terminal redraw counter counts only Player
+  pumping after the readiness gate, not every reuse of the displayed source.
+  Installed-package qualification and owner picture review remain pending;
+  PR #197 remains installed and unmerged. Private source, executable
   identities, controls and moving comparisons are retained under
   `scratch/source-prefilter-phases-20260914/`.
 - **Frame-time spikes, issue #186:** throughput averages do not retire the 4.17
