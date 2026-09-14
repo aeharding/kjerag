@@ -247,8 +247,23 @@ returns are included, so this is not hardware qualification. Full workspace
   Full Clippy, vendor warnings, formatting, naming and Cargo-source checks pass.
   Native UI passes 45 X4 and 46 ONE X2 checks with no failures; isolated runs
   exclude sound and portal services, and the recorded exact-view and paired-file
-  hardlink checks skip. The candidate remains uninstalled and unmerged, with
-  package qualification pending. Private identities, comparisons and receipts
+  hardlink checks skip. Draft PR [#201](https://github.com/aeharding/kjerag/pull/201)
+  is stacked on PR #200; all six CI jobs pass on code commit `4ede9f30`.
+  The exact SDK package builds. Separate package `--app-path` X4 controls,
+  with identical metadata and baseline code apart from this change, measure
+  300.649 / 309.374 / 311.149 completed views/s and consecutive source advances
+  at 29.950 / 29.975 / 29.950 per second. Completion p99 is
+  14.990 / 10.774 / 13.001 ms; spacing p99 is 12.468 / 11.010 / 11.718 ms.
+  This corroborates the narrower upper-tail observation, not a throughput win
+  or the 4.17 ms target. Thermal/fan state differs. All strict bounded capacity
+  cohorts pass; broader cadence reports retain startup issues and, in the first
+  control and candidate, terminal non-cohort issues.
+  One candidate-only ONE X2 package run measures 317.224 views/s with 29.975
+  consecutive source advances/s, completion p99/max 9.884/20.460 ms and spacing
+  p99/max 10.267/23.350 ms. This is second-camera coverage, not an X2 speedup
+  comparison; AC remains online but battery status changes to discharging.
+  The candidate remains uninstalled and unmerged, with installed-package
+  qualification pending. Private identities, comparisons and receipts
   are retained in `scratch/temporal-periodic-wrap-20260914/`. This changes no
   July sky-line diagnosis or owner picture-acceptance status.
 - **Frame-time spikes, issue #186:** throughput averages do not retire the 4.17
