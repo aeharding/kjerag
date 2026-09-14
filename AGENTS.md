@@ -101,6 +101,26 @@ binary got is `readelf -d <binary> | grep NEEDED`: ffmpeg 7.1 is
 
 ## Gates (run before pushing)
 
+**Local GPU safety hold (2026-09-13, issue #195):** a broad real-GPU workspace
+test run coincided with AMD command-allocation failures and a frozen desktop
+requiring a hard reset. Do not restart GPU tests, playback stress, UI suites or
+SDK builds without the owner's explicit approval. Automatic goal continuation
+is not that approval. CPU-only checks must select inspected tests and use
+bounded resources; removing `KJERAG_REQUIRE_GPU` does not disable GPU tests.
+
+Some failure-path tests deliberately quarantine GPU owners for process life.
+`--test-threads=1` limits concurrency but does not prevent accumulation across
+tests in one process. After approval, use one exact prebuilt test at a time via
+`bash scripts/run-gpu-test-isolated.sh --gpu-approved <binary> <exact-name>`,
+with sound-emitting tests wrapped in `scripts/quiet.sh`. Inspect its evidence
+and system health before another test; never automate a full-suite loop on the
+shared desktop. The runner caps host CPU, RAM, swap, scope lifetime and each
+output file (64 MiB), but it does not cap GPU memory or guarantee protection
+from driver failure. Its approval flag acknowledges permission obtained
+separately; it grants none.
+GPU-less CI keeps the normal workspace gate below. Isolated local cases are
+not a substitute for a complete qualification result, which remains pending.
+
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings

@@ -767,6 +767,15 @@ mod tests {
 
     #[test]
     fn render_pass_callback_holds_exact_source_until_nonblocking_poll() {
+        check_render_pass_retirement(false);
+    }
+
+    #[test]
+    fn render_pass_callback_releases_completed_source_on_teardown() {
+        check_render_pass_retirement(true);
+    }
+
+    fn check_render_pass_retirement(release_on_drop: bool) {
         let (device, queue, adapter) = match gpu() {
             Ok(gpu) => gpu,
             Err(error) if std::env::var_os("KJERAG_REQUIRE_GPU").is_none() => {
@@ -847,11 +856,35 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            retirements.poll().unwrap();
-            if retained.upgrade().is_none() {
-                break;
+            if release_on_drop {
+                // Other work can drive this device's last draw callback
+                // without another Scene prepare collecting its payload.
+                device.poll(wgpu::PollType::Poll).unwrap();
+                let item = &retirements.pending[0];
+                if item.completed_generation.load(Ordering::Acquire) == item.generation {
+                    break;
+                }
+            } else {
+                retirements.poll().unwrap();
+                if retained.upgrade().is_none() {
+                    break;
+                }
             }
             std::thread::sleep(Duration::from_millis(1));
+        }
+        if release_on_drop {
+            let item = &retirements.pending[0];
+            assert_eq!(
+                item.completed_generation.load(Ordering::Acquire),
+                item.generation,
+                "real render-pass callback did not publish its exact completion"
+            );
+            assert!(
+                retained.upgrade().is_some(),
+                "callback released the payload"
+            );
+            assert!(matches!(answer.try_recv(), Err(mpsc::TryRecvError::Empty)));
+            drop(retirements);
         }
         assert!(
             retained.upgrade().is_none(),

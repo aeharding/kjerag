@@ -136,7 +136,12 @@ color-update policy is selected.
   regressions address that bounded defect without polling the device or
   weakening unresolved-work quarantine. Its contribution to the desktop
   failure is not established. The performance experiment is parked, and the
-  installed signed 0.3.1 app remains unchanged.
+  installed signed 0.3.1 app remains unchanged. Additional source audit found
+  no second completion-proven leak in the worker, history and pending-map
+  paths. Failure tests intentionally retain unresolved GPU work for process
+  life, so a new opt-in runner admits one exact test per process under host
+  resource/time bounds. Its fake-process regressions do not qualify a GPU run
+  or establish GPU-memory containment; owner approval is still required.
 - **Native/SDK performance gap, issue
   [#186](https://github.com/aeharding/kjerag/issues/186):** current X4 runs show
   shared source-cadence slowdowns across the published and restored accepted
