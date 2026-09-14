@@ -7,7 +7,7 @@
 //! `Arc` without separating its resources. The submitted-work callback is
 //! attached to that live [`wgpu::RenderPass`], so it cannot accidentally prove
 //! an earlier compute prefix. Callbacks only publish generation numbers;
-//! ordinary nonblocking polling performs every payload release.
+//! ordinary nonblocking polling or teardown releases completion-proven payloads.
 //!
 //! The eventual `InstalledOneXsDraw` payload must transitively own the exact
 //! `Arc<Frames>` whose imported surfaces the draw samples. Retaining cloned
@@ -455,10 +455,26 @@ impl<P> DrawRetirements<P> {
 impl<P> Drop for DrawRetirements<P> {
     fn drop(&mut self) {
         if !self.failed {
-            // The exact render command buffer may never have been submitted,
-            // so a wait cannot prove safety and may never return. Exceptional
-            // destruction therefore retains every uncertain owner.
-            self.quarantine_all();
+            self.admission.closed.store(true, Ordering::Release);
+            // A final callback may already have run with no subsequent poll
+            // to collect it. Keep those proven entries for normal field drop,
+            // but quarantine every uncertain owner before any payload's Drop
+            // can panic. Rotating only the original queue length allocates
+            // nothing, recycles no permits, and never drives the device.
+            let count = self.pending.len();
+            for _ in 0..count {
+                let item = self
+                    .pending
+                    .pop_front()
+                    .expect("draw teardown count came from this queue");
+                if item.completed_generation.load(Ordering::Acquire) == item.generation {
+                    self.pending.push_back(item);
+                } else {
+                    // This command buffer might never have been submitted.
+                    // Waiting cannot prove safety and may never return.
+                    std::mem::forget(item);
+                }
+            }
         }
     }
 }
@@ -621,6 +637,132 @@ mod tests {
         assert_eq!(history_commits, 2);
         drop(scene_installed);
         assert_eq!(answer.recv().unwrap(), 2);
+    }
+
+    // This module never creates a GPU device. Its distinct name permits a
+    // CPU-only teardown regression run without selecting the GPU tests below.
+    mod cpu_teardown {
+        use super::*;
+
+        #[test]
+        fn drop_releases_all_completed_draws_without_polling() {
+            let (dropped, answer) = mpsc::channel();
+            let mut retirements = DrawRetirements::injected(3);
+            for id in 1..=3 {
+                let permit = retirements.reserve().unwrap();
+                retirements.arm_injected(permit, installed(id, &dropped));
+                retirements.prove_for_test(usize::from(id - 1));
+            }
+            // A teardown poll would fail and quarantine the completed draws.
+            retirements.inject_poll(InjectedPoll::Panic);
+            drop(retirements);
+            let mut released = answer.try_iter().collect::<Vec<_>>();
+            released.sort();
+            assert_eq!(released, [1, 2, 3]);
+        }
+
+        #[test]
+        fn drop_releases_only_exact_completed_draws_in_a_mixed_queue() {
+            let (dropped, answer) = mpsc::channel();
+            let mut retirements = DrawRetirements::injected(4);
+            for id in 1..=4 {
+                let permit = retirements.reserve().unwrap();
+                retirements.arm_injected(permit, installed(id, &dropped));
+            }
+            retirements.prove_for_test(1);
+            retirements.prove_for_test(3);
+            let unresolved_signal = Arc::clone(&retirements.pending[0].completed_generation);
+            let unresolved_generation = retirements.pending[0].generation;
+            drop(retirements);
+            let mut released = answer.try_iter().collect::<Vec<_>>();
+            released.sort();
+            assert_eq!(released, [2, 4]);
+            // A late callback cannot undo conservative teardown quarantine.
+            unresolved_signal.store(unresolved_generation, Ordering::Release);
+            assert!(matches!(answer.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        }
+
+        #[test]
+        fn drop_rejects_a_stale_reused_generation() {
+            let (dropped, answer) = mpsc::channel();
+            let mut retirements = DrawRetirements::injected(1);
+            let permit = retirements.reserve().unwrap();
+            retirements.arm_injected(permit, installed(1, &dropped));
+            let signal = Arc::clone(&retirements.pending[0].completed_generation);
+            let generation = retirements.pending[0].generation;
+            retirements.prove_for_test(0);
+            assert_eq!(retirements.poll().unwrap(), 1);
+            assert_eq!(answer.try_recv().unwrap(), 1);
+            let permit = retirements.reserve().unwrap();
+            retirements.arm_injected(permit, installed(2, &dropped));
+            assert!(Arc::ptr_eq(
+                &signal,
+                &retirements.pending[0].completed_generation
+            ));
+            signal.store(generation, Ordering::Release);
+            drop(retirements);
+            assert!(matches!(answer.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        }
+
+        #[test]
+        fn drop_keeps_a_source_used_by_an_unresolved_redraw() {
+            let (dropped, answer) = mpsc::channel();
+            let mut retirements = DrawRetirements::injected(2);
+            let payload = installed(1, &dropped);
+            let retained = Arc::downgrade(&payload);
+            for _ in 0..2 {
+                let permit = retirements.reserve().unwrap();
+                retirements.arm_injected(permit, Arc::clone(&payload));
+            }
+            drop(payload);
+            retirements.prove_for_test(0);
+            drop(retirements);
+            assert_eq!(
+                retained.strong_count(),
+                1,
+                "only the unresolved draw remains"
+            );
+            assert!(matches!(answer.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        }
+
+        #[test]
+        fn drop_quarantines_unresolved_draws_before_a_completed_destructor_panics() {
+            struct Payload {
+                source: Arc<SourceOwnerDrop>,
+                panic_on_drop: bool,
+            }
+            impl Drop for Payload {
+                fn drop(&mut self) {
+                    if self.panic_on_drop {
+                        panic!("completed payload {} destructor panicked", self.source.id);
+                    }
+                }
+            }
+
+            let (dropped, answer) = mpsc::channel();
+            let mut retirements = DrawRetirements::injected(3);
+            for id in 1..=3 {
+                let permit = retirements.reserve().unwrap();
+                retirements.arm_injected(
+                    permit,
+                    Arc::new(Payload {
+                        source: owner(id, &dropped),
+                        panic_on_drop: id == 1,
+                    }),
+                );
+            }
+            retirements.prove_for_test(0);
+            retirements.prove_for_test(2);
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                drop(retirements);
+            }));
+            assert!(panic.is_err(), "completed payload was never released");
+            // VecDeque's unwind cleanup releases the other completed payload,
+            // but the unresolved source must already be out of the drop path.
+            let mut released = answer.try_iter().collect::<Vec<_>>();
+            released.sort();
+            assert_eq!(released, [1, 3]);
+        }
     }
 
     #[test]

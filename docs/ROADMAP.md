@@ -126,6 +126,17 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **GPU resource safety, issue
+  [#195](https://github.com/aeharding/kjerag/issues/195):** the owner reported a
+  frozen desktop requiring a hard reset during a real-GPU workspace gate on
+  September 13. The preceding kernel log records AMD command-allocation
+  failures. GPU tests, playback stress, UI suites and SDK builds are stopped
+  pending owner approval. Source review identifies a teardown leak that keeps
+  even completion-proven draw owners alive; a branch correction and CPU-only
+  regressions address that bounded defect without polling the device or
+  weakening unresolved-work quarantine. Its contribution to the desktop
+  failure is not established. The performance experiment is parked, and the
+  installed signed 0.3.1 app remains unchanged.
 - **Native/SDK performance gap, issue
   [#186](https://github.com/aeharding/kjerag/issues/186):** current X4 runs show
   shared source-cadence slowdowns across the published and restored accepted
