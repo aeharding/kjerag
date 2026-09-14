@@ -107,6 +107,10 @@ requiring a hard reset. Do not restart GPU tests, playback stress, UI suites or
 SDK builds without the owner's explicit approval. Automatic goal continuation
 is not that approval. CPU-only checks must select inspected tests and use
 bounded resources; removing `KJERAG_REQUIRE_GPU` does not disable GPU tests.
+After the September 14 resumption, the single one-pixel GPU regression passed.
+Permission review blocked the heavier X4 test before launch; obtain explicit
+approval for real-footage GPU checks before proceeding. Do not bypass that
+rejection or treat another automatic continuation as approval.
 
 Some failure-path tests deliberately quarantine GPU owners for process life.
 `--test-threads=1` limits concurrency but does not prevent accumulation across

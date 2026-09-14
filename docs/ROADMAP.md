@@ -142,6 +142,11 @@ color-update policy is selected.
   life, so a new opt-in runner admits one exact test per process under host
   resource/time bounds. Its fake-process regressions do not qualify a GPU run
   or establish GPU-memory containment; owner approval is still required.
+  After the September 14 resumption, the single one-pixel callback/teardown
+  regression passed on the Radeon 760M in 0.08 seconds. No new kernel messages
+  appeared and post-test VRAM/GTT counters matched their pre-test values. This
+  qualifies that exact cleanup regression only; real-footage checks still
+  await explicit approval, and the desktop-freeze cause remains unproven.
 - **Native/SDK performance gap, issue
   [#186](https://github.com/aeharding/kjerag/issues/186):** current X4 runs show
   shared source-cadence slowdowns across the published and restored accepted
