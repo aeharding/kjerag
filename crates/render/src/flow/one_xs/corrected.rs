@@ -142,6 +142,15 @@ impl CorrectedFrame {
         self.correction.frame()
     }
 
+    /// Read the immutable map and color ratios sampled by this exact output.
+    /// Diagnostic only: this copies GPU data and waits, never during playback.
+    pub(crate) fn diagnostic_map(&self) -> Fallible<crate::OneXsMapFrame> {
+        if self.display.map.frame() != self.frame() {
+            return Err("filtered stitch map differs from its displayed source".into());
+        }
+        self.display.map.diagnostic_readback()
+    }
+
     /// Read-only access to the exact displayed field for real-Scene diagnostics.
     #[cfg(test)]
     pub(crate) fn correction_for_review(&self) -> &CorrectionFrame {

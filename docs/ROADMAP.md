@@ -77,7 +77,7 @@ Both actual 0.3.1 x86_64 distribution routes independently pass 40 X4 Air and
 fixing the signed 0.3.0 omission. Permissions and runtime metadata are unchanged.
 The documented sandbox sound-device and import-fault skips still apply.
 
-The signed 0.3.1 app is installed from the official GPG-verified channel. Its
+The signed 0.3.1 baseline was installed from the official GPG-verified channel. Its
 2256x1504, 40-second active-playback cohorts with 300 Hz requested view rate are:
 
 | Camera | Completed redraws/s | Source advances/s | Completion p99 / max |
@@ -126,6 +126,24 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **Filtered-map inspection, issue
+  [#198](https://github.com/aeharding/kjerag/issues/198):** the actual X4
+  filtered Scene reproduces a missing displayed-map diagnostic. That API
+  queried the separate spatial facade, not the retained corrected frame.
+  Branch inspection now follows the exact filtered owner and retains handles
+  only to the map/alpha/ratio allocations already sampled by its bind groups.
+  Ordinary playback performs no new readback, GPU allocation or stitching
+  arithmetic. Both current-delivery and retained-display contracts have
+  real-camera regressions passing separately on X4 and ONE X2. The device-hidden
+  workspace reports 1,513 passes, 52 ignored and no failures, including unavailable
+  GPU/media returns rather than hardware coverage. Full Clippy, vendor warnings,
+  formatting, naming and Cargo-source checks pass. The native X4 UI suite passes
+  45 checks and ONE X2 passes 46. Audio and portal services are excluded;
+  cross-bind-mount paired-file hardlinks also skip in this isolated ONE X2 run.
+  PR [#199](https://github.com/aeharding/kjerag/pull/199) carries this diagnostic
+  change; CI and review remain separate merge gates. This enables
+  investigation of the reported July sky boundary, not a seam-quality fix
+  or evidence of a difference from Studio.
 - **GPU resource safety, issue
   [#195](https://github.com/aeharding/kjerag/issues/195):** the owner reported a
   frozen desktop requiring a hard reset during a real-GPU workspace gate on
@@ -138,7 +156,7 @@ color-update policy is selected.
   that bounded defect without polling the device or
   weakening unresolved-work quarantine. Its contribution to the desktop
   failure is not established. The performance experiment is parked, and the
-  installed signed 0.3.1 app remains unchanged. Additional source audit found
+  stitching arithmetic is unchanged. Additional source audit found
   no second completion-proven leak in the worker, history and pending-map
   paths. Failure tests intentionally retain unresolved GPU work for process
   life, so a new opt-in runner admits one exact test per process under host
@@ -157,10 +175,11 @@ color-update policy is selected.
   integration checks do not qualify a full workspace gate, playback performance,
   or a release. A subsequent device-hidden full workspace run passed with
   1,511 reported passes and 52 ignored tests; unavailable-GPU and absent-media
-  returns are included, so this is not hardware qualification. Full workspace
+returns are included, so this is not hardware qualification. Full workspace
   Clippy and vendor warning checks passed, and the branch player rebuilt.
-  Normal player UI qualification and CI are next. The desktop-freeze cause
-  remains unproven.
+  PR [#196](https://github.com/aeharding/kjerag/pull/196) subsequently passed
+  both camera UI suites and all six CI jobs, then merged at `6cf8963f` after
+  the owner's explicit approval. The desktop-freeze cause remains unproven.
 - **Native/SDK performance gap, issue
   [#186](https://github.com/aeharding/kjerag/issues/186):** current X4 runs show
   shared source-cadence slowdowns across the published and restored accepted
@@ -203,9 +222,18 @@ Feature release **0.3.0** and packaging patch **0.3.1** are published through
 GitHub and the signed channel. Complete issue #187's capacity/handoff decision;
 publication, installed UI and license checks pass, while issue #186 retains
 the unresolved performance evidence.
-The installed 0.3.1 app follows the signed public `kjerag` remote; the accepted
-`48e1d741` bundle remains available for rollback. Issue #146 tracks deriving
-downloads from that same signed build, avoiding separate payload qualification.
+At the owner's request, the qualified PR
+[#197](https://github.com/aeharding/kjerag/pull/197) test Flatpak temporarily
+replaces the signed release for a clipboard retest. Source `519e7545`, installed
+OSTree `94688e18d630`, and executable SHA256 `9ed9b69b730c` identify this package;
+it includes the merged cleanup fixes and changes no stitching or color
+arithmetic. Both cameras passed four focused clipboard checks against the
+actual installed ref, including matching restored view text and pixels.
+This reduced-service qualification does not cover audio, portals or performance.
+The test package remains installed pending owner retest; PR #197 is unmerged.
+The verified signed 0.3.1 ref and release bundle are retained for rollback,
+and normal-channel restoration is due after that retest. Issue #146 tracks
+deriving downloads from the signed build, avoiding separate payload qualification.
 
 The signed 0.3.1 60 Hz X4 control maintains 29.975 source advances/s under
 the same 1,000 Hz mouse input, with 17.1 ms worst reported lateness. Earlier

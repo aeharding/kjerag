@@ -332,6 +332,149 @@ fn one_x2_filtered_scene_preserves_exact_source_ownership() {
 }
 
 #[test]
+fn x4_filtered_displayed_map_diagnostic_matches_exact_shown_source() {
+    let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
+        return;
+    };
+    assert_filtered_displayed_map_diagnostic(Path::new(&path));
+}
+
+#[test]
+fn one_x2_filtered_displayed_map_diagnostic_matches_exact_shown_source() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    assert_filtered_displayed_map_diagnostic(Path::new(&path));
+}
+
+fn assert_filtered_displayed_map_diagnostic(path: &Path) {
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let mut scene = Scene::open(path).unwrap();
+    scene.set_muted(true);
+    // This only verifies the route selected automatically at open; it does
+    // not enable a test-only playback path.
+    scene.enable_temporal_for_review().unwrap();
+    scene.pause(Instant::now());
+
+    let first = super::tests::wait_for_new_scene_frame(&scene, None);
+    let camera = Camera::default();
+    let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    settle_filtered(&scene, &mut pipeline, &device, &queue, &first, camera, None);
+
+    let before_pixels = capture_shown(&scene, &mut pipeline, &device, &queue, camera);
+    let before_shown = scene
+        .primitive(camera)
+        .shown
+        .get()
+        .expect("filtered map diagnostic needs a shown source");
+    let before_capture = before_shown
+        .filtered
+        .clone()
+        .expect("automatic filtered route lost its shown owner");
+    let before_installed = before_capture
+        .installed()
+        .unwrap()
+        .expect("shown filtered source is not installed");
+    let displayed = scene
+        .diagnostic_filtered_displayed_frame()
+        .unwrap()
+        .expect("shown source is not the installed filtered frame");
+    assert_eq!(displayed, first);
+
+    let map = scene
+        .diagnostic_one_xs_displayed_map()
+        .unwrap()
+        .expect("filtered display diagnostic lost its exact stitch map");
+    assert_eq!(map.frame(), &displayed);
+    assert!(map.fusion().is_some(), "filtered display map lost fusion");
+    let current_map = scene
+        .diagnostic_one_xs_map()
+        .unwrap()
+        .expect("current filtered delivery lost its displayed stitch map");
+    assert_eq!(current_map.frame(), map.frame());
+    assert_eq!(current_map.packed().bytes(), map.packed().bytes());
+    assert_eq!(current_map.alpha().bytes(), map.alpha().bytes());
+    assert_eq!(current_map.fusion(), map.fusion());
+    drop(current_map);
+
+    let after_pixels = capture_shown(&scene, &mut pipeline, &device, &queue, camera);
+    let after_shown = scene
+        .primitive(camera)
+        .shown
+        .get()
+        .expect("filtered map diagnostic removed the shown source");
+    let after_capture = after_shown
+        .filtered
+        .as_ref()
+        .expect("filtered map diagnostic removed the shown owner");
+    let after_installed = after_capture
+        .installed()
+        .unwrap()
+        .expect("filtered map diagnostic removed the installed source");
+    assert!(Arc::ptr_eq(&after_shown.frames, &before_shown.frames));
+    assert!(after_capture.same_capture(&before_capture));
+    assert!(Arc::ptr_eq(&after_installed, &before_installed));
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&displayed));
+    assert_eq!(after_pixels.index, before_pixels.index);
+    assert_eq!(after_pixels.time, before_pixels.time);
+    assert_eq!(
+        (after_pixels.width, after_pixels.height),
+        (before_pixels.width, before_pixels.height)
+    );
+    assert_eq!(
+        after_pixels.rgba, before_pixels.rgba,
+        "filtered map diagnostic changed the captured shown pixels"
+    );
+    drop(map);
+
+    // Offer one successor without preparing it. The diagnostic must continue
+    // to name the retained picture rather than the newer source delivery.
+    scene.pump(Instant::now());
+    scene.step(Instant::now(), 1);
+    let offered = super::tests::wait_for_new_scene_frame(&scene, Some(&first));
+    assert_eq!(offered.index(), first.index() + 1);
+    assert_eq!(scene.frame_stamp().as_ref(), Some(&offered));
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&displayed));
+    assert!(
+        scene.diagnostic_one_xs_map().unwrap().is_none(),
+        "current-delivery diagnostic reported the older retained display"
+    );
+    assert_eq!(
+        before_capture.installed().unwrap().unwrap().frame(),
+        &displayed,
+        "offered successor installed before its presentation transaction"
+    );
+    let retained = scene
+        .diagnostic_one_xs_displayed_map()
+        .unwrap()
+        .expect("newer offered source hid the retained filtered display map");
+    assert_eq!(retained.frame(), &displayed);
+    assert!(retained.fusion().is_some());
+    let retained_shown = scene
+        .primitive(camera)
+        .shown
+        .get()
+        .expect("displayed map diagnostic removed the retained source");
+    assert!(Arc::ptr_eq(&retained_shown.frames, &before_shown.frames));
+    assert!(Arc::ptr_eq(
+        &retained_shown
+            .filtered
+            .as_ref()
+            .unwrap()
+            .installed()
+            .unwrap()
+            .unwrap(),
+        &before_installed
+    ));
+    assert!(
+        retained_shown
+            .filtered
+            .as_ref()
+            .is_some_and(|capture| capture.same_capture(&before_capture))
+    );
+}
+
+#[test]
 fn x4_filtered_failure_releases_history_and_preserves_stopped_picture() {
     let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
         return;
