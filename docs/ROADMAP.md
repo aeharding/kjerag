@@ -140,8 +140,8 @@ color-update policy is selected.
   formatting, naming and Cargo-source checks pass. The native X4 UI suite passes
   45 checks and ONE X2 passes 46. Audio and portal services are excluded;
   cross-bind-mount paired-file hardlinks also skip in this isolated ONE X2 run.
-  PR [#199](https://github.com/aeharding/kjerag/pull/199) carries this diagnostic
-  change; CI and review remain separate merge gates. This enables
+  PR [#199](https://github.com/aeharding/kjerag/pull/199) merged at `286b2b9f`
+  after all six CI jobs passed and the owner explicitly approved. This enables
   investigation of the reported July sky boundary, not a seam-quality fix
   or evidence of a difference from Studio.
 - **GPU resource safety, issue
@@ -185,6 +185,34 @@ returns are included, so this is not hardware qualification. Full workspace
   shared source-cadence slowdowns across the published and restored accepted
   packages. Host/Flatpak measurements show an environment contribution but do
   not isolate the cause.
+- **Native-grid source-filter candidate, issue #186:** evaluating the source
+  box at original texel centers has two horizontal phases and one vertical
+  phase. The candidate derives its four bilinear sample positions and separable
+  weights directly, retaining the original native-plane textures, atlas
+  boundaries, pass count, source cadence and temporal/color ownership. It does
+  not add a lower-resolution source or another intermediate image. The original
+  loop shader remains a same-device reference. Floating-point reassociation is
+  not bit-identical: full-camera patterned plane checks differ by at most one
+  code, and the named 31-source X4 world/blotch and ONE X2 riser sequences differ
+  by at most three RGB8 codes in the displayed picture. Source indices/times,
+  current/filtered fields and camera-coordinate bytes match the preserved
+  reference exactly. These measurements are not owner picture acceptance.
+  A sequential native X4 baseline/candidate/baseline test at 2256x1504 measures
+  239.349 / 287.299 / 232.024 completed redraws/s with 29.950 / 29.950 / 29.900
+  source advances/s. Completion p99 is 14.962 / 12.229 / 15.244 ms. The candidate
+  is retained for qualification, not installed or released: the measured gain
+  does not retire the 4.17 ms tail target or establish every-camera performance.
+  AC was online throughout, but fan and battery-status endpoints differed.
+  The device-hidden full code gate reports 1,514 passes, 52 ignored and no
+  failures, including unavailable-GPU/media returns rather than additional
+  hardware coverage. Full Clippy, vendor warnings, formatting, naming and
+  Cargo-source checks pass. Native UI passes 45 X4 and 46 ONE X2 checks,
+  with sound-device, portal, exact-view and paired-file fixture skips recorded.
+  The odd-width chroma fixture is byte-exact against the original shader.
+  CI, installed-package qualification and owner picture review remain pending;
+  the installed PR #197 test package is unchanged. Private source, executable
+  identities, controls and moving comparisons are retained under
+  `scratch/source-prefilter-phases-20260914/`.
 - **Frame-time spikes, issue #186:** throughput averages do not retire the 4.17
   ms capacity budget or hitch risk. Do not call playback hitch-free.
 - **Exact photometric parity, issue
