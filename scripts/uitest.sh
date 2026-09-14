@@ -1585,9 +1585,10 @@ holds_the_command_line_view() {
 # afterwards has to differ from the first or the check says so itself.
 returns_to_the_copied_view() {
 	local check="ctrl+v goes back to the copied view"
-	local copied returned
+	local copied returned tag=goto
 	if [ "${1:-}" = printed ]; then
 		check="ctrl+v goes back to the printed view"
+		tag=goto-printed
 		if [ "$clipboard_write" = no ]; then
 			skip "$check (no wl-copy)"
 			return
@@ -1606,15 +1607,15 @@ returns_to_the_copied_view() {
 			wl-copy --type text/plain || { fail "$check" "wl-copy failed"; return; }
 	fi
 	sleep "$TOAST_GONE"
-	grab goto-there >/dev/null
+	grab "$tag-there" >/dev/null
 
 	key -k Right
 	key -M ctrl -k minus -m ctrl
 	alive || lost "$check"
-	grab goto-away >/dev/null
-	if same_picture "$session/goto-there.ppm" "$session/goto-away.ppm"; then
+	grab "$tag-away" >/dev/null
+	if same_picture "$session/$tag-there.ppm" "$session/$tag-away.ppm"; then
 		fail "$check" "the seek and the zoom moved nothing, so this proves nothing" \
-			"$session/goto-there.ppm" "$session/goto-away.ppm"
+			"$session/$tag-there.ppm" "$session/$tag-away.ppm"
 		return
 	fi
 
@@ -1625,7 +1626,7 @@ returns_to_the_copied_view() {
 		return
 	fi
 	sleep "$TOAST_GONE"
-	grab goto-back >/dev/null
+	grab "$tag-back" >/dev/null
 
 	view_lines=$(grep -c '^view:' "$log")
 	if ! press_until more_view_lines goto -k i; then
@@ -1639,9 +1640,9 @@ returns_to_the_copied_view() {
 		fail "$check" "copied:   $copied" "came back: $returned"
 		return
 	fi
-	if ! same_picture "$session/goto-there.ppm" "$session/goto-back.ppm"; then
+	if ! same_picture "$session/$tag-there.ppm" "$session/$tag-back.ppm"; then
 		fail "$check" "the line came back but the picture did not" \
-			"$session/goto-there.ppm" "$session/goto-back.ppm"
+			"$session/$tag-there.ppm" "$session/$tag-back.ppm"
 		return
 	fi
 	pass "$check (${copied#"$media "})"
@@ -1653,6 +1654,7 @@ returns_to_the_copied_view() {
 spaced_view_reference() {
 	local original=$media mate fixture=$session/'view references'
 	local media=$fixture/"pilot's flight  $(basename "$original")"
+	local expected attempt landed=no
 	printf '\n-- spaced-path view references\n'
 	mkdir -p "$fixture"
 	ln -s -- "$(realpath -- "$original")" "$media" || die "cannot link the view fixture"
@@ -1671,6 +1673,30 @@ spaced_view_reference() {
 	if ! press_until still_picture view-paths-paused -k space; then
 		alive || lost "the spaced-path file pauses"
 		fail "the spaced-path file pauses" "log: $log"
+		teardown
+		return
+	fi
+	# The first pause can land in uninterrupted warm history. A later paste
+	# restarts temporal history, an accepted picture difference, so use a
+	# keyboard seek to source zero before the pixel-equality round trips.
+	# This preparation does not depend on the clipboard parser being tested.
+	view_lines=$(grep -c '^view:' "$log")
+	if ! press_until more_view_lines view-paths-initial -k i; then
+		alive || lost "the spaced-path starting view is known"
+		fail "the spaced-path starting view is known" "log: $log"
+		teardown
+		return
+	fi
+	expected=$(view_line | sed -E 's/ time=[0-9.]+ / time=0.000 /')
+	for attempt in 1 2 3; do
+		key -k Left
+		if wait_for_displayed_view "$expected" 5 "the spaced-path fixture seeks to zero"; then
+			landed=yes
+			break
+		fi
+	done
+	if [ "$landed" = no ]; then
+		fail "the spaced-path fixture seeks to zero" "shown: $displayed_view" "log: $log"
 		teardown
 		return
 	fi
