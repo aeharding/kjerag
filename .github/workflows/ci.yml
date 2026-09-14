@@ -39,6 +39,8 @@ jobs:
       # Exercise the harness's log ordering without a compositor or footage.
       - run: bash scripts/test-uitest-startup.sh
       - run: python3 scripts/test-check-controls-wake.py
+      # Fake manager/test processes only, no GPU or user-session D-Bus.
+      - run: python3 scripts/test-run-gpu-test-isolated.py
       # ffmpeg-sys-next binds the system headers, and bindgen needs libclang
       # to read them. The pin is ffmpeg 7.1 (issue #65) and ubuntu-24.04 ships
       # 6.1, so the ffmpeg half comes from a PPA, and it is the same one

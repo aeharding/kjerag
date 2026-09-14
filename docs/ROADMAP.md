@@ -126,6 +126,41 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **GPU resource safety, issue
+  [#195](https://github.com/aeharding/kjerag/issues/195):** the owner reported a
+  frozen desktop requiring a hard reset during a real-GPU workspace gate on
+  September 13. The preceding kernel log records AMD command-allocation
+  failures. Broad hardware test loops remain disabled. The owner has resumed
+  continued work with the full computer available; merge preparation uses a
+  device-hidden workspace test gate and separate bounded player UI checks.
+  Source review identifies a teardown leak that keeps even completion-proven
+  draw owners alive; a branch correction and CPU-only regressions address
+  that bounded defect without polling the device or
+  weakening unresolved-work quarantine. Its contribution to the desktop
+  failure is not established. The performance experiment is parked, and the
+  installed signed 0.3.1 app remains unchanged. Additional source audit found
+  no second completion-proven leak in the worker, history and pending-map
+  paths. Failure tests intentionally retain unresolved GPU work for process
+  life, so a new opt-in runner admits one exact test per process under host
+  resource/time bounds. Its fake-process regressions do not qualify a GPU run
+  or establish GPU-memory containment; the runner requires separate approval.
+  After the September 14 resumption, the single one-pixel callback/teardown
+  regression passed on the Radeon 760M in 0.08 seconds. No new kernel messages
+  appeared and post-test VRAM/GTT counters matched their pre-test values. This
+  qualifies that exact cleanup regression only. The owner subsequently approved
+  one-at-a-time real-footage GPU tests with resource limits and health checks.
+  X4 and ONE X2 draw-deferral checks passed in 5.98 and 2.61 seconds; the X4
+  overlap/renderer-recreation case recorded as failed in the interrupted gate
+  passed alone in 12.39 seconds. After each process exited, VRAM/GTT counters
+  matched the preflight values, memory-pressure averages stayed zero, swap
+  remained unused, and the kernel journal had no new entries. These isolated
+  integration checks do not qualify a full workspace gate, playback performance,
+  or a release. A subsequent device-hidden full workspace run passed with
+  1,511 reported passes and 52 ignored tests; unavailable-GPU and absent-media
+  returns are included, so this is not hardware qualification. Full workspace
+  Clippy and vendor warning checks passed, and the branch player rebuilt.
+  Normal player UI qualification and CI are next. The desktop-freeze cause
+  remains unproven.
 - **Native/SDK performance gap, issue
   [#186](https://github.com/aeharding/kjerag/issues/186):** current X4 runs show
   shared source-cadence slowdowns across the published and restored accepted

@@ -266,6 +266,13 @@ shown owner remains independent. Retired resources release only on proven
 completion; uncertain completion is quarantined, not recycled or retried as
 fresh source work.
 
+Draw-retirement teardown checks the exact callback generations already
+published, without driving or waiting for the device. It quarantines every
+unresolved entry before releasing completion-proven payloads, so a completed
+payload's destructor panic cannot release an unresolved source. Already proven
+draws must not be retained for process life merely because no later redraw
+collected their callbacks.
+
 Startup and exact seek landing hold picture and audio time until the requested
 resident result is installed and acknowledged. Pausing during startup cancels
 autoplay intent. EOF waits for admitted real inputs to drain before flushing
