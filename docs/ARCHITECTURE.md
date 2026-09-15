@@ -299,6 +299,15 @@ Patch provenance and removal conditions live in
 [`iced_wgpu/KJERAG.md`](../vendor/iced_wgpu/KJERAG.md) and
 [`iced_core/KJERAG.md`](../vendor/iced_core/KJERAG.md).
 
+Generic realtime playback can also wait on that Scene subscription when its
+next deadline is overdue and the decode channel is empty. The media layer owns
+the empty-queue generation and a one-shot standard-library waker, not shell
+subscription types. Successful note delivery or decoder exit wakes an armed
+consumer; delivery racing registration prevents sleep. Pause and seek cancel
+the old wait. Future deadlines, sequential stitch scheduling, and instruments
+without a subscription retain their existing behavior. This changes idle
+scheduling, not media timestamps, frame-drop policy, or image arithmetic.
+
 ### Decode, audio, and clocks
 
 [`decode.rs`](../crates/media/src/decode.rs) owns VA-API decode.

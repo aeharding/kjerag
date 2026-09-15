@@ -95,6 +95,8 @@ const DRAW_RETIREMENT_RETRY: Duration = Duration::from_millis(1);
 
 #[cfg(test)]
 mod correction_review;
+#[cfg(test)]
+mod decoder_wake_tests;
 mod filtered;
 #[cfg(test)]
 mod filtered_tests;
@@ -1659,6 +1661,19 @@ impl Scene {
     pub fn pump(&self, now: Instant) -> Next {
         let next = self.pump_inner(now);
         let full = self.draw_retirement_full.load(AtomicOrdering::Acquire);
+        if matches!(next, Next::At(due) if due <= now)
+            && !full
+            && self.ready_wake.listening()
+            && let Some(show) = self.show.as_ref()
+            && show.one_xs.is_none()
+            && let Source::Live(player) = &show.playing.borrow().source
+            && player.wait_for_decode(
+                now,
+                std::task::Waker::from(Arc::new(self.ready_wake.clone())),
+            )
+        {
+            return Next::Never;
+        }
         if next == Next::Refresh
             && !full
             && self.resident_waiting.load(AtomicOrdering::Acquire)
