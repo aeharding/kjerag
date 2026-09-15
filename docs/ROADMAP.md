@@ -126,6 +126,14 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **CPU sampler bounds, issue
+  [#204](https://github.com/aeharding/kjerag/issues/204):** synthetic decoded-plane
+  tests reproduce chroma sampling row padding outside the image and both samplers
+  accepting NaN coordinates. A branch fix checks logical image bounds before
+  integer conversion, retaining decoder strides, valid NV12/P010 values and
+  bilinear luma support. All seven focused sampling tests pass with GPU devices
+  hidden. This is an agent-found CPU sampling defect, not an established cause
+  of an owner-reported seam artifact or a GPU stitching/performance change.
 - **Filtered-map inspection, issue
   [#198](https://github.com/aeharding/kjerag/issues/198):** the actual X4
   filtered Scene reproduces a missing displayed-map diagnostic. That API

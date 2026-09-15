@@ -123,6 +123,13 @@ impl Plane {
         }
     }
 
+    // Check logical pixels before integer conversion or indexing padded rows.
+    // Range comparisons also reject NaN and infinite coordinates.
+    fn contains(&self, x: f64, y: f64) -> bool {
+        (0.0..f64::from(self.size.width)).contains(&x)
+            && (0.0..f64::from(self.size.height)).contains(&y)
+    }
+
     /// Cb and Cr at a **luma** pixel, each as a signed offset from neutral in
     /// 8-bit codes, or `None` outside the picture or on a frame with no
     /// chroma plane.
@@ -133,10 +140,10 @@ impl Plane {
     /// content at this direction is rather than where its edges are.
     pub fn chroma_at(&self, x: f64, y: f64) -> Option<(f64, f64)> {
         let chroma = self.chroma.as_ref()?;
-        let (column, row) = ((x * 0.5) as usize, (y * 0.5) as usize);
-        if x < 0.0 || y < 0.0 {
+        if !self.contains(x, y) {
             return None;
         }
+        let (column, row) = ((x * 0.5) as usize, (y * 0.5) as usize);
         let step = self.step();
         let at = row * chroma.stride + 2 * column * step;
         let pair = chroma.bytes.get(at..at + 2 * step)?;
@@ -150,11 +157,10 @@ impl Plane {
     /// Bilinear, in delivered-frame pixels. `None` outside the picture, which
     /// a patch takes as a patch it cannot use.
     pub fn at(&self, x: f64, y: f64) -> Option<f64> {
-        let (left, top) = (x.floor(), y.floor());
-        if left < 0.0 || top < 0.0 {
+        if !self.contains(x, y) {
             return None;
         }
-        let (left, top) = (left as usize, top as usize);
+        let (left, top) = (x.floor() as usize, y.floor() as usize);
         if left + 1 >= self.size.width as usize || top + 1 >= self.size.height as usize {
             return None;
         }
@@ -533,5 +539,81 @@ mod tests {
         let (cb, cr) = wide.chroma_at(0.0, 0.0).expect("inside the picture");
         assert!(cb.abs() < 1e-9, "{cb}");
         assert!((cr - 56.0).abs() < 1e-9, "{cr}");
+    }
+
+    fn padded_chroma_plane(wide: bool) -> Plane {
+        let mut plane = plane(64, wide, Size::new(8, 6));
+        let sample: &[u8] = if wide {
+            &[0, 128, 0, 184] // P010: Cb512, Cr736, shifted left six bits.
+        } else {
+            &[128, 184]
+        };
+        let stride = 4 * sample.len() + 4;
+        let mut bytes = vec![0xee; 3 * stride];
+        for row in bytes.chunks_exact_mut(stride) {
+            for pair in row[..4 * sample.len()].chunks_exact_mut(sample.len()) {
+                pair.copy_from_slice(sample);
+            }
+        }
+        plane.chroma = Some(Chroma { bytes, stride });
+        plane
+    }
+
+    #[test]
+    fn chroma_samples_use_picture_bounds_not_allocation_bounds() {
+        for wide in [false, true] {
+            let plane = padded_chroma_plane(wide);
+            for (x, y) in [(8.0, 0.0), (9.0, 0.0), (12.0, 0.0), (0.0, 6.0)] {
+                assert_eq!(plane.chroma_at(x, y), None, "wide={wide}, ({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn chroma_samples_keep_the_last_pixel_and_decoder_stride() {
+        for wide in [false, true] {
+            let plane = padded_chroma_plane(wide);
+            for (x, y) in [(0.0, 0.0), (6.0, 4.0), (7.999, 5.999)] {
+                assert_eq!(plane.chroma_at(x, y), Some((0.0, 56.0)));
+            }
+        }
+    }
+
+    #[test]
+    fn luma_samples_reject_nonfinite_and_unrepresentable_coordinates() {
+        for wide in [false, true] {
+            let plane = padded_chroma_plane(wide);
+            for coordinate in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX, -1.0] {
+                assert_eq!(
+                    plane.at(coordinate, 0.0),
+                    None,
+                    "wide={wide}, x={coordinate}"
+                );
+                assert_eq!(
+                    plane.at(0.0, coordinate),
+                    None,
+                    "wide={wide}, y={coordinate}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chroma_samples_reject_nonfinite_and_unrepresentable_coordinates() {
+        for wide in [false, true] {
+            let plane = padded_chroma_plane(wide);
+            for coordinate in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX, -1.0] {
+                assert_eq!(
+                    plane.chroma_at(coordinate, 0.0),
+                    None,
+                    "wide={wide}, x={coordinate}"
+                );
+                assert_eq!(
+                    plane.chroma_at(0.0, coordinate),
+                    None,
+                    "wide={wide}, y={coordinate}"
+                );
+            }
+        }
     }
 }
