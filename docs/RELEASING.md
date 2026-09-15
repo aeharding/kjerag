@@ -43,20 +43,29 @@ commits that as `release: 0.2.0`, tags it `0.2.0` (the plain version, no `v`),
 and pushes both. Configuration is `release.toml`.
 
 The tag is what builds the app. `.github/workflows/release.yml` runs the CI
-gates on the tagged commit, builds the Flatpak with Flatpak's own GitHub
-action on an x86_64 and an aarch64 runner, and publishes a Release carrying
-`kjerag-0.2.0-x86_64.flatpak`, `kjerag-0.2.0-aarch64.flatpak` and a `.sha256`
-for each, with notes GitHub generates from what merged since the last tag.
-About ten minutes; the two builds run side by side.
+gates, then Flatter builds and signs each architecture once on its native
+x86_64 or aarch64 runner. Each passes its repository and signed source/version/
+commit record through a separately named workflow artifact. The assembler
+authenticates both, imports only their exact signed app and Debug commits,
+generates the combined signed channel, and exports the two app-only bundles
+from it. Cache contents and matrix execution order do not select release refs.
 
-**The same tag publishes the channel** (issue #137, docs/DISTRIBUTION.md 4.3).
-A second pair of builds is GPG signed and exported into the OSTree repository
-at `https://kjerag.harding.dev/`, which is where an installed Kjerag gets this
-version from and where a new one is installed from with a click. That half
-builds one arch at a time, because both write into one repository, so a tag is
-nearer twenty-five minutes end to end than ten. It needs the `GPG_PRIVATE_KEY`
-and `GPG_PASSPHRASE` repository secrets; without them that job fails and the
-Release is published anyway, which is the right way round.
+**Both routes use the same signed app commits** (issue #146). The complete
+repository, bundles and checksums receive a signed publication manifest before
+either destination is eligible. Publication jobs independently verify that
+manifest against the signing job's public key and expected source/tag. Neither
+publishing job needs a private key. The builder and assembler still need
+`GPG_PRIVATE_KEY` and `GPG_PASSPHRASE`; a missing key or failed architecture
+withholds the entire release, not an unsigned or single-architecture fallback.
+
+GitHub receives `kjerag-0.2.0-x86_64.flatpak`,
+`kjerag-0.2.0-aarch64.flatpak` and a `.flatpak.sha256` for each. The publisher
+checks the remote tag's exact commit, creates a draft with generated notes,
+uploads only missing files, and downloads all four to verify their bytes before
+publishing. Existing differing assets are refused, never overwritten. Only a
+successful Release job permits the signed channel deployment at
+`https://kjerag.harding.dev/`. Those two destinations are not atomic: a Pages
+failure leaves a valid Release available and the previous channel in place.
 
 **A description is not a release.** What a software centre reads about the
 channel is written by `scripts/pages-site.sh`, and the `site` workflow runs it
@@ -79,22 +88,24 @@ flatpak install --user ./kjerag-0.2.0-x86_64.flatpak
 KJERAG_FLATPAK=dev.harding.Kjerag scripts/uitest.sh ~/Videos/<file>.insv
 ```
 
-The signed channel is a separate build, not necessarily the same executable
-as the GitHub bundle. Run the same installed checks for that route too, with
+Run the same installed checks for the signed channel too, with
 the first two lines replaced by `flatpak update dev.harding.Kjerag` if the app
 already follows the signed public remote. Verify `flatpak info --show-origin`
 and the remote URL first: a scratch test origin does not follow the public
 channel. Record the installed OSTree commit and executable SHA256 for each
-route. Both install branch `stable`, so only one can be active per installation.
+route, and require equality for a release produced by the single-build workflow.
+Both install branch `stable`, so only one can be active per installation.
 
-The current GitHub bundle is unsigned. Installing it with `--reinstall` over
-an app owned by the signed channel fails GPG verification. Do not disable the
-channel's verification. For temporary bundle qualification, uninstall only
-`app/dev.harding.Kjerag/x86_64/stable` with `--user --no-related`, without
-`--delete-data`, then install the digest-verified bundle. Settings and runtimes
-remain; the bundle receives a local origin. After its tests, reinstall from
-the signed `kjerag` remote and verify the final origin and identity. Keep the
-previous verified package available for rollback throughout.
+The signed bundle records the official channel URL. Reinstalling it over the
+matching signed channel uses `flatpak install --user --reinstall ./bundle.flatpak`;
+do not disable GPG verification or uninstall first. Verify the retained origin,
+settings and subsequent channel update. The local synthetic lifecycle test
+exercises these client mechanics, not a live HTTPS deployment or real playback.
+Keep the previous verified package available for rollback throughout.
+
+Historical 0.3.1 and earlier downloads came from a separate unsigned build.
+They do not gain signatures retroactively and cannot be used to prove the new
+workflow's identity or reinstall contract.
 
 Check the actual installed license payload on both routes:
 `/app/share/licenses/dev.harding.Kjerag/kjerag/LICENSE` must match the source
@@ -124,15 +135,24 @@ target. Keep source cadence and completion-time spikes beside redraw throughput;
 over 240 redraws/sec while a 29.97 fps source falls behind is not a pass.
 Record current failures even if the same binary passed an earlier cohort.
 
-If the tag run fails, take the tag back, fix, and tag again:
+If a run fails, inspect its failed job and rerun failed jobs. Private handoffs
+are kept for14 days. A failed build can reuse its successful sibling's artifact;
+a failed Pages job reuses the already authenticated publication without another
+build or Release upload. A partial draft resumes only when its existing files
+match. Rebuilding the same tag is not permission to replace different published
+bytes: use a new patch tag for a changed payload. If the staging artifact has
+expired, do not reconstruct and silently replace an existing release.
 
-```sh
-gh release delete 0.2.0 --yes --cleanup-tag
-```
-
-That takes the Release and the tag back. It does not take the repository back,
-because the deploy already happened: fix, tag the next patch version, and the
-next deploy replaces it.
+Release and site-only deployments share one job-level lock covering checkout
+and deployment. The channel's signed `kjerag-release.txt` marker rejects older
+source history, non-increasing semantic versions and mismatched same-source
+records after the first single-build release. Build metadata is not a version
+increase. A site-only republish must preserve that record and its signature;
+it cannot silently migrate the marker to a different signing key.
+GitHub concurrency is not FIFO; a pending deployment can be canceled and need
+a retry. The lock does not cover manual pushes or older workflow revisions.
+Do not delete a published Release/tag as an automatic retry strategy: that
+cannot roll back an already deployed channel.
 
 One thing this does not do. It writes no prose: the changelog entry carries a
 version and a date, and if a release deserves words in a software centre, add

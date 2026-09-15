@@ -1,7 +1,7 @@
 name: site
 # Republishes what a person reads about the repository, without a release.
 #
-# A tag rebuilds the app twice and takes twenty minutes, and none of that is
+# A tag builds the app on both architectures, and none of that is
 # needed to fix a summary, an icon or a description: the OSTree objects at
 # kjerag.harding.dev are the ones the last tag published and they are fine.
 # What goes stale is the descriptors beside them, and those are one script
@@ -26,19 +26,25 @@ permissions:
 jobs:
   site:
     runs-on: ubuntu-24.04
-    # The image the pages job of release.yml builds in, so the flatpak that
-    # rewrites the summary is the one that wrote it.
-    container:
-      image: ghcr.io/andyholmes/flatter/rust:25.08
-      options: --privileged
+    # Cover checkout as well as deployment, so a stale snapshot cannot replace
+    # a release published while this job was waiting.
+    concurrency:
+      group: kjerag-pages-production
+      cancel-in-progress: false
     steps:
       # Two trees: the source, which holds the script and the metainfo, and
       # the published repository, which is what gets described and deployed.
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/checkout@v4
         with:
           ref: gh-pages
           path: site
+      # Match the assembly job's Flatpak tool provisioning.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak ostree gnupg
       # The signature is the whole reason a remote can be trusted over plain
       # HTTP, and the summary is re-signed below. No key, no publish.
       - uses: crazy-max/ghaction-import-gpg@v7
@@ -46,7 +52,24 @@ jobs:
         with:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
           passphrase: ${{ secrets.GPG_PASSPHRASE }}
-      - run: scripts/pages-site.sh site "${{ steps.gpg.outputs.fingerprint }}"
+      - name: Describe without changing any published ref
+        env:
+          FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
+        run: |
+          find site/refs/heads -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > "$RUNNER_TEMP/refs.before"
+          if test -f site/kjerag-release.txt; then
+            sha256sum site/kjerag-release.txt site/kjerag-release.sig >> "$RUNNER_TEMP/refs.before"
+          fi
+          scripts/pages-site.sh site "$FINGERPRINT"
+          find site/refs/heads -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > "$RUNNER_TEMP/refs.after"
+          if test -f site/kjerag-release.txt; then
+            sha256sum site/kjerag-release.txt site/kjerag-release.sig >> "$RUNNER_TEMP/refs.after"
+            verification=$(mktemp -d "$RUNNER_TEMP/site-key.XXXXXXXX")
+            gpg --batch --export "$FINGERPRINT" > "$verification/key.gpg"
+            gpgv --homedir "$verification" --keyring "$verification/key.gpg" \
+              site/kjerag-release.sig site/kjerag-release.txt
+          fi
+          cmp "$RUNNER_TEMP/refs.before" "$RUNNER_TEMP/refs.after"
       # The deploy replaces the branch with this directory, so half a checkout
       # would publish half a repository. Both arches have to resolve to a
       # commit object that is here, and the signed summary has to answer for
@@ -57,8 +80,10 @@ jobs:
         run: |
           set -eu
           for arch in x86_64 aarch64; do
-            commit=$(cat "site/refs/heads/app/dev.harding.Kjerag/$arch/stable")
-            test -f "site/objects/${commit:0:2}/${commit:2}.commit"
+            for ref in "app/dev.harding.Kjerag/$arch/stable" "runtime/dev.harding.Kjerag.Debug/$arch/stable"; do
+              commit=$(cat "site/refs/heads/$ref")
+              test -f "site/objects/${commit:0:2}/${commit:2}.commit"
+            done
           done
           export FLATPAK_USER_DIR="$RUNNER_TEMP/selftest"
           gpg --export "$FINGERPRINT" >"$RUNNER_TEMP/key.gpg"

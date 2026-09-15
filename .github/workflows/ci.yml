@@ -91,6 +91,31 @@ jobs:
       - uses: actions/checkout@v4
       - run: scripts/cargo-sources.sh --check
 
+  # Synthetic signed repositories only. Both archive architectures are checked;
+  # native installation tests never execute the fixture app or a runtime.
+  # Disposable keys and isolated Flatpak state stay under scratch, not artifacts.
+  release-artifacts:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak ostree gnupg
+      - run: python3 scripts/test-release-artifacts.py
+        env:
+          KJERAG_RELEASE_TEST_ROOT: ${{ github.workspace }}/scratch/release-artifact-tests
+      - run: python3 scripts/test-publish-release-assets.py
+        env:
+          KJERAG_RELEASE_TEST_ROOT: ${{ github.workspace }}/scratch/release-artifact-tests
+      - run: python3 scripts/test-check-release-channel.py
+        env:
+          KJERAG_RELEASE_TEST_ROOT: ${{ github.workspace }}/scratch/release-artifact-tests
+
   # The name the project had before issue #75 is gone and stays gone, in file
   # contents and in paths (owner). Needs no toolchain: it is a grep over what
   # git tracks, and the pattern is written so the script does not match
