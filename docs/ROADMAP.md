@@ -157,6 +157,70 @@ color-update policy is selected.
   Tag-event publication, live HTTPS updates and actual-player qualification
   remain distinct release checks. The installed player is unchanged; this
   infrastructure work does not retire #186 or pending picture reviews.
+  Current main is integrated, retaining its playback qualification instructions
+  and the release branch's authenticated retry policy. Release scripts and
+  signing/publication workflows are unchanged. The integrated tree passes 1,519
+  device-hidden workspace tests (52 ignored), all51 isolated release checks on
+  Flatpak 1.14.6, and format/lint/vendor/source/name/syntax checks. Unavailable
+  devices are not hardware coverage. Fresh integration CI and owner policy
+  acceptance remain pending; the earlier native artifacts retain their actual
+  `4aa5dadc` source identity rather than that of this integration.
+- **CPU sampler bounds, issue
+  [#204](https://github.com/aeharding/kjerag/issues/204):** synthetic decoded-plane
+  tests reproduce chroma sampling row padding outside the image and both samplers
+  accepting NaN coordinates. A branch fix checks logical image bounds before
+  integer conversion, retaining decoder strides, valid NV12/P010 values and
+  bilinear luma support. All seven focused sampling tests pass with GPU devices
+  hidden. This is an agent-found CPU sampling defect, not an established cause
+  of an owner-reported seam artifact or a GPU stitching/performance change.
+- **Capacity input precision, issue
+  [#208](https://github.com/aeharding/kjerag/issues/208):** the benchmark's
+  whole-pixel sine pan repeats a coordinate for about 25 ms at each turn.
+  Every outside-present gap over 8 ms in the recovered X4 and ONE X2 traces
+  coincides with those turns; the app need not redraw an unchanged view.
+  A pointer-only branch preserves subpixel input and records its precision.
+  Its regression fails on the original 25-sample hold, and all five CPU
+  pointer tests pass after correction. The device-hidden workspace gate reports
+  1,515 passes and 52 ignored tests, including unavailable-GPU/media returns.
+  Separate bounded installed-player controls at 2256x1504 passed with the
+  unchanged combined review package: 291.274 completed redraws/s and 29.900
+  consecutive source advances/s on X4, 327.474 and 29.975 on ONE X2.
+  Outside-present gaps over 8 ms fell from 76 to 1 on X4 and 130 to 0 on ONE
+  X2. Both cameras' actual before/after pictures were inspected, and kernel,
+  memory-pressure and post-exit GPU-memory checks found no new failure.
+  This fixes the benchmark's input hold, not player performance: X4's
+  begin-to-commit p99 rose from 1.926 to 7.985 ms, and completion-spacing
+  p99/max remains 12.958/25.197 ms (X4) and 7.799/12.333 ms (ONE X2).
+  The changed input workload and different cooling state preclude a clean
+  application-speed comparison; X4's slight source shortfall also remains.
+  The nominal-300-Hz headless workload is also compositor-callback-paced, not
+  an uncapped maximum. Existing sourced throughput counts remain valid, but
+  these gaps cannot alone establish a scheduling defect or retire #186.
+- **Visible playback qualification, issue
+  [#206](https://github.com/aeharding/kjerag/issues/206):** retained real UI
+  captures show that a painted backdrop can satisfy startup, and either the
+  first video frame appearing or changing controls can satisfy the old motion
+  check. A test-only branch now requires a positive playback report plus a
+  valid non-flat video area before measuring motion. Both captures are checked
+  and compared without controls; dark textured footage remains admissible.
+  Eighteen portable synthetic regressions pass without GPU or personal media;
+  the old harness fails the backdrop-transition and controls-only controls.
+  The device-hidden workspace reports 1,513 passes and 52 ignored, including
+  GPU/media-unavailable returns rather than hardware coverage. Formatting,
+  full Clippy, vendor warnings, naming and Cargo-source checks pass.
+  One-lens fixtures cannot qualify motion because automatic opening advice can
+  draw over an empty pane; this restriction does not change player support.
+  The installed player and stitching arithmetic are unchanged. After host
+  recovery, the exact tracked harness at `b0264533` passed 37 X4 Air and 38
+  ONE X2 installed checks in separate bounded runs. Both motion captures were
+  visually inspected for each camera; every launched player authenticated as
+  the unchanged combined review package below. No new kernel entries appeared.
+  Sound-device, portal, exact-view and cross-mount paired-fixture checks retain
+  their documented skips. The standard native shader/Rust-twin check also
+  passed; it is separate from installed shader provenance. These are functional
+  checks, not a performance fix or owner picture acceptance. The four additional
+  PR #197 spaced-path checks remain covered by the earlier combined-package
+  suite; that unmerged route is absent from this main-based harness.
 - **Filtered-map inspection, issue
   [#198](https://github.com/aeharding/kjerag/issues/198):** the actual X4
   filtered Scene reproduces a missing displayed-map diagnostic. That API
@@ -253,18 +317,35 @@ Feature release **0.3.0** and packaging patch **0.3.1** are published through
 GitHub and the signed channel. Complete issue #187's capacity/handoff decision;
 publication, installed UI and license checks pass, while issue #186 retains
 the unresolved performance evidence.
-At the owner's request, the qualified PR
-[#197](https://github.com/aeharding/kjerag/pull/197) test Flatpak temporarily
-replaces the signed release for a clipboard retest. Source `519e7545`, installed
-OSTree `94688e18d630`, and executable SHA256 `9ed9b69b730c` identify this package;
-it includes the merged cleanup fixes and changes no stitching or color
-arithmetic. Both cameras passed four focused clipboard checks against the
-actual installed ref, including matching restored view text and pixels.
-This reduced-service qualification does not cover audio, portals or performance.
-The test package remains installed pending owner retest; PR #197 is unmerged.
+At the owner's request, the combined review Flatpak temporarily replaces the
+signed release. Source `0029252ded4dbb4c622c827120f025532b884175`, installed
+OSTree `b547c4e29db1752e4d5be04f9c403c69690df85d98fc1c43631ad4f921b28e31`,
+and executable SHA256
+`20982c8db8246d30339e1e0953a0ff5bcdcf96c44884c5c2fd3795595c8a3ecf`
+identify this private integration artifact. It combines PR
+[#197](https://github.com/aeharding/kjerag/pull/197)'s clipboard fixes with
+PRs [#200](https://github.com/aeharding/kjerag/pull/200) and
+[#201](https://github.com/aeharding/kjerag/pull/201)'s GPU optimizations and
+the merged cleanup/diagnostic ancestry. It is not a new published release.
+The earlier combined-package suites passed 41 X4 and 42 ONE X2 checks,
+including the four spaced-path clipboard checks absent from the main-based
+tracked harness qualified above. Owner picture review and clipboard retest
+remain pending; installation permission does not accept a picture tradeoff.
 The verified signed 0.3.1 ref and release bundle are retained for rollback,
-and normal-channel restoration is due after that retest. Issue #146 tracks
+and normal-channel restoration is due after review. Issue #146 tracks
 deriving downloads from the signed build, avoiding separate payload qualification.
+
+After the host GPU recovered on the same boot from the observed 800 MHz /
+`0x604` throttle condition, the unchanged combined package sustained 310.875
+X4 and 317.824 ONE X2 completed redraws/s in separate 2256x1504, requested-300-Hz,
+40-second pans. Both advanced consecutive sources at 29.950/s. Completion
+spacing p99/max was 10.941/22.136 ms for X4 and 9.094/22.475 ms for ONE X2.
+Those notifications include queue/callback delivery, not precise shader time
+or physical scanout; app-side spacing is also uneven. These runs meet the
+average capacity/source-cadence requirement, not the 4.17 ms tail budget or a
+hitch-free guarantee. No software fix or environmental trigger is established.
+Issue [#186](https://github.com/aeharding/kjerag/issues/186#issuecomment-5675525548)
+retains the measurements and remaining timing-consistency work.
 
 The signed 0.3.1 60 Hz X4 control maintains 29.975 source advances/s under
 the same 1,000 Hz mouse input, with 17.1 ms worst reported lateness. Earlier

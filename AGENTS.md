@@ -191,7 +191,7 @@ resolves a by-name grant against the caller's environment, so the session's
 is never bound into the sandbox (measured; docs/DISTRIBUTION.md 3.9).
 Captures land in gitignored
 `scratch/uitest/`, because a frame of real footage is personal video.
-Needs `cage wtype grim ffmpeg` installed, plus `wl-clipboard` for the one
+Needs `cage wtype grim ffmpeg python3` installed, plus `wl-clipboard` for the one
 check that reads the session's clipboard, which skips without it.
 
 The one thing it shares with the desktop is the sound server, because the

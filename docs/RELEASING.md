@@ -168,6 +168,20 @@ target. Keep source cadence and completion-time spikes beside redraw throughput;
 over 240 redraws/sec while a 29.97 fps source falls behind is not a pass.
 Record current failures even if the same binary passed an earlier cohort.
 
+Playback qualification requires a positive playback report and a non-flat video
+area before the movement check. Both movement captures must contain a valid,
+non-flat picture, and changes confined to controls do not count. Use footage
+with visible spatial detail and motion: a completely uniform or stationary
+test view cannot establish playback this way. The CPU-only regression
+`python3 scripts/test-uitest-playback.py` checks the gate with synthetic images;
+it does not replace the actual installed-camera suites.
+The motion probes require complete two-lens footage and run in fresh sessions
+before toast-producing input. A one-lens open is refused for motion qualification
+because it may automatically show advice about its missing mate. This restriction
+is on test fixtures, not on which captures the player opens. The probes'
+control-free crop is not a general video classifier: do not reuse this guard
+on captures containing toasts or alerts over the picture.
+
 If a run fails, inspect its failed job and rerun failed jobs. Private handoffs
 are kept for14 days. A failed build can reuse its successful sibling's artifact;
 a failed Pages job reuses the already authenticated publication without another
