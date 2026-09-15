@@ -126,6 +126,25 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **Visible playback qualification, issue
+  [#206](https://github.com/aeharding/kjerag/issues/206):** retained real UI
+  captures show that a painted backdrop can satisfy startup, and either the
+  first video frame appearing or changing controls can satisfy the old motion
+  check. A test-only branch now requires a positive playback report plus a
+  valid non-flat video area before measuring motion. Both captures are checked
+  and compared without controls; dark textured footage remains admissible.
+  Eighteen portable synthetic regressions pass without GPU or personal media;
+  the old harness fails the backdrop-transition and controls-only controls.
+  The device-hidden workspace reports 1,513 passes and 52 ignored, including
+  GPU/media-unavailable returns rather than hardware coverage. Formatting,
+  full Clippy, vendor warnings, naming and Cargo-source checks pass.
+  One-lens fixtures cannot qualify motion because automatic opening advice can
+  draw over an empty pane; this restriction does not change player support.
+  The installed player and stitching arithmetic are unchanged. The earlier
+  private guard passed both installed camera suites, but the generalized
+  tracked guard still requires live qualification after host recovery from
+  the observed 800 MHz firmware-throttle condition. This is not a performance
+  fix, owner picture acceptance or a replacement for those installed checks.
 - **Filtered-map inspection, issue
   [#198](https://github.com/aeharding/kjerag/issues/198):** the actual X4
   filtered Scene reproduces a missing displayed-map diagnostic. That API

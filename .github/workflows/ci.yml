@@ -38,6 +38,8 @@ jobs:
       - uses: actions/checkout@v4
       # Exercise the harness's log ordering without a compositor or footage.
       - run: bash scripts/test-uitest-startup.sh
+      # Synthetic captures only: blank windows and controls are not video motion.
+      - run: python3 scripts/test-uitest-playback.py
       - run: python3 scripts/test-check-controls-wake.py
       # Fake manager/test processes only, no GPU or user-session D-Bus.
       - run: python3 scripts/test-run-gpu-test-isolated.py

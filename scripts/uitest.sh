@@ -30,13 +30,13 @@
 # path; what is arranged is the scarcity, not the handling of it (issue
 # #124).
 #
-# What the checks are allowed to believe, strongest first:
+# The checks combine setup telemetry with the actual captured picture:
 #
 #   1. the app's own stdout: a report line every 5 s while playing, and one
 #      `device:` line saying whether the zero-copy import was available;
-#   2. two captures of the same output, which differ while a video is playing
-#      and are byte for byte identical while it is paused;
-#   3. one capture, which is at least not a black rectangle.
+#   2. two valid, non-flat video areas without controls, which must differ
+#      for the movement check; a backdrop becoming video is not motion proof;
+#   3. a nonblack window proves only that the window painted, not playback.
 #
 # Everything the run writes lands in scratch/uitest/, which is gitignored,
 # because a capture of real footage is personal video and this repo is
@@ -46,7 +46,7 @@
 # The one thing the session shares with the desktop is the sound server, and
 # what it plays there goes into a null sink: see the preflight.
 #
-# Needs `cage wtype grim ffmpeg`. The injection checks need `wl-copy` and the
+# Needs `cage wtype grim ffmpeg python3`. The injection checks need `wl-copy` and the
 # clipboard-reading check needs `wl-paste`; each skips independently.
 #
 # Local only, and never in CI: see "UI verification" in AGENTS.md.
@@ -235,7 +235,7 @@ lens_mate() {
 
 # ------------------------------------------------------------- preflight
 
-for tool in cage wtype grim ffmpeg; do
+for tool in cage wtype grim ffmpeg python3; do
 	command -v "$tool" >/dev/null || die "$tool is not installed (AGENTS.md, UI verification)"
 done
 
@@ -623,7 +623,13 @@ still_picture() {
 }
 
 moving_picture() {
+	# Both callers use a fresh player before any toast-producing input. A
+	# one-lens open can itself show advice, so it cannot qualify this probe.
 	motion_problem=
+	if said '^media:[[:space:]]*1 lens stream'; then
+		motion_problem="motion qualification needs a complete capture without opening advice"
+		return 1
+	fi
 	local a b
 	if ! a=$(grab "$1-a"); then
 		motion_problem="the first capture failed"
@@ -634,8 +640,12 @@ moving_picture() {
 		motion_problem="the second capture failed"
 		return 1
 	fi
-	if cmp -s "$a" "$b"; then
-		motion_problem="two captures 0.7 s apart are identical"
+	if ! visible_picture "$a" || ! visible_picture "$b"; then
+		motion_problem="the motion probe captured an invalid or flat video area"
+		return 1
+	fi
+	if same_picture "$a" "$b"; then
+		motion_problem="two video pictures 0.7 s apart are identical"
 		return 1
 	fi
 	return 0
@@ -665,9 +675,8 @@ presented_fps() {
 	grep '^play:' "$log" | tail -1 | sed -n 's/.*, \([0-9.]*\) fps presented.*/\1/p'
 }
 
-# Nothing is drawn until the first frame, and a key pressed at a window that
-# has not been mapped goes nowhere, so every session waits for paint before
-# it does anything else. This is also the "it renders" check.
+# Wait for a painted window before sending input. Its backdrop can paint
+# before any video; with_media separately checks visible playback below.
 await_paint() {
 	local waited=0 shot
 	while [ "$waited" -le $((READY * 2)) ]; do
@@ -681,6 +690,42 @@ await_paint() {
 }
 
 # ------------------------------------------------- the checks, with a file
+
+# Reject a flat backdrop using the same control-free crop as same_picture.
+# This admits dark textured footage; a completely flat frame cannot prove
+# that the video area has appeared. The helper also validates the PPM payload.
+# Only use this in fresh playback with no toast or alert over the picture.
+visible_picture() {
+	python3 "$root/scripts/check-ui-picture.py" "$1" "$HEADER_BAND" "$CONTROL_BAND"
+}
+
+# A positive Player report can precede the corrected display commit. Require
+# both the report and a visible picture, inside one existing readiness bound.
+await_visible_playback() {
+	local started=$SECONDS positive=no shot
+	# A missing mate can put an automatic advice toast over an empty pane.
+	# Require complete test footage instead of mistaking that toast for video.
+	if said '^media:[[:space:]]*1 lens stream'; then
+		return 1
+	fi
+	while [ $((SECONDS - started)) -lt "$READY" ]; do
+		alive || return 1
+		if [ "$positive" = no ] && awk '
+			/^play:/ && $4 ~ /^[0-9]+[.][0-9]+$/ && $4 + 0 > 0 && $5 == "fps" {
+				found = 1; exit
+			}
+			END { exit !found }
+		' "$log"; then
+			positive=yes
+		fi
+		shot=$(grab playback-ready) || return 1
+		if [ "$positive" = yes ] && visible_picture "$shot"; then
+			return 0
+		fi
+		sleep 0.5
+	done
+	return 1
+}
 
 with_media() {
 	printf '\n-- playback checks (%s%s)\n' "$media" \
@@ -737,6 +782,17 @@ with_media() {
 		fail "the zero-copy import is live" \
 			"$(grep '^device:' "$log" || echo 'no device line')" \
 			"the client fell off the dmabuf path; see $log"
+	fi
+
+	if await_visible_playback; then
+		pass "playback reaches a visible picture before the motion check"
+	else
+		fail "playback reaches a visible picture before the motion check" \
+			"no positive playback report and visible picture within $READY s" \
+			"motion qualification requires complete footage without opening advice" \
+			"$session/playback-ready.ppm" "log: $log"
+		teardown
+		return
 	fi
 
 	if moving_picture playing; then
