@@ -126,6 +126,20 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **CI dependency-fetch hang, issue
+  [#160](https://github.com/aeharding/kjerag/issues/160):** branch work bounds
+  the reported `add-apt-repository` stall to five minutes, followed by a
+  30-second forced-stop grace period. The command keeps its underlying output
+  and nonzero exit status, and the other architecture continues independently.
+  A genuinely slow fetch can now fail and need a rerun. This does not remove
+  the external dependency or bound the later package update/install commands;
+  no package version or player behavior changes. The original PR #203 head
+  `05ac017a` passes all six CI jobs, including normal provisioning on both
+  architectures. Current main is integrated without changing the timeout.
+  Its device-hidden workspace gate passes 1,519 tests with 52 ignored; format,
+  Clippy, vendor warnings, source/name checks and shell syntax also pass. These
+  unavailable-device returns are not hardware qualification. Fresh integration
+  CI and owner acceptance of the cutoff remain pending.
 - **CPU sampler bounds, issue
   [#204](https://github.com/aeharding/kjerag/issues/204):** synthetic decoded-plane
   tests reproduce chroma sampling row padding outside the image and both samplers
