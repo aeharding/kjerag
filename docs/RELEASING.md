@@ -96,11 +96,17 @@ channel. Record the installed OSTree commit and executable SHA256 for each
 route, and require equality for a release produced by the single-build workflow.
 Both install branch `stable`, so only one can be active per installation.
 
-The signed bundle records the official channel URL. Reinstalling it over the
-matching signed channel uses `flatpak install --user --reinstall ./bundle.flatpak`;
-do not disable GPG verification or uninstall first. Verify the retained origin,
-settings and subsequent channel update. The local synthetic lifecycle test
-exercises these client mechanics, not a live HTTPS deployment or real playback.
+The signed bundle records the official channel URL. Installing a newer bundle
+over the matching signed channel uses
+`flatpak install --user --reinstall ./bundle.flatpak`; do not disable GPG
+verification or uninstall first. Flatpak 1.14.6 refuses an **identical already
+installed commit** with "already installed", even with `--reinstall`; 1.18.1
+accepts it. If the verified intended commit is already installed, no replacement
+is needed. This is not permission to ignore a different commit or another error.
+Verify the retained origin, settings and subsequent channel update. The local
+synthetic lifecycle test covers an older channel build, a different signed bundle,
+the identical-bundle repeat, and a subsequent channel update. It exercises client
+mechanics, not a live HTTPS deployment or real playback.
 Keep the previous verified package available for rollback throughout.
 
 Historical 0.3.1 and earlier downloads came from a separate unsigned build.

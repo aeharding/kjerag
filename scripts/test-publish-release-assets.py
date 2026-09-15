@@ -157,9 +157,11 @@ class PublishReleaseAssetsTest(unittest.TestCase):
     def _read_state(self) -> dict:
         return json.loads((self.root / "state.json").read_text())
 
-    def _run(self, *, source: str = SOURCE) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self, *, version: str = VERSION, source: str = SOURCE
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["python3", str(SCRIPT), VERSION, source, str(self.bundles)],
+            ["python3", str(SCRIPT), version, source, str(self.bundles)],
             env=self.env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -323,6 +325,22 @@ class PublishReleaseAssetsTest(unittest.TestCase):
         checksum.write_text("0" * 64 + "  wrong.flatpak\n")
         result = self._run()
         self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self._read_state()["commands"], [])
+
+    def test_rejects_malformed_semver_before_gh(self) -> None:
+        malformed = (
+            "01.2.3",
+            "1.02.3",
+            "1.2.03",
+            "1.2.3-rc.01",
+            "1.2.3-rc..1",
+            "1.2.3+build..1",
+            "1.2.3+first+second",
+        )
+        for version in malformed:
+            with self.subTest(version=version):
+                result = self._run(version=version)
+                self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self._read_state()["commands"], [])
 
 

@@ -1254,9 +1254,13 @@ bundle carries the app, and that URL is where the runtime under it comes
 from.
 
 The bundle also records the official Kjerag repository URL so signed-channel
-reinstallation and subsequent updates use that origin. The local disposable
-test verifies client mechanics without changing the real installation; it does
-not establish real-channel publication or playback qualification.
+bundle upgrades and subsequent updates use that origin. Flatpak 1.14.6 refuses
+reinstalling an identical commit even with `--reinstall`, whereas 1.18.1 accepts
+it; an already verified matching commit needs no replacement. The local
+disposable test covers a different-commit bundle upgrade, the same-commit
+behavior, settings retention and a later channel update without changing the
+real installation. It does not establish real-channel publication or playback
+qualification.
 
 **Both routes install branch `stable`** since issue #137, which is the whole
 point of naming it in the manifest rather than on a command line: a machine

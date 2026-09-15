@@ -61,6 +61,7 @@ class ReleaseArtifactsTest(unittest.TestCase):
         cls.env.pop("GPG_AGENT_INFO", None)
         cls.env.update(
             {
+                "LC_ALL": "C",
                 "HOME": str(cls.suite / "home"),
                 "GNUPGHOME": str(cls.suite / "gnupg"),
                 "XDG_CACHE_HOME": str(cls.suite / "xdg-cache"),
@@ -528,7 +529,7 @@ class ReleaseArtifactsTest(unittest.TestCase):
             ["gpg", "--batch", "--verify", aggregate / "kjerag-release.sig", aggregate / "kjerag-release.txt"]
         )
 
-    def test_isolated_native_install_bundle_reinstall_and_update(self) -> None:
+    def test_isolated_native_channel_to_bundle_and_channel_update(self) -> None:
         arch = platform.machine()
         if arch not in ARCHES:
             self.skipTest(f"no synthetic release architecture for host {arch}")
@@ -537,7 +538,13 @@ class ReleaseArtifactsTest(unittest.TestCase):
         self.assemble(staging, output)
 
         remote = "kjerag-release-test"
-        aggregate = output / "repository"
+        previous = self._make_repository(
+            self.case / f"previous-{arch}",
+            arch,
+            self.signer,
+            payload="previous",
+            release_version="9.8.6-test1",
+        )
         self._checked_run(
             [
                 "flatpak",
@@ -546,7 +553,7 @@ class ReleaseArtifactsTest(unittest.TestCase):
                 "--if-not-exists",
                 f"--gpg-import={output / 'signing-key.gpg'}",
                 remote,
-                f"file://{aggregate}",
+                f"file://{previous['repository']}",
             ]
         )
         self._checked_run(
@@ -565,12 +572,11 @@ class ReleaseArtifactsTest(unittest.TestCase):
         sentinel = Path(self.env["HOME"]) / f".var/app/{APP_ID}/config/test-setting"
         sentinel.parent.mkdir(parents=True)
         sentinel.write_text("keep this setting\n")
-        first_commit = str(self.repositories[arch]["app"])
-        self.assert_installed(arch, first_commit, remote, "initial", sentinel)
+        self.assert_installed(arch, str(previous["app"]), remote, "previous", sentinel)
 
         # build-bundle records the public channel URL. Retargeting only this
-        # isolated fixture remote exercises origin matching without contacting
-        # that URL; it is not live HTTPS or channel-publication evidence.
+        # isolated fixture remote exercises origin matching with a local bundle;
+        # optional metadata refreshes are not live channel-publication evidence.
         self._checked_run(
             [
                 "flatpak",
@@ -581,20 +587,35 @@ class ReleaseArtifactsTest(unittest.TestCase):
             ]
         )
         bundle = output / "bundles" / f"kjerag-{VERSION}-{arch}.flatpak"
-        self._checked_run(
-            [
-                "flatpak",
-                "install",
-                "--user",
-                "--noninteractive",
-                "--no-deps",
-                "--no-related",
-                "--reinstall",
-                bundle,
-            ],
-            LONG_TIMEOUT,
-        )
-        self.assert_installed(arch, first_commit, remote, "initial", sentinel)
+        install_bundle = [
+            "flatpak",
+            "install",
+            "--user",
+            "--noninteractive",
+            "--no-deps",
+            "--no-related",
+            "--reinstall",
+            bundle,
+        ]
+        self._checked_run(install_bundle, LONG_TIMEOUT)
+        bundle_commit = str(self.repositories[arch]["app"])
+        self.assertNotEqual(bundle_commit, str(previous["app"]))
+        self.assert_installed(arch, bundle_commit, remote, "initial", sentinel)
+
+        # Flatpak 1.14 refuses an identical commit even with --reinstall;
+        # 1.18 succeeds. Neither needs a new payload. Keep this compatibility
+        # check separate from the mandatory *different-commit* upgrade above.
+        # Accept only that exact refusal, never an arbitrary installation error,
+        # and recheck the installed commit, origin, payload, license and setting.
+        repeated = self._raw_run(install_bundle, LONG_TIMEOUT)
+        if repeated.returncode:
+            self.assertEqual(repeated.returncode, 1, repeated.stderr)
+            self.assertEqual(
+                repeated.stderr.strip(),
+                f"Error: Failed to install bundle {APP_ID}: {APP_ID} already installed",
+            )
+            print("Identical bundle refused as already installed; verifying retained payload.")
+        self.assert_installed(arch, bundle_commit, remote, "initial", sentinel)
 
         update = self._make_repository(
             self.case / f"update-{arch}",
@@ -604,7 +625,7 @@ class ReleaseArtifactsTest(unittest.TestCase):
             release_version=OTHER_VERSION,
         )
         update_commit = str(update["app"])
-        self.assertNotEqual(update_commit, first_commit)
+        self.assertNotEqual(update_commit, bundle_commit)
         self._checked_run(
             [
                 "flatpak",

@@ -17,7 +17,11 @@ from typing import NoReturn
 REPOSITORY = "aeharding/kjerag"
 ARCHITECTURES = ("x86_64", "aarch64")
 VERSION_RE = re.compile(
-    r"[0-9]+\.[0-9]+\.[0-9]+(?:[+-][A-Za-z0-9.+-]+)?"
+    r"(0|[1-9][0-9]*)\."
+    r"(0|[1-9][0-9]*)\."
+    r"(0|[1-9][0-9]*)"
+    r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
 )
 SOURCE_RE = re.compile(r"[0-9a-f]{40}")
 SHA256_RE = re.compile(r"([0-9a-f]{64})  ([^/\n]+)\n")
@@ -26,6 +30,18 @@ MAX_TAG_OBJECTS = 4
 
 def fail(message: str) -> NoReturn:
     raise RuntimeError(message)
+
+
+def validate_version(version: str) -> None:
+    match = VERSION_RE.fullmatch(version)
+    if match is None:
+        fail("invalid release version")
+    prerelease = match[4]
+    if prerelease is not None and any(
+        part.isdigit() and len(part) > 1 and part.startswith("0")
+        for part in prerelease.split(".")
+    ):
+        fail("invalid numeric prerelease identifier")
 
 
 def is_prerelease(version: str) -> bool:
@@ -270,8 +286,7 @@ def main(argv: list[str]) -> int:
     version, source, directory_text = argv[1:]
     repository = os.environ.get("GH_REPO")
     try:
-        if VERSION_RE.fullmatch(version) is None:
-            fail("invalid version")
+        validate_version(version)
         if SOURCE_RE.fullmatch(source) is None:
             fail("invalid source revision")
         if repository != REPOSITORY:

@@ -129,17 +129,25 @@ color-update policy is selected.
 - **Single signed release build, issue
   [#146](https://github.com/aeharding/kjerag/issues/146):** branch work replaces
   the independent unsigned-download build with app bundles exported from the
-  signed multiarchitecture repository. Forty-two local release tests pass, including
-  signature-preserving bundle import and isolated install, reinstall-over-channel,
-  fresh bundle installation, settings retention and subsequent update, signed
+  signed multiarchitecture repository. Forty-three local release tests pass on
+  Flatpak 1.14.6 and 1.18.1, including signature-preserving bundle import and
+  isolated older-channel-to-newer-bundle upgrades, fresh bundle installation,
+  settings retention and subsequent update, signed
   payload tampering, reference races, draft retries and version rollback guards.
   The workflow now stages both native
   builds explicitly and gates publication on a signed combined payload. The
   artifact-failure and publication-retry checks use disposable repositories and
   fake publication commands, not public writes. Device-hidden workspace checks
   report 1,513 passes and 52 ignored, including unavailable-GPU/media returns;
-  formatting, Clippy, vendor warnings and source-list checks pass. Review, native
-  CI handoff and non-production end-to-end validation remain open.
+  formatting, Clippy, vendor warnings and source-list checks pass. Draft PR
+  [#202](https://github.com/aeharding/kjerag/pull/202) initially passed the six
+  existing CI jobs but exposed a client-version assumption in both new release
+  jobs: Flatpak 1.14 refuses reinstalling an identical commit. The lifecycle
+  test now requires a real different-commit bundle upgrade, checks that precise
+  same-commit refusal without suppressing other errors, and verifies retained
+  settings, origin and later channel updates. Publisher version validation also
+  rejects malformed SemVer before contacting GitHub. Fresh CI, review, native
+  build handoff and non-production end-to-end validation remain open.
   No release, tag, signing secret or installed player was changed locally.
   This does not retire #186's performance target or pending picture reviews.
 - **Filtered-map inspection, issue
