@@ -894,13 +894,19 @@ impl GyroConfig {
 /// is what a horizon 121 degrees off level looks like from a camera aimed
 /// at where it ought to be.
 ///
-/// The default stays the X4's. It is now known to be wrong on one camera
-/// family rather than merely unverified, so a model that is not in this
+/// **The X3 is `xzy`**, measured on an Insta360 X3 running firmware
+/// v1.0.86. The opening and a second physical pose separate it from the
+/// other proper rotations. The rendered evidence and limits of that
+/// one-camera result are in `docs/research/x3-orientation-20260915.md`.
+///
+/// The default stays the X4's. It is known to be wrong on the X2 and X3
+/// families rather than merely unverified, so a model that is not in this
 /// table gets a horizon nobody has checked; there is no better guess to
 /// make, and the check is one run of the sweep plus the zenith render
 /// above.
 fn imu_orientation(camera_model: &str) -> &'static str {
     match camera_model {
+        m if m.starts_with("Insta360 X3") => "xzy",
         m if m.starts_with("Insta360 X4") => "xZY",
         m if m.starts_with("Insta360 X5") => "xZY",
         m if m.starts_with("Insta360 ONE X2") => "Zxy",
@@ -1386,6 +1392,32 @@ mod tests {
         assert_eq!(calibration().gyro.imu_orientation, "xZY");
         assert_eq!(imu_orientation("Insta360 X4"), "xZY");
         assert_eq!(imu_orientation("Insta360 X5"), "xZY");
+    }
+
+    /// This is a model-selection regression over synthetic metadata, not the
+    /// real-footage measurement that selected the convention. That evidence
+    /// is recorded in `docs/research/x3-orientation-20260915.md`.
+    #[test]
+    fn an_x3_gets_its_measured_imu_orientation() {
+        let mut metadata = fixture::metadata();
+        metadata.camera_type = "Insta360 X3".to_owned();
+        let calibration = CalibrationSet::from_metadata(&metadata).unwrap();
+
+        assert_eq!(calibration.gyro.imu_orientation, "xzy");
+        assert_eq!(calibration.readout().sweep, Sweep::Unknown);
+        assert_eq!(imu_orientation("Insta360 X3"), "xzy");
+        assert_ne!(
+            calibration.gyro.imu_orientation,
+            imu_orientation("Insta360 X4 Air")
+        );
+        assert!((axis_map("xzy").determinant() - 1.0).abs() < 1e-12);
+
+        // Existing families and genuinely unknown models keep their prior
+        // selections; this entry is only for the X3 model prefix.
+        assert_eq!(imu_orientation("Insta360 X4 Air"), "xZY");
+        assert_eq!(imu_orientation("Insta360 X5"), "xZY");
+        assert_eq!(imu_orientation("Insta360 ONE X2"), "Zxy");
+        assert_eq!(imu_orientation("Insta360 Future Camera"), "xZY");
     }
 
     /// **Issue #79.** The ONE X2's IMU is not mounted the way an X4's is, and
