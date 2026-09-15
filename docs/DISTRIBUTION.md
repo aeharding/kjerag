@@ -1088,10 +1088,15 @@ asset, publishes a complete draft, and only then permits Pages deployment. A
 failure before staging leaves neither destination changed; a Pages failure can
 leave the new Release downloadable while the old channel remains live.
 
-Builders and assembly need the signing secrets; publication does not. Workflow
-artifacts contain narrowly selected repositories, signatures and public data,
-never a builder workspace or GPG home. Failed-job retries reuse staged artifacts
-for14 days. Differing same-tag assets are refused rather than overwritten.
+Release builders and assembly need the production signing secrets; publication
+does not. Release artifacts contain narrowly selected repositories, signatures
+and public data, never a builder workspace, production private key or GPG home.
+A separate dispatch-validation route uses a disposable test signer and transfers
+only that test private key in a distinct one-day artifact. Its non-default-branch
+builds use the same handoff path, but both publishing jobs are disabled and its
+`validation-*` artifacts are not releases (RELEASING.md). Failed-job retries reuse
+staged release artifacts for14 days. Differing same-tag assets are refused rather
+than overwritten.
 Site-only and release deploys share a lock spanning checkout through deployment;
 the channel records source/version/commit provenance for stale-retry checks.
 See RELEASING.md for the qualification requirements and retry limits.

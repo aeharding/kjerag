@@ -146,8 +146,13 @@ color-update policy is selected.
   test now requires a real different-commit bundle upgrade, checks that precise
   same-commit refusal without suppressing other errors, and verifies retained
   settings, origin and later channel updates. Publisher version validation also
-  rejects malformed SemVer before contacting GitHub. Fresh CI, review, native
-  build handoff and non-production end-to-end validation remain open.
+  rejects malformed SemVer before contacting GitHub. All eight CI jobs pass on
+  correction `ec3087a4`. Follow-on branch work adds a no-publication dispatch
+  mode using a disposable signer through the same native build and artifact
+  path, with an independent final download/verification job. Seven additional
+  local checks exercise context validation, signer continuity and publication
+  guards; together the fifty release checks pass on Flatpak 1.14.6. Actual
+  Actions dispatch/build handoff and fresh CI for that mode remain open.
   No release, tag, signing secret or installed player was changed locally.
   This does not retire #186's performance target or pending picture reviews.
 - **Filtered-map inspection, issue

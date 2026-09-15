@@ -67,6 +67,33 @@ successful Release job permits the signed channel deployment at
 `https://kjerag.harding.dev/`. Those two destinations are not atomic: a Pages
 failure leaves a valid Release available and the previous channel in place.
 
+Before a release-workflow change is ready, exercise its native builds and
+artifact handoffs without publication:
+
+```sh
+gh workflow run release.yml --ref <reviewed-working-branch>
+```
+
+This dispatch route requires a non-default branch, derives the version from
+that checkout's `Cargo.toml`, and keeps disposable-signature caches off release
+tags and the default branch. It generates one disposable validation key and
+passes it to both builders and assembly as a separately named, one-day artifact.
+That **test-only private key is intentionally disposable**, not a production
+credential. It is never included in repository or bundle payloads. The two
+production-secret import steps and both publishing jobs are tag-push-only.
+
+The same build/stage/assemble/export/sign/verify path produces distinctly named
+`validation-*` artifacts. A final read-only job downloads and authenticates the
+combined payload. No release, Pages deployment or host installation occurs.
+The generated bundles use a test signer and are not releases or replacements
+for the installed app. Once the validation key artifact expires, rerun the
+whole validation, not a mixture of old and new signed handoffs.
+
+This run does not qualify production credentials, either public destination,
+live HTTPS updates or playback. Manual dispatch availability on a newly edited
+workflow must be checked on GitHub; do not create a temporary release tag to
+work around an unavailable dispatch.
+
 **A description is not a release.** What a software centre reads about the
 channel is written by `scripts/pages-site.sh`, and the `site` workflow runs it
 against the published repository on a dispatch, so a fixed summary, a new icon
