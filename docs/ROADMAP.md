@@ -148,8 +148,9 @@ color-update policy is selected.
   as do cross-mount paired-file hardlinks on ONE X2. No new kernel entries or
   memory-limit events appeared, and post-exit GPU-memory counters matched each
   suite's preflight. These are functional checks, not installed-bundle or
-  performance qualification. Owner acceptance and a cumulative test delivery
-  remain pending; the installed app is unchanged.
+  performance qualification. The cumulative PR #213 test package is now
+  installed and qualified on both cameras as recorded below. Separate merge
+  authorization remains pending.
   This is not a fix for X4 source/GPU contention in #186.
 - **CPU sampler bounds, issue
   [#204](https://github.com/aeharding/kjerag/issues/204):** synthetic decoded-plane
@@ -230,8 +231,11 @@ color-update policy is selected.
   reproduces failed clipboard navigation with a space-containing filename.
   Branch parsing now preserves the raw path before the view-term suffix;
   application classification tests and a real-window spaced-path copy/paste
-  regression cover it. Branch verification and owner retest are required
-  before merge. This does not implement shell quoting or tilde expansion
+  regression cover it. Branch verification passed, and on September 15 the
+  owner confirmed that copying and restoring a view with spaces works in the
+  installed Flatpak. That response did not name an exact package identity.
+  Separate merge authorization remains pending. This does not implement shell
+  quoting or tilde expansion
   ([#157](https://github.com/aeharding/kjerag/issues/157)), change the written
   reference format, or change any stitching, color or rendering arithmetic.
 - **GPU resource safety, issue
@@ -314,8 +318,10 @@ color-update policy is selected.
   the phase optimization. The terminal redraw counter counts only Player
   pumping after the readiness gate, not every reuse of the displayed source.
   These isolated performance packages preceded the installed combined review
-  package recorded below. Owner picture review remains pending. Private source, executable
-  identities, controls and moving comparisons are retained under
+  package recorded below. On September 15 the owner reported "They look the
+  same" for the supplied moving old/new comparisons. This accepts those
+  viewed comparisons, not bit identity, all-camera coverage or performance.
+  Private source/executable identities, controls and moving comparisons remain in
   `scratch/source-prefilter-phases-20260914/`.
 - **Exact periodic-wrap simplification, issue #186:** a follow-on candidate
   replaces the temporal motion shader's inner signed remainder pair with one
@@ -370,13 +376,36 @@ color-update policy is selected.
 
 ## Delivery next steps
 
-A new local cumulative review is being prepared from current main plus the
-exact installed `0029252d` composition, preserving PR #197's clipboard changes
-and PRs #200/#201's GPU optimizations. It will add PR #211's generic decoder
-arrival wake. The still-unqualified X3 horizon candidate in PR #212 is excluded.
-This new composition needs its own gates and runtime qualification; older
-package results do not qualify it. The installed `0029252d` package below is
-unchanged, and the pending owner reviews remain pending.
+The owner-approved cumulative PR [#213](https://github.com/aeharding/kjerag/pull/213)
+test Flatpak is installed. Tested source `90721189` combines main `f3f83a4f`
+with the earlier installed `0029252d` composition and PR #211's generic decoder
+arrival wake. It preserves PR #197's clipboard changes and PRs #200/#201's
+stitching/color arithmetic, and includes merged CPU bounds and test cleanup.
+The still-unqualified X3 horizon candidate in PR #212 is excluded.
+
+This exact source passed the device-hidden workspace gate (1,544 reported
+passes, 52 ignored, zero failures), full Clippy, formatting, vendor warnings,
+naming and Cargo-source checks, eighteen synthetic harness checks and all six
+CI jobs in run `34985135862`. Unavailable-GPU/media returns are included in
+the workspace count, not additional hardware coverage. A separate SDK build
+and actual bundle import authenticated the payload, metadata and license.
+Native UI suites passed 51 X4 and 52 ONE X2 checks; app-path runtime suites
+passed 41 and 42; after authorized installation, actual installed suites also
+passed 41 and 42, all with zero failures. Every Flatpak suite authenticated
+each running player executable, and both motion pictures from all six suites
+were personally inspected.
+
+The isolated suites retain their documented sound-device, portal, exact-view,
+sandbox import-fault and cross-mount paired-fixture skips. Native import-failure
+recovery and the separate Radeon shader/Rust-twin guard passed; that twin does
+not establish SDK-shader provenance. No new kernel entries or scoped
+memory-limit/OOM events appeared. Host GPU-memory, swap and pressure counters
+varied. These are 1280x720 functional checks, not a new capacity result,
+hitch-free verdict or proof that the historical desktop-freeze cause is fixed.
+Private receipts remain in `scratch/cumulative-review-20260915/`. This delivery
+record changes documentation only; the installed artifact remains source
+`90721189`. PR #213 remains draft, with no merge or release authorized by
+the installation approval.
 
 Issue [#193](https://github.com/aeharding/kjerag/issues/193) hardens filtered
 capture failure and cancellation. Restart honors a worker error recorded before
@@ -401,27 +430,28 @@ Feature release **0.3.0** and packaging patch **0.3.1** are published through
 GitHub and the signed channel. Complete issue #187's capacity/handoff decision;
 publication, installed UI and license checks pass, while issue #186 retains
 the unresolved performance evidence.
-At the owner's request, the combined review Flatpak temporarily replaces the
-signed release. Source `0029252ded4dbb4c622c827120f025532b884175`, installed
-OSTree `b547c4e29db1752e4d5be04f9c403c69690df85d98fc1c43631ad4f921b28e31`,
+At the owner's request, the cumulative review Flatpak temporarily replaces the
+signed release. Source `907211897664904b24d74e544c78c7aad84bb5d2`, installed
+OSTree `660d46ac2815a721109ef7e2c76555de6830b499ba27b1f4d316f61d61c5c322`,
 and executable SHA256
-`20982c8db8246d30339e1e0953a0ff5bcdcf96c44884c5c2fd3795595c8a3ecf`
+`440c490f6e3d1d847033fec0a758cc82e71542f1885dda6eb07fd0beeaae95ec`
 identify this private integration artifact. It combines PR
 [#197](https://github.com/aeharding/kjerag/pull/197)'s clipboard fixes with
 PRs [#200](https://github.com/aeharding/kjerag/pull/200) and
-[#201](https://github.com/aeharding/kjerag/pull/201)'s GPU optimizations and
-the merged cleanup/diagnostic ancestry. It is not a new published release.
-The earlier combined-package suites passed 41 X4 and 42 ONE X2 checks,
-including the four spaced-path clipboard checks absent from the main-based
-tracked harness qualified above. Owner picture review and clipboard retest
-remain pending; installation permission does not accept a picture tradeoff.
-The verified signed 0.3.1 ref and release bundle are retained for rollback,
-and normal-channel restoration is due after review. Issue #146 tracks
+[#201](https://github.com/aeharding/kjerag/pull/201)'s GPU optimizations,
+PR #211's decoder wake and merged cleanup/diagnostic ancestry. It is not a
+new published release. Installation preserved user data, runtimes, related
+refs and remote settings; the origin remains `kjerag-origin`. The exact prior
+`0029252d`/`b547c4e2`/`20982c8d` package is retained for rollback, as are the
+verified signed 0.3.1 ref and release bundle. Owner clipboard and sampling
+feedback is recorded above, without accepting hitches or authorizing merge.
+Normal-channel restoration is due after review. Issue #146 tracks
 deriving downloads from the signed build, avoiding separate payload qualification.
 
-After the host GPU recovered on the same boot from the observed 800 MHz /
-`0x604` throttle condition, the unchanged combined package sustained 310.875
-X4 and 317.824 ONE X2 completed redraws/s in separate 2256x1504, requested-300-Hz,
+Before the cumulative installation, after the host GPU recovered on the same
+boot from the observed 800 MHz / `0x604` throttle condition, the then-installed
+`0029252d` combined package sustained 310.875 X4 and 317.824 ONE X2 completed
+redraws/s in separate 2256x1504, requested-300-Hz,
 40-second pans. Both advanced consecutive sources at 29.950/s. Completion
 spacing p99/max was 10.941/22.136 ms for X4 and 9.094/22.475 ms for ONE X2.
 Those notifications include queue/callback delivery, not precise shader time
@@ -442,3 +472,13 @@ code-quality attention after the published-release handoff. This is not
 acceptance of the slowdown or a reason to close #186; the source cadence,
 picture and actual-player verification requirements remain. The release flow
 is recorded in [RELEASING.md](RELEASING.md).
+
+On September 15 the owner approved and the coordinator merged CI-only PR
+[#203](https://github.com/aeharding/kjerag/pull/203) at `005d4dcc`, after all
+six CI jobs passed. It bounds FFmpeg PPA registration to five minutes; a
+genuinely slow request may fail and need a rerun. This does not change the
+installed player. For draft PR [#202](https://github.com/aeharding/kjerag/pull/202),
+the owner also explicitly accepted withholding the entire release if signing
+is unavailable or either x86_64/ARM build fails. That is release-policy
+acceptance, not separate authorization to merge #202. The separately disclosed
+non-atomic GitHub/Pages publication boundary is not newly accepted by that reply.
