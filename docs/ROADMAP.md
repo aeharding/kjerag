@@ -126,6 +126,58 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **Single signed release build, issue
+  [#146](https://github.com/aeharding/kjerag/issues/146):** branch work replaces
+  the independent unsigned-download build with app bundles exported from the
+  signed multiarchitecture repository. PR
+  [#202](https://github.com/aeharding/kjerag/pull/202) passes all eight CI jobs at
+  `4aa5dadc`. Its no-publication validation
+  [run 34918992469](https://github.com/aeharding/kjerag/actions/runs/34918992469)
+  also passes both native builds, signed architecture handoffs, combined
+  repository/bundle assembly and independent final artifact verification.
+  A separate device-hidden audit of the downloaded real packages verifies that
+  each bundle preserves its channel app commit and signature, both channel
+  Debug commits remain signed, and licenses, permissions, runtime metadata and
+  ELF architecture/FFmpeg dependencies match the manifest and source.
+  No application was installed or executed by that audit.
+
+  Fifty-one local release/workflow checks pass on Flatpak 1.14.6; the original
+  forty-three release checks also pass on 1.18.1. They cover isolated signed
+  install/update mechanics, settings retention, payload tampering, reference
+  races, publication retries, source identity and version guards. The older
+  client refuses an identical-commit reinstall; the test accepts only that
+  precise refusal and still requires a real different-commit upgrade and later
+  channel update. Device-hidden workspace checks report 1,513 passes and 52
+  ignored, including unavailable-GPU/media returns, with formatting, Clippy,
+  vendor warnings, naming and source-list checks passing.
+
+  The owner explicitly approved withholding the whole release if signing or
+  either architecture fails, and subsequently delegated qualified merges.
+  Publication across GitHub and Pages remains non-atomic, as in the current
+  workflow. The new downloads-before-Pages ordering narrows existing failure
+  states; it is not a newly owner-accepted atomic-publication guarantee. Validation used
+  a disposable signer, not production credentials, and published nothing.
+  Tag-event publication, live HTTPS updates and actual-player qualification
+  remain distinct release checks. The installed player is unchanged; this
+  infrastructure work does not retire #186.
+  The earlier main integration retained its playback qualification instructions
+  and the release branch's authenticated retry policy. Release scripts and
+  signing/publication workflows are unchanged. The integrated tree passes 1,519
+  device-hidden workspace tests (52 ignored), all51 isolated release checks on
+  Flatpak 1.14.6, and format/lint/vendor/source/name/syntax checks. Unavailable
+  devices are not hardware coverage. All eight CI jobs passed on that exact
+  `32b5c881` integration in run `34969694574`; the earlier native artifacts retain
+  their actual `4aa5dadc` source identity rather than that of this integration.
+
+  Final merge preparation incorporates accepted main `e8089f9a`, including the
+  cumulative player delivery and CI timeout. The sole roadmap conflict retains
+  all three entries. Runtime, shader and test-harness sources match main exactly;
+  release scripts and release/site workflows match the previously qualified
+  `32b5c881` branch exactly. The updated device-hidden workspace gate reports
+  1,544 passes, 52 ignored and zero failures; format, full Clippy, vendor,
+  source/name/whitespace and all 20 CI shell-step checks pass. All 51 isolated
+  signed-release tests pass on Flatpak 1.14.6. Fresh exact-head CI is the remaining
+  integration gate, not another rebuild or installation of the accepted player.
 - **Decoder starvation wakeups, issue
   [#136](https://github.com/aeharding/kjerag/issues/136):** delayed video-packet
   delivery reproduces repeated overdue-empty redraws in the actual generic X3
@@ -432,6 +484,13 @@ CI timeout and roadmap changes. The sole conflict is resolved by retaining
 both the decoder-wake and CI-timeout entries. All runtime and test-harness
 sources remain byte-identical to the installed/qualified `90721189` artifact;
 that package is not rebuilt or reinstalled for these documentation/CI changes.
+
+That cumulative PR #213 subsequently merged at `e8089f9a` after all six CI jobs
+passed on final integration head `60b5ed3e`; main's tree is identical to that
+checked head and its post-merge CI also passed. PRs #200/#201 are marked merged,
+and #197/#211 were closed as incorporated, with their evidence and branches
+retained. Issue #174 is closed; #136/#186 remain open. The installed package
+above is unchanged, and this was not a release publication.
 
 Issue [#193](https://github.com/aeharding/kjerag/issues/193) hardens filtered
 capture failure and cancellation. Restart honors a worker error recorded before

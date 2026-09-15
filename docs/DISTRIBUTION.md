@@ -1072,6 +1072,40 @@ not `master`.**
 
 ### 4.3 How a tag publishes it
 
+Issue #146 replaces the original two-build flow with one signed native build
+per architecture. `release.yml` stages the two results under explicit artifact
+names. `scripts/release-artifacts.sh` verifies signed source/version/architecture
+records, imports the exact signed app and Debug commit IDs, composes a fresh
+combined repository, and exports both app bundles from it. Debug remains in the
+channel, not inside the app-only bundle. No matrix/cache ordering is needed to
+decide which refs are published.
+
+After `pages-site.sh` describes the combined repository, a signed manifest binds
+the complete repository and both downloads to the expected source and version.
+Downstream jobs verify it using the signing job's public key, not a key selected
+by the artifact. The GitHub publisher verifies the tag and every existing/uploaded
+asset, publishes a complete draft, and only then permits Pages deployment. A
+failure before staging leaves neither destination changed; a Pages failure can
+leave the new Release downloadable while the old channel remains live.
+
+Release builders and assembly need the production signing secrets; publication
+does not. Release artifacts contain narrowly selected repositories, signatures
+and public data, never a builder workspace, production private key or GPG home.
+A separate dispatch-validation route uses a disposable test signer and transfers
+only that test private key in a distinct one-day artifact. Its non-default-branch
+builds use the same handoff path, but both publishing jobs are disabled and its
+`validation-*` artifacts are not releases (RELEASING.md). Failed-job retries reuse
+staged release artifacts for14 days. Differing same-tag assets are refused rather
+than overwritten.
+Site-only and release deploys share a lock spanning checkout through deployment;
+the channel records source/version/commit provenance for stale-retry checks.
+See RELEASING.md for the qualification requirements and retry limits.
+
+#### Historical first channel implementation, August 2026
+
+The following records the original deployment and measurements, not the current
+single-build workflow:
+
 `.github/workflows/release.yml`, the `pages` job, next to the `bundle` job
 that issue #106 built. Three published actions and one step of shell; the
 model is andyholmes/valent's `cd.yml`, which does the same job for a GNOME app
@@ -1208,20 +1242,30 @@ touched the installation this desktop uses.
 
 ### 4.4 The single-file bundle stays
 
-Because it is not a distribution channel and never was: `flatpak build-bundle`
-produces one `.flatpak` that installs with no remote at all, which is how the
-owner gets a build to click a `.insv` against, and how anyone with a machine
-that should not carry a third-party remote gets one.
+The `.flatpak` remains useful for direct installation, offline transfer of the
+app payload and qualification of an exact build. It is not a second update
+channel. The signed release exporter now records the official update origin;
+it does not reproduce the older unsigned bundle's origin-free behavior.
 
-Since issue #106 that bundle is what a version tag produces: the release
-workflow builds this manifest with Flatpak's own GitHub action, once per arch
-on a runner of that arch, and attaches both bundles and their `.sha256` files
-to a GitHub Release (docs/RELEASING.md). The x86_64 one is the one anybody has
-run; the aarch64 one is compiled and unit tested and nothing more. The
-action records the Flathub repository in the bundle as it exports it, which is
+Since issue #106 that bundle is what a version tag produces. Issue #146 now
+exports it from the same signed repository as the channel, without a second
+build, and attaches both app bundles and their `.sha256` files to a GitHub
+Release (docs/RELEASING.md). Both routes retain the exact same app commit and
+signature. The x86_64 real player is the one anybody has run; the aarch64 one
+is compiled and unit tested, not playback-qualified. The exporter records
+the Flathub repository in the bundle as it exports it, which is
 what lets it install on a machine that has never had Flathub configured: the
 bundle carries the app, and that URL is where the runtime under it comes
 from.
+
+The bundle also records the official Kjerag repository URL so signed-channel
+bundle upgrades and subsequent updates use that origin. Flatpak 1.14.6 refuses
+reinstalling an identical commit even with `--reinstall`, whereas 1.18.1 accepts
+it; an already verified matching commit needs no replacement. The local
+disposable test covers a different-commit bundle upgrade, the same-commit
+behavior, settings retention and a later channel update without changing the
+real installation. It does not establish real-channel publication or playback
+qualification.
 
 **Both routes install branch `stable`** since issue #137, which is the whole
 point of naming it in the manifest rather than on a command line: a machine

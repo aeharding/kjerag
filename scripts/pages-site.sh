@@ -6,8 +6,8 @@
 #   scripts/pages-site.sh <repo-dir> <gpg-fingerprint>
 #
 # Two callers, one script, so a release and a republish say the same things:
-# the pages job of .github/workflows/release.yml, against the repository
-# flatter just built, and .github/workflows/site.yml, against the published
+# the assemble job of .github/workflows/release.yml, against its authenticated
+# combined repository, and .github/workflows/site.yml, against the published
 # one checked out of the Pages branch.
 #
 # There are two moments and they read different files. BEFORE the remote is
