@@ -1,8 +1,9 @@
-//! One coalesced wake for a due stitch result, not a per-frame clock.
+//! One coalesced wake for missing source input or a due stitch result, not a
+//! per-frame clock.
 
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll, Wake, Waker};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ReadyWake(Arc<Mutex<State>>);
@@ -20,6 +21,12 @@ impl Hash for ReadyWake {
     }
 }
 
+impl Wake for ReadyWake {
+    fn wake(self: Arc<Self>) {
+        self.notify();
+    }
+}
+
 impl ReadyWake {
     pub(crate) fn listening(&self) -> bool {
         self.0
@@ -32,7 +39,7 @@ impl ReadyWake {
     /// the Scene retains its existing redraw retry, including in instruments.
     pub(crate) fn listen(&self) -> ReadyListener {
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
-        assert!(!state.listening, "a stitch wake has only one listener");
+        assert!(!state.listening, "a scene wake has only one listener");
         state.listening = true;
         ReadyListener(self.clone())
     }
@@ -90,6 +97,19 @@ mod tests {
         fn wake(self: Arc<Self>) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    #[test]
+    fn decoder_waker_coalesces_with_stitch_completion_in_the_same_listener() {
+        let wake = ReadyWake::default();
+        let mut listener = wake.listen();
+        let decoder = Waker::from(Arc::new(wake.clone()));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(listener.poll_ready(&mut cx).is_pending());
+        decoder.wake_by_ref();
+        wake.notify();
+        assert!(listener.poll_ready(&mut cx).is_ready());
+        assert!(listener.poll_ready(&mut cx).is_pending());
     }
 
     #[test]

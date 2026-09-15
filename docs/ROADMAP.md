@@ -126,6 +126,23 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **Decoder starvation wakeups, issue
+  [#136](https://github.com/aeharding/kjerag/issues/136):** delayed video-packet
+  delivery reproduces repeated overdue-empty redraws in the actual generic X3
+  player, about 62 redraws/s for 23 source frames/s. The same bounded installed
+  test does not reproduce that mechanism on the selected filtered X4 Air path;
+  its late deadlines accompany new sources. A branch change uses a one-shot
+  decoder-arrival wake through the existing Scene subscription, retaining
+  ordinary deadlines without a listener and leaving sequential stitching
+  scheduling unchanged. The device-hidden workspace passes 1,535 tests with
+  52 ignored, including deterministic Player and Scene wake regressions.
+  A private candidate in the same Flatpak runtime reduces Scene pumps during
+  the 16-second delay from 981 to 382, with no expired-deadline callbacks in
+  that interval (964 before). Source delivery remains input-limited near
+  23 fps and recovers to about 30 fps afterward. This is an idle-work reduction,
+  not a measured CPU-percent, seam-quality or 240-capacity result. Candidate UI
+  suites and owner acceptance remain pending; the installed app is unchanged.
+  This is not a fix for X4 source/GPU contention in #186.
 - **CPU sampler bounds, issue
   [#204](https://github.com/aeharding/kjerag/issues/204):** synthetic decoded-plane
   tests reproduce chroma sampling row padding outside the image and both samplers
