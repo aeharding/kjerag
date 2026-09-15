@@ -189,9 +189,9 @@ pub enum Message {
     Quit,
     /// Five seconds have passed and playback has a line to print.
     Report,
-    /// A due stitch result is ready. Rebuild/redraw without moving the clock
-    /// here or making speculative worker completions into presentation ticks.
-    StitchReady,
+    /// Missing source input or a due stitch result is ready. Rebuild/redraw
+    /// without moving the clock here or treating speculative completion as a tick.
+    SceneReady,
     /// The pass gave up on the file that was playing and stopped it
     /// (issue #124). It arrives here because `kjerag_render`'s widget can only
     /// hand a [`Stall`] to a message type that carries one, which is what
@@ -724,7 +724,7 @@ impl cosmic::Application for App {
                 self.show_controls(now);
             }
             Message::Report => self.report(now),
-            Message::StitchReady => {}
+            Message::SceneReady => {}
             Message::ShowControls => self.show_controls(now),
             Message::Surface(action) => {
                 return cosmic::task::message(cosmic::Action::Cosmic(
@@ -935,7 +935,7 @@ impl cosmic::Application for App {
             sources.push(
                 open.scene
                     .ready_subscription()
-                    .map(|()| Message::StitchReady),
+                    .map(|()| Message::SceneReady),
             );
         }
         if self.is_playing() {

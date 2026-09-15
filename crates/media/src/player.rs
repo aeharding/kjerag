@@ -22,11 +22,13 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError, channel, sync_channel};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::task::Waker;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use super::audio::{Audio, Beat, Reading};
+use super::decode_arrival::{self, Arrival, Delivery};
 use super::sound::Sound;
 use super::{Accuracy, Cue, Fallible, Frames, Read, Reader, Size, Timing};
 
@@ -167,6 +169,8 @@ enum Command {
 /// its frames belongs on screen.
 pub struct Player {
     notes: Receiver<Note>,
+    decode_arrival: Arc<Arrival>,
+    last_empty_generation: Option<u64>,
     commands: Sender<Command>,
     presenter: Presenter,
     /// The open output device, and `None` for a file with no sound or a box
@@ -191,6 +195,30 @@ pub struct Player {
     /// A bounded replay whose intermediate video sources must not move the
     /// requested media/audio position.
     replay_clock_held: bool,
+}
+
+/// Controlled input for cross-layer clock/wakeup tests, with the production
+/// bounded delivery channel and no decoder, sound device or GPU.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub struct TestDecoder {
+    notes: Delivery<Note>,
+    _commands: Receiver<Command>,
+}
+
+#[cfg(feature = "test-support")]
+impl TestDecoder {
+    pub fn deliver(&self, frames: Frames) {
+        self.notes.send(Note::Frames(0, frames)).unwrap();
+    }
+
+    pub fn end(&self) {
+        self.notes.send(Note::Ended(0)).unwrap();
+    }
+
+    pub fn fail(&self, message: &str) {
+        self.notes.send(Note::Failed(message.into())).unwrap();
+    }
 }
 
 /// What the picture is waiting for, which is what decides which frames may
@@ -286,6 +314,36 @@ impl Epochs {
 }
 
 impl Player {
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn controlled_for_test(timing: Timing, size: Size) -> (Self, TestDecoder) {
+        let (sender, notes, decode_arrival) = decode_arrival::channel(QUEUED);
+        let (commands, orders) = channel();
+        (
+            Self {
+                notes,
+                decode_arrival,
+                last_empty_generation: None,
+                commands,
+                presenter: Presenter::new(timing.interval(), Arc::new(Beat::default())),
+                sound: None,
+                timing,
+                size,
+                lenses: 2,
+                files: vec![PathBuf::from("controlled.insv")],
+                failure: None,
+                ended: false,
+                epochs: Epochs::default(),
+                replay_target: None,
+                replay_clock_held: false,
+            },
+            TestDecoder {
+                notes: sender,
+                _commands: orders,
+            },
+        )
+    }
+
     /// Opens the file and starts decoding. Returns as soon as the container
     /// is parsed: the first frame arrives on the thread, so a big file does
     /// not hold the window shut.
@@ -324,7 +382,7 @@ impl Player {
         if let Some(sound) = &sound {
             reader = reader.listen(sound)?;
         }
-        let (sender, notes) = sync_channel(QUEUED);
+        let (sender, notes, decode_arrival) = decode_arrival::channel(QUEUED);
         // Unbounded, because a drag asks for a position per pointer move and
         // the player must never block on handing one over. The thread throws
         // away everything but the newest before each read.
@@ -335,6 +393,8 @@ impl Player {
 
         Ok(Self {
             notes,
+            decode_arrival,
+            last_empty_generation: None,
             commands,
             presenter: Presenter::new(timing.interval(), beat),
             sound,
@@ -387,6 +447,7 @@ impl Player {
         if self.is_playing() {
             return false;
         }
+        self.cancel_decode_wait();
         self.presenter.policy = policy;
         true
     }
@@ -608,11 +669,39 @@ impl Player {
         self.presenter.next_due()
     }
 
+    /// Sleep until the missing decoder delivery arrives, instead of polling
+    /// an already expired presentation deadline. The caller must keep the
+    /// waker's event subscription alive, and retain its ordinary deadline if
+    /// this returns false. This never changes presentation or media time.
+    ///
+    /// Only generic realtime playback uses this wait. Sequential consumers'
+    /// source preparation and stitch-result wake policy remain independent.
+    pub fn wait_for_decode(&self, now: Instant, waker: Waker) -> bool {
+        if self.presenter.policy != PresentationPolicy::Realtime
+            || !self.is_playing()
+            || self.is_seeking()
+            || self.replay_target.is_some()
+            || self.ended
+            || !self.presenter.peeked.is_empty()
+            || self.next_due().is_none_or(|due| due > now)
+        {
+            return false;
+        }
+        self.last_empty_generation
+            .is_some_and(|generation| self.decode_arrival.wait_after(generation, waker))
+    }
+
+    fn cancel_decode_wait(&mut self) {
+        self.last_empty_generation = None;
+        self.decode_arrival.cancel();
+    }
+
     pub fn play(&mut self) {
         self.presenter.clock.play();
     }
 
     pub fn pause(&mut self, now: Instant) {
+        self.cancel_decode_wait();
         self.presenter.clock.pause(now);
     }
 
@@ -630,6 +719,7 @@ impl Player {
     /// return immediately: the seek happens on the decode thread, and
     /// [`Player::is_seeking`] is true until its first frame arrives.
     pub fn seek(&mut self, to: Cue, accuracy: Accuracy) {
+        self.cancel_decode_wait();
         self.replay_target = None;
         self.replay_clock_held = false;
         let epoch = self.epochs.ask();
@@ -794,6 +884,7 @@ impl Player {
     /// The frame that belongs on screen at `now`, or `None` when the picture
     /// must not change. Call it on every redraw; it is the whole clock.
     pub fn pump(&mut self, now: Instant) -> Fallible<Option<Arc<Frames>>> {
+        self.cancel_decode_wait();
         let sequential = self.presenter.policy.is_sequential();
         let prefetch_successor = self.presenter.policy == PresentationPolicy::SequentialRealtime
             && self.presenter.clock.is_playing()
@@ -806,9 +897,13 @@ impl Player {
             &mut self.replay_target,
         );
         let epochs = &mut self.epochs;
+        let arrival = &self.decode_arrival;
+        let last_empty = &mut self.last_empty_generation;
         let owed = epochs.is_seeking();
         let mut next = || {
             loop {
+                let generation = arrival.generation();
+                *last_empty = None;
                 match notes.try_recv() {
                     // Ordinary scrub landings may show an overtaken epoch as
                     // forward progress. A sequential stitch consumer may not:
@@ -843,7 +938,10 @@ impl Player {
                         *failure = Some(e);
                         return None;
                     }
-                    Err(TryRecvError::Empty) => return None,
+                    Err(TryRecvError::Empty) => {
+                        *last_empty = Some(generation);
+                        return None;
+                    }
                     Err(TryRecvError::Disconnected) => {
                         if let Some(target) = replay_target.take() {
                             *failure = Some(
@@ -935,7 +1033,7 @@ impl Source for Reader {
 /// Decodes ahead of the picture until the player goes away. The bounded
 /// channel is the throttle: a full one blocks here, so a paused player
 /// stops decoding after `QUEUED` pairs instead of eating the file.
-fn decode_ahead(mut reader: impl Source, notes: &SyncSender<Note>, commands: &Receiver<Command>) {
+fn decode_ahead(mut reader: impl Source, notes: &Delivery<Note>, commands: &Receiver<Command>) {
     let mut epoch = 0;
     let mut ended = false;
     // Taken off the channel by the interrupt below and not acted on yet.
@@ -1298,12 +1396,158 @@ impl Clock {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Wake;
 
     use super::*;
     use crate::Size;
 
     const NTSC: Duration = Duration::from_nanos(33_366_666);
     const HZ_60: Duration = Duration::from_nanos(16_666_666);
+
+    #[derive(Default)]
+    struct WakeCount(AtomicUsize);
+
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn starved_bench() -> (Bench, Instant) {
+        let mut bench = Bench::new();
+        let now = Instant::now();
+        bench.player.play();
+        bench.decoded(0, 0);
+        assert_eq!(bench.redraw(now), Some(0));
+        let overdue = now + NTSC * 3;
+        assert_eq!(bench.redraw(overdue), None);
+        (bench, overdue)
+    }
+
+    #[test]
+    fn decode_arrival_wait_retains_source_time_and_does_not_reanchor_clock() {
+        let (mut bench, now) = starved_bench();
+        let counter = Arc::new(WakeCount::default());
+        assert!(
+            bench
+                .player
+                .wait_for_decode(now, Waker::from(counter.clone()))
+        );
+        bench.decoded(0, 1);
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+        assert_eq!(bench.redraw(now), Some(1));
+        assert_eq!(bench.player.position(now), NTSC * 3);
+        assert_eq!(
+            bench.player.presenter.current.as_ref().unwrap().timestamp,
+            NTSC
+        );
+        // It may offer this late frame and arm its missing successor in the
+        // same pump. Requiring an extra redraw would waste one per arrival.
+        assert!(
+            bench
+                .player
+                .wait_for_decode(now, Waker::from(counter.clone()))
+        );
+        bench.decoded(0, 2);
+        bench.decoded(0, 3);
+        assert_eq!(counter.0.load(Ordering::Relaxed), 2);
+        assert_eq!(bench.redraw(now), Some(3));
+        assert_eq!(bench.player.stats().dropped, 1);
+    }
+
+    #[test]
+    fn decode_arrival_wait_does_not_replace_a_future_deadline_or_queued_frame() {
+        let mut bench = Bench::new();
+        let now = Instant::now();
+        bench.player.play();
+        bench.decoded(0, 0);
+        assert_eq!(bench.redraw(now), Some(0));
+        assert!(!bench.player.wait_for_decode(now, Waker::noop().clone()));
+        bench.decoded(0, 2);
+        assert_eq!(bench.redraw(now + NTSC), None);
+        assert!(
+            !bench
+                .player
+                .wait_for_decode(now + NTSC * 4, Waker::noop().clone())
+        );
+    }
+
+    #[test]
+    fn decode_arrival_between_player_pump_and_wait_never_gets_lost() {
+        let (bench, now) = starved_bench();
+        bench.decoded(0, 1);
+        assert!(!bench.player.wait_for_decode(now, Waker::noop().clone()));
+    }
+
+    #[test]
+    fn pause_and_seek_cancel_the_old_decoder_wait() {
+        for seek in [false, true] {
+            let (mut bench, now) = starved_bench();
+            let counter = Arc::new(WakeCount::default());
+            assert!(
+                bench
+                    .player
+                    .wait_for_decode(now, Waker::from(counter.clone()))
+            );
+            if seek {
+                bench.player.seek(Cue::Index(10), Accuracy::Exact);
+            } else {
+                bench.player.pause(now);
+            }
+            bench.decoded(0, 1);
+            assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+            assert!(!bench.player.wait_for_decode(now, Waker::noop().clone()));
+        }
+    }
+
+    #[test]
+    fn decoder_end_error_and_disconnect_wake_the_waiting_player() {
+        for terminal in 0..3 {
+            let (mut bench, now) = starved_bench();
+            let counter = Arc::new(WakeCount::default());
+            assert!(
+                bench
+                    .player
+                    .wait_for_decode(now, Waker::from(counter.clone()))
+            );
+            match terminal {
+                0 => bench.notes.send(Note::Ended(0)).unwrap(),
+                1 => bench
+                    .notes
+                    .send(Note::Failed("injected decoder failure".into()))
+                    .unwrap(),
+                _ => {
+                    let (unrelated, _, _) = decode_arrival::channel(1);
+                    drop(std::mem::replace(&mut bench.notes, unrelated));
+                }
+            }
+            assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+            let result = bench.player.pump(now);
+            if terminal == 1 {
+                assert_eq!(result.unwrap_err().to_string(), "injected decoder failure");
+            } else {
+                assert!(result.unwrap().is_none());
+                assert!(bench.player.is_ended());
+            }
+            assert!(!bench.player.wait_for_decode(now, Waker::noop().clone()));
+        }
+    }
+
+    #[test]
+    fn sequential_consumers_do_not_select_the_generic_decoder_wait() {
+        for policy in [
+            PresentationPolicy::SequentialRealtime,
+            PresentationPolicy::EveryFrame,
+        ] {
+            let (mut bench, now) = starved_bench();
+            bench.player.pause(now);
+            assert!(bench.player.set_presentation_policy(policy));
+            bench.player.play();
+            bench.redraw(now);
+            assert!(!bench.player.wait_for_decode(now, Waker::noop().clone()));
+        }
+    }
 
     /// A frame with no lenses in it: everything the clock decides is decided
     /// from the timestamp, so the pixels are not needed to test the pacing.
@@ -1651,7 +1895,7 @@ mod tests {
     /// out, and reports what came back and what the source was asked for.
     fn decode(first: Vec<Command>, script: Vec<Option<Command>>) -> (Vec<(u64, u64)>, Vec<Did>) {
         let (commands, orders) = channel();
-        let (sender, notes) = sync_channel(64);
+        let (sender, notes, _) = decode_arrival::channel(64);
         let did = Arc::new(Mutex::new(Vec::new()));
         for order in first {
             commands.send(order).unwrap();
@@ -1892,18 +2136,20 @@ mod tests {
     /// the test's own thread with no decoder and no footage.
     struct Bench {
         player: Player,
-        notes: SyncSender<Note>,
+        notes: Delivery<Note>,
         commands: Receiver<Command>,
     }
 
     impl Bench {
         fn new() -> Self {
-            let (sender, notes) = sync_channel(64);
+            let (sender, notes, decode_arrival) = decode_arrival::channel(64);
             let (commands, orders) = channel();
             let timing = Timing::new(crate::ff::Rational::new(30_000, 1001), 100_000).unwrap();
             Self {
                 player: Player {
                     notes,
+                    decode_arrival,
+                    last_empty_generation: None,
                     commands,
                     presenter: Presenter::with_policy(
                         timing.interval(),
@@ -2245,7 +2491,7 @@ mod tests {
             assert_eq!(bench.redraw(now), Some(7));
             bench.player.replay_target = Some(7);
             if disconnected {
-                let (unrelated, _) = sync_channel(1);
+                let (unrelated, _, _) = decode_arrival::channel(1);
                 drop(std::mem::replace(&mut bench.notes, unrelated));
             } else {
                 bench.notes.send(Note::Ended(0)).unwrap();

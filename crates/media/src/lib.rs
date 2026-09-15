@@ -25,6 +25,7 @@
 
 mod audio;
 mod decode;
+mod decode_arrival;
 mod player;
 mod reader;
 mod sound;
@@ -37,6 +38,9 @@ use ffmpeg_next as ff;
 
 pub use audio::Audio;
 pub use decode::{DrmFrame, HwDevice, MissingDecoder, SwFrame, open_decoder};
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use player::TestDecoder;
 pub use player::{Player, PresentationPolicy, Stats};
 pub use reader::{Accuracy, Cue, FrameStamp, Frames, Read, Reader, Timing};
 pub use walk::{Chroma, Pair, Plane, Walk};
