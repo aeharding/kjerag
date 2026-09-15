@@ -8,6 +8,7 @@ Requires PyYAML and a caller-selected durable KJERAG_RELEASE_TEST_ROOT.
 
 import os
 from pathlib import Path
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -96,6 +97,38 @@ class ReleaseWorkflowTest(unittest.TestCase):
                 result = self.run_script(self.source["run"], extra)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse((self.case / "outputs").exists())
+
+    def test_native_checkout_check_handles_container_ownership_narrowly(self):
+        preflight = next(step for step in self.jobs["build"]["steps"]
+                         if step.get("name") == "Authenticate the native source checkout")
+        extra = {
+            "RELEASE_ARCH": platform.machine(), "RELEASE_VERSION": self.version,
+            "GITHUB_WORKSPACE": str(ROOT),
+            "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+        }
+        # Execute Git's ownership refusal, not a fake git wrapper that assumes
+        # what failed inside the real native build container.
+        refused = self.run_script("git rev-parse HEAD", extra)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("dubious ownership", refused.stderr)
+        stage = next(step for step in self.jobs["build"]["steps"]
+                     if step.get("name") == "Stage this architecture's signed commits")
+        stage_checks = [line for line in stage["run"].splitlines() if "git " in line]
+        self.assertEqual(len(stage_checks), 1)
+        # Execute both actual Git checks, without running post-build staging
+        # against nonexistent native artifacts in this CPU-only regression.
+        for script in (preflight["run"], stage_checks[0]):
+            with self.subTest(script=script):
+                accepted = self.run_script(script, extra)
+                self.assertEqual(accepted.returncode, 0, accepted.stderr)
+                wrong_path = self.run_script(script, {
+                    **extra, "GITHUB_WORKSPACE": str(self.case),
+                })
+                self.assertNotEqual(wrong_path.returncode, 0)
+                self.assertIn("dubious ownership", wrong_path.stderr)
+                wrong_source = self.run_script(script, {**extra, "GITHUB_SHA": "f" * 40})
+                self.assertNotEqual(wrong_source.returncode, 0)
 
     def test_publication_permissions_and_production_secrets_are_tag_only(self):
         self.assertEqual(self.workflow["permissions"], {"contents": "read"})

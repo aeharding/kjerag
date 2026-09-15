@@ -101,7 +101,9 @@ jobs:
       - name: Authenticate the native source checkout
         run: |
           test "$(uname -m)" = "$RELEASE_ARCH"
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          # The container user differs from the checkout owner. Trust only this
+          # checkout for this query, without changing global Git configuration.
+          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(awk -F '\"' '/^version = / { print $2; exit }' Cargo.toml)" = "$RELEASE_VERSION"
       - uses: crazy-max/ghaction-import-gpg@v7
         if: github.event_name == 'push' && github.ref_type == 'tag'
@@ -146,7 +148,7 @@ jobs:
           BUILD_REPOSITORY: ${{ steps.build.outputs.repository }}
           FINGERPRINT: ${{ steps.signer.outputs.fingerprint }}
         run: |
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = "$GITHUB_SHA"
           bash scripts/release-artifacts.sh stage "$BUILD_REPOSITORY" \
             "release-$RELEASE_ARCH" "$RELEASE_ARCH" "$RELEASE_VERSION" "$GITHUB_SHA" "$FINGERPRINT"
       # Named handoffs, never matrix order or shared-cache contents. Upload the

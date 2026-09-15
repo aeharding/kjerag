@@ -149,10 +149,15 @@ color-update policy is selected.
   rejects malformed SemVer before contacting GitHub. All eight CI jobs pass on
   correction `ec3087a4`. Follow-on branch work adds a no-publication dispatch
   mode using a disposable signer through the same native build and artifact
-  path, with an independent final download/verification job. Seven additional
+  path, with an independent final download/verification job. Eight additional
   local checks exercise context validation, signer continuity and publication
-  guards; together the fifty release checks pass on Flatpak 1.14.6. Actual
-  Actions dispatch/build handoff and fresh CI for that mode remain open.
+  guards; together the fifty-one release checks pass on Flatpak 1.14.6. Dispatch
+  from the reviewed branch succeeds, and all eight PR CI jobs pass at `4f769ab8`.
+  Its first real validation run fails before compilation because Git rejects
+  the container-owned checkout. Both native identity checks now trust only the
+  exact workflow checkout for that command; a regression reproduces the ownership
+  refusal and requires wrong paths and source revisions to remain rejected.
+  Actual native build handoff and fresh CI for this correction remain open.
   No release, tag, signing secret or installed player was changed locally.
   This does not retire #186's performance target or pending picture reviews.
 - **Filtered-map inspection, issue
