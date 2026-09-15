@@ -189,9 +189,9 @@ pub enum Message {
     Quit,
     /// Five seconds have passed and playback has a line to print.
     Report,
-    /// A due stitch result is ready. Rebuild/redraw without moving the clock
-    /// here or making speculative worker completions into presentation ticks.
-    StitchReady,
+    /// Missing source input or a due stitch result is ready. Rebuild/redraw
+    /// without moving the clock here or treating speculative completion as a tick.
+    SceneReady,
     /// The pass gave up on the file that was playing and stopped it
     /// (issue #124). It arrives here because `kjerag_render`'s widget can only
     /// hand a [`Stall`] to a message type that carries one, which is what
@@ -724,7 +724,7 @@ impl cosmic::Application for App {
                 self.show_controls(now);
             }
             Message::Report => self.report(now),
-            Message::StitchReady => {}
+            Message::SceneReady => {}
             Message::ShowControls => self.show_controls(now),
             Message::Surface(action) => {
                 return cosmic::task::message(cosmic::Action::Cosmic(
@@ -935,7 +935,7 @@ impl cosmic::Application for App {
             sources.push(
                 open.scene
                     .ready_subscription()
-                    .map(|()| Message::StitchReady),
+                    .map(|()| Message::SceneReady),
             );
         }
         if self.is_playing() {
@@ -1995,6 +1995,43 @@ mod tests {
         let printed = PRINTED.replace("VID_0001", "VID_0002");
         assert!(matches!(read(&printed, Some(&watching())), Goto::Open(file, _) if file == other));
         assert!(matches!(read(&printed, None), Goto::Open(file, _) if file == other));
+    }
+
+    /// A copied reference carries a bare filename. Spaces and apostrophes in
+    /// that name are path characters, not separators or shell syntax, and the
+    /// complete basename still identifies the file already on screen.
+    #[test]
+    fn a_space_containing_copied_name_matches_the_open_file() {
+        let open = PathBuf::from("/home/pilot/Videos/Alex's  sunset flight.insv");
+        let copied =
+            "Alex's  sunset flight.insv time=754.321 yaw=-37.42 pitch=8.06 fov=64.30 lock=1";
+
+        assert!(matches!(read(copied, Some(&open)), Goto::Here(_)));
+    }
+
+    /// A printed reference carries the path rather than only its basename.
+    /// Preserve its raw whitespace for both absolute paths and relative paths
+    /// with a directory, because either one contains enough location to open.
+    #[test]
+    fn space_containing_printed_paths_open_without_changing_the_path() {
+        let absolute = PathBuf::from("/home/pilot/Flight  Archive/Alex's sunset.insv");
+        let absolute_line = "/home/pilot/Flight  Archive/Alex's sunset.insv time=754.321 yaw=-37.42 pitch=8.06 fov=64.30 lock=1";
+        assert!(matches!(read(absolute_line, None), Goto::Open(file, _) if file == absolute));
+
+        let relative = PathBuf::from("Flight\tArchive/Alex's  sunset.insv");
+        let relative_line = "Flight\tArchive/Alex's  sunset.insv time=754.321 yaw=-37.42 pitch=8.06 fov=64.30 lock=1";
+        assert!(matches!(read(relative_line, None), Goto::Open(file, _) if file == relative));
+    }
+
+    /// A copied basename from another file still carries no directory to open
+    /// it from. Keep every character so the toast names the actual video.
+    #[test]
+    fn another_space_containing_copied_name_is_preserved_as_elsewhere() {
+        let other = PathBuf::from("Márta's  vuelo nocturno.insv");
+        let copied =
+            "Márta's  vuelo nocturno.insv time=754.321 yaw=-37.42 pitch=8.06 fov=64.30 lock=1";
+
+        assert_eq!(read(copied, Some(&watching())), Goto::Elsewhere(other));
     }
 
     /// Two videos of the same name in two folders are two videos, and only a

@@ -15,7 +15,8 @@ use cosmic::iced::{Event, Point, Rectangle, mouse, window};
 use super::{Next, Scene, ScenePipeline, ScenePrimitive, Stall, Viewpoint};
 
 impl Scene {
-    /// Wake the shell only when a due stitch result it waited for completes.
+    /// Wake the shell when missing decoder input arrives or a due stitch
+    /// result it waited for completes.
     /// The video clock still runs inside the redraw event, not this stream.
     pub fn ready_subscription(&self) -> cosmic::iced::Subscription<()> {
         cosmic::iced::Subscription::run_with(self.ready_wake(), |wake| {

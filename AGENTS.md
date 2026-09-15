@@ -231,6 +231,12 @@ the STREAM volume zeroed, never audible playback, and says so.
 ## Hard rules
 
 - Branch + PR for all work after the bootstrap commits. Never force-push.
+- Merge-author identity (issue #214): use `gh pr merge --merge
+  --author-email noreply@harding.dev --match-head-commit <checked-head>` after
+  the required owner review and CI gates. Local Git identity does not control
+  GitHub's server-generated merge author. Verify the resulting commit's `%ae`
+  and tree after merge; do not silently retry without the author override,
+  rewrite main, or change account-wide settings if GitHub refuses it.
 - ALL work stays inside the owner's repositories. Never open, file, or
   comment on issues or pull requests of any outside project, ever. This
   includes "goodwill" bug reports and backport offers to dependencies.

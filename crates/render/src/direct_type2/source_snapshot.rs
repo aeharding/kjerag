@@ -40,7 +40,8 @@ fn vs(@builtin(vertex_index) vertex: u32) -> VertexOutput {
 }
 "#;
 
-const FILTER_SHADER_ENTRIES: &str = r#"
+#[cfg(test)]
+const REFERENCE_FILTER_SHADER_ENTRIES: &str = r#"
 fn atlas_centres(position: vec2<f32>) -> array<vec2<f32>, 2> {
   let dimensions = vec2<f32>(textureDimensions(source_a));
   return array(
@@ -80,6 +81,57 @@ fn chroma_fs(in: VertexOutput) -> ChromaOutput {
 }
 "#;
 
+// At native plane centers the general box has only two atlas-x phases and
+// one y phase. Keep its four bilinear samples and atlas boundary rules, but
+// construct their positions/weights directly. This changes f32 reassociation,
+// not the ideal box; the reference shader below remains the GPU comparator.
+const FILTER_SHADER_ENTRIES: &str = r#"
+fn snapshot_box(position: vec2<f32>, lens: u32) -> vec4<f32> {
+  let dimensions = textureDimensions(source_a);
+  let global = position + vec2<f32>(f32(lens * dimensions.x), 0.0);
+  let even = (u32(global.x) & 1u) == 0u;
+  let phase = select(0.25, 0.75, even);
+  let box_size = 1.7881766557693481;
+  let half_box = box_size * 0.5;
+  let reciprocal_size = 1.0 / vec2<f32>(f32(2u * dimensions.x), f32(dimensions.y));
+  let x = global.xx + vec2<f32>(phase - half_box, phase + half_box);
+  let y = global.yy + vec2<f32>((0.5 - half_box) * 0.5, (0.5 + half_box) * 0.5);
+  let right = (half_box - phase) / box_size;
+  let bottom = (half_box - 0.5) / box_size;
+  let a = type2_atlas_linear(source_a, source_b, vec2<f32>(x.x, y.x) * reciprocal_size);
+  let b = type2_atlas_linear(source_a, source_b, vec2<f32>(x.y, y.x) * reciprocal_size);
+  let c = type2_atlas_linear(source_a, source_b, vec2<f32>(x.x, y.y) * reciprocal_size);
+  let d = type2_atlas_linear(source_a, source_b, vec2<f32>(x.y, y.y) * reciprocal_size);
+  return mix(mix(a, b, right), mix(c, d, right), bottom);
+}
+
+struct LumaOutput {
+  @location(0) a: f32,
+  @location(1) b: f32,
+}
+
+@fragment
+fn luma_fs(in: VertexOutput) -> LumaOutput {
+  var out: LumaOutput;
+  out.a = snapshot_box(in.position.xy, 0u).r;
+  out.b = snapshot_box(in.position.xy, 1u).r;
+  return out;
+}
+
+struct ChromaOutput {
+  @location(0) a: vec2<f32>,
+  @location(1) b: vec2<f32>,
+}
+
+@fragment
+fn chroma_fs(in: VertexOutput) -> ChromaOutput {
+  var out: ChromaOutput;
+  out.a = snapshot_box(in.position.xy, 0u).rg;
+  out.b = snapshot_box(in.position.xy, 1u).rg;
+  return out;
+}
+"#;
+
 /// Cached full-resolution prefilter shared by every display snapshot made
 /// through one direct pipeline. It records commands only; submission and
 /// retirement stay with the installed resident transaction.
@@ -93,6 +145,15 @@ pub(super) struct SnapshotPipeline {
 
 impl SnapshotPipeline {
     pub(super) fn new(device: &wgpu::Device) -> Self {
+        Self::with_entries(device, FILTER_SHADER_ENTRIES)
+    }
+
+    #[cfg(test)]
+    fn new_reference(device: &wgpu::Device) -> Self {
+        Self::with_entries(device, REFERENCE_FILTER_SHADER_ENTRIES)
+    }
+
+    fn with_entries(device: &wgpu::Device, entries: &str) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("resident source snapshot inputs"),
             entries: &[
@@ -130,7 +191,7 @@ impl SnapshotPipeline {
             immediate_size: 0,
         });
         let shader_source = format!(
-            "{FILTER_SHADER_PREFIX}\n{}\n{FILTER_SHADER_ENTRIES}",
+            "{FILTER_SHADER_PREFIX}\n{}\n{entries}",
             super::SOURCE_FILTER_WGSL
         );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -501,6 +562,200 @@ mod tests {
         assert!(!fields.contains("Carrier"));
         assert!(fields.contains("planes: [Planes; 2]"));
         assert!(fields.contains("frame: FrameStamp"));
+    }
+
+    // Compare the phase-specialized snapshot against the unchanged source-box
+    // shader on one device. Large camera sizes run as separate test processes;
+    // luma is dropped before chroma is allocated so the comparison does not
+    // retain both full plane formats at once.
+    #[test]
+    fn gpu_phase_snapshot_matches_source_box_at_native_texel_centres() {
+        let Ok((device, queue)) = super::super::tests::gpu() else {
+            assert!(std::env::var_os("KJERAG_REQUIRE_GPU").is_none());
+            return;
+        };
+        let dimension = |name: &str, default| {
+            std::env::var(name)
+                .map(|value| {
+                    value.parse::<u32>().unwrap_or_else(|error| {
+                        panic!("{name} must be a positive integer: {error}")
+                    })
+                })
+                .unwrap_or(default)
+        };
+        let size = Size::new(
+            dimension("KJERAG_SNAPSHOT_TEST_WIDTH", 16),
+            dimension("KJERAG_SNAPSHOT_TEST_HEIGHT", 8),
+        );
+        assert!(
+            size.width > 0
+                && size.height > 0
+                && size.width.is_multiple_of(2)
+                && size.height.is_multiple_of(2),
+            "snapshot comparison dimensions must be positive and even, got {} by {}",
+            size.width,
+            size.height
+        );
+
+        let candidate = SnapshotPipeline::new(&device);
+        let reference = SnapshotPipeline::new_reference(&device);
+        compare_snapshot_plane_pipelines(
+            &device,
+            &queue,
+            &candidate,
+            &reference,
+            size,
+            wgpu::TextureFormat::R8Unorm,
+            "luma",
+        );
+        compare_snapshot_plane_pipelines(
+            &device,
+            &queue,
+            &candidate,
+            &reference,
+            size.halved(),
+            wgpu::TextureFormat::Rg8Unorm,
+            "chroma",
+        );
+    }
+
+    fn compare_snapshot_plane_pipelines(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        candidate: &SnapshotPipeline,
+        reference: &SnapshotPipeline,
+        size: Size,
+        format: wgpu::TextureFormat,
+        role: &'static str,
+    ) {
+        let bytes_per_pixel = format.block_copy_size(None).unwrap();
+        let sources: [wgpu::Texture; 2] = std::array::from_fn(|lens| {
+            let mut bytes = Vec::with_capacity(
+                size.width as usize * size.height as usize * bytes_per_pixel as usize,
+            );
+            for y in 0..size.height {
+                for x in 0..size.width {
+                    for channel in 0..bytes_per_pixel {
+                        bytes.push(
+                            ((x * 73
+                                + y * 47
+                                + channel * 113
+                                + lens as u32 * 191
+                                + ((x + y) & 1) * 59
+                                + ((x / 2 + 3 * y) & 7) * 17)
+                                % 256) as u8,
+                        );
+                    }
+                }
+            }
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("snapshot phase comparison source"),
+                size: size.extent(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                texture.as_image_copy(),
+                &bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(size.width * bytes_per_pixel),
+                    rows_per_image: Some(size.height),
+                },
+                size.extent(),
+            );
+            texture
+        });
+        let make_targets = || -> [wgpu::Texture; 2] {
+            std::array::from_fn(|_| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("snapshot phase comparison target"),
+                    size: size.extent(),
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                })
+            })
+        };
+        let candidate_targets = make_targets();
+        let reference_targets = make_targets();
+        let (candidate_pipeline, reference_pipeline) = match format {
+            wgpu::TextureFormat::R8Unorm => (&candidate.luma, &reference.luma),
+            wgpu::TextureFormat::Rg8Unorm => (&candidate.chroma, &reference.chroma),
+            _ => unreachable!(),
+        };
+        let mut encoder = device.create_command_encoder(&Default::default());
+        candidate.encode_pair(
+            &mut encoder,
+            candidate_pipeline,
+            [&sources[0], &sources[1]],
+            [&candidate_targets[0], &candidate_targets[1]],
+            "snapshot phase candidate comparison",
+        );
+        reference.encode_pair(
+            &mut encoder,
+            reference_pipeline,
+            [&sources[0], &sources[1]],
+            [&reference_targets[0], &reference_targets[1]],
+            "snapshot source-box reference comparison",
+        );
+        let candidate_readbacks = candidate_targets
+            .each_ref()
+            .map(|texture| encode_readback(device, &mut encoder, texture));
+        let reference_readbacks = reference_targets
+            .each_ref()
+            .map(|texture| encode_readback(device, &mut encoder, texture));
+        let submission = queue.submit([encoder.finish()]);
+
+        let mut worst = 0u8;
+        let mut differing = 0usize;
+        let mut first_excessive = None;
+        for (
+            lens,
+            ((candidate_readback, reference_readback), (candidate_target, reference_target)),
+        ) in candidate_readbacks
+            .into_iter()
+            .zip(reference_readbacks)
+            .zip(candidate_targets.iter().zip(&reference_targets))
+            .enumerate()
+        {
+            let actual = readback_bytes(
+                device,
+                submission.clone(),
+                candidate_readback,
+                candidate_target,
+            );
+            let expected = readback_bytes(
+                device,
+                submission.clone(),
+                reference_readback,
+                reference_target,
+            );
+            assert_eq!(actual.len(), expected.len());
+            for (index, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
+                let difference = actual.abs_diff(expected);
+                worst = worst.max(difference);
+                differing += usize::from(difference != 0);
+                if difference > 1 && first_excessive.is_none() {
+                    first_excessive = Some((lens, index, actual, expected));
+                }
+            }
+        }
+        eprintln!(
+            "snapshot phase comparison {role} {}x{}: max={worst} differing={differing}",
+            size.width, size.height
+        );
+        assert!(
+            first_excessive.is_none(),
+            "snapshot phase comparison {role} exceeded one code at {first_excessive:?}"
+        );
     }
 
     // Root runs GPU tests serially. The CPU oracle independently evaluates the
