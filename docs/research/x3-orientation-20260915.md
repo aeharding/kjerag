@@ -63,14 +63,28 @@ new entry. Full device-hidden workspace gates report 1,520 passes, 52 ignored
 and no failures; unavailable-GPU/media returns are included. Formatting,
 workspace Clippy, vendor warnings, naming and Cargo-source checks also pass.
 These are portable checks, not real-footage rendering tests.
-Normal branch-player playback, owner-visible review, both established camera
-regressions and final CI remain separate qualification gates. A mapping that
-looks upright in stills must not be called stable during motion without that
-check.
+All six CI jobs pass on candidate `5fc99fb2`. The normal native X3 player
+shows upright, moving footage in the captured opening sequence. Its UI suite
+finishes with 47 total checks: 46 pass and one fails. The failed clipboard
+round trip restores the same view text but changes picture bytes slightly in
+the lower part of the view. The source-frame index was not recorded, and the
+cause is not established. This is not a fully passing UI qualification; the
+test was not weakened. Portal and cross-mount paired-file checks also skip.
+The native shader/Rust twin passes on the Radeon GPU.
+
+Owner-visible review, both established-camera UI regressions and cumulative
+Flatpak qualification remain separate gates. The opening captures do not
+establish stable horizon behavior throughout the recording.
 
 Private artifacts are under `scratch/x3-horizon-20260915/`: source/binary
 manifests, separate bounded-run receipts, original PNGs and `RESULT.md`.
 No footage, raw trailer, serial, GPS or capture metadata is checked in here.
-The headless processes ran separately with desktop and sound access hidden;
+The earlier headless processes ran separately with desktop and sound access hidden;
 post-exit GPU-memory counters matched preflight and no new kernel entries
 appeared. This is not a broad driver-safety or performance qualification.
+The later native UI run used a private compositor and null audio, but a host
+monitor/dock hotplug coincided with an AMD display timeout and warning in the
+desktop compositor's display-commit path. Host GPU-memory counters changed.
+That run does not establish unchanged host health or a player leak. Further
+GPU qualification is paused pending health review; the installed app and main
+remain unchanged.

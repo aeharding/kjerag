@@ -137,10 +137,14 @@ color-update policy is selected.
   the skyline check that could not rank this footage. The model-selection
   regression fails on the old fallback and passes with the correction. Full
   device-hidden workspace gates pass with 1,520 reported passes and 52 ignored,
-  including unavailable-GPU/media returns, not hardware qualification. Moving
-  branch-player review, established-camera hardware regressions and CI remain
-  pending; this does not qualify all X3 firmware or add X3 to the resident
-  stitcher.
+  including unavailable-GPU/media returns, not hardware qualification. All six
+  CI jobs pass on `5fc99fb2`. Native X3 playback captures are upright and moving;
+  its UI suite has 46 passes and one exact-picture clipboard-return failure
+  whose cause remains unproven. A host monitor/dock hotplug also coincides with
+  an AMD display warning, so further GPU checks are paused for health review.
+  Owner review, established-camera UI regressions and cumulative Flatpak
+  qualification remain pending. This does not qualify all X3 firmware or add
+  X3 to the resident stitcher.
 - **CPU sampler bounds, issue
   [#204](https://github.com/aeharding/kjerag/issues/204):** synthetic decoded-plane
   tests reproduce chroma sampling row padding outside the image and both samplers
