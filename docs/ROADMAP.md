@@ -126,6 +126,29 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **Capacity input precision, issue
+  [#208](https://github.com/aeharding/kjerag/issues/208):** the benchmark's
+  whole-pixel sine pan repeats a coordinate for about 25 ms at each turn.
+  Every outside-present gap over 8 ms in the recovered X4 and ONE X2 traces
+  coincides with those turns; the app need not redraw an unchanged view.
+  A pointer-only branch preserves subpixel input and records its precision.
+  Its regression fails on the original 25-sample hold, and all five CPU
+  pointer tests pass after correction. The device-hidden workspace gate reports
+  1,515 passes and 52 ignored tests, including unavailable-GPU/media returns.
+  Separate bounded installed-player controls at 2256x1504 passed with the
+  unchanged combined review package: 291.274 completed redraws/s and 29.900
+  consecutive source advances/s on X4, 327.474 and 29.975 on ONE X2.
+  Outside-present gaps over 8 ms fell from 76 to 1 on X4 and 130 to 0 on ONE
+  X2. Both cameras' actual before/after pictures were inspected, and kernel,
+  memory-pressure and post-exit GPU-memory checks found no new failure.
+  This fixes the benchmark's input hold, not player performance: X4's
+  begin-to-commit p99 rose from 1.926 to 7.985 ms, and completion-spacing
+  p99/max remains 12.958/25.197 ms (X4) and 7.799/12.333 ms (ONE X2).
+  The changed input workload and different cooling state preclude a clean
+  application-speed comparison; X4's slight source shortfall also remains.
+  The nominal-300-Hz headless workload is also compositor-callback-paced, not
+  an uncapped maximum. Existing sourced throughput counts remain valid, but
+  these gaps cannot alone establish a scheduling defect or retire #186.
 - **Visible playback qualification, issue
   [#206](https://github.com/aeharding/kjerag/issues/206):** retained real UI
   captures show that a painted backdrop can satisfy startup, and either the

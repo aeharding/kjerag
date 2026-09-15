@@ -54,6 +54,11 @@ const BTN_LEFT: u32 = 0x110;
 /// The horizontal pan completes one smooth out-and-back cycle per second.
 const PAN_PERIOD: Duration = Duration::from_secs(1);
 
+/// Use 1/256-pixel positions for benchmark motion. Whole-pixel rounding
+/// holds this sine still for about 25 ms at each turnaround with a 160 px pan.
+/// Scale the absolute extents too, so this changes precision, not the path.
+const PAN_COORDINATE_SCALE: u32 = 256;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Action {
     Move,
@@ -176,6 +181,9 @@ fn action(args: &[String], width: u32, height: u32, x: u32, y: u32) -> Result<Ac
             if width == 0 || height == 0 || x >= width || y >= height {
                 return Err("pan start must be inside the output".to_owned());
             }
+            if width > u32::MAX / PAN_COORDINATE_SCALE || height > u32::MAX / PAN_COORDINATE_SCALE {
+                return Err("pan output is too large for subpixel motion".to_owned());
+            }
             if amplitude == 0 || amplitude > x.min(width - 1 - x) {
                 return Err(
                     "pan amplitude must keep every horizontal position inside the output"
@@ -216,13 +224,9 @@ fn run_pan(
         if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             sleep(remaining);
         }
-        pointer.motion_absolute(
-            at(),
-            pan_x(x, pan.amplitude, started.elapsed()),
-            y,
-            width,
-            height,
-        );
+        let [wire_x, wire_y, wire_width, wire_height] =
+            pan_motion([width, height, x, y], pan.amplitude, started.elapsed());
+        pointer.motion_absolute(at(), wire_x, wire_y, wire_width, wire_height);
         pointer.frame();
         connection.flush()?;
     }
@@ -231,7 +235,7 @@ fn run_pan(
     let ended_monotonic_ns = monotonic_ns()?;
     let ended_unix_ms = unix_ms()?;
     println!(
-        "{{\"event\":\"pointer_pan\",\"sent\":{event_count},\"requested_duration_ms\":{},\"actual_elapsed_ms\":{},\"event_hz\":{},\"amplitude_px\":{},\"start_monotonic_ns\":{started_monotonic_ns},\"end_monotonic_ns\":{ended_monotonic_ns},\"start_unix_ms\":{started_unix_ms},\"end_unix_ms\":{ended_unix_ms}}}",
+        "{{\"event\":\"pointer_pan\",\"sent\":{event_count},\"requested_duration_ms\":{},\"actual_elapsed_ms\":{},\"event_hz\":{},\"amplitude_px\":{},\"coordinate_units_per_pixel\":{PAN_COORDINATE_SCALE},\"start_monotonic_ns\":{started_monotonic_ns},\"end_monotonic_ns\":{ended_monotonic_ns},\"start_unix_ms\":{started_unix_ms},\"end_unix_ms\":{ended_unix_ms}}}",
         pan.duration.as_millis(),
         elapsed.as_millis(),
         pan.event_hz,
@@ -240,10 +244,22 @@ fn run_pan(
     Ok(())
 }
 
+/// Protocol arguments for a validated pan. The position and both extents must
+/// use the same units; scaling just x would move the pointer out of the window.
+fn pan_motion(place: [u32; 4], amplitude: u32, elapsed: Duration) -> [u32; 4] {
+    let [width, height, x, y] = place;
+    [
+        pan_x(x, amplitude, elapsed),
+        y * PAN_COORDINATE_SCALE,
+        width * PAN_COORDINATE_SCALE,
+        height * PAN_COORDINATE_SCALE,
+    ]
+}
+
 fn pan_x(center: u32, amplitude: u32, elapsed: Duration) -> u32 {
     let phase = elapsed.as_secs_f64() / PAN_PERIOD.as_secs_f64();
     let offset = (phase * std::f64::consts::TAU).sin() * f64::from(amplitude);
-    (f64::from(center) + offset).round() as u32
+    ((f64::from(center) + offset) * f64::from(PAN_COORDINATE_SCALE)).round() as u32
 }
 
 fn monotonic_ns() -> Result<u64, std::io::Error> {
@@ -391,21 +407,78 @@ mod tests {
 
         assert!(action(&valid, 2256, 1504, 2256, 730).is_err());
         assert!(action(&valid, 2256, 1504, 1128, 1504).is_err());
+        let largest_extent = u32::MAX / PAN_COORDINATE_SCALE;
+        assert!(action(&valid, largest_extent, largest_extent, 1128, 730).is_ok());
+        for (width, height) in [(largest_extent + 1, 1504), (2256, largest_extent + 1)] {
+            assert_eq!(
+                action(&valid, width, height, 1128, 730),
+                Err("pan output is too large for subpixel motion".to_owned())
+            );
+        }
     }
 
     #[test]
     fn pan_path_stays_at_the_center_and_extrema() {
         let center = 1128;
         let amplitude = 160;
-        assert_eq!(pan_x(center, amplitude, Duration::ZERO), center);
+        assert_eq!(
+            pan_x(center, amplitude, Duration::ZERO),
+            center * PAN_COORDINATE_SCALE
+        );
         assert_eq!(
             pan_x(center, amplitude, Duration::from_millis(250)),
-            center + amplitude
+            (center + amplitude) * PAN_COORDINATE_SCALE
         );
         assert_eq!(
             pan_x(center, amplitude, Duration::from_millis(750)),
-            center - amplitude
+            (center - amplitude) * PAN_COORDINATE_SCALE
         );
-        assert_eq!(pan_x(center, amplitude, Duration::from_secs(1)), center);
+        assert_eq!(
+            pan_x(center, amplitude, Duration::from_secs(1)),
+            center * PAN_COORDINATE_SCALE
+        );
+    }
+
+    #[test]
+    fn subpixel_pan_preserves_the_absolute_position_and_extent() {
+        assert_eq!(
+            pan_motion([2256, 1504, 1128, 730], 160, Duration::ZERO),
+            [1128 * 256, 730 * 256, 2256 * 256, 1504 * 256]
+        );
+        for micros in 0..=1_000_000 {
+            let elapsed = Duration::from_micros(micros);
+            let [x, y, width, height] = pan_motion([2256, 1504, 1128, 730], 160, elapsed);
+            assert!(x < width && y < height);
+            let ideal_x = 1128.0 + (elapsed.as_secs_f64() * std::f64::consts::TAU).sin() * 160.0;
+            let delivered_x = f64::from(x) / f64::from(width) * 2256.0;
+            assert!((delivered_x - ideal_x).abs() <= 1.0 / 512.0 + 1e-10);
+            assert_eq!(f64::from(y) / f64::from(height) * 1504.0, 730.0);
+        }
+    }
+
+    #[test]
+    fn benchmark_pan_keeps_moving_near_turnarounds() {
+        // These are the real capacity workload's 1000 Hz samples. Whole-pixel
+        // sine rounding holds the cursor still for 25 ms around each turn,
+        // so the app correctly stops requesting view redraws during the test.
+        for phase_us in [0, 250, 500, 750] {
+            let mut previous = None;
+            let mut held_samples = 0;
+            let mut longest_hold = 0;
+            for millis in 0..=1000 {
+                let position = pan_x(1128, 160, Duration::from_micros(millis * 1000 + phase_us));
+                held_samples = if previous == Some(position) {
+                    held_samples + 1
+                } else {
+                    1
+                };
+                longest_hold = longest_hold.max(held_samples);
+                previous = Some(position);
+            }
+            assert!(
+                longest_hold <= 2,
+                "1000 Hz pan repeats a position for {longest_hold} samples at phase {phase_us} us"
+            );
+        }
     }
 }
