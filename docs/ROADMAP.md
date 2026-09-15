@@ -149,9 +149,24 @@ color-update policy is selected.
   memory-limit events appeared, and post-exit GPU-memory counters matched each
   suite's preflight. These are functional checks, not installed-bundle or
   performance qualification. The cumulative PR #213 test package is now
-  installed and qualified on both cameras as recorded below. Separate merge
-  authorization remains pending.
+  installed and qualified on both cameras as recorded below. The owner accepted
+  the combined normal-use check and authorized landing it after CI.
   This is not a fix for X4 source/GPU contention in #186.
+- **CI dependency-fetch hang, issue
+  [#160](https://github.com/aeharding/kjerag/issues/160):** branch work bounds
+  the reported `add-apt-repository` stall to five minutes, followed by a
+  30-second forced-stop grace period. The command keeps its underlying output
+  and nonzero exit status, and the other architecture continues independently.
+  A genuinely slow fetch can now fail and need a rerun. This does not remove
+  the external dependency or bound the later package update/install commands;
+  no package version or player behavior changes. The original PR #203 head
+  `05ac017a` passes all six CI jobs, including normal provisioning on both
+  architectures. Current main is integrated without changing the timeout.
+  Its device-hidden workspace gate passes 1,519 tests with 52 ignored; format,
+  Clippy, vendor warnings, source/name checks and shell syntax also pass. These
+  unavailable-device returns are not hardware qualification. The final head
+  `a3c51f75` passed all six CI jobs; after owner acceptance and explicit approval,
+  PR #203 merged at `005d4dcc` and issue #160 closed on September 15.
 - **CPU sampler bounds, issue
   [#204](https://github.com/aeharding/kjerag/issues/204):** synthetic decoded-plane
   tests reproduce chroma sampling row padding outside the image and both samplers
@@ -234,8 +249,8 @@ color-update policy is selected.
   regression cover it. Branch verification passed, and on September 15 the
   owner confirmed that copying and restoring a view with spaces works in the
   installed Flatpak. That response did not name an exact package identity.
-  Separate merge authorization remains pending. This does not implement shell
-  quoting or tilde expansion
+  The owner subsequently accepted the combined build and authorized its merge.
+  This does not implement shell quoting or tilde expansion
   ([#157](https://github.com/aeharding/kjerag/issues/157)), change the written
   reference format, or change any stitching, color or rendering arithmetic.
 - **GPU resource safety, issue
@@ -359,7 +374,8 @@ color-update policy is selected.
   p99/max 10.267/23.350 ms. This is second-camera coverage, not an X2 speedup
   comparison; AC remains online but battery status changes to discharging.
   These isolated package results preceded the installed combined review
-  package below; merge and owner review remain pending. Private identities, comparisons and receipts
+  package below, whose normal-use review the owner subsequently accepted.
+  The work is included in cumulative PR #213. Private identities, comparisons and receipts
   are retained in `scratch/temporal-periodic-wrap-20260914/`. This changes no
   July sky-line diagnosis or owner picture-acceptance status.
 - **Frame-time spikes, issue #186:** throughput averages do not retire the 4.17
@@ -402,10 +418,20 @@ not establish SDK-shader provenance. No new kernel entries or scoped
 memory-limit/OOM events appeared. Host GPU-memory, swap and pressure counters
 varied. These are 1280x720 functional checks, not a new capacity result,
 hitch-free verdict or proof that the historical desktop-freeze cause is fixed.
-Private receipts remain in `scratch/cumulative-review-20260915/`. This delivery
-record changes documentation only; the installed artifact remains source
-`90721189`. PR #213 remains draft, with no merge or release authorized by
-the installation approval.
+Private receipts remain in `scratch/cumulative-review-20260915/`. The installed
+artifact remains source `90721189`. After the requested normal-use check of
+playback, seeking, pause/resume and seam/color regressions, the owner replied
+"lgtm". This accepts the combined build, not a measured capacity result or
+unresolved hitches. The owner then authorized merging #213 after the
+documentation conflict and CI were cleared, adding "you dont need permission".
+Routine qualified merges are delegated; new visible tradeoffs still require
+owner acceptance and release qualification remains separate.
+
+Merge preparation integrates main `005d4dcc`, bringing only the already-merged
+CI timeout and roadmap changes. The sole conflict is resolved by retaining
+both the decoder-wake and CI-timeout entries. All runtime and test-harness
+sources remain byte-identical to the installed/qualified `90721189` artifact;
+that package is not rebuilt or reinstalled for these documentation/CI changes.
 
 Issue [#193](https://github.com/aeharding/kjerag/issues/193) hardens filtered
 capture failure and cancellation. Restart honors a worker error recorded before
@@ -444,7 +470,8 @@ new published release. Installation preserved user data, runtimes, related
 refs and remote settings; the origin remains `kjerag-origin`. The exact prior
 `0029252d`/`b547c4e2`/`20982c8d` package is retained for rollback, as are the
 verified signed 0.3.1 ref and release bundle. Owner clipboard and sampling
-feedback is recorded above, without accepting hitches or authorizing merge.
+feedback and subsequent combined-build/merge approval are recorded above,
+without accepting hitches or authorizing a new release.
 Normal-channel restoration is due after review. Issue #146 tracks
 deriving downloads from the signed build, avoiding separate payload qualification.
 
@@ -479,6 +506,6 @@ six CI jobs passed. It bounds FFmpeg PPA registration to five minutes; a
 genuinely slow request may fail and need a rerun. This does not change the
 installed player. For draft PR [#202](https://github.com/aeharding/kjerag/pull/202),
 the owner also explicitly accepted withholding the entire release if signing
-is unavailable or either x86_64/ARM build fails. That is release-policy
-acceptance, not separate authorization to merge #202. The separately disclosed
-non-atomic GitHub/Pages publication boundary is not newly accepted by that reply.
+is unavailable or either x86_64/ARM build fails. That policy acceptance does
+not waive the remaining qualification. The separately disclosed non-atomic
+GitHub/Pages publication boundary is not newly accepted by that reply.
