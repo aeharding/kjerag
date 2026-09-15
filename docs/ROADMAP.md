@@ -126,6 +126,25 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **X3 horizon convention, issue
+  [#88](https://github.com/aeharding/kjerag/issues/88):** actual generic X3
+  playback exposes an inverted horizon with the unverified X4 `xZY` fallback.
+  A finite picture comparison of all 24 proper axis mappings, followed by a
+  different camera pose, supports an X3-specific `xzy` calibration input.
+  ONE X2's mapping does not transfer. The branch changes model selection only,
+  retaining the generic projection/readout policy and existing X4/X2 mappings.
+  [The evidence and limitations](research/x3-orientation-20260915.md) include
+  the skyline check that could not rank this footage. The model-selection
+  regression fails on the old fallback and passes with the correction. Full
+  device-hidden workspace gates pass with 1,520 reported passes and 52 ignored,
+  including unavailable-GPU/media returns, not hardware qualification. All six
+  CI jobs pass on `5fc99fb2`. Native X3 playback captures are upright and moving;
+  its UI suite has 46 passes and one exact-picture clipboard-return failure
+  whose cause remains unproven. A host monitor/dock hotplug also coincides with
+  an AMD display warning, so further GPU checks are paused for health review.
+  Owner review, established-camera UI regressions and cumulative Flatpak
+  qualification remain pending. This does not qualify all X3 firmware or add
+  X3 to the resident stitcher.
 - **CPU sampler bounds, issue
   [#204](https://github.com/aeharding/kjerag/issues/204):** synthetic decoded-plane
   tests reproduce chroma sampling row padding outside the image and both samplers
