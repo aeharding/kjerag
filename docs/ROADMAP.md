@@ -126,6 +126,17 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **Capacity input precision, issue
+  [#208](https://github.com/aeharding/kjerag/issues/208):** the benchmark's
+  whole-pixel sine pan repeats a coordinate for about 25 ms at each turn.
+  Every outside-present gap over 8 ms in the recovered X4 and ONE X2 traces
+  coincides with those turns; the app need not redraw an unchanged view.
+  A pointer-only branch preserves subpixel input and records its precision.
+  Its regression fails on the original 25-sample hold, and all five CPU
+  pointer tests pass after correction. Installed-player control remains pending.
+  The nominal-300-Hz headless workload is also compositor-callback-paced, not
+  an uncapped maximum. Existing sourced throughput counts remain valid, but
+  these gaps cannot alone establish a scheduling defect or retire #186.
 - **Visible playback qualification, issue
   [#206](https://github.com/aeharding/kjerag/issues/206):** retained real UI
   captures show that a painted backdrop can satisfy startup, and either the
