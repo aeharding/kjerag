@@ -751,6 +751,11 @@ pub(super) struct MapSnapshot {
     frame: FrameStamp,
     read: wgpu::BindGroup,
     fusion_read: Option<wgpu::BindGroup>,
+    // Explicit diagnostics need handles to the same allocations already
+    // retained by the sample bind groups. Cloning these allocates no GPU data.
+    packed: wgpu::Buffer,
+    alpha: wgpu::Buffer,
+    fusion: Option<[wgpu::Texture; 2]>,
     context: OneXsGpuContext,
 }
 
@@ -769,6 +774,16 @@ impl MapSnapshot {
 
     pub(super) fn ensure_context(&self, expected: &OneXsGpuContext) -> Fallible<()> {
         self.context.ensure_same(expected)
+    }
+
+    pub(super) fn diagnostic_readback(&self) -> Fallible<crate::OneXsMapFrame> {
+        readback_map(
+            &self.context,
+            &self.frame,
+            &self.packed,
+            &self.alpha,
+            self.fusion.as_ref(),
+        )
     }
 }
 
@@ -896,6 +911,12 @@ impl InstalledGpuMapBinding {
             frame: self.frame.clone(),
             read: self.read.clone(),
             fusion_read: self.fusion_read.clone(),
+            packed: self.packed.clone(),
+            alpha: self.statics.alpha.clone(),
+            fusion: self
+                .fusion
+                .as_ref()
+                .map(|fusion| fusion.output.textures.clone()),
             context: self.context.clone(),
         })
     }
@@ -908,34 +929,13 @@ impl InstalledGpuMapBinding {
     }
 
     pub(super) fn diagnostic_readback(&self) -> Fallible<crate::OneXsMapFrame> {
-        let packed = readback_packed(self.context.device(), self.context.queue(), &self.packed)?;
-        let alpha = readback_u32(
-            self.context.device(),
-            self.context.queue(),
+        readback_map(
+            &self.context,
+            &self.frame,
+            &self.packed,
             &self.statics.alpha,
-            ALPHA_BYTES as u64,
-        )?
-        .into_iter()
-        .map(f32::from_bits)
-        .collect();
-        let map = crate::OneXsMapFrame::new(
-            self.frame.clone(),
-            packed,
-            crate::studio_type2::AlphaMap::new(alpha)?,
-            crate::studio_type2::PisBackend::Gpu,
-        );
-        match &self.fusion {
-            None => Ok(map),
-            Some(fusion) => {
-                let read = |texture| {
-                    readback_fusion_texture(self.context.device(), self.context.queue(), texture)
-                };
-                Ok(map.with_fusion(crate::image_fusion::RatioPair {
-                    left: read(&fusion.output.textures[0])?,
-                    right: read(&fusion.output.textures[1])?,
-                }))
-            }
-        }
+            self.fusion.as_ref().map(|fusion| &fusion.output.textures),
+        )
     }
 
     #[cfg(test)]
@@ -947,6 +947,36 @@ impl InstalledGpuMapBinding {
             INPUT_BYTES,
         )?;
         DiagnosticFinalInputs::from_words(self.frame.clone(), words)
+    }
+}
+
+/// Explicit inspection shared by spatial and filtered display owners. The
+/// caller retains these exact immutable resources until every copy completes.
+/// Normal snapshot construction and playback never call this readback path.
+fn readback_map(
+    context: &OneXsGpuContext,
+    frame: &FrameStamp,
+    packed: &wgpu::Buffer,
+    alpha: &wgpu::Buffer,
+    fusion: Option<&[wgpu::Texture; 2]>,
+) -> Fallible<crate::OneXsMapFrame> {
+    let packed = readback_packed(context.device(), context.queue(), packed)?;
+    let alpha = readback_u32(context.device(), context.queue(), alpha, ALPHA_BYTES as u64)?
+        .into_iter()
+        .map(f32::from_bits)
+        .collect();
+    let map = crate::OneXsMapFrame::new(
+        frame.clone(),
+        packed,
+        crate::studio_type2::AlphaMap::new(alpha)?,
+        crate::studio_type2::PisBackend::Gpu,
+    );
+    match fusion {
+        None => Ok(map),
+        Some(textures) => Ok(map.with_fusion(crate::image_fusion::RatioPair {
+            left: readback_fusion_texture(context.device(), context.queue(), &textures[0])?,
+            right: readback_fusion_texture(context.device(), context.queue(), &textures[1])?,
+        })),
     }
 }
 

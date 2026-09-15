@@ -143,6 +143,10 @@ The installed `MapSnapshot` in
 [`map_patch_gpu.rs`](../crates/render/src/flow/one_xs/map_patch_gpu.rs)
 retains its packed map, alpha, and immutable photometric ratio binding. Newer
 computation cannot replace bindings owned by the installed draw.
+Its diagnostic handles reference those same allocations, not the production
+carrier or decoder leases. Explicit Scene map inspection follows the retained
+filtered owner when that path is selected; it must not consult the separate
+spatial facade. Map readback remains diagnostic-only, never a playback step.
 
 [`panorama.rs`](../crates/render/src/direct_type2/panorama.rs) distinguishes:
 
