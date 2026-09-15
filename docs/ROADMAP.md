@@ -140,8 +140,16 @@ color-update policy is selected.
   the 16-second delay from 981 to 382, with no expired-deadline callbacks in
   that interval (964 before). Source delivery remains input-limited near
   23 fps and recovers to about 30 fps afterward. This is an idle-work reduction,
-  not a measured CPU-percent, seam-quality or 240-capacity result. Candidate UI
-  suites and owner acceptance remain pending; the installed app is unchanged.
+  not a measured CPU-percent, seam-quality or 240-capacity result. PR
+  [#211](https://github.com/aeharding/kjerag/pull/211)'s exact code head
+  `d3a03071` passed all six CI jobs. Separate bounded native UI suites passed
+  47 X4 Air and 48 ONE X2 checks; both motion captures were visually inspected
+  for each camera. Exact-view and portal checks retain their documented skips,
+  as do cross-mount paired-file hardlinks on ONE X2. No new kernel entries or
+  memory-limit events appeared, and post-exit GPU-memory counters matched each
+  suite's preflight. These are functional checks, not installed-bundle or
+  performance qualification. Owner acceptance and a cumulative test delivery
+  remain pending; the installed app is unchanged.
   This is not a fix for X4 source/GPU contention in #186.
 - **CPU sampler bounds, issue
   [#204](https://github.com/aeharding/kjerag/issues/204):** synthetic decoded-plane
