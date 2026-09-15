@@ -4,9 +4,10 @@ The acceptance registry for seam work. Lines are runnable as CLI args and Ctrl+V
 Footage lives on the owner's test box under ~/Videos (owner ruling 2026-08-01: footage filenames
 are fine in the repo). A bare filename is in ~/Videos or ~/Videos/Insta; a file that has moved out
 of those carries its whole path on the line, quoted where a directory name has a space in it. A line
-carrying a path like that is a CLI argument only, and is NOT a Ctrl+V target: `Framing::read_line`
-takes the first whitespace word as the path, so a quoted directory splits mid-quote, and nothing
-expands a tilde, which makes such a paste a silent no-op (issue #157).
+carrying shell quotes or a tilde is a CLI argument only, not a Ctrl+V target:
+clipboard parsing preserves raw paths, including spaces, but does not interpret
+shell quoting or expand `~` (issue #157). For paste, use the full absolute path
+without added shell quotes, followed by the view terms.
 Agents: read this at the start of any seam task;
 add new owner references here with date, category, and status.
 

@@ -9,6 +9,7 @@
 # first command-line words.
 # Set KJERAG_UITEST_ONLY=stalls to run only the unsandboxed import-failure
 # checks against supplied test media.
+# Set KJERAG_UITEST_ONLY=view-paths for the spaced-filename clipboard regression.
 #
 # The same checks run against the installed Flatpak with
 # KJERAG_FLATPAK=dev.harding.Kjerag, which is how a bundle is checked before
@@ -201,12 +202,15 @@ fi
 
 case ${KJERAG_UITEST_ONLY:-} in
 "") ;;
+view-paths)
+	[ -n "$media" ] || die "KJERAG_UITEST_ONLY=view-paths needs test media"
+	;;
 stalls)
 	[ -n "$media" ] || die "KJERAG_UITEST_ONLY=stalls needs test media"
 	[ -z "${KJERAG_FLATPAK:-}" ] ||
 		die "KJERAG_UITEST_ONLY=stalls cannot preload into a Flatpak"
 	;;
-*) die "KJERAG_UITEST_ONLY must be stalls when it is set" ;;
+*) die "KJERAG_UITEST_ONLY must be stalls or view-paths when it is set" ;;
 esac
 
 # The session went away with checks still to run: a dead compositor cannot
@@ -1581,7 +1585,15 @@ holds_the_command_line_view() {
 # afterwards has to differ from the first or the check says so itself.
 returns_to_the_copied_view() {
 	local check="ctrl+v goes back to the copied view"
-	local copied returned
+	local copied returned tag=goto
+	if [ "${1:-}" = printed ]; then
+		check="ctrl+v goes back to the printed view"
+		tag=goto-printed
+		if [ "$clipboard_write" = no ]; then
+			skip "$check (no wl-copy)"
+			return
+		fi
+	fi
 
 	view_lines=$(grep -c '^view:' "$log")
 	if ! press_until more_view_lines goto -k i; then
@@ -1590,16 +1602,20 @@ returns_to_the_copied_view() {
 		return
 	fi
 	copied=$(view_line)
+	if [ "${1:-}" = printed ]; then
+		printf '%s' "$copied" | env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+			wl-copy --type text/plain || { fail "$check" "wl-copy failed"; return; }
+	fi
 	sleep "$TOAST_GONE"
-	grab goto-there >/dev/null
+	grab "$tag-there" >/dev/null
 
 	key -k Right
 	key -M ctrl -k minus -m ctrl
 	alive || lost "$check"
-	grab goto-away >/dev/null
-	if same_picture "$session/goto-there.ppm" "$session/goto-away.ppm"; then
+	grab "$tag-away" >/dev/null
+	if same_picture "$session/$tag-there.ppm" "$session/$tag-away.ppm"; then
 		fail "$check" "the seek and the zoom moved nothing, so this proves nothing" \
-			"$session/goto-there.ppm" "$session/goto-away.ppm"
+			"$session/$tag-there.ppm" "$session/$tag-away.ppm"
 		return
 	fi
 
@@ -1610,7 +1626,7 @@ returns_to_the_copied_view() {
 		return
 	fi
 	sleep "$TOAST_GONE"
-	grab goto-back >/dev/null
+	grab "$tag-back" >/dev/null
 
 	view_lines=$(grep -c '^view:' "$log")
 	if ! press_until more_view_lines goto -k i; then
@@ -1624,12 +1640,70 @@ returns_to_the_copied_view() {
 		fail "$check" "copied:   $copied" "came back: $returned"
 		return
 	fi
-	if ! same_picture "$session/goto-there.ppm" "$session/goto-back.ppm"; then
+	if ! same_picture "$session/$tag-there.ppm" "$session/$tag-back.ppm"; then
 		fail "$check" "the line came back but the picture did not" \
-			"$session/goto-there.ppm" "$session/goto-back.ppm"
+			"$session/$tag-there.ppm" "$session/$tag-back.ppm"
 		return
 	fi
 	pass "$check (${copied#"$media "})"
+}
+
+# Issue #174: run the real copy/paste path with whitespace in both directory
+# and filename. Symlinks avoid copying personal footage or relying on hardlinks
+# across the Flatpak's bind mounts. Preserve the paired-lens suffix when present.
+spaced_view_reference() {
+	local original=$media mate fixture=$session/'view references'
+	local media=$fixture/"pilot's flight  $(basename "$original")"
+	local expected attempt landed=no
+	printf '\n-- spaced-path view references\n'
+	mkdir -p "$fixture"
+	ln -s -- "$(realpath -- "$original")" "$media" || die "cannot link the view fixture"
+	mate=$(lens_mate "$original")
+	if [ -n "$mate" ]; then
+		ln -s -- "$(realpath -- "$mate")" "$fixture/pilot's flight  $(basename "$mate")" ||
+			die "cannot link the second view-fixture lens"
+	fi
+	boot view-paths "$media"
+	if ! await '^media:' "$READY" || ! await_paint view-paths; then
+		alive || lost "the spaced-path file opens"
+		fail "the spaced-path file opens" "log: $log"
+		teardown
+		return
+	fi
+	if ! press_until still_picture view-paths-paused -k space; then
+		alive || lost "the spaced-path file pauses"
+		fail "the spaced-path file pauses" "log: $log"
+		teardown
+		return
+	fi
+	# The first pause can land in uninterrupted warm history. A later paste
+	# restarts temporal history, an accepted picture difference, so use a
+	# keyboard seek to source zero before the pixel-equality round trips.
+	# This preparation does not depend on the clipboard parser being tested.
+	view_lines=$(grep -c '^view:' "$log")
+	if ! press_until more_view_lines view-paths-initial -k i; then
+		alive || lost "the spaced-path starting view is known"
+		fail "the spaced-path starting view is known" "log: $log"
+		teardown
+		return
+	fi
+	expected=$(view_line | sed -E 's/ time=[0-9.]+ / time=0.000 /')
+	for attempt in 1 2 3; do
+		key -k Left
+		if wait_for_displayed_view "$expected" 5 "the spaced-path fixture seeks to zero"; then
+			landed=yes
+			break
+		fi
+	done
+	if [ "$landed" = no ]; then
+		fail "the spaced-path fixture seeks to zero" "shown: $displayed_view" "log: $log"
+		teardown
+		return
+	fi
+	copies_the_view
+	returns_to_the_copied_view
+	returns_to_the_copied_view printed
+	exits_clean
 }
 
 # `h` flips the horizon lock, which is on by default, so the session's config
@@ -2859,11 +2933,14 @@ twin_guard() {
 
 # ------------------------------------------------------------------- run
 
-if [ "${KJERAG_UITEST_ONLY:-}" = stalls ]; then
+if [ "${KJERAG_UITEST_ONLY:-}" = view-paths ]; then
+	spaced_view_reference
+elif [ "${KJERAG_UITEST_ONLY:-}" = stalls ]; then
 	stalls
 else
 	if [ -n "$media" ]; then
 		with_media
+		spaced_view_reference
 		dropped_files
 		paired_files
 		stalls

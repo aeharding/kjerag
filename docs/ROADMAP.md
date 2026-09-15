@@ -144,6 +144,15 @@ color-update policy is selected.
   after all six CI jobs passed and the owner explicitly approved. This enables
   investigation of the reported July sky boundary, not a seam-quality fix
   or evidence of a difference from Studio.
+- **View references, issue
+  [#174](https://github.com/aeharding/kjerag/issues/174):** the unchanged player
+  reproduces failed clipboard navigation with a space-containing filename.
+  Branch parsing now preserves the raw path before the view-term suffix;
+  application classification tests and a real-window spaced-path copy/paste
+  regression cover it. Branch verification and owner retest are required
+  before merge. This does not implement shell quoting or tilde expansion
+  ([#157](https://github.com/aeharding/kjerag/issues/157)), change the written
+  reference format, or change any stitching, color or rendering arithmetic.
 - **GPU resource safety, issue
   [#195](https://github.com/aeharding/kjerag/issues/195):** the owner reported a
   frozen desktop requiring a hard reset during a real-GPU workspace gate on
@@ -175,7 +184,7 @@ color-update policy is selected.
   integration checks do not qualify a full workspace gate, playback performance,
   or a release. A subsequent device-hidden full workspace run passed with
   1,511 reported passes and 52 ignored tests; unavailable-GPU and absent-media
-returns are included, so this is not hardware qualification. Full workspace
+  returns are included, so this is not hardware qualification. Full workspace
   Clippy and vendor warning checks passed, and the branch player rebuilt.
   PR [#196](https://github.com/aeharding/kjerag/pull/196) subsequently passed
   both camera UI suites and all six CI jobs, then merged at `6cf8963f` after
@@ -279,6 +288,13 @@ returns are included, so this is not hardware qualification. Full workspace
   compiled and unit-tested in CI, not playback-tested on hardware.
 
 ## Delivery next steps
+
+A local integration review combines the clipboard changes in PR #197 with the
+source-filter and periodic-wrap changes in PRs #200 and #201. The existing
+performance packages omit #197, so they cannot replace its installed test build
+without losing those clipboard changes. The combined source is not an installed
+or runtime-qualified package, and does not inherit owner acceptance of the
+pending #200 picture differences. The installed #197 test package is unchanged.
 
 Issue [#193](https://github.com/aeharding/kjerag/issues/193) hardens filtered
 capture failure and cancellation. Restart honors a worker error recorded before
