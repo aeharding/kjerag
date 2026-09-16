@@ -851,7 +851,11 @@ with_media() {
 	# thing that has printed one is a capture, the two counts can be compared.
 	a_still_says_where_it_was_looking
 	copies_the_view
-	returns_to_the_copied_view
+	if [ "$paused" = yes ]; then
+		returns_to_the_copied_view
+	else
+		skip "ctrl+v goes back to the copied view (pause failed)"
+	fi
 	drag_release_over_controls
 	if [ "$paused" = yes ]; then
 		failed_pasted_open_preserves_the_view
@@ -1435,6 +1439,56 @@ more_goto_lines() {
 	[ "$(grep -c '^goto:' "$log")" -gt "$goto_lines" ]
 }
 
+# `i` reports the public copied-view line and, immediately after it, the exact
+# delivery the renderer committed. The line-number boundary makes the pair
+# fresh. The latest new view owns only its immediately following display line,
+# so an older valid receipt cannot rescue a missing or interrupted new one.
+report_after=0
+paired_view=
+paired_display=
+
+more_view_display_lines() {
+	local pair
+	pair=$(tail -n "+$((report_after + 1))" "$log" | awk '
+		/^view:/ { view = $0; display = ""; waiting = 1; next }
+		waiting && /^display:/ { display = $0; waiting = 0; next }
+		waiting { waiting = 0; display = "" }
+		END { if (view != "" && display != "") print view "\n" display }
+	')
+	paired_view=$(printf '%s\n' "$pair" | sed -n '1s/^view:[[:space:]]*//p')
+	paired_display=$(printf '%s\n' "$pair" | sed -n '2s/^display:[[:space:]]*//p')
+	[ -n "$paired_view" ] && [ -n "$paired_display" ]
+}
+
+display_index=
+display_time_ns=
+
+current_display() {
+	local receipt=$1 current
+	display_index=
+	display_time_ns=
+	if [[ $receipt =~ ^index=([0-9]+)[[:space:]]time_ns=([0-9]+)[[:space:]]current=([01])$ ]]; then
+		display_index=${BASH_REMATCH[1]}
+		display_time_ns=${BASH_REMATCH[2]}
+		current=${BASH_REMATCH[3]}
+		[ "$current" = 1 ]
+	else
+		return 1
+	fi
+}
+
+expected_returned_view=
+expected_returned_index=
+expected_returned_time_ns=
+
+returned_view_is_current() {
+	more_view_display_lines || return 1
+	[ "$paired_view" = "$expected_returned_view" ] || return 1
+	current_display "$paired_display" || return 1
+	[ "$display_index" = "$expected_returned_index" ] &&
+		[ "$display_time_ns" = "$expected_returned_time_ns" ]
+}
+
 # Poll the real displayed-frame observable until it names an independently
 # constructed expected view. The goto line proves only that a request arrived.
 displayed_view=
@@ -1738,52 +1792,76 @@ holds_the_command_line_view() {
 }
 
 # The whole loop, which is the feature: copy a view, wander off, paste, and be
-# back exactly where the copy was taken.
+# back at the same source frame and framing.
 #
-# The window is paused here, so the picture is a function of the frame and the
-# camera alone and two captures of one view are the same bytes. Two
-# instruments, and the first is the stronger: the app's own copied line is
-# exact to the millisecond and the hundredth of a degree, where a capture only
-# says the pixels came out the same. Both, because a line that matches while
-# the picture does not would mean the view is not what the line says it is.
+# The copied line is the public framing contract. The adjacent display receipt
+# authenticates the exact currently offered delivery rather than reducing it
+# to an index and timestamp, which may alias after a seek. Pixels answer only
+# whether the real compositor shows a meaningful, stable returned picture:
+# generic stitching is history-dependent, so a warm picture and a seek-fresh
+# picture of the same source are not required to be byte-identical.
 #
 # The wander is a ten second seek and a notch of zoom out: one moves the frame
 # and the other moves the camera, which are the two halves a paste has to put
-# back. A dropped key costs the check nothing, because the capture taken
-# afterwards has to differ from the first or the check says so itself.
+# back. Both the away and returned pictures must visibly differ, so a dropped
+# key, stale away picture or flat backdrop cannot qualify the transaction.
 returns_to_the_copied_view() {
 	local check="ctrl+v goes back to the copied view"
-	local copied returned tag=goto
+	local copied tag=${2:-goto} there away back_a back_b
+	local copied_index copied_time_ns history
+	local return_attempt=0 returned_ready=no
 	if [ "${1:-}" = printed ]; then
 		check="ctrl+v goes back to the printed view"
-		tag=goto-printed
+		tag=${2:-goto-printed}
 		if [ "$clipboard_write" = no ]; then
 			skip "$check (no wl-copy)"
 			return
 		fi
 	fi
 
-	view_lines=$(grep -c '^view:' "$log")
-	if ! press_until more_view_lines goto -k i; then
+	report_after=$(wc -l <"$log")
+	if ! press_until more_view_display_lines goto -k i; then
 		alive || lost "$check"
-		fail "$check" "no view line after $PRESSES presses of i" "log: $log"
+		fail "$check" "no fresh paired view/display report after $PRESSES presses of i" \
+			"log: $log"
 		return
 	fi
-	copied=$(view_line)
+	copied=$paired_view
+	if ! current_display "$paired_display"; then
+		fail "$check" "the copied display receipt is unavailable, malformed or stale" \
+			"received: ${paired_display:-no display line}" "log: $log"
+		return
+	fi
+	copied_index=$display_index
+	copied_time_ns=$display_time_ns
 	if [ "${1:-}" = printed ]; then
 		printf '%s' "$copied" | env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
 			wl-copy --type text/plain || { fail "$check" "wl-copy failed"; return; }
 	fi
 	sleep "$TOAST_GONE"
-	grab "$tag-there" >/dev/null
+	there=$(grab "$tag-there") || {
+		fail "$check" "the copied-view capture failed" "log: $log"
+		return
+	}
+	if ! visible_picture "$there"; then
+		fail "$check" "the copied view is not a meaningful video picture" "$there"
+		return
+	fi
 
 	key -k Right
 	key -M ctrl -k minus -m ctrl
 	alive || lost "$check"
-	grab "$tag-away" >/dev/null
-	if same_picture "$session/$tag-there.ppm" "$session/$tag-away.ppm"; then
+	away=$(grab "$tag-away") || {
+		fail "$check" "the away capture failed" "log: $log"
+		return
+	}
+	if ! visible_picture "$away"; then
+		fail "$check" "the away view is not a meaningful video picture" "$away"
+		return
+	fi
+	if same_picture "$there" "$away"; then
 		fail "$check" "the seek and the zoom moved nothing, so this proves nothing" \
-			"$session/$tag-there.ppm" "$session/$tag-away.ppm"
+			"$there" "$away"
 		return
 	fi
 
@@ -1793,27 +1871,61 @@ returns_to_the_copied_view() {
 		fail "$check" "no goto line after $PRESSES presses of ctrl+v" "log: $log"
 		return
 	fi
-	sleep "$TOAST_GONE"
-	grab "$tag-back" >/dev/null
-
-	view_lines=$(grep -c '^view:' "$log")
-	if ! press_until more_view_lines goto -k i; then
+	report_after=$(wc -l <"$log")
+	expected_returned_view=$copied
+	expected_returned_index=$copied_index
+	expected_returned_time_ns=$copied_time_ns
+	while [ "$return_attempt" -lt "$READY" ]; do
+		key -k i
+		alive || break
+		if returned_view_is_current; then
+			returned_ready=yes
+			break
+		fi
+		return_attempt=$((return_attempt + 1))
+	done
+	if [ "$returned_ready" = no ]; then
 		alive || lost "$check"
-		fail "$check" "no view line after the paste" "log: $log"
+		fail "$check" "the pasted view did not reach a fresh current display" \
+			"expected: $expected_returned_view" \
+			"expected display: index=$expected_returned_index time_ns=$expected_returned_time_ns current=1" \
+			"latest view: ${paired_view:-no paired view}" \
+			"latest display: ${paired_display:-no paired display}" "log: $log"
 		return
 	fi
-	returned=$(view_line)
 
-	if [ "$returned" != "$copied" ]; then
-		fail "$check" "copied:   $copied" "came back: $returned"
+	# The report key raises a toast. Let it leave, then require two exact
+	# control-free pictures of the paused return. Their equality is temporal
+	# stability, not equality with the differently warmed pre-seek stitch.
+	sleep "$TOAST_GONE"
+	back_a=$(grab "$tag-back-a") || {
+		fail "$check" "the first returned capture failed" "log: $log"
+		return
+	}
+	sleep 0.7
+	back_b=$(grab "$tag-back-b") || {
+		fail "$check" "the second returned capture failed" "log: $log"
+		return
+	}
+	if ! visible_picture "$back_a" || ! visible_picture "$back_b"; then
+		fail "$check" "the returned view is not a meaningful video picture" \
+			"$back_a" "$back_b"
 		return
 	fi
-	if ! same_picture "$session/$tag-there.ppm" "$session/$tag-back.ppm"; then
-		fail "$check" "the line came back but the picture did not" \
-			"$session/$tag-there.ppm" "$session/$tag-back.ppm"
+	if same_picture "$away" "$back_a"; then
+		fail "$check" "the returned picture is still the away picture" "$away" "$back_a"
 		return
 	fi
-	pass "$check (${copied#"$media "})"
+	if ! same_picture "$back_a" "$back_b"; then
+		fail "$check" "the returned paused picture is not stable" "$back_a" "$back_b"
+		return
+	fi
+	if same_picture "$there" "$back_a"; then
+		history="seek-history pixels identical"
+	else
+		history="seek-history pixels differ"
+	fi
+	pass "$check (${copied#"$media "}; $history; captures: $there, $back_a)"
 }
 
 # Set by failed_pasted_open_preserves_the_view and read by its predicates.
@@ -1962,10 +2074,9 @@ spaced_view_reference() {
 		teardown
 		return
 	fi
-	# The first pause can land in uninterrupted warm history. A later paste
-	# restarts temporal history, an accepted picture difference, so use a
-	# keyboard seek to source zero before the pixel-equality round trips.
-	# This preparation does not depend on the clipboard parser being tested.
+	# Use a known starting source for both reference forms. This preparation
+	# does not depend on the clipboard parser being tested; the round trips
+	# authenticate source/view restoration separately from stitching history.
 	view_lines=$(grep -c '^view:' "$log")
 	if ! press_until more_view_lines view-paths-initial -k i; then
 		alive || lost "the spaced-path starting view is known"
@@ -1987,8 +2098,8 @@ spaced_view_reference() {
 		return
 	fi
 	copies_the_view
-	returns_to_the_copied_view
-	returns_to_the_copied_view printed
+	returns_to_the_copied_view copied view-paths-goto
+	returns_to_the_copied_view printed view-paths-goto-printed
 	exits_clean
 }
 

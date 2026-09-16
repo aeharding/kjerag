@@ -1312,7 +1312,18 @@ impl App {
             camera: open.scene.viewpoint().camera(),
             horizon: open.scene.horizon(),
         };
-        println!("view:   {}", framing.printed(&open.path));
+        let displayed = open.scene.displayed_frame_stamp();
+        let offered = open.scene.frame_stamp();
+        println!(
+            "view:   {}\n{}",
+            framing.printed(&open.path),
+            display_receipt(
+                displayed
+                    .as_ref()
+                    .map(|stamp| (stamp.index(), stamp.timestamp(), stamp)),
+                offered.as_ref(),
+            )
+        );
         let line = framing.copied(&open.path);
         Task::batch([
             self.toast(strings::VIEW_COPIED.to_owned()),
@@ -1769,6 +1780,24 @@ fn copied_view_time(
     displayed.or(offered).map_or(position, |(_, time)| time)
 }
 
+/// A machine-readable receipt for the exact source delivery behind `view:`.
+///
+/// Index and time can repeat after a seek. `current` therefore compares the
+/// opaque delivery identities rather than those two report fields.
+fn display_receipt<T: PartialEq>(
+    displayed: Option<(u64, Duration, &T)>,
+    offered: Option<&T>,
+) -> String {
+    let Some((index, timestamp, identity)) = displayed else {
+        return "display: unavailable".to_owned();
+    };
+    let current = u8::from(offered == Some(identity));
+    format!(
+        "display: index={index} time_ns={} current={current}",
+        timestamp.as_nanos()
+    )
+}
+
 /// Whether this path is the document portal's rather than the pilot's.
 ///
 /// A file picked in a sandbox's chooser comes back as
@@ -2138,6 +2167,30 @@ mod tests {
             offered
         );
         assert_eq!(copied_view_time(None, None, position), position);
+    }
+
+    #[test]
+    fn display_receipt_names_the_exact_displayed_delivery() {
+        let displayed = 17;
+        let other = 18;
+        let at = Duration::from_nanos(7_941_266_666);
+
+        assert_eq!(
+            display_receipt(Some((238, at, &displayed)), Some(&displayed)),
+            "display: index=238 time_ns=7941266666 current=1"
+        );
+        assert_eq!(
+            display_receipt(Some((238, at, &displayed)), Some(&other)),
+            "display: index=238 time_ns=7941266666 current=0"
+        );
+        assert_eq!(
+            display_receipt(Some((238, at, &displayed)), None),
+            "display: index=238 time_ns=7941266666 current=0"
+        );
+        assert_eq!(
+            display_receipt(None, Some(&displayed)),
+            "display: unavailable"
+        );
     }
 
     #[test]

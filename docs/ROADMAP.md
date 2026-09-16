@@ -211,6 +211,39 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **X3 horizon convention, issue
+  [#88](https://github.com/aeharding/kjerag/issues/88):** actual generic X3
+  playback exposes an inverted horizon with the unverified X4 `xZY` fallback.
+  A finite picture comparison of all 24 proper axis mappings, followed by a
+  different camera pose, supports an X3-specific `xzy` calibration input.
+  ONE X2's mapping does not transfer. The branch changes model selection only,
+  retaining the generic projection/readout policy and existing X4/X2 mappings.
+  [The evidence and limitations](research/x3-orientation-20260915.md) include
+  the skyline check that could not rank this footage. The model-selection
+  regression fails on the old fallback and passes with the correction. Full
+  device-hidden workspace gates pass with 1,520 reported passes and 52 ignored,
+  including unavailable-GPU/media returns, not hardware qualification. All six
+  CI jobs pass on `5fc99fb2`. Native X3 playback captures are upright and moving;
+  its UI suite has 46 passes and one exact-picture clipboard-return failure
+  whose broad difference is now isolated to retained generic chromatic history,
+  with a smaller seam-anchor restart component. A bounded real-Scene diagnostic
+  restores the exact source and reproduces both original UI captures
+  byte-for-byte. This is not a new clipboard or orientation arithmetic defect.
+  Issue #170's branch copied-view harness correction separates exact displayed
+  source/view restoration from history-dependent pixels without changing
+  stitching or adding a tolerance. The owner cleared the earlier monitor/dock
+  health pause. The integrated device-hidden workspace passes 1,585 tests with
+  53 ignored, and portable harness positive/negative controls pass. These are
+  not hardware tests. Separate native suites at `e9ecc01a` subsequently pass
+  53 X3, 53 X4 Air and 54 ONE X2 checks, with zero failures. Both motion
+  captures per camera were inspected; copied-view checks authenticate exact
+  source/view restoration and held output, reporting seek-history differences
+  separately. No new kernel messages or scoped runtime memory-limit events
+  appear; host GPU/memory counters vary. This is functional qualification,
+  not performance or a historical desktop-freeze fix. Owner review,
+  final-head CI and cumulative Flatpak qualification remain pending.
+  This does not qualify all X3 firmware or add
+  X3 to the resident stitcher.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes
