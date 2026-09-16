@@ -168,6 +168,9 @@ pub enum Message {
     FileClose,
     FileLoad(PathBuf),
     FileOpen,
+    /// The chooser could not open or return its selection. Cancellation is
+    /// handled before this message; this carries the backend's own error.
+    FileChooserFailed(String),
     FileOpenRecent(usize),
     /// What the chooser came back with, which is one file or several: a
     /// capture written one lens per file is picked as two, because inside a
@@ -272,7 +275,7 @@ pub struct App {
     context_page: ContextPage,
     /// The theme names the settings dropdown shows, in its own order.
     themes: Vec<String>,
-    /// What a capture says when it lands.
+    /// Short notifications that leave the current picture available.
     toasts: Toasts,
     controls: Controls,
     /// Set while the scrubber is being dragged, to whether the file was
@@ -570,6 +573,7 @@ impl cosmic::Application for App {
                 return self.opened(&first.clone(), alongside, now);
             }
             Message::FileOpen => return chooser(),
+            Message::FileChooserFailed(why) => self.alert.raise(Failure::Chooser(why)),
             Message::FileOpenRecent(index) => {
                 let Some(path) = self.stored.state.recent_files.get(index).cloned() else {
                     return Task::none();
@@ -601,7 +605,9 @@ impl cosmic::Application for App {
             }
             Message::LaunchUrl(url) => {
                 if let Err(e) = open::that_detached(&url) {
-                    eprintln!("kjerag: {url} not opened: {e}");
+                    let said = format!("{url} not opened: {e}");
+                    eprintln!("kjerag: {said}");
+                    return self.toast(said);
                 }
             }
             Message::LockHorizon => {
@@ -1013,15 +1019,18 @@ impl App {
     /// A failed open takes nothing away (owner's call, 2026-08-01): the video
     /// that was playing carries on playing behind the alert, because a file
     /// that would not open is not a reason to stop the one that did.
-    fn load(&mut self, path: &Path) {
-        self.load_with(path, &[]);
+    ///
+    /// Returns whether this attempt opened a new video, not whether a video
+    /// (possibly the previous one) remains open.
+    fn load(&mut self, path: &Path) -> bool {
+        self.load_with(path, &[])
     }
 
     /// The same, told about the other files the pilot picked alongside this
     /// one: inside a sandbox that is where a capture written one lens per
     /// file finds its other half, because the chooser hands over a document
     /// with nothing beside it (issue #123).
-    fn load_with(&mut self, path: &Path, alongside: &[PathBuf]) {
+    fn load_with(&mut self, path: &Path, alongside: &[PathBuf]) -> bool {
         match Scene::open_with(path, alongside) {
             Ok(scene) => {
                 self.alert.close();
@@ -1037,8 +1046,12 @@ impl App {
                 self.hold_horizon();
                 self.hold_flow();
                 self.hold_sound();
+                true
             }
-            Err(e) => self.alert.raise(Failure::Open(path.to_path_buf(), e)),
+            Err(e) => {
+                self.alert.raise(Failure::Open(path.to_path_buf(), e));
+                false
+            }
         }
     }
 
@@ -1324,9 +1337,9 @@ impl App {
                 self.toast(strings::WENT_TO_VIEW.to_owned())
             }
             Goto::Open(file, framing) => {
-                self.load(&file);
+                let loaded = self.load(&file);
                 let titled = self.retitle();
-                if self.open.is_none() {
+                if !loaded {
                     return titled;
                 }
                 self.place(framing);
@@ -1793,33 +1806,42 @@ fn document(path: &Path) -> bool {
 fn chooser() -> Task<Message> {
     Task::perform(
         async {
-            let dialog = file_chooser::open::Dialog::new()
+            file_chooser::open::Dialog::new()
                 .title(strings::OPEN_TITLE)
-                .filter(FileFilter::new(strings::INSV_FILTER).glob("*.insv"));
-            match dialog.open_files().await {
-                Ok(response) => {
-                    let mut picked = Vec::new();
-                    for url in response.urls() {
-                        println!("chose:  {url}");
-                        match url.to_file_path() {
-                            Ok(path) => picked.push(path),
-                            Err(()) => eprintln!("kjerag: {url} is not a local file"),
-                        }
-                    }
-                    match picked.is_empty() {
-                        true => action::none(),
-                        false => action::app(Message::FilesPicked(picked)),
-                    }
-                }
-                Err(file_chooser::Error::Cancelled) => action::none(),
-                Err(e) => {
-                    eprintln!("kjerag: no file chosen: {e}");
-                    action::none()
+                .filter(FileFilter::new(strings::INSV_FILTER).glob("*.insv"))
+                .open_files()
+                .await
+        },
+        chooser_response,
+    )
+}
+
+fn chooser_response(
+    response: Result<file_chooser::open::MultiFileResponse, file_chooser::Error>,
+) -> cosmic::Action<Message> {
+    match response {
+        Ok(response) => {
+            let mut picked = Vec::new();
+            for url in response.urls() {
+                println!("chose:  {url}");
+                match url.to_file_path() {
+                    Ok(path) => picked.push(path),
+                    Err(()) => eprintln!("kjerag: {url} is not a local file"),
                 }
             }
-        },
-        |action| action,
-    )
+            match picked.is_empty() {
+                true => action::none(),
+                false => action::app(Message::FilesPicked(picked)),
+            }
+        }
+        Err(file_chooser::Error::Cancelled) => action::none(),
+        Err(e) => {
+            // libcosmic's Display only says "open dialog failed". Its source
+            // carries the portal's actual reason, including transport errors.
+            let why = std::error::Error::source(&e).unwrap_or(&e).to_string();
+            action::app(Message::FileChooserFailed(why))
+        }
+    }
 }
 
 /// No `developers([...])`: that setter turns name and email pairs into
@@ -1862,6 +1884,215 @@ fn applied_optical_flow(saved: bool, available: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// App initialization may read COSMIC settings. Keep shell-message tests
+    /// away from the desktop and from real settings, without mutating the
+    /// parallel test runner's environment.
+    #[cfg(target_os = "linux")]
+    fn isolated_app_test(name: &str) -> Option<std::process::Output> {
+        const CHILD: &str = "KJERAG_TEST_APP_CHILD";
+        if std::env::var(CHILD).as_deref() == Ok(name) {
+            return None;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("app::tests::{name}"), "--nocapture"])
+            .env(CHILD, name)
+            .env("PATH", "/proc/self/kjerag-no-launchers")
+            .env("XDG_CONFIG_HOME", "/proc/self/kjerag-no-config")
+            .env("XDG_STATE_HOME", "/proc/self/kjerag-no-state")
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
+            .env_remove("XDG_RUNTIME_DIR")
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("DISPLAY")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        Some(output)
+    }
+
+    /// Exercise the About link's real message handler without opening a browser
+    /// or changing the test process's environment. A child has no launchers,
+    /// settings directory or desktop session; App init opens no media or GPU.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_about_link_spawn_shows_the_raw_error_in_a_toast() {
+        let said = format!(
+            "{} not opened: {}",
+            strings::REPOSITORY_URL,
+            std::io::Error::from_raw_os_error(2)
+        );
+        if let Some(output) =
+            isolated_app_test("failed_about_link_spawn_shows_the_raw_error_in_a_toast")
+        {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains(&format!("kjerag: {said}")), "{stderr}");
+            return;
+        }
+
+        let (mut app, _initial_task) = App::init(
+            Core::default(),
+            Flags {
+                stored: Stored::default(),
+                input: None,
+                at: None,
+            },
+        );
+        let _dismissal = app.update(Message::LaunchUrl(strings::REPOSITORY_URL.to_owned()));
+        assert_eq!(lines(&app.toasts), [said.as_str()]);
+        assert!(!app.alert.is_up());
+        assert!(app.open.is_none());
+    }
+
+    /// Run the real FileOpen task with no session bus. No fake dialog or
+    /// replacement handler: its actual backend failure must reach the alert.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_file_chooser_shows_the_backend_error() {
+        if let Some(output) = isolated_app_test("failed_file_chooser_shows_the_backend_error") {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("kjerag: no file chosen: "), "{stderr}");
+            assert!(!stderr.contains("open dialog failed"), "{stderr}");
+            return;
+        }
+        use cosmic::iced::futures::StreamExt;
+        use cosmic::iced::runtime;
+
+        let (mut app, _initial_task) = App::init(
+            Core::default(),
+            Flags {
+                stored: Stored::default(),
+                input: None,
+                at: None,
+            },
+        );
+        app.open = Some(Open {
+            path: watching(),
+            scene: Scene::blank(),
+            duration: Duration::from_secs(100),
+            position: Duration::from_secs(12),
+        });
+        let scene = &app.open.as_ref().unwrap().scene;
+        let camera = scene.viewpoint().camera();
+        let horizon = scene.horizon();
+        let mut task = runtime::task::into_stream(app.update(Message::FileOpen)).unwrap();
+        let expected = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while let Some(action) = task.next().await {
+                        match action {
+                            runtime::Action::Output(cosmic::Action::App(message)) => {
+                                let _task = app.update(message);
+                            }
+                            runtime::Action::Output(cosmic::Action::None) => {}
+                            _ => panic!("unexpected action from file chooser"),
+                        }
+                    }
+                })
+                .await
+                .expect("missing session bus should fail promptly");
+                let error = match file_chooser::open::Dialog::new().open_files().await {
+                    Err(error) => error,
+                    Ok(_) => panic!("the isolated child has no session bus"),
+                };
+                std::error::Error::source(&error).unwrap().to_string()
+            });
+        let (_, body) = app.alert.showing().expect("file chooser failed silently");
+        assert_eq!(body, expected);
+        let open = app.open.as_ref().expect("chooser failure closed the video");
+        assert_eq!(open.path, watching());
+        assert_eq!(open.duration, Duration::from_secs(100));
+        assert_eq!(open.position, Duration::from_secs(12));
+        assert_eq!(open.scene.viewpoint().camera(), camera);
+        assert_eq!(open.scene.horizon(), horizon);
+        assert!(lines(&app.toasts).is_empty());
+    }
+
+    #[test]
+    fn cancelled_file_chooser_produces_no_app_message() {
+        assert!(matches!(
+            chooser_response(Err(file_chooser::Error::Cancelled)),
+            cosmic::Action::None
+        ));
+    }
+
+    #[test]
+    fn chooser_failure_preserves_backend_or_unwrapped_error_words() {
+        for error in [
+            file_chooser::Error::Open(file_chooser::DialogError::NoResponse),
+            file_chooser::Error::UrlAbsolute,
+        ] {
+            let expected = std::error::Error::source(&error)
+                .unwrap_or(&error)
+                .to_string();
+            let cosmic::Action::App(Message::FileChooserFailed(why)) = chooser_response(Err(error))
+            else {
+                panic!("non-cancellation error was discarded");
+            };
+            assert_eq!(why, expected);
+        }
+    }
+
+    /// Use the real paste handler and real failed open, with a blank Scene
+    /// carrying the old view. The .360 suffix is refused before decoder/GPU
+    /// initialization; an absent .insv would initialize VA-API first.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_pasted_open_preserves_the_existing_view() {
+        if isolated_app_test("failed_pasted_open_preserves_the_existing_view").is_some() {
+            return;
+        }
+        let (mut app, _initial_task) = App::init(
+            Core::default(),
+            Flags {
+                stored: Stored::default(),
+                input: None,
+                at: None,
+            },
+        );
+        let original_lock = app.stored.config.horizon_lock;
+        let bad_view = format!(
+            "/proc/self/kjerag-no-video.360 time=40 yaw=50 pitch=20 fov=60 lock={}",
+            u8::from(!original_lock)
+        );
+        // With no old video, failure must not apply the view either.
+        let _task = app.update(Message::PastedView(Some(bad_view.clone())));
+        assert!(app.open.is_none());
+        assert!(app.alert.is_up());
+        assert!(lines(&app.toasts).is_empty());
+        assert_eq!(app.stored.config.horizon_lock, original_lock);
+
+        app.open = Some(Open {
+            path: watching(),
+            scene: Scene::blank(),
+            duration: Duration::from_secs(100),
+            position: Duration::from_secs(12),
+        });
+        app.hold_horizon();
+        let scene = &app.open.as_ref().unwrap().scene;
+        let camera = scene.viewpoint().camera();
+        let horizon = scene.horizon();
+        let _task = app.update(Message::PastedView(Some(bad_view)));
+        let open = app.open.as_ref().unwrap();
+        // Apply any queued camera change through the widget's real redraw
+        // handler. The blank scene never submits rendering work.
+        let _redraw = <Scene as shader::Program<Message>>::update(
+            &open.scene,
+            &mut (),
+            &Event::Window(window::Event::RedrawRequested(Instant::now())),
+            cosmic::iced::Rectangle::with_size(cosmic::iced::Size::new(800.0, 600.0)),
+            cosmic::iced::mouse::Cursor::Unavailable,
+        );
+        assert_eq!(open.path, watching());
+        assert_eq!(open.position, Duration::from_secs(12));
+        assert_eq!(open.scene.viewpoint().camera(), camera);
+        assert_eq!(open.scene.horizon(), horizon);
+        assert_eq!(app.stored.config.horizon_lock, original_lock);
+        assert!(lines(&app.toasts).is_empty());
+        assert!(app.alert.is_up());
+    }
 
     /// The stock COSMIC template inserts its named header before its named
     /// content when the controls wake. Losing that second child also loses
@@ -2062,6 +2293,23 @@ mod tests {
             Some("VID.insv"),
         ] {
             assert_eq!(Goto::read(text, Some(&open)), Goto::Nothing, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn invalid_view_numbers_are_ignored_even_when_the_file_matches() {
+        let open = watching();
+        for term in [
+            "yaw=NaN",
+            "pitch=inf",
+            "fov=NaN",
+            "time=NaN",
+            "time=inf",
+            "time=1e20",
+        ] {
+            let line = format!("{COPIED} {term}");
+            assert_eq!(read(&line, Some(&open)), Goto::Nothing, "{line}");
+            assert_eq!(read(&line, None), Goto::Nothing, "{line}");
         }
     }
 

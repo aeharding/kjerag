@@ -146,6 +146,22 @@ mod tests {
         assert!(parse_words("a.insv zoom=2").is_err());
     }
 
+    #[test]
+    fn invalid_view_numbers_report_the_failing_term_before_opening() {
+        for term in [
+            "yaw=NaN",
+            "pitch=inf",
+            "fov=-inf",
+            "time=NaN",
+            "time=inf",
+            "time=1e20",
+        ] {
+            let line = format!("a.insv time=1 yaw=0 pitch=0 fov=90 lock=1 {term}");
+            let error = parse_words(&line).expect_err("a malformed view must not open");
+            assert!(error.contains(term), "{error}");
+        }
+    }
+
     /// A view of nothing has nowhere to land, and opening the welcome view
     /// at yaw 144 is not a thing that means anything.
     #[test]

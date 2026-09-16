@@ -92,8 +92,61 @@ vendor warnings, formatting, source/name checks, five startup regressions and
 18 synthetic playback checks. Unavailable GPU/media paths are not hardware
 qualification. Full native UI suites pass 52 X4 and 53 ONE X2 checks with no
 failures; the existing portal, single-file-pair, cross-filesystem hard-link and
-explicit-view-fixture skips remain. Owner branch retest is pending. The installed
-Flatpak is unchanged and no merge or release is claimed for this fix.
+explicit-view-fixture skips remain. The owner then tested the frozen native
+candidate from head `5b87ed90` and reported "Yes, fixed." That verdict covers
+the reported drag-release defect in that exact candidate. It does not assign an
+owner verdict to a later integrated build. The installed Flatpak is unchanged,
+and no merge or release is claimed for this fix.
+
+Issue [#86](https://github.com/aeharding/kjerag/issues/86) has a reproduced
+post-decode pairing inconsistency: the analysis `Walk` matched raw timestamps
+using its first source's clock, while `Reader` normalized each source's origin
+and matched frame indices. A regression through an extracted production queue
+adapter fails with starts 0/900 and passes after per-source normalization. The
+candidate shares the alignment decision without changing Reader's lookahead,
+mapping, stamps or scheduling. Capture discovery and sibling validation now
+also share Reader's existing policy: named pairs stay in lens order, selected
+companions take precedence, unsuitable discovered siblings fall back to one
+lens, and unsuitable explicitly selected pairs are errors.
+
+The device-hidden media gate passes 122 tests with four ignored and no
+failures. Generated CPU-only MOVs exercise
+real container admission, software decode and repeated forward/backward demux
+seeks through Walk's production clock/queue adapter with starts 0/60000. Both
+lenses deliver every expected frame after each cue. A separate H.264 MOV probe
+found extra preroll with the existing raw seek target but no wrong at-or-after
+packet; seek targets are unchanged. These checks do not cover hardware decode,
+negative-origin containers or arbitrary-origin playback. The final-source
+device-hidden workspace gate passes 1,566 tests with 53 ignored and no failures,
+plus formatting, full workspace Clippy, naming and dependency-source checks.
+Unavailable GPU/media returns are not hardware coverage.
+
+The separate public Reader/Walk hardware comparison now passes on both named
+X4 Air and ONE X2 captures. It checks 15 near-start deliveries per camera across
+five forward/backward/repeated cues: indices, normalized times, lens counts and
+nonempty downloaded Walk planes agree. This is not image equality, full-clip or
+arbitrary-origin hardware qualification. Native player UI suites pass 51 X4 and
+52 ONE X2 checks with zero failures, including visible playback, real late
+seeks, pause/resume, spaced-path view restoration and import-failure recovery.
+Both cameras' motion captures were visually inspected. The exact-view, portal
+and cross-mount paired-fixture checks retain their documented skips; the
+separate Radeon shader/Rust-twin test passes.
+
+No new kernel entries or scoped memory-limit/OOM events appeared. GPU heap
+counters varied across the UI suites; these are bounded functional checks, not
+a resource-containment or performance verdict. The X4 outer wrapper rejected
+the harness's routine pointer-helper rebuild after all 51 checks passed; both
+helper identities were authenticated, and the frozen player and source hashes
+remained unchanged. ONE X2 then passed the complete wrapper with that helper.
+Private receipts remain in `scratch/frame-alignment-86-20260915/`.
+
+Independent review confirms that production capture discovery, sibling
+selection, admission and alignment now have single shared implementations,
+meeting #86's capture-pairing scope without unifying decoder/delivery APIs.
+PR [#216](https://github.com/aeharding/kjerag/pull/216) has all eight CI jobs
+passing on runtime head `2df9eea1`; final documentation-head CI is a separate
+merge gate. No installed app/package/release change, seam-quality change or
+performance improvement is claimed.
 
 Both actual 0.3.1 x86_64 distribution routes independently pass 40 X4 Air and
 44 ONE X2 installed UI checks. Their reported views match the accepted
@@ -150,6 +203,55 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **File-chooser failures, issue
+  [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
+  task reproduces a silent missing-session-bus failure. The branch routes
+  non-cancellation errors to the existing alert and terminal, preserving the
+  underlying portal error instead of libcosmic's generic dialog wrapper.
+  Cancellation remains a no-op and a failed chooser retains the current video.
+  Real Cancel-button clicks on the installed GTK and COSMIC pickers each
+  returned response code 1 with no files, observed on isolated software-rendered
+  sessions. COSMIC required a nested COSMIC compositor; cage alone lacks its
+  required protocols. This is qualified for those installed backends, not every
+  portal implementation. Playback and stitching arithmetic are unchanged.
+- **Non-clobber frame saves, issue
+  [#222](https://github.com/aeharding/kjerag/issues/222):** actual-save CPU
+  regressions reproduce an existing capture being overwritten after filename
+  collisions and a dangling filename symlink being followed. Saving now encodes
+  first, reserves a new file exclusively and advances numbered names without
+  falling back to an occupied original. JPEG bytes and ordinary names are
+  unchanged. Concurrent captures and raw noncollision IO errors are covered;
+  this does not add atomic complete-file publication or crash durability.
+- **Failed pasted-view opens, issue
+  [#220](https://github.com/aeharding/kjerag/issues/220):** the real paste
+  handler could mistake the retained old video for a successful new open,
+  then change its time, camera and horizon and show a false success toast.
+  A failing-before application-message regression reproduces the unwanted
+  seek. Loading now returns an explicit success result and only a successful
+  target open applies the pasted view. A normal-window UI regression checks
+  failure while actual footage remains open; stitching is unchanged.
+- **View-reference numeric validation, issue
+  [#219](https://github.com/aeharding/kjerag/issues/219):** CPU regressions
+  reproduce malformed NaN angles reaching the real camera-pointing path and
+  invalid times being silently reset to zero. The shared parser now rejects
+  non-finite values and failed Duration conversions before CLI/paste admission.
+  Negative finite times still clamp to zero; ordinary view terms and raw path
+  handling are unchanged. This is an input-validation fix, not a reproduced
+  footage defect or a stitching/performance change.
+- **About-link spawn errors, issue
+  [#131](https://github.com/aeharding/kjerag/issues/131):** branch work routes
+  the existing raw launcher-spawn error to both the terminal and an on-screen
+  toast. A device-hidden regression through the actual application message
+  handler reproduces the missing notification with no launchers in PATH.
+  Detached launching remains unchanged: a launcher that starts and later fails
+  is outside this error API's coverage. This does not alter playback or the
+  separate file-chooser cancellation behavior in #141.
+- **Legacy band comments, issue
+  [#179](https://github.com/aeharding/kjerag/issues/179):** three stale comments
+  now describe retained instrument measurements rather than the deleted
+  `band_bend` draw path. Confidence decays when a channel is refused while its
+  measurement remains available. This is documentation-only: no executable
+  Rust/WGSL, stitching, color, scheduling or installed-player behavior changes.
 - **Single signed release build, issue
   [#146](https://github.com/aeharding/kjerag/issues/146):** branch work replaces
   the independent unsigned-download build with app bundles exported from the

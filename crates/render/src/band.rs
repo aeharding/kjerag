@@ -1095,12 +1095,9 @@ impl Cell {
 /// What the band says at one direction: both axes, together (issue #103,
 /// stage 5).
 ///
-/// One type rather than two arguments because they come out of one
-/// correlation, at one candidate shift, and a caller that took one without the
-/// other would be drawing half a measurement. `Default` is the picture stage 1
-/// drew: no bend on either axis.
-///
-/// WGSL twin: the two locals `band_bend` computes before it builds its offset.
+/// Both axes travel together for one direction; `Default` is zero on both.
+/// Used by `Reframe::reading_at` for instrument-side lookups. The draw no longer
+/// consumes either displacement.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Reading {
     /// Along [`Ring::epi`], in radians. Depth, plus what the calibration left
@@ -2284,9 +2281,8 @@ fn settle(cell: u32, at: Ring) {
 
   // What decays where a channel is refused is the EVIDENCE and not the
   // measurement: the reading was true when it was taken and may be true still,
-  // but nothing is confirming it, and the pass applies a reading in proportion
-  // to how well it is being confirmed (`band_bend`). So the bend fades out on
-  // its own, and a direction that starts correlating again has its answer
+  // but nothing is confirming it. The evidence fades while the reading is
+  // retained, so a direction that starts correlating again has its answer
   // already in hand rather than having to learn it twice.
   //
   // The epipolar channel fades at the SAME rate the direction learns, which is

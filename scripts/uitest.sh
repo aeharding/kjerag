@@ -853,6 +853,11 @@ with_media() {
 	copies_the_view
 	returns_to_the_copied_view
 	drag_release_over_controls
+	if [ "$paused" = yes ]; then
+		failed_pasted_open_preserves_the_view
+	else
+		skip "a failed pasted open preserves the view (pause failed)"
+	fi
 	flips_the_horizon
 	survives_fullscreen
 	fullscreen_holds_the_view
@@ -1809,6 +1814,124 @@ returns_to_the_copied_view() {
 		return
 	fi
 	pass "$check (${copied#"$media "})"
+}
+
+# Set by failed_pasted_open_preserves_the_view and read by its predicates.
+failed_pasted_open_path=
+failed_pasted_open_lines=0
+failed_pasted_open_prior=
+
+more_failed_pasted_open_lines() {
+	[ "$(grep -Fc "$failed_pasted_open_path not shown:" "$log")" -gt \
+		"$failed_pasted_open_lines" ]
+}
+
+failed_pasted_open_alert_gone() {
+	local shot
+	shot=$(grab "$1") || return 1
+	same_picture "$failed_pasted_open_prior" "$shot"
+}
+
+# A printed view can name another file. If that file cannot open, its framing
+# belongs to nothing: the video already on screen must keep its frame, camera
+# and horizon. Exercise the real clipboard message while the picture is held,
+# and require the raw open failure before treating the paste as delivered.
+failed_pasted_open_preserves_the_view() {
+	local check="a failed pasted open preserves the view"
+	local before after alerted final alert_problem= current_time current_yaw current_pitch current_fov
+	local current_lock bad_time bad_yaw bad_pitch bad_fov bad_lock goto_before
+	if [ "$clipboard_write" = no ]; then
+		skip "$check (no wl-copy)"
+		return
+	fi
+
+	view_lines=$(grep -c '^view:' "$log")
+	if ! press_until more_view_lines failed-pasted-open-before -k i; then
+		alive || lost "$check"
+		fail "$check" "no baseline view line after $PRESSES presses of i" "log: $log"
+		return
+	fi
+	before=$(view_line)
+	sleep "$TOAST_GONE"
+	if ! still_picture failed-pasted-open-before; then
+		fail "$check" "the baseline view was not held" \
+			"$session/failed-pasted-open-before-a.ppm" \
+			"$session/failed-pasted-open-before-b.ppm"
+		return
+	fi
+	failed_pasted_open_prior=$session/failed-pasted-open-before-b.ppm
+
+	current_time=$(printf '%s\n' "$before" | sed -n 's/.* time=\([^ ]*\) .*/\1/p')
+	current_yaw=$(printf '%s\n' "$before" | sed -n 's/.* yaw=\([^ ]*\) .*/\1/p')
+	current_pitch=$(printf '%s\n' "$before" | sed -n 's/.* pitch=\([^ ]*\) .*/\1/p')
+	current_fov=$(printf '%s\n' "$before" | sed -n 's/.* fov=\([^ ]*\) .*/\1/p')
+	current_lock=$(printf '%s\n' "$before" | sed -n 's/.* lock=\([01]\)$/\1/p')
+	[ "$current_time" = 40.000 ] && bad_time=41.000 || bad_time=40.000
+	[ "$current_yaw" = 50.00 ] && bad_yaw=51.00 || bad_yaw=50.00
+	[ "$current_pitch" = 20.00 ] && bad_pitch=21.00 || bad_pitch=20.00
+	[ "$current_fov" = 60.00 ] && bad_fov=61.00 || bad_fov=60.00
+	[ "$current_lock" = 1 ] && bad_lock=0 || bad_lock=1
+
+	failed_pasted_open_path=/proc/self/kjerag-no-video.insv
+	failed_pasted_open_lines=$(grep -Fc "$failed_pasted_open_path not shown:" "$log")
+	goto_before=$(grep -c '^goto:' "$log")
+	if ! env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		wl-copy "$failed_pasted_open_path time=$bad_time yaw=$bad_yaw pitch=$bad_pitch fov=$bad_fov lock=$bad_lock" \
+		2>>"$log"; then
+		fail "$check" "wl-copy could not inject the missing-file view" "log: $log"
+		return
+	fi
+	if ! press_until more_failed_pasted_open_lines failed-pasted-open -M ctrl -k v -m ctrl; then
+		alive || lost "$check"
+		fail "$check" "no raw open failure after $PRESSES presses of ctrl+v" \
+			"$(grep -F "$failed_pasted_open_path" "$log" || echo 'the missing path was never reported')" \
+			"log: $log"
+		return
+	fi
+
+	alerted=$(grab failed-pasted-open-alert) || {
+		fail "$check" "the failure alert could not be captured" "log: $log"
+		return
+	}
+	if same_picture "$failed_pasted_open_prior" "$alerted"; then
+		alert_problem="the raw failure was printed but no alert appeared"
+	fi
+
+	if ! press_until failed_pasted_open_alert_gone failed-pasted-open-dismissed -k Escape; then
+		alive || lost "$check"
+		fail "$check" "Escape did not restore the held picture after the alert" \
+			"$failed_pasted_open_prior" "$session/failed-pasted-open-alert.ppm" \
+			"$session/failed-pasted-open-dismissed.ppm"
+		return
+	fi
+	view_lines=$(grep -c '^view:' "$log")
+	if ! press_until more_view_lines failed-pasted-open-after -k i; then
+		alive || lost "$check"
+		fail "$check" "no view line after dismissing the failure" "log: $log"
+		return
+	fi
+	after=$(view_line)
+	sleep "$TOAST_GONE"
+	if ! still_picture failed-pasted-open-after; then
+		fail "$check" "the restored view was not held" \
+			"$session/failed-pasted-open-after-a.ppm" \
+			"$session/failed-pasted-open-after-b.ppm"
+		return
+	fi
+	final=$session/failed-pasted-open-after-b.ppm
+
+	if [ "$after" != "$before" ]; then
+		fail "$check" "before: $before" "after:  $after"
+	elif [ "$(grep -c '^goto:' "$log")" -ne "$goto_before" ]; then
+		fail "$check" "the failed paste added a goto line" "log: $log"
+	elif ! same_picture "$failed_pasted_open_prior" "$final"; then
+		fail "$check" "the view line survived but the picture changed" \
+			"$failed_pasted_open_prior" "$final"
+	elif [ -n "$alert_problem" ]; then
+		fail "$check" "$alert_problem" "$failed_pasted_open_prior" "$alerted"
+	else
+		pass "$check ($before; alert: $alerted)"
+	fi
 }
 
 # Issue #174: run the real copy/paste path with whitespace in both directory
