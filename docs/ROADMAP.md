@@ -92,11 +92,34 @@ packet; seek targets are unchanged. These checks do not cover hardware decode,
 negative-origin containers or arbitrary-origin playback. The final-source
 device-hidden workspace gate passes 1,566 tests with 53 ignored and no failures,
 plus formatting, full workspace Clippy, naming and dependency-source checks.
-Unavailable GPU/media returns are not hardware coverage. Independent review
-found no blocker and identified public hardware delivery as the remaining
-coverage boundary; a separately ignored Reader/Walk comparison is ready for
-both cameras. Both-camera runtime gates remain pending, so #86 stays open.
-No installed app/package/release change or performance improvement is claimed.
+Unavailable GPU/media returns are not hardware coverage.
+
+The separate public Reader/Walk hardware comparison now passes on both named
+X4 Air and ONE X2 captures. It checks 15 near-start deliveries per camera across
+five forward/backward/repeated cues: indices, normalized times, lens counts and
+nonempty downloaded Walk planes agree. This is not image equality, full-clip or
+arbitrary-origin hardware qualification. Native player UI suites pass 51 X4 and
+52 ONE X2 checks with zero failures, including visible playback, real late
+seeks, pause/resume, spaced-path view restoration and import-failure recovery.
+Both cameras' motion captures were visually inspected. The exact-view, portal
+and cross-mount paired-fixture checks retain their documented skips; the
+separate Radeon shader/Rust-twin test passes.
+
+No new kernel entries or scoped memory-limit/OOM events appeared. GPU heap
+counters varied across the UI suites; these are bounded functional checks, not
+a resource-containment or performance verdict. The X4 outer wrapper rejected
+the harness's routine pointer-helper rebuild after all 51 checks passed; both
+helper identities were authenticated, and the frozen player and source hashes
+remained unchanged. ONE X2 then passed the complete wrapper with that helper.
+Private receipts remain in `scratch/frame-alignment-86-20260915/`.
+
+Independent review confirms that production capture discovery, sibling
+selection, admission and alignment now have single shared implementations,
+meeting #86's capture-pairing scope without unifying decoder/delivery APIs.
+PR [#216](https://github.com/aeharding/kjerag/pull/216) has all eight CI jobs
+passing on runtime head `2df9eea1`; final documentation-head CI is a separate
+merge gate. No installed app/package/release change, seam-quality change or
+performance improvement is claimed.
 
 Both actual 0.3.1 x86_64 distribution routes independently pass 40 X4 Air and
 44 ONE X2 installed UI checks. Their reported views match the accepted
