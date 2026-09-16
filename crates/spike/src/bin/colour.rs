@@ -1495,6 +1495,7 @@ fn marked(picture: &Picture, reframe: &Reframe, size: Size) -> Picture {
 /// a degree at the view the owner complained at, which is around where a
 /// gradient stops being an edge and starts being shading.
 const LAGS: [usize; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
+const DECOY_CENTRES: [f64; 4] = [-12.0, -8.0, 8.0, 12.0];
 
 /// The contrast an eye is held to. Weber, so it is a ratio and not a count of
 /// codes: 1 percent is the standard just-noticeable difference on a large flat
@@ -1520,6 +1521,10 @@ const JND: f64 = 0.01;
 /// residual reads five times sharper at the owner's fov 114 than at the fov 20
 /// stage 5 was judged on, and nothing about the correction changed between them
 /// (6.5).
+///
+/// Limitation: empty bins are compacted before lag indexing. The lag describes
+/// delivered-pixel distance only for dense profiles; sparse profiles span a
+/// larger distance. This legacy diagnostic is not a resident-player quality gate.
 #[derive(Clone, Copy, Debug, Default)]
 struct Eye {
     /// The steepest local Weber contrast at each of [`LAGS`], worst channel.
@@ -1644,6 +1649,8 @@ fn binned(
 /// view of ploughed soil that is larger than the artifact; the same pair
 /// measured across the seam is the handover plus that texture, and the decoy
 /// circle is what says how much of it is which.
+/// A reading requires every requested lag and both side fits. Missing evidence
+/// is `None`, distinct from a measured flat profile with zero contrast.
 fn eye_at(
     planes: &[Vec<f64>; 3],
     distance: &[Option<f64>],
@@ -1662,7 +1669,8 @@ fn eye_at(
         ..Eye::default()
     };
     for (slot, lag) in LAGS.iter().enumerate() {
-        let mut worst = 0.0f64;
+        // No sampled pair is missing evidence, not measured zero contrast.
+        let mut worst: Option<f64> = None;
         for low in 0..bins.len().saturating_sub(*lag) {
             let high = low + lag;
             // Straddling, and by the degrees rather than by the index: a bin
@@ -1681,10 +1689,10 @@ fn eye_at(
                 if mean <= 0.0 {
                     continue;
                 }
-                worst = worst.max((b - a).abs() / mean);
+                worst = Some(worst.unwrap_or(0.0).max((b - a).abs() / mean));
             }
         }
-        out.steepest[slot] = worst;
+        out.steepest[slot] = worst?;
     }
     let at = |from: f64, to: f64| -> Option<(f64, f64)> {
         let rows: Vec<(f64, f64)> = bins
@@ -1711,13 +1719,28 @@ fn eye_at(
         }
         (variance > 0.0).then(|| (mean_y - covariance / variance * mean_x, mean_y))
     };
-    if let (Some((low, level_low)), Some((high, level_high))) = (at(-reach, -1.5), at(1.5, reach)) {
-        let mean = 0.5 * (level_low + level_high);
-        if mean > 0.0 {
-            out.step = (high - low) / mean;
+    let (low, level_low) = at(-reach, -1.5)?;
+    let (high, level_high) = at(1.5, reach)?;
+    let mean = 0.5 * (level_low + level_high);
+    if mean <= 0.0 {
+        return None;
+    }
+    out.step = (high - low) / mean;
+    Some(out)
+}
+
+/// All four named controls define the excess. A partial set is a different
+/// statistic; neither missing-as-zero nor a smaller denominator is valid.
+fn eye_excess(here: &Eye, away: &[Option<Eye>; DECOY_CENTRES.len()]) -> Option<[f64; LAGS.len()]> {
+    let mut sums = [0.0; LAGS.len()];
+    for read in away {
+        for (sum, contrast) in sums.iter_mut().zip(read.as_ref()?.steepest) {
+            *sum += contrast;
         }
     }
-    Some(out)
+    Some(std::array::from_fn(|slot| {
+        here.steepest[slot] - sums[slot] / away.len() as f64
+    }))
 }
 
 /// BT.709's luma weights, which is what the three channels are pooled into
@@ -1796,28 +1819,22 @@ fn eye(reframe: &Reframe, picture: &Picture, size: Size, window: (f64, f64, f64,
             100.0 * read.steepest[5],
         );
     };
-    let mut away: Vec<Eye> = Vec::new();
     // Eight and twelve degrees off, and not the six this used until
     // 2026-08-06: a decoy has to straddle content the handover never touched,
     // and the handover plus the bend it carries reaches 6.60 degrees now that
     // the crossover is 8 (`kjerag_render::band::reach`). A control inside the
     // thing it is a control for reads the artifact and subtracts it from the
     // excess line below.
-    for centre in [-12.0, -8.0, 8.0, 12.0] {
-        if let Some(read) = eye_at(&planes, &seam, size, reach, centre) {
-            show(&format!("{centre:+.0} deg off"), &read);
-            away.push(read);
+    let away = DECOY_CENTRES.map(|centre| eye_at(&planes, &seam, size, reach, centre));
+    for (centre, read) in DECOY_CENTRES.iter().zip(&away) {
+        let name = format!("{centre:+.0} deg off");
+        match read {
+            Some(read) => show(&name, read),
+            None => println!("    {name:<14}unavailable: not enough sampled profile"),
         }
     }
     show("THE SEAM", &here);
-    if !away.is_empty() {
-        let mean = |slot: usize| {
-            away.iter().map(|read| read.steepest[slot]).sum::<f64>() / away.len() as f64
-        };
-        let excess: Vec<f64> = [0usize, 1, 3, 5]
-            .iter()
-            .map(|slot| here.steepest[*slot] - mean(*slot))
-            .collect();
+    if let Some(excess) = eye_excess(&here, &away) {
         println!(
             "    {:<14}{:>+9.2}%{:>+9.2}%{:>+9.2}%{:>+9.2}%\n\
              \x20   ^ what the seam has that this content does not have anywhere. A\n\
@@ -1828,9 +1845,11 @@ fn eye(reframe: &Reframe, picture: &Picture, size: Size, window: (f64, f64, f64,
             "the excess",
             100.0 * excess[0],
             100.0 * excess[1],
-            100.0 * excess[2],
             100.0 * excess[3],
+            100.0 * excess[5],
         );
+    } else {
+        println!("    the excess    unavailable: all four off-seam controls are required");
     }
     println!("\n  controls, the same statistic through the same geometry:");
     match eye_at(&planes, &decoy, size, reach, 0.0) {
@@ -1838,7 +1857,7 @@ fn eye(reframe: &Reframe, picture: &Picture, size: Size, window: (f64, f64, f64,
             "    a circle with no handover on it, which is what the scene contributes\n      {}",
             there.report()
         ),
-        None => println!("    the decoy circle is outside the window on this view"),
+        None => println!("    the decoy circle is unavailable: not enough sampled profile"),
     }
     let rate = here.degrees_per_pixel;
     for (ratio, pixels) in [(1.0, 1.0), (1.02, 1.0), (1.05, 1.0), (1.05, 64.0)] {
@@ -2481,6 +2500,98 @@ const USAGE: &str = "usage: colour <file.insv|export.mp4> [mode=field|profile|st
      [from=seconds] [count=frames] [places=n] [patches=n] [keep=r] [fit=1] [verbose=1] \
      [yaw=deg] [pitch=deg] [fov=deg] [size=px] [lock=0] [out=dir] [tag=name] [reach=deg] \
      [rows=lo:hi] [cols=lo:hi] [box=left:top:right:bottom] [table=table.txt]";
+
+#[cfg(test)]
+mod eye_tests {
+    use super::*;
+
+    // Dense one-row profiles avoid the independent sparse-bin spacing issue.
+    fn profile(from: i32, to: i32) -> (Size, Vec<Option<f64>>, [Vec<f64>; 3]) {
+        let distance: Vec<_> = (from..=to).map(|at| Some(f64::from(at) / 16.0)).collect();
+        let size = Size {
+            width: distance.len() as u32,
+            height: 1,
+        };
+        let planes = std::array::from_fn(|_| vec![100.0; distance.len()]);
+        (size, distance, planes)
+    }
+
+    #[test]
+    fn flat_profile_is_measured_zero_not_missing() {
+        let (size, distance, planes) = profile(-128, 128);
+        let read = eye_at(&planes, &distance, size, 8.0, 0.0).unwrap();
+        assert_eq!(read.steepest, [0.0; LAGS.len()]);
+        assert_eq!(read.step, 0.0);
+    }
+
+    #[test]
+    fn outside_controls_are_missing_not_zero() {
+        let (size, distance, planes) = profile(-128, 128);
+        for centre in [-12.0, 12.0] {
+            assert!(eye_at(&planes, &distance, size, 8.0, centre).is_none());
+        }
+    }
+
+    #[test]
+    fn missing_long_lag_is_not_zero() {
+        // 127 bins allow the shorter lags, but no 128-bin pair exists.
+        let (size, distance, planes) = profile(-63, 63);
+        assert!(eye_at(&planes, &distance, size, 8.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn missing_side_fit_is_not_zero() {
+        // Every lag can straddle zero, but the negative trend is absent.
+        let (size, distance, planes) = profile(-1, 128);
+        assert!(eye_at(&planes, &distance, size, 8.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn default_reach_cannot_report_four_control_excess() {
+        let (size, distance, planes) = profile(-256, 256);
+        let here = eye_at(&planes, &distance, size, 8.0, 0.0).unwrap();
+        let away = DECOY_CENTRES.map(|centre| eye_at(&planes, &distance, size, 8.0, centre));
+        assert!(away[1].is_some() && away[2].is_some());
+        assert!(away[0].is_none() && away[3].is_none());
+        assert!(eye_excess(&here, &away).is_none());
+    }
+
+    #[test]
+    fn complete_controls_preserve_four_way_mean() {
+        let (size, distance, mut planes) = profile(-256, 256);
+        for plane in &mut planes {
+            for (value, at) in plane.iter_mut().zip(&distance) {
+                *value += at.unwrap().powi(2);
+            }
+        }
+        let here = eye_at(&planes, &distance, size, 16.0, 0.0).unwrap();
+        let away = DECOY_CENTRES.map(|centre| eye_at(&planes, &distance, size, 16.0, centre));
+        let measured = eye_excess(&here, &away).unwrap();
+        for (slot, excess) in measured.iter().enumerate() {
+            let expected = here.steepest[slot]
+                - away
+                    .iter()
+                    .map(|read| read.unwrap().steepest[slot])
+                    .sum::<f64>()
+                    / 4.0;
+            assert_eq!(*excess, expected);
+        }
+        assert!(measured.iter().any(|value| *value != 0.0));
+        for missing in 0..away.len() {
+            let mut incomplete = away;
+            incomplete[missing] = None;
+            assert!(eye_excess(&here, &incomplete).is_none());
+        }
+    }
+
+    #[test]
+    fn flat_controls_preserve_measured_zero_excess() {
+        let (size, distance, planes) = profile(-256, 256);
+        let here = eye_at(&planes, &distance, size, 16.0, 0.0).unwrap();
+        let away = DECOY_CENTRES.map(|centre| eye_at(&planes, &distance, size, 16.0, centre));
+        assert_eq!(eye_excess(&here, &away), Some([0.0; LAGS.len()]));
+    }
+}
 
 #[cfg(test)]
 mod option_tests {
