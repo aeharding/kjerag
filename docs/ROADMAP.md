@@ -176,6 +176,12 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **Legacy band comments, issue
+  [#179](https://github.com/aeharding/kjerag/issues/179):** three stale comments
+  now describe retained instrument measurements rather than the deleted
+  `band_bend` draw path. Confidence decays when a channel is refused while its
+  measurement remains available. This is documentation-only: no executable
+  Rust/WGSL, stitching, color, scheduling or installed-player behavior changes.
 - **Single signed release build, issue
   [#146](https://github.com/aeharding/kjerag/issues/146):** branch work replaces
   the independent unsigned-download build with app bundles exported from the
