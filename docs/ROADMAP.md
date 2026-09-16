@@ -225,8 +225,16 @@ color-update policy is selected.
   including unavailable-GPU/media returns, not hardware qualification. All six
   CI jobs pass on `5fc99fb2`. Native X3 playback captures are upright and moving;
   its UI suite has 46 passes and one exact-picture clipboard-return failure
-  whose cause remains unproven. A host monitor/dock hotplug also coincides with
-  an AMD display warning, so further GPU checks are paused for health review.
+  whose broad difference is now isolated to retained generic chromatic history,
+  with a smaller seam-anchor restart component. A bounded real-Scene diagnostic
+  restores the exact source and reproduces both original UI captures
+  byte-for-byte. This is not a new clipboard or orientation arithmetic defect.
+  Issue #170's branch copied-view harness correction separates exact displayed
+  source/view restoration from history-dependent pixels without changing
+  stitching or adding a tolerance. The owner cleared the earlier monitor/dock
+  health pause. The integrated device-hidden workspace passes 1,585 tests with
+  53 ignored, and portable harness positive/negative controls pass. These are
+  not hardware tests; fresh real-camera qualification remains pending.
   Owner review, established-camera UI regressions and cumulative Flatpak
   qualification remain pending. This does not qualify all X3 firmware or add
   X3 to the resident stitcher.

@@ -68,8 +68,9 @@ shows upright, moving footage in the captured opening sequence. Its UI suite
 finishes with 47 total checks: 46 pass and one fails. The failed clipboard
 round trip restores the same view text but changes picture bytes slightly in
 the lower part of the view. The source-frame index was not recorded, and the
-cause is not established. This is not a fully passing UI qualification; the
-test was not weakened. Portal and cross-mount paired-file checks also skip.
+cause was not established in that run. This was not a fully passing UI
+qualification; the test was not weakened. Portal and cross-mount paired-file
+checks also skip.
 The native shader/Rust twin passes on the Radeon GPU.
 
 Owner-visible review, both established-camera UI regressions and cumulative
@@ -86,5 +87,48 @@ The later native UI run used a private compositor and null audio, but a host
 monitor/dock hotplug coincided with an AMD display timeout and warning in the
 desktop compositor's display-commit path. Host GPU-memory counters changed.
 That run does not establish unchanged host health or a player leak. Further
-GPU qualification is paused pending health review; the installed app and main
-remain unchanged.
+GPU qualification was paused pending health review. The owner subsequently
+confirmed that the desktop was normal and resumed bounded playback checks.
+The installed app still excludes this candidate.
+
+## Copied-view mismatch isolated, September 16
+
+A separate diagnostic drives the real generic Scene through consecutive source
+frames, a seek away and a return to the original source. Each normal draw
+authenticates offered/displayed opaque frame identity. Both target deliveries
+have index 238 and exact PTS 7.941266666 seconds; their opaque identities differ
+because they come from different decode epochs. Normal before/after images
+reproduce **both** retained native UI captures byte-for-byte throughout the
+original control-free test area. This does not retroactively recover the old
+UI run's unrecorded delivery history.
+
+Holding the generic chromatic field neutral removes the broad difference while
+leaving a smaller seam-anchor restart component. The actual applied normal
+fields differ, and the plain shader consumes that field but not the legacy
+pooled tone/disparity measurements. Of 716,800 test-area pixels, the normal
+round trip changes 108,295; the neutral-field control changes 6,442 near the
+bottom right. There are 102,444 normal changes where the control is identical,
+with a maximum difference of five RGB8 codes. These are causal diagnostics,
+not a visual-quality threshold or owner acceptance.
+
+The check passed in one bounded hardware process. No new kernel messages or
+scoped memory-limit events appeared, and post-exit GPU heap counters matched
+preflight. Host memory pressure varied; this is not driver containment or
+performance qualification. The test-only source is retained in local commit
+`256cdb16`, with private receipts and authenticated outputs in
+`scratch/x3-seek-history-20260916/`. No player arithmetic was changed.
+
+The navigation test must therefore distinguish exact source/view restoration
+from history-dependent rendering. The branch harness correction keeps exact
+source index/time and camera/horizon checks, authenticates the currently shown
+delivery, rejects a retained away picture and requires a stable paused result.
+Seek-history pixel differences remain recorded for review, not hidden by a
+tolerance or mask. Non-seek pixel-equality checks remain unchanged. This work
+addresses only the copied-view portion of issue #170; its separate toast and
+sound observations remain open. The integrated device-hidden workspace reports
+1,585 passes, 53 ignored and no failures, including unavailable GPU/media
+returns rather than additional hardware coverage. Formatting, full Clippy,
+vendor warnings, naming and dependency-source checks pass. Six portable
+copied-view contract tests cover positive and negative controls; the existing
+playback, startup, controls-wake and isolated-runner tests also pass. Fresh
+candidate UI qualification and owner review remain pending.
