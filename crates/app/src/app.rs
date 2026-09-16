@@ -2112,6 +2112,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn invalid_view_numbers_are_ignored_even_when_the_file_matches() {
+        let open = watching();
+        for term in [
+            "yaw=NaN",
+            "pitch=inf",
+            "fov=NaN",
+            "time=NaN",
+            "time=inf",
+            "time=1e20",
+        ] {
+            let line = format!("{COPIED} {term}");
+            assert_eq!(read(&line, Some(&open)), Goto::Nothing, "{line}");
+            assert_eq!(read(&line, None), Goto::Nothing, "{line}");
+        }
+    }
+
     fn lines(toasts: &Toasts) -> Vec<&str> {
         toasts
             .lines

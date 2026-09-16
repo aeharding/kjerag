@@ -176,6 +176,14 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **View-reference numeric validation, issue
+  [#219](https://github.com/aeharding/kjerag/issues/219):** CPU regressions
+  reproduce malformed NaN angles reaching the real camera-pointing path and
+  invalid times being silently reset to zero. The shared parser now rejects
+  non-finite values and failed Duration conversions before CLI/paste admission.
+  Negative finite times still clamp to zero; ordinary view terms and raw path
+  handling are unchanged. This is an input-validation fix, not a reproduced
+  footage defect or a stitching/performance change.
 - **About-link spawn errors, issue
   [#131](https://github.com/aeharding/kjerag/issues/131):** branch work routes
   the existing raw launcher-spawn error to both the terminal and an on-screen
