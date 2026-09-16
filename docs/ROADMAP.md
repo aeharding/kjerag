@@ -238,6 +238,30 @@ Frame-time spikes and sustained source lag are limitations, not accepted
 performance tradeoffs. No seam-refresh cadence reduction or invented gradual
 color-update policy is selected.
 
+## Retired queue entries
+
+- **Application identity, issue
+  [#66](https://github.com/aeharding/kjerag/issues/66):** the owner-approved
+  `dev.harding.Kjerag` identity landed in `9c878337` / PR #104. The app,
+  Flatpak manifest and desktop, metainfo, icon and MIME resources agree;
+  [DISTRIBUTION.md section 3.6](DISTRIBUTION.md#36-the-app-id-is-devhardingkjerag-and-the-whole-tree-says-so)
+  records the settled choice. No new rename or settings migration is pending.
+- **Direct pointer testing, issue
+  [#84](https://github.com/aeharding/kjerag/issues/84):** the native Wayland
+  pointer helper landed in `28e7e442` via PR #128. The UI harness now injects
+  real clicks, held scrubber drags and drag-release gestures. This retires the
+  missing-input instrument, not every UI defect or all input coverage.
+- **Duplicate seam-pool samples, issue
+  [#156](https://github.com/aeharding/kjerag/issues/156):** the fitted seam pool
+  was removed in `c72579af`, delivered by PR #183. `ConfigState` retains only
+  recent files and ignores old pool keys. This issue is obsolete by removal,
+  not repaired by adding deduplication or reviving per-capture fitting.
+
+The generic decoder-arrival wake is also merged, but issue #136 remains open:
+its original NAS symptom is not established as fixed by that narrower change.
+This queue reconciliation does not retire #186's performance requirements,
+change installed code or add qualification claims.
+
 ## Remaining work
 
 - **File-chooser failures, issue
