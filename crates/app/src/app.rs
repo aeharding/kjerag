@@ -168,6 +168,9 @@ pub enum Message {
     FileClose,
     FileLoad(PathBuf),
     FileOpen,
+    /// The chooser could not open or return its selection. Cancellation is
+    /// handled before this message; this carries the backend's own error.
+    FileChooserFailed(String),
     FileOpenRecent(usize),
     /// What the chooser came back with, which is one file or several: a
     /// capture written one lens per file is picked as two, because inside a
@@ -570,6 +573,7 @@ impl cosmic::Application for App {
                 return self.opened(&first.clone(), alongside, now);
             }
             Message::FileOpen => return chooser(),
+            Message::FileChooserFailed(why) => self.alert.raise(Failure::Chooser(why)),
             Message::FileOpenRecent(index) => {
                 let Some(path) = self.stored.state.recent_files.get(index).cloned() else {
                     return Task::none();
@@ -1798,33 +1802,42 @@ fn document(path: &Path) -> bool {
 fn chooser() -> Task<Message> {
     Task::perform(
         async {
-            let dialog = file_chooser::open::Dialog::new()
+            file_chooser::open::Dialog::new()
                 .title(strings::OPEN_TITLE)
-                .filter(FileFilter::new(strings::INSV_FILTER).glob("*.insv"));
-            match dialog.open_files().await {
-                Ok(response) => {
-                    let mut picked = Vec::new();
-                    for url in response.urls() {
-                        println!("chose:  {url}");
-                        match url.to_file_path() {
-                            Ok(path) => picked.push(path),
-                            Err(()) => eprintln!("kjerag: {url} is not a local file"),
-                        }
-                    }
-                    match picked.is_empty() {
-                        true => action::none(),
-                        false => action::app(Message::FilesPicked(picked)),
-                    }
-                }
-                Err(file_chooser::Error::Cancelled) => action::none(),
-                Err(e) => {
-                    eprintln!("kjerag: no file chosen: {e}");
-                    action::none()
+                .filter(FileFilter::new(strings::INSV_FILTER).glob("*.insv"))
+                .open_files()
+                .await
+        },
+        chooser_response,
+    )
+}
+
+fn chooser_response(
+    response: Result<file_chooser::open::MultiFileResponse, file_chooser::Error>,
+) -> cosmic::Action<Message> {
+    match response {
+        Ok(response) => {
+            let mut picked = Vec::new();
+            for url in response.urls() {
+                println!("chose:  {url}");
+                match url.to_file_path() {
+                    Ok(path) => picked.push(path),
+                    Err(()) => eprintln!("kjerag: {url} is not a local file"),
                 }
             }
-        },
-        |action| action,
-    )
+            match picked.is_empty() {
+                true => action::none(),
+                false => action::app(Message::FilesPicked(picked)),
+            }
+        }
+        Err(file_chooser::Error::Cancelled) => action::none(),
+        Err(e) => {
+            // libcosmic's Display only says "open dialog failed". Its source
+            // carries the portal's actual reason, including transport errors.
+            let why = std::error::Error::source(&e).unwrap_or(&e).to_string();
+            action::app(Message::FileChooserFailed(why))
+        }
+    }
 }
 
 /// No `developers([...])`: that setter turns name and email pairs into
@@ -1924,6 +1937,98 @@ mod tests {
         assert_eq!(lines(&app.toasts), [said.as_str()]);
         assert!(!app.alert.is_up());
         assert!(app.open.is_none());
+    }
+
+    /// Run the real FileOpen task with no session bus. No fake dialog or
+    /// replacement handler: its actual backend failure must reach the alert.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_file_chooser_shows_the_backend_error() {
+        if let Some(output) = isolated_app_test("failed_file_chooser_shows_the_backend_error") {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("kjerag: no file chosen: "), "{stderr}");
+            assert!(!stderr.contains("open dialog failed"), "{stderr}");
+            return;
+        }
+        use cosmic::iced::futures::StreamExt;
+        use cosmic::iced::runtime;
+
+        let (mut app, _initial_task) = App::init(
+            Core::default(),
+            Flags {
+                stored: Stored::default(),
+                input: None,
+                at: None,
+            },
+        );
+        app.open = Some(Open {
+            path: watching(),
+            scene: Scene::blank(),
+            duration: Duration::from_secs(100),
+            position: Duration::from_secs(12),
+        });
+        let scene = &app.open.as_ref().unwrap().scene;
+        let camera = scene.viewpoint().camera();
+        let horizon = scene.horizon();
+        let mut task = runtime::task::into_stream(app.update(Message::FileOpen)).unwrap();
+        let expected = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while let Some(action) = task.next().await {
+                        match action {
+                            runtime::Action::Output(cosmic::Action::App(message)) => {
+                                let _task = app.update(message);
+                            }
+                            runtime::Action::Output(cosmic::Action::None) => {}
+                            _ => panic!("unexpected action from file chooser"),
+                        }
+                    }
+                })
+                .await
+                .expect("missing session bus should fail promptly");
+                let error = match file_chooser::open::Dialog::new().open_files().await {
+                    Err(error) => error,
+                    Ok(_) => panic!("the isolated child has no session bus"),
+                };
+                std::error::Error::source(&error).unwrap().to_string()
+            });
+        let (_, body) = app.alert.showing().expect("file chooser failed silently");
+        assert_eq!(body, expected);
+        let open = app.open.as_ref().expect("chooser failure closed the video");
+        assert_eq!(open.path, watching());
+        assert_eq!(open.duration, Duration::from_secs(100));
+        assert_eq!(open.position, Duration::from_secs(12));
+        assert_eq!(open.scene.viewpoint().camera(), camera);
+        assert_eq!(open.scene.horizon(), horizon);
+        assert!(lines(&app.toasts).is_empty());
+    }
+
+    #[test]
+    fn cancelled_file_chooser_produces_no_app_message() {
+        assert!(matches!(
+            chooser_response(Err(file_chooser::Error::Cancelled)),
+            cosmic::Action::None
+        ));
+    }
+
+    #[test]
+    fn chooser_failure_preserves_backend_or_unwrapped_error_words() {
+        for error in [
+            file_chooser::Error::Open(file_chooser::DialogError::NoResponse),
+            file_chooser::Error::UrlAbsolute,
+        ] {
+            let expected = std::error::Error::source(&error)
+                .unwrap_or(&error)
+                .to_string();
+            let cosmic::Action::App(Message::FileChooserFailed(why)) = chooser_response(Err(error))
+            else {
+                panic!("non-cancellation error was discarded");
+            };
+            assert_eq!(why, expected);
+        }
     }
 
     /// Use the real paste handler and real failed open, with a blank Scene
