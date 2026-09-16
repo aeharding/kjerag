@@ -82,7 +82,8 @@ established cause of playback hitches. The device-hidden full workspace passes
 1,598 tests with 53 ignored and no failures, including unavailable-device
 returns rather than hardware coverage. Full formatting, Clippy, vendor warning,
 naming and dependency-source gates pass. Independent source review approves
-the bounded guard. The installed Flatpak is unchanged.
+the bounded guard. PR [#230](https://github.com/aeharding/kjerag/pull/230)
+merged at `b4af2fa8`; the qualified private Flatpak below includes the guard.
 
 Issue [#227](https://github.com/aeharding/kjerag/issues/227) covers the generic
 player's end-of-timeline seek. Its inclusive duration endpoint requested a
@@ -101,7 +102,10 @@ new kernel entries or scoped memory-limit events. Captures were inspected.
 The device-hidden workspace reports 1,595 passes, 53 ignored and no failures,
 including unavailable-device returns rather than hardware coverage. These are
 focused native checks, not full UI suites, Flatpak delivery, a performance
-result or a stitching/color change. The separate X3 horizon review is unchanged.
+result or a stitching/color change. PR
+[#228](https://github.com/aeharding/kjerag/pull/228) merged at `f0eee9e1`;
+the qualified private Flatpak below includes the fix. The separate X3 horizon
+review is unchanged.
 
 Issue [#163](https://github.com/aeharding/kjerag/issues/163) corrects missing
 evidence in the legacy `colour` profile diagnostic. Out-of-window controls,
@@ -649,25 +653,29 @@ change installed code or add qualification claims.
 
 ### Current private installation, September 16
 
-Merged main `1d5e9e46` is now installed as a private test Flatpak. It includes
-the owner-accepted drag-release fix and the merged capture-pairing, file-opening,
-view-validation, screenshot-safety and error-reporting changes. The selected
-stitching/color arithmetic, source cadence, dependencies and Flatpak manifest
-are unchanged from the previously accepted `90721189` package. The unqualified
+The installed private test Flatpak was built from `f557ee59`, whose tree is
+identical to merged main `748ea008`. Relative to the previous `1d5e9e46`
+package, its only production changes are PR #228's generic endpoint-seek and
+terminal-wait correction and PR #230's NaN-volume guard. It retains the
+owner-accepted drag-release fix. Selected stitching/color arithmetic, source
+cadence, dependencies and the Flatpak manifest remain unchanged; the unqualified
 X3 horizon candidate in PR #212 remains excluded.
 
 The actual bundle passed its separate payload audit. Both before installation
 and through the actual installed package, separate runtime suites passed
-43 X4 Air and 44 ONE X2 checks with zero failures. Every launched player
-executable was authenticated, and both motion captures from each of the four
-suites were inspected. The documented isolated sound-device, portal, exact-view,
-import-fault and cross-mount pair-fixture skips remain. This is functional
-qualification, not new owner acceptance, a capacity result or a public release.
+43 X4 Air, 44 ONE X2 and six focused X3 endpoint checks with zero failures.
+Every launched player executable was authenticated; both motion captures from
+each full suite and both X3 endpoint captures were inspected. The documented
+isolated sound-device, portal, exact-view, import-fault and cross-mount pair-fixture
+skips remain. X3 coverage is generic endpoint behavior, not horizon or seam
+qualification. This is functional qualification, not new owner acceptance,
+a capacity result or a public release.
 Exact identities, health qualifications and rollback are recorded in
 [MERGE_READINESS.md](MERGE_READINESS.md#current-private-test-package-september-16).
 
-The previous accepted `90721189` bundle is retained for rollback. Installation
-preserved data, runtimes and remote settings; the origin remains `kjerag-origin`.
+The immediate prior `1d5e9e46` bundle and earlier owner-accepted `90721189`
+bundle are retained for rollback. Installation preserved data, runtimes and
+remote settings; the origin remains `kjerag-origin`.
 Normal signed-channel restoration remains due after test review. Issue #186's
 performance limitations and #187's capacity/handoff decision remain open.
 
