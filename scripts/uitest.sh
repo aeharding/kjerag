@@ -1807,12 +1807,12 @@ holds_the_command_line_view() {
 # key, stale away picture or flat backdrop cannot qualify the transaction.
 returns_to_the_copied_view() {
 	local check="ctrl+v goes back to the copied view"
-	local copied tag=goto there away back_a back_b
+	local copied tag=${2:-goto} there away back_a back_b
 	local copied_index copied_time_ns history
 	local return_attempt=0 returned_ready=no
 	if [ "${1:-}" = printed ]; then
 		check="ctrl+v goes back to the printed view"
-		tag=goto-printed
+		tag=${2:-goto-printed}
 		if [ "$clipboard_write" = no ]; then
 			skip "$check (no wl-copy)"
 			return
@@ -2098,8 +2098,8 @@ spaced_view_reference() {
 		return
 	fi
 	copies_the_view
-	returns_to_the_copied_view
-	returns_to_the_copied_view printed
+	returns_to_the_copied_view copied view-paths-goto
+	returns_to_the_copied_view printed view-paths-goto-printed
 	exits_clean
 }
 

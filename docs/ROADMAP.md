@@ -234,9 +234,15 @@ color-update policy is selected.
   stitching or adding a tolerance. The owner cleared the earlier monitor/dock
   health pause. The integrated device-hidden workspace passes 1,585 tests with
   53 ignored, and portable harness positive/negative controls pass. These are
-  not hardware tests; fresh real-camera qualification remains pending.
-  Owner review, established-camera UI regressions and cumulative Flatpak
-  qualification remain pending. This does not qualify all X3 firmware or add
+  not hardware tests. Separate native suites at `e9ecc01a` subsequently pass
+  53 X3, 53 X4 Air and 54 ONE X2 checks, with zero failures. Both motion
+  captures per camera were inspected; copied-view checks authenticate exact
+  source/view restoration and held output, reporting seek-history differences
+  separately. No new kernel messages or scoped runtime memory-limit events
+  appear; host GPU/memory counters vary. This is functional qualification,
+  not performance or a historical desktop-freeze fix. Owner review,
+  final-head CI and cumulative Flatpak qualification remain pending.
+  This does not qualify all X3 firmware or add
   X3 to the resident stitcher.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen

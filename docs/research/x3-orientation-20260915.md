@@ -128,7 +128,37 @@ addresses only the copied-view portion of issue #170; its separate toast and
 sound observations remain open. The integrated device-hidden workspace reports
 1,585 passes, 53 ignored and no failures, including unavailable GPU/media
 returns rather than additional hardware coverage. Formatting, full Clippy,
-vendor warnings, naming and dependency-source checks pass. Six portable
+vendor warnings, naming and dependency-source checks pass. Nine portable
 copied-view contract tests cover positive and negative controls; the existing
 playback, startup, controls-wake and isolated-runner tests also pass. Fresh
-candidate UI qualification and owner review remain pending.
+candidate UI qualification is recorded below; owner review remains pending.
+
+## Integrated native qualification
+
+Frozen source `e9ecc01a` passes separate native UI suites: 53 X3, 53 X4 Air
+and 54 ONE X2 checks, with zero failures. Each suite runs alone with resource
+bounds, a private compositor and null audio. App, helper and source identities
+are verified before and after. All three copied/printed-view round trips pass
+per camera, along with playback, pause/resume, real input routing and import
+failure recovery. Portal, cross-mount paired-file and explicit-view fixture
+checks retain their documented skips. The native Radeon shader/Rust twin also
+passes; it does not authenticate a Flatpak shader build.
+
+The initial X3 round trip names source 237 at exactly 7.9079 seconds on both
+sides with current delivery identity; it reports different history pixels and
+a stable returned picture. The corresponding X4 and ONE X2 checks report
+identical pixels as well as exact source/view restoration. Both motion captures
+from each camera were inspected, as were retained round-trip pictures. The X3
+main-loop captures were overwritten by the later spaced-path fixture's reused
+names; its live verdict and source receipts remain, but the final files show
+the source-zero spaced-path check. Subsequent artifact-prefix cleanup prevents
+this overwrite without changing navigation assertions. X4 and ONE X2 main-loop
+captures were separately preserved before the later fixture ran.
+
+No new kernel messages or scoped runtime memory-limit events appeared. GPU
+heap and host-memory counters varied, so this is not a driver-safety or leak
+verdict. These 1280x720 functional checks do not establish throughput, the
+4.17 ms frame-time target, all-camera support or whole-recording horizon
+stability. The native candidate is offered for owner review. Final-head CI and
+cumulative Flatpak qualification remain separate; no X3 merge or installation
+has occurred. Private receipts are in `scratch/x3-view-qualification-20260916/`.

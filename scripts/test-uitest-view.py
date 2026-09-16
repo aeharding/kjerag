@@ -101,6 +101,7 @@ append_report() {{
         receipt='index=238 time_ns=7941266666 current=0'
     fi
     if [ "$scenario" = missing-copy-receipt ] ||
+        [ "$scenario" = old-pair-before-boundary ] ||
         {{ [ "$scenario" = missing-return ] && [ "$report_number" -ge 2 ]; }}; then
         printf 'view:   %s\n' "$view" >>"$log"
     elif [ "$scenario" = stale-pair-copy ] ||
@@ -109,6 +110,9 @@ append_report() {{
     else
         printf 'view:   %s\ndisplay: %s\n' "$view" "$receipt" >>"$log"
         [ "$scenario" != later-noise ] || printf 'worker: unrelated completion\n' >>"$log"
+        if [ "$scenario" = newer-unpaired-return ] && [ "$report_number" -ge 2 ]; then
+            printf 'view:   %s\n' "$wrong" >>"$log"
+        fi
     fi
 }}
 
@@ -133,10 +137,10 @@ grab() {{
     local name=$1 value path
     path="$session/$name.ppm"
     case "$name" in
-    goto-there) value=A ;;
-    goto-away) if [ "$wandered" = yes ]; then value=AWAY; else value=A; fi ;;
-    goto-back-a) value=B ;;
-    goto-back-b) value=B ;;
+    goto-there|custom-there) value=A ;;
+    goto-away|custom-away) if [ "$wandered" = yes ]; then value=AWAY; else value=A; fi ;;
+    goto-back-a|custom-back-a) value=B ;;
+    goto-back-b|custom-back-b) value=B ;;
     *) return 1 ;;
     esac
     case "$scenario:$name" in
@@ -159,7 +163,14 @@ malformed-copy) receipt_a='index=238 time_ns=nope current=1' ;;
 unavailable-copy) receipt_a='unavailable' ;;
 stale-copy) receipt_a='index=238 time_ns=7941266666 current=0' ;;
 esac
-returns_to_the_copied_view
+if [ "$scenario" = old-pair-before-boundary ]; then
+    printf 'view:   %s\ndisplay: %s\n' "$fixture_view" "$receipt_a" >>"$log"
+fi
+if [ "$scenario" = custom-prefix ]; then
+    returns_to_the_copied_view copied custom
+else
+    returns_to_the_copied_view
+fi
 """
         return subprocess.run(
             ["bash", "-c", body],
@@ -189,6 +200,22 @@ returns_to_the_copied_view
         self.assert_pass("valid-history-variance")
         self.assert_pass("later-noise")
         self.assert_pass("recovery-after-stale")
+
+    def test_custom_artifact_prefix_keeps_fixture_evidence_distinct(self) -> None:
+        result = self.run_case("custom-prefix")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PASS|ctrl+v goes back", result.stdout)
+        for suffix in ("there", "away", "back-a", "back-b"):
+            self.assertTrue(
+                (self.artifact / "custom-prefix" / f"custom-{suffix}.ppm").is_file(),
+                suffix,
+            )
+
+    def test_old_pair_before_boundary_cannot_rescue_missing_new_receipt(self) -> None:
+        self.assert_fail("old-pair-before-boundary", "no fresh paired")
+
+    def test_newer_unpaired_view_invalidates_older_valid_pair(self) -> None:
+        self.assert_fail("newer-unpaired-return", "did not reach a fresh")
 
     def test_rejects_missing_interrupted_or_malformed_receipts(self) -> None:
         for scenario, reason in (
