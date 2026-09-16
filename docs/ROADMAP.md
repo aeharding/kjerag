@@ -176,6 +176,17 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **File-chooser failures, issue
+  [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
+  task reproduces a silent missing-session-bus failure. The branch routes
+  non-cancellation errors to the existing alert and terminal, preserving the
+  underlying portal error instead of libcosmic's generic dialog wrapper.
+  Cancellation remains a no-op and a failed chooser retains the current video.
+  Real Cancel-button clicks on the installed GTK and COSMIC pickers each
+  returned response code 1 with no files, observed on isolated software-rendered
+  sessions. COSMIC required a nested COSMIC compositor; cage alone lacks its
+  required protocols. This is qualified for those installed backends, not every
+  portal implementation. Playback and stitching arithmetic are unchanged.
 - **Non-clobber frame saves, issue
   [#222](https://github.com/aeharding/kjerag/issues/222):** actual-save CPU
   regressions reproduce an existing capture being overwritten after filename
