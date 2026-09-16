@@ -5,6 +5,7 @@
 //! cargo run --release -p kjerag-spike --bin pointer -- 1280 720 640 360
 //! cargo run --release -p kjerag-spike --bin pointer -- 1280 720 1252 696 click
 //! cargo run --release -p kjerag-spike --bin pointer -- 1280 720 350 696 drag 858 696
+//! cargo run --release -p kjerag-spike --bin pointer -- 1280 720 640 360 drag-release-move 900 360 1252 696
 //! cargo run --release -p kjerag-spike --bin pointer -- 2256 1504 1128 730 pan 12 1000 160
 //! ```
 //!
@@ -48,6 +49,11 @@ const SETTLE: Duration = Duration::from_millis(500);
 /// a click no toolkit would miss, but a click a person could not make either.
 const HELD: Duration = Duration::from_millis(120);
 
+/// How long `drag-release-move` leaves each reported phase available for the
+/// harness to capture. Both holds are bounded so a failed capture cannot leave
+/// the helper waiting indefinitely.
+const PHASE_HOLD: Duration = Duration::from_secs(2);
+
 /// Linux's own code for the left button, which is what the protocol asks for.
 const BTN_LEFT: u32 = 0x110;
 
@@ -63,7 +69,16 @@ const PAN_COORDINATE_SCALE: u32 = 256;
 enum Action {
     Move,
     Click,
-    Drag { x: u32, y: u32 },
+    Drag {
+        x: u32,
+        y: u32,
+    },
+    DragReleaseMove {
+        release_x: u32,
+        release_y: u32,
+        move_x: u32,
+        move_y: u32,
+    },
     Pan(Pan),
 }
 
@@ -110,7 +125,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match action {
             Action::Move | Action::Click => {}
-            Action::Drag { x: to_x, y: to_y } => {
+            Action::Drag { x: to_x, y: to_y }
+            | Action::DragReleaseMove {
+                release_x: to_x,
+                release_y: to_y,
+                ..
+            } => {
                 // Multiple pointer updates while held exercise the real slider's
                 // keyframe previews before the exact release, not a seek API.
                 for step in 1..=20i64 {
@@ -131,6 +151,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pointer.button(at(), BTN_LEFT, wl_pointer::ButtonState::Released);
         pointer.frame();
         queue.roundtrip(&mut found)?;
+
+        if let Action::DragReleaseMove { move_x, move_y, .. } = action {
+            println!("pointer: released");
+            sleep(PHASE_HOLD);
+            pointer.motion_absolute(at(), move_x, move_y, width, height);
+            pointer.frame();
+            queue.roundtrip(&mut found)?;
+            println!("pointer: moved-unpressed");
+            sleep(PHASE_HOLD);
+        }
     }
 
     sleep(SETTLE);
@@ -162,6 +192,38 @@ fn action(args: &[String], width: u32, height: u32, x: u32, y: u32) -> Result<Ac
                 .parse()
                 .map_err(|_| "drag destination y must be an unsigned integer".to_owned())?,
         }),
+        Some("drag-release-move") if args.len() == 9 => {
+            let release_x = args[5]
+                .parse()
+                .map_err(|_| "drag release x must be an unsigned integer".to_owned())?;
+            let release_y = args[6]
+                .parse()
+                .map_err(|_| "drag release y must be an unsigned integer".to_owned())?;
+            let move_x = args[7]
+                .parse()
+                .map_err(|_| "unpressed move x must be an unsigned integer".to_owned())?;
+            let move_y = args[8]
+                .parse()
+                .map_err(|_| "unpressed move y must be an unsigned integer".to_owned())?;
+            if width == 0 || height == 0 {
+                return Err("drag-release-move output dimensions must be nonzero".to_owned());
+            }
+            if x >= width || y >= height {
+                return Err("drag-release-move start must be inside the output".to_owned());
+            }
+            if release_x >= width || release_y >= height {
+                return Err("drag release must be inside the output".to_owned());
+            }
+            if move_x >= width || move_y >= height {
+                return Err("unpressed move must be inside the output".to_owned());
+            }
+            Ok(Action::DragReleaseMove {
+                release_x,
+                release_y,
+                move_x,
+                move_y,
+            })
+        }
         Some("pan") if args.len() == 8 => {
             let duration_seconds = args[5].parse::<u64>().map_err(|_| {
                 "pan duration must be an integer from 1 through 60 seconds".to_owned()
@@ -201,7 +263,7 @@ fn action(args: &[String], width: u32, height: u32, x: u32, y: u32) -> Result<Ac
 }
 
 fn usage() -> String {
-    "usage: pointer <width> <height> <x> <y> [click | drag <x> <y> | pan <seconds> <event-hz> <amplitude-px>]".to_owned()
+    "usage: pointer <width> <height> <x> <y> [click | drag <x> <y> | drag-release-move <release-x> <release-y> <move-x> <move-y> | pan <seconds> <event-hz> <amplitude-px>]".to_owned()
 }
 
 fn run_pan(
@@ -414,6 +476,104 @@ mod tests {
                 action(&valid, width, height, 1128, 730),
                 Err("pan output is too large for subpixel motion".to_owned())
             );
+        }
+    }
+
+    #[test]
+    fn drag_release_move_parses_valid_places() {
+        let drag_release_move = args(&[
+            "1280",
+            "720",
+            "640",
+            "360",
+            "drag-release-move",
+            "900",
+            "360",
+            "1252",
+            "696",
+        ]);
+        assert_eq!(
+            action(&drag_release_move, 1280, 720, 640, 360),
+            Ok(Action::DragReleaseMove {
+                release_x: 900,
+                release_y: 360,
+                move_x: 1252,
+                move_y: 696,
+            })
+        );
+    }
+
+    #[test]
+    fn drag_release_move_rejects_invalid_inputs() {
+        let valid = args(&[
+            "1280",
+            "720",
+            "640",
+            "360",
+            "drag-release-move",
+            "900",
+            "360",
+            "1252",
+            "696",
+        ]);
+        for (width, height, x, y) in [
+            (0, 720, 0, 360),
+            (1280, 0, 640, 0),
+            (1280, 720, 1280, 360),
+            (1280, 720, 640, 720),
+        ] {
+            assert!(action(&valid, width, height, x, y).is_err());
+        }
+
+        for words in [
+            vec!["1280", "720", "640", "360", "drag-release-move"],
+            vec![
+                "1280",
+                "720",
+                "640",
+                "360",
+                "drag-release-move",
+                "900",
+                "360",
+                "1252",
+                "696",
+                "extra",
+            ],
+            vec![
+                "1280",
+                "720",
+                "640",
+                "360",
+                "drag-release-move",
+                "invalid",
+                "360",
+                "1252",
+                "696",
+            ],
+            vec![
+                "1280",
+                "720",
+                "640",
+                "360",
+                "drag-release-move",
+                "900",
+                "720",
+                "1252",
+                "696",
+            ],
+            vec![
+                "1280",
+                "720",
+                "640",
+                "360",
+                "drag-release-move",
+                "900",
+                "360",
+                "1280",
+                "696",
+            ],
+        ] {
+            assert!(action(&args(&words), 1280, 720, 640, 360).is_err());
         }
     }
 
