@@ -10,6 +10,7 @@
 # Set KJERAG_UITEST_ONLY=stalls to run only the unsandboxed import-failure
 # checks against supplied test media.
 # Set KJERAG_UITEST_ONLY=view-paths for the spaced-filename clipboard regression.
+# Set KJERAG_UITEST_ONLY=drag-release for the video-to-controls drag regression.
 #
 # The same checks run against the installed Flatpak with
 # KJERAG_FLATPAK=dev.harding.Kjerag, which is how a bundle is checked before
@@ -205,12 +206,15 @@ case ${KJERAG_UITEST_ONLY:-} in
 view-paths)
 	[ -n "$media" ] || die "KJERAG_UITEST_ONLY=view-paths needs test media"
 	;;
+drag-release)
+	[ -n "$media" ] || die "KJERAG_UITEST_ONLY=drag-release needs test media"
+	;;
 stalls)
 	[ -n "$media" ] || die "KJERAG_UITEST_ONLY=stalls needs test media"
 	[ -z "${KJERAG_FLATPAK:-}" ] ||
 		die "KJERAG_UITEST_ONLY=stalls cannot preload into a Flatpak"
 	;;
-*) die "KJERAG_UITEST_ONLY must be stalls or view-paths when it is set" ;;
+*) die "KJERAG_UITEST_ONLY must be stalls, view-paths or drag-release when it is set" ;;
 esac
 
 # The session went away with checks still to run: a dead compositor cannot
@@ -848,6 +852,7 @@ with_media() {
 	a_still_says_where_it_was_looking
 	copies_the_view
 	returns_to_the_copied_view
+	drag_release_over_controls
 	if [ "$paused" = yes ]; then
 		failed_pasted_open_preserves_the_view
 	else
@@ -1466,6 +1471,108 @@ selected_seek_fixture() {
 	"$SELECTED_SEEK_X2_MEDIA" | "$SELECTED_SEEK_X4_MEDIA") return 0 ;;
 	*) return 1 ;;
 	esac
+}
+
+# Read the shown view within a pointer phase's two-second hold. Unlike key(),
+# this waits for the actual report rather than sleeping a full second per key.
+drag_view() {
+	local before attempt tick
+	before=$(grep -c '^view:' "$log")
+	for attempt in 1 2; do
+		env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" wtype -k i 2>>"$log" || return 1
+		for tick in {1..20}; do
+			if [ "$(grep -c '^view:' "$log")" -gt "$before" ]; then
+				view_line
+				return 0
+			fi
+			sleep 0.025
+		done
+	done
+	return 1
+}
+
+drag_phase() {
+	local pid=$1 phase=$2 report=$3 tick
+	for tick in {1..100}; do
+		kill -0 "$pid" 2>/dev/null || return 1
+		grep -qx "pointer: $phase" "$report" && return 0
+		sleep 0.025
+	done
+	return 1
+}
+
+# Issue #151: a video grab must end even when an overlay captures the release.
+# Keep ONE pointer alive through the drag, release and later bare motion.
+# Separate pointer invocations emit CursorLeft and can hide the defect.
+drag_release_over_controls() {
+	local check="releasing a video drag over the scrubber ends the camera grab"
+	local before released moved pid report=$session/drag-release-pointer.log
+	local problem= artifact
+	before=$(drag_view) || {
+		fail "$check" "no starting view report" "log: $log"
+		return
+	}
+	# A copy toast must not intercept the initiating press in the video.
+	sleep "$TOAST_GONE"
+	env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		"$poker" 1280 720 640 300 drag-release-move 640 "$CONTROL_ROW" 900 300 \
+		>"$report" 2>>"$log" &
+	pid=$!
+	if ! drag_phase "$pid" released "$report"; then
+		problem="the pointer did not report its release"
+	elif ! released=$(drag_view); then
+		problem="no view report after release"
+	else
+		artifact=$(grab drag-released) || problem="the released picture could not be captured"
+		# Slow capture/reporting must not silently compare two post-move views.
+		if grep -qx 'pointer: moved-unpressed' "$report"; then
+			problem="the released capture exceeded the pointer phase"
+		fi
+	fi
+	if [ -z "$problem" ]; then
+		if ! drag_phase "$pid" moved-unpressed "$report"; then
+			problem="the pointer did not report its unpressed move"
+		elif ! moved=$(drag_view); then
+			problem="no view report after unpressed movement"
+		else
+			artifact=$(grab drag-moved-unpressed) || problem="the moved picture could not be captured"
+		fi
+	fi
+	if [ -n "$problem" ]; then
+		kill -TERM "$pid" 2>/dev/null || true
+		wait "$pid" 2>/dev/null || true
+		fail "$check" "$problem" "pointer: $report" "log: $log"
+		return
+	fi
+	if ! wait "$pid"; then
+		fail "$check" "the pointer gesture failed" "pointer: $report"
+	elif [ "$before" = "$released" ]; then
+		fail "$check" "the held drag did not move the camera, so release was not exercised" "log: $log"
+	elif [ "$(printf '%s' "$before" | sed -n 's/.* time=\([^ ]*\).*/\1/p')" != \
+		"$(printf '%s' "$released" | sed -n 's/.* time=\([^ ]*\).*/\1/p')" ]; then
+		fail "$check" "the source frame was not held during the drag" "log: $log"
+	elif [ "$released" != "$moved" ]; then
+		fail "$check" "released: $released" "unpressed: $moved" \
+			"$session/drag-released.ppm" "$session/drag-moved-unpressed.ppm"
+	else
+		pass "$check ($artifact)"
+	fi
+}
+
+drag_release_check() {
+	boot drag-release "$media" "${play_args[@]}"
+	if ! await_visible_playback; then
+		fail "drag-release playback prerequisite" "no visible playing picture" "log: $log"
+	elif ! press_until still_picture drag-release-paused -k space; then
+		fail "drag-release pause prerequisite" "no held picture" "log: $log"
+	else
+		drag_release_over_controls
+	fi
+	if quit; then
+		pass "the drag-release session quits normally"
+	else
+		fail "the drag-release session quits normally" "log: $log"
+	fi
 }
 
 # Regression for the owner's unusable scrubber: actual mouse motion with the
@@ -3114,6 +3221,8 @@ twin_guard() {
 
 if [ "${KJERAG_UITEST_ONLY:-}" = view-paths ]; then
 	spaced_view_reference
+elif [ "${KJERAG_UITEST_ONLY:-}" = drag-release ]; then
+	drag_release_check
 elif [ "${KJERAG_UITEST_ONLY:-}" = stalls ]; then
 	stalls
 else

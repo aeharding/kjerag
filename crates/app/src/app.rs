@@ -912,6 +912,12 @@ impl cosmic::Application for App {
                     }),
                     event::Status::Ignored,
                 ) => Some(Message::Key(modifiers, physical_key, key)),
+                // `opaque` shields the control overlays without publishing a
+                // message for their blank padding. Keep every left press as
+                // pointer activity so that padding still rearms auto-hide.
+                (Event::Mouse(MouseEvent::ButtonPressed(cosmic::iced::mouse::Button::Left)), _) => {
+                    Some(Message::ShowControls)
+                }
                 (Event::Mouse(MouseEvent::CursorMoved { .. }), _) => Some(Message::ShowControls),
                 _ => None,
             }),
@@ -1634,19 +1640,20 @@ fn backdrop(fullscreen: bool) -> theme::Container<'static> {
 }
 
 /// One row of the overlay: cosmic-player's padding and background
-/// (`src/main.rs:2052-2060`), in a mouse area that re-arms the auto-hide
-/// timer when the row itself is used.
+/// (`src/main.rs:2052-2060`). The opaque wrapper lets child controls handle
+/// their events, captures presses so they cannot start a camera grab below,
+/// and leaves unowned releases for that grab to end in original event order.
+/// The window subscription rearms the auto-hide timer for every left press,
+/// including the row's blank padding.
 fn bar<'a>(
     row: impl Into<Element<'a, Message>>,
     spacing: cosmic_theme::Spacing,
 ) -> Element<'a, Message> {
-    widget::mouse_area(
+    cosmic::iced::widget::opaque(
         widget::container(row)
             .padding([spacing.space_xxs, spacing.space_xs])
             .class(theme::Container::WindowBackground),
     )
-    .on_press(Message::ShowControls)
-    .into()
 }
 
 /// The speaker button, which says what the sound is doing and is the way to
@@ -1692,17 +1699,14 @@ fn volume_popup(
         );
     widget::row::with_capacity(2)
         .push(widget::space::horizontal())
-        .push(
-            widget::mouse_area(
-                widget::container(
-                    widget::container(inside).padding([spacing.space_xxs, spacing.space_m]),
-                )
-                .padding(1)
-                .class(theme::Container::Dropdown)
-                .width(Length::Fixed(VOLUME_POPUP)),
+        .push(cosmic::iced::widget::opaque(
+            widget::container(
+                widget::container(inside).padding([spacing.space_xxs, spacing.space_m]),
             )
-            .on_press(Message::ShowControls),
-        )
+            .padding(1)
+            .class(theme::Container::Dropdown)
+            .width(Length::Fixed(VOLUME_POPUP)),
+        ))
         .into()
 }
 
