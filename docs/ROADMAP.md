@@ -176,6 +176,14 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **Non-clobber frame saves, issue
+  [#222](https://github.com/aeharding/kjerag/issues/222):** actual-save CPU
+  regressions reproduce an existing capture being overwritten after filename
+  collisions and a dangling filename symlink being followed. Saving now encodes
+  first, reserves a new file exclusively and advances numbered names without
+  falling back to an occupied original. JPEG bytes and ordinary names are
+  unchanged. Concurrent captures and raw noncollision IO errors are covered;
+  this does not add atomic complete-file publication or crash durability.
 - **Failed pasted-view opens, issue
   [#220](https://github.com/aeharding/kjerag/issues/220):** the real paste
   handler could mistake the retained old video for a successful new open,
