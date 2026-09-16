@@ -717,8 +717,16 @@ impl Player {
     /// [`Accuracy::Keyframe`] is what a slider being dragged asks for and
     /// [`Accuracy::Exact`] is what letting go of it does (issue #5). Both
     /// return immediately: the seek happens on the decode thread, and
-    /// [`Player::is_seeking`] is true until its first frame arrives.
+    /// [`Player::is_seeking`] is true until its first frame arrives or the
+    /// decoder ends without one. Known-length captures clamp to their final
+    /// frame: the scrubber's duration endpoint is just past that frame.
     pub fn seek(&mut self, to: Cue, accuracy: Accuracy) {
+        let to = match self.timing.frames.checked_sub(1) {
+            Some(last) => Cue::Index(to.index(self.timing).min(last)),
+            // Zero means the container did not report a frame count, not
+            // that frame zero is the only position that may be requested.
+            None => to,
+        };
         self.cancel_decode_wait();
         self.replay_target = None;
         self.replay_clock_held = false;
@@ -932,6 +940,9 @@ impl Player {
                             return None;
                         }
                         *ended = epochs.is_newest(tag);
+                        if *ended {
+                            epochs.give_up();
+                        }
                         return None;
                     }
                     Ok(Note::Failed(e)) => {
@@ -953,6 +964,7 @@ impl Player {
                             epochs.give_up();
                             return None;
                         }
+                        epochs.give_up();
                         *ended = true;
                         return None;
                     }
@@ -2919,6 +2931,78 @@ mod tests {
         assert!(!bench.player.is_seeking());
     }
 
+    #[test]
+    fn replay_decoder_disconnect_after_acceptance_is_a_terminal_error() {
+        let mut bench = Bench::new();
+        bench.player.replay_to(Cue::Index(9), true).unwrap();
+        assert_eq!(bench.replay_orders(), [(1, 9)]);
+        drop(bench.notes);
+        let error = bench.player.pump(Instant::now()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "ONE X2 replay decoder stopped before target frame 9"
+        );
+        assert!(!bench.player.is_seeking());
+    }
+
+    #[test]
+    fn generic_end_seek_lands_the_last_known_frame() {
+        for accuracy in [Accuracy::Keyframe, Accuracy::Exact] {
+            for by_time in [false, true] {
+                let mut bench = Bench::new();
+                let now = Instant::now();
+                let timing = bench.player.timing();
+                let cue = if by_time {
+                    Cue::Time(timing.duration())
+                } else {
+                    Cue::Index(timing.frames + 1000)
+                };
+                bench.player.seek(cue, accuracy);
+                assert_eq!(bench.asked(), [(timing.frames - 1, accuracy)]);
+                assert!(bench.player.is_seeking());
+                bench.decoded(1, timing.frames - 1);
+                assert_eq!(bench.redraw(now), Some(timing.frames - 1));
+                assert!(!bench.player.is_seeking());
+            }
+        }
+    }
+
+    #[test]
+    fn generic_end_seek_preserves_unknown_length_requests() {
+        for cue in [Cue::Index(900), Cue::Time(Duration::from_secs(30))] {
+            let mut bench = Bench::new();
+            bench.player.timing.frames = 0;
+            let expected = cue.index(bench.player.timing());
+            bench.player.seek(cue, Accuracy::Exact);
+            assert_eq!(bench.asked(), [(expected, Accuracy::Exact)]);
+            bench.decoded(1, expected);
+            assert_eq!(bench.redraw(Instant::now()), Some(expected));
+            assert!(!bench.player.is_seeking());
+        }
+    }
+
+    #[test]
+    fn generic_end_seek_retires_a_wait_on_newest_eof() {
+        let mut bench = Bench::new();
+        bench.player.seek(Cue::Index(900), Accuracy::Exact);
+        assert!(bench.player.is_seeking());
+        bench.notes.send(Note::Ended(1)).unwrap();
+        assert_eq!(bench.redraw(Instant::now()), None);
+        assert!(bench.player.is_ended());
+        assert!(!bench.player.is_seeking());
+    }
+
+    #[test]
+    fn generic_end_seek_retires_a_wait_when_decoder_disconnects() {
+        let mut bench = Bench::new();
+        bench.player.seek(Cue::Index(900), Accuracy::Exact);
+        assert!(bench.player.is_seeking());
+        drop(bench.notes);
+        assert!(bench.player.pump(Instant::now()).unwrap().is_none());
+        assert!(bench.player.is_ended());
+        assert!(!bench.player.is_seeking());
+    }
+
     /// The whole of issue #55. Every position is asked for before the last
     /// one has produced a picture, so each picture that does arrive carries
     /// an epoch the pilot dragged past two seeks ago. Showing only the newest
@@ -3080,6 +3164,7 @@ mod tests {
             !bench.player.is_ended(),
             "the newest seek is not at the end"
         );
+        assert!(bench.player.is_seeking(), "the newest seek is still owed");
 
         bench.decoded(2, 1000);
         assert_eq!(bench.redraw(now), Some(1000));

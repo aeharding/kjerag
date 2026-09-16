@@ -71,6 +71,16 @@ paths and are not release assets.
 
 ## Qualification summary
 
+Issue [#227](https://github.com/aeharding/kjerag/issues/227) covers the generic
+player's end-of-timeline seek. Its inclusive duration endpoint requested a
+nonexistent source after the final frame, and terminal EOF/disconnection could
+leave a seek marked outstanding. Deterministic tests reproduce both failures
+through the actual Player pump. The candidate clamps known-length captures,
+preserves requests for unknown-length streams, and retires terminal waits
+without accepting a superseded epoch or hiding replay errors. The selected
+resident route already clamps endpoint seeks. Real scrubber qualification is
+still pending; no stitching/color change or installed delivery is claimed.
+
 Issue [#163](https://github.com/aeharding/kjerag/issues/163) corrects missing
 evidence in the legacy `colour` profile diagnostic. Out-of-window controls,
 unsampled lags and missing side fits no longer masquerade as measured zeros.
