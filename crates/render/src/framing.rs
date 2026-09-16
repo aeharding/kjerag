@@ -107,9 +107,25 @@ impl Framing {
     pub fn read_line(line: &str) -> Option<(PathBuf, Self)> {
         let line = line.trim();
         let line = line.strip_prefix(LABEL).unwrap_or(line).trim_start();
-        let mut words = line.split_whitespace();
-        let file = words.next().filter(|word| !Self::is_term(word))?;
-        Some((PathBuf::from(file), Self::read(words).ok().flatten()?))
+        // The writer emits a raw path, which can itself contain whitespace.
+        // Peel off only the view-term suffix, leaving the path's interior
+        // untouched. This is not shell parsing: quotes and ~ stay literal.
+        let mut file = line;
+        let mut terms = Vec::new();
+        while let Some((prefix, word)) = file.rsplit_once(char::is_whitespace) {
+            if !Self::is_term(word) {
+                break;
+            }
+            terms.push(word);
+            file = prefix.trim_end();
+        }
+        if file.is_empty() || Self::is_term(file) {
+            return None;
+        }
+        Some((
+            PathBuf::from(file),
+            Self::read(terms.into_iter().rev()).ok().flatten()?,
+        ))
     }
 
     /// Whether a word is one of the view's own keys, which is how a file
@@ -136,17 +152,26 @@ impl Framing {
         for term in terms {
             let (key, value) = term.split_once('=').ok_or(USAGE)?;
             let degrees = || {
-                value
+                let degrees = value
                     .parse::<f32>()
-                    .map(f32::to_radians)
-                    .map_err(|_| format!("{key}={value} is not a number of degrees"))
+                    .map_err(|_| format!("{key}={value} is not a number of degrees"))?;
+                if !degrees.is_finite() {
+                    return Err(format!("{key}={value} is not a finite number of degrees"));
+                }
+                Ok(degrees.to_radians())
             };
             match key {
                 TIME => {
                     let seconds = value
                         .parse::<f64>()
                         .map_err(|_| format!("{key}={value} is not a number of seconds"))?;
-                    at = Some(Duration::try_from_secs_f64(seconds.max(0.0)).unwrap_or_default());
+                    if !seconds.is_finite() {
+                        return Err(format!("{key}={value} is not a finite number of seconds"));
+                    }
+                    at = Some(
+                        Duration::try_from_secs_f64(seconds.max(0.0))
+                            .map_err(|error| format!("{key}={value}: {error}"))?,
+                    );
                 }
                 YAW => yaw = Some(degrees()?),
                 PITCH => pitch = Some(degrees()?),
@@ -373,6 +398,33 @@ mod tests {
         let (_, read) = Framing::read_line(line).expect("a line");
         assert_eq!(read.at, Duration::ZERO);
     }
+
+    #[test]
+    fn non_finite_view_angles_do_not_change_the_camera() {
+        use crate::{Nudge, Viewpoint};
+
+        for key in ["yaw", "pitch", "fov"] {
+            for value in ["NaN", "inf", "-inf", "1e999", "-1e999"] {
+                let line = format!("f.insv time=1 yaw=0 pitch=0 fov=90 lock=1 {key}={value}");
+                let mut viewpoint = Viewpoint::default();
+                let original = viewpoint.camera();
+                if let Some((_, view)) = Framing::read_line(&line) {
+                    // The same camera handoff used by pasted/command-line views.
+                    viewpoint.nudge(Nudge::Point(view.camera), 16.0 / 9.0);
+                }
+                assert_eq!(viewpoint.camera(), original, "{line}");
+                assert!(Framing::read_line(&line).is_none(), "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_view_times_are_not_silently_changed_to_zero() {
+        for value in ["NaN", "inf", "-inf", "1e999", "-1e999", "1e20"] {
+            let line = format!("f.insv time={value} yaw=0 pitch=0 fov=90 lock=1");
+            assert!(Framing::read_line(&line).is_none(), "{line}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -394,12 +446,56 @@ mod paste_tests {
     }
 
     #[test]
-    fn a_path_with_a_space_in_it_is_refused_rather_than_half_read() {
-        // The owner has several: `.../ab_testing/clip 2/VID....insv`.
-        // `split_whitespace` takes `.../clip` as the file and then `2` is not
-        // a term, so this must be NOTHING rather than a place near where he
-        // asked for. It silently did the latter until 2026-08-12.
+    fn a_path_with_a_space_in_it_is_read_whole() {
         let line = "/home/x/clip 2/VID_1.insv time=1.0 yaw=0 pitch=0 fov=90 lock=1";
-        assert!(Framing::read_line(line).is_none());
+        let (file, view) = Framing::read_line(line).expect("the raw path is not one word");
+        assert_eq!(file, Path::new("/home/x/clip 2/VID_1.insv"));
+        assert_eq!(view.at, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn copied_and_printed_paths_keep_their_interior_characters() {
+        let view = Framing::read(["time=1", "yaw=0", "pitch=0", "fov=90", "lock=1"])
+            .unwrap()
+            .unwrap();
+        for path in [
+            "/home/pilot/clip 2/1 8k30p standard 10bit iso max 800-003.OSV",
+            "/home/pilot/Flight\tArchive/pilot's flight  2.insv",
+            "/home/pilot/夜間 飛行/vol  d'été.insv",
+            "relative folder/a=b \\ raw.insv",
+        ] {
+            let path = Path::new(path);
+            for (line, expected) in [
+                (view.printed(path), path),
+                (view.copied(path), Path::new(path.file_name().unwrap())),
+            ] {
+                let (got, got_view) = Framing::read_line(&line).expect("a whole raw path");
+                assert_eq!(got, expected);
+                assert_eq!(got_view, view);
+            }
+        }
+    }
+
+    #[test]
+    fn suffix_parsing_preserves_term_order_and_duplicate_semantics() {
+        let terms = "lock=0\t pitch=1  time=2 yaw=3 fov=90 time=4";
+        let expected = Framing::read(terms.split_whitespace()).unwrap().unwrap();
+        let (file, view) = Framing::read_line(&format!("two words.insv  {terms}\n")).unwrap();
+        assert_eq!(file, Path::new("two words.insv"));
+        assert_eq!(view, expected);
+        assert_eq!(view.at, Duration::from_secs(4));
+    }
+
+    #[test]
+    fn a_spaced_path_still_requires_a_complete_valid_view_suffix() {
+        for terms in [
+            "time=1 yaw=0 pitch=0 fov=90",
+            "time=1 yaw=0 pitch=0 fov=90 lock=2",
+            "time=soon yaw=0 pitch=0 fov=90 lock=1",
+            "time=1 yaw=0 surprise pitch=0 fov=90 lock=1",
+            "time=1 yaw=0 pitch=0 fov=90 lock=1 seam=file",
+        ] {
+            assert!(Framing::read_line(&format!("two words.insv {terms}")).is_none());
+        }
     }
 }

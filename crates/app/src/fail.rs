@@ -27,9 +27,9 @@
 //! are 2880x2880 but the stream decodes 736x368".
 //!
 //! What this does not cover, deliberately: a capture that could not be
-//! written says so in a toast, because the picture is still there and the
-//! pilot is still watching it (docs/UI.md, "The capture toast"). The funnel
-//! is for the failures that leave him with no video.
+//! written or an About link whose launcher could not start says so in a
+//! toast (docs/UI.md, "The capture toast"). The funnel covers failures to open
+//! or continue video, including a failed chooser while an older video remains.
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -62,6 +62,9 @@ pub enum Failure {
     /// #118). The portal's own message, which is the only account of it
     /// anything on this side has.
     Portal(String),
+    /// The file chooser failed, before it could hand over a path. The
+    /// most specific available error, not libcosmic's generic dialog wrapper.
+    Chooser(String),
     /// The picture died part way through a file and the player was stopped
     /// with it, sound and all (issue #124).
     Stopped(PathBuf, Stall),
@@ -71,7 +74,9 @@ impl Failure {
     /// The alert's title, which says what happened.
     fn title(&self) -> &'static str {
         match self {
-            Self::Open(..) | Self::Dropped | Self::Portal(..) => strings::CANNOT_OPEN,
+            Self::Open(..) | Self::Dropped | Self::Portal(..) | Self::Chooser(..) => {
+                strings::CANNOT_OPEN
+            }
             Self::Stopped(..) => strings::VIDEO_STOPPED,
         }
     }
@@ -86,7 +91,7 @@ impl Failure {
             // conversion: what a URL, a remote share or a selection of text
             // leaves this app is `None`.
             Self::Dropped => strings::DROPPED_NOTHING.to_owned(),
-            Self::Portal(e) => e.clone(),
+            Self::Portal(e) | Self::Chooser(e) => e.clone(),
             // The stall's own line, and after it the one thing the stall
             // cannot know: that this open is over and the way on is to open
             // the file again. The terminal gets the same first half.
@@ -101,6 +106,7 @@ impl Failure {
             Self::Open(path, e) => format!("{} not shown: {e}", path.display()),
             Self::Dropped => "that drop carried no local file".to_owned(),
             Self::Portal(e) => format!("that drop's files stayed with the portal: {e}"),
+            Self::Chooser(e) => format!("no file chosen: {e}"),
             Self::Stopped(path, stall) => format!("{} stopped: {stall}", path.display()),
         }
     }
@@ -214,6 +220,17 @@ mod tests {
 
     fn file() -> PathBuf {
         PathBuf::from("/home/pilot/Videos/VID_0001.insv")
+    }
+
+    #[test]
+    fn chooser_failure_keeps_the_same_backend_reason_on_both_surfaces() {
+        let why = "Portal error: no response";
+        let failure = Failure::Chooser(why.to_owned());
+        assert_eq!(failure.said(), why);
+        assert_eq!(failure.echoed(), format!("no file chosen: {why}"));
+        let mut alert = Alert::default();
+        alert.raise(failure);
+        assert_eq!(alert.showing(), Some((strings::CANNOT_OPEN, why)));
     }
 
     /// The shell has to tell a build with no decoder apart from a file it

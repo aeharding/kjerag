@@ -1,119 +1,87 @@
 name: release
-# A version tag is the whole trigger, and it has two outputs (issues #106,
-# #137). One file a person can install, one per arch, on the GitHub Release:
-# `flatpak install --user ./kjerag-….flatpak`. And the same build exported
-# into the signed Flatpak repository at https://kjerag.harding.dev/, which is
-# the one a person subscribes to and `flatpak update` follows.
-#
-# Every step is stock. The bundle is Flatpak's own action, running in the image
-# Flathub builds with; the release is softprops/action-gh-release with the
-# notes GitHub writes itself; the repository is andyholmes/flatter, signed with
-# crazy-max/ghaction-import-gpg and pushed to the Pages branch by
-# JamesIves/github-pages-deploy-action. Nothing here knows anything about this
-# project that the manifest does not already say.
-#
-# The tag is the plain version, `0.1.0`, with no `v` in front of it (owner,
-# 2026-08-01), and the pattern is the same statement: a digit-led tag starts a
-# release, a tag named `test` or `nightly` starts nothing.
+# One signed native build per architecture. Nothing is published until both
+# handoffs authenticate and the complete repository/download payload is sealed.
+# Release publishes first; a Pages failure leaves its valid downloads available
+# and the old channel intact. Retry failed jobs using the same staged payload.
 on:
   push:
     tags: ['[0-9]*']
+  # Exercise the real native build and artifact handoff without publishing.
+  # This route uses a disposable signer, never the production signing secrets.
+  workflow_dispatch:
 
-# What the release step writes with. Everything else stays read-only.
 permissions:
-  contents: write
+  contents: read
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
-  # The gates a pull request runs, on the tagged commit, by calling the same
-  # workflow rather than restating it. It is what keeps a red commit from
-  # becoming a published artifact.
-  #
-  # scripts/uitest.sh is not among them and cannot be: it decodes on VA-API
-  # against /dev/dri/renderD128 and a runner has no GPU (AGENTS.md). It runs
-  # on the way to the tag instead, out of release.toml.
-  gates:
-    uses: ./.github/workflows/ci.yml
-
-  # One bundle per arch, each built on a runner of that arch: no emulation and
-  # no cross build. The aarch64 half is compiled and unit tested and nothing
-  # else, because a runner has no GPU (README, docs/RELEASING.md).
-  bundle:
-    needs: gates
-    strategy:
-      # One arch failing is not a reason to throw away the other's bundle.
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: x86_64
-          - runner: ubuntu-24.04-arm
-            arch: aarch64
-    runs-on: ${{ matrix.runner }}
-    # The image Flathub's own builds run in, on the runtime branch our
-    # manifest names. It carries flatpak-builder and the two tools its last
-    # steps need, `eu-strip` and gdk-pixbuf's SVG loader, which a bare runner
-    # does not have and this job used to install by hand. The tag is
-    # multi-arch: measured 2026-08-01 on ubuntu-24.04-arm, it starts and
-    # reports `aarch64`, and the runtime and both SDK extensions the manifest
-    # names exist on Flathub for aarch64.
-    container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
-      options: --privileged
-    env:
-      BUNDLE: kjerag-${{ github.ref_name }}-${{ matrix.arch }}.flatpak
+  context:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.source.outputs.version }}
+      artifact-prefix: ${{ steps.source.outputs.artifact-prefix }}
     steps:
       - uses: actions/checkout@v4
-      # Runs flatpak-builder against the committed manifest and
-      # flatpak/cargo-sources.json, installs the runtime and the two SDK
-      # extensions the manifest declares, and exports the single-file bundle
-      # with the runtime repository recorded in it, so it installs on a
-      # machine that has never had Flathub configured.
-      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+      - id: source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          # Safe single-line step outputs here; Cargo and the final canonical
+          # release record check the full semantic-version grammar.
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9.+-]+)?$ ]]
+          case "$EVENT_NAME" in
+            push)
+              test "$REF_TYPE" = tag
+              test "$version" = "$REF_NAME"
+              prefix=release
+              ;;
+            workflow_dispatch)
+              # Keep disposable-signature build caches off release tags and
+              # the default branch used as a fallback by production builds.
+              test "$REF_TYPE" = branch
+              test "$REF_NAME" != "$DEFAULT_BRANCH"
+              prefix=validation
+              ;;
+            *) exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "artifact-prefix=$prefix" >> "$GITHUB_OUTPUT"
+      - name: Create a disposable validation signer
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          export GNUPGHOME="$(mktemp -d "$RUNNER_TEMP/validation-key.XXXXXXXX")"
+          gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key \
+            "Kjerag validation $GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT <validation@example.invalid>" rsa2048 sign 1d
+          mkdir validation-key
+          gpg --batch --armor --export-secret-keys > validation-key/disposable.asc
+          test -s validation-key/disposable.asc
+          gpgconf --kill gpg-agent
+      # This is a publicly disposable test key, not a production secret. Only
+      # this run's validation jobs use it. Never include it in either payload.
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
         with:
-          manifest-path: flatpak/dev.harding.Kjerag.yml
-          bundle: ${{ env.BUNDLE }}
-          # Not the host's arch: the action's own default is the string
-          # `x86_64` (its action.yml), so the arm runner has to be told, or
-          # flatpak-builder is asked for an x86_64 build on an arm machine.
-          arch: ${{ matrix.arch }}
-          # The Release is where the bundle goes; a second copy as a workflow
-          # artifact would expire in 90 days and confuse which is which.
-          upload-artifact: false
-      - run: sha256sum "$BUNDLE" > "$BUNDLE.sha256"
-      # Both arches publish into the one Release for the tag. Whichever runs
-      # second finds it already created and adds its two files; the action
-      # expects that ("presume a race with competing matrix runs",
-      # src/github.ts).
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            ${{ env.BUNDLE }}
-            ${{ env.BUNDLE }}.sha256
-          generate_release_notes: true
-          # A label after the version (0.1.0-rc1) is a prerelease, and GitHub
-          # is told rather than left to guess.
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          name: validation-key
+          path: validation-key/disposable.asc
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
 
-  # The other output of the tag: the signed OSTree repository the app is
-  # installed and updated from (issue #137, docs/DISTRIBUTION.md 4.3). A
-  # flatpak remote is a directory of static files, so this ends where a
-  # GitHub Pages branch begins.
-  #
-  # It builds the manifest a second time rather than reusing the bundle above,
-  # because a bundle is an export of a repository and not a repository: there
-  # is no supported way back. Two builds per arch per tag is the price, and a
-  # release-profile build inside the sandbox is about four minutes.
-  pages:
-    needs: gates
+  gates:
+    needs: context
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: [context, gates]
     strategy:
-      # One repository, two arches, and they share its cache: the second job
-      # restores what the first saved and adds to it, so what is deployed
-      # carries both. That only holds while they do not run at once, which is
-      # what max-parallel says (flatter's README, "Multiple Architectures").
-      max-parallel: 1
-      # An arch that fails is not a reason to throw away the other's build.
-      # The deploy is the whole repository as the cache holds it, so whichever
-      # arch succeeded is what gets published.
       fail-fast: false
       matrix:
         include:
@@ -122,53 +90,245 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: aarch64
     runs-on: ${{ matrix.runner }}
-    # flatter's own image for Rust apps on this runtime branch: flatpak,
-    # flatpak-builder, rsync for the deploy, and the freedesktop 25.08
-    # Platform, Sdk and rust-stable already installed for BOTH arches, which
-    # is what makes the same tag work on the arm runner. llvm21 is the one
-    # thing the manifest names that the image does not carry, and
-    # --install-deps-from below is what fetches it.
     container:
       image: ghcr.io/andyholmes/flatter/rust:25.08
       options: --privileged
+    env:
+      RELEASE_ARCH: ${{ matrix.arch }}
+      RELEASE_VERSION: ${{ needs.context.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      # The signature is the whole reason a remote can be trusted over plain
-      # HTTP. No secret, no key, no repository: this step fails the job rather
-      # than publishing something a client would have to be told to ignore.
+      - name: Authenticate the native source checkout
+        run: |
+          test "$(uname -m)" = "$RELEASE_ARCH"
+          # The container user differs from the checkout owner. Trust only this
+          # checkout for this query, without changing global Git configuration.
+          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(awk -F '\"' '/^version = / { print $2; exit }' Cargo.toml)" = "$RELEASE_VERSION"
       - uses: crazy-max/ghaction-import-gpg@v7
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         id: gpg
         with:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
           passphrase: ${{ secrets.GPG_PASSPHRASE }}
-      # flatter reads ./CNAME to write the Url into the index.flatpakrepo it
-      # generates, so the domain has to be here before the build and not only
-      # in the deployed copy.
+      - uses: actions/download-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: validation-key
+          # The manifest's dir source copies the checkout. Keep even the
+          # disposable private key outside build sources and cached debug data.
+          path: ${{ runner.temp }}/validation-key
+      - name: Select this run's signer
+        id: signer
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PRODUCTION_FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
+        run: |
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            export GNUPGHOME="$(mktemp -d "$RUNNER_TEMP/validation-signing.XXXXXXXX")"
+            echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+            gpg --batch --import "$RUNNER_TEMP/validation-key/disposable.asc"
+            fingerprint=$(gpg --batch --with-colons --list-secret-keys validation@example.invalid | awk -F: '$1 == "fpr" { print $10; exit }')
+          else
+            fingerprint=$PRODUCTION_FINGERPRINT
+          fi
+          [[ $fingerprint =~ ^[0-9A-Fa-f]{40}$ ]]
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
       - run: cp flatpak/pages/CNAME .
       - uses: andyholmes/flatter@main
         id: build
         with:
           files: flatpak/dev.harding.Kjerag.yml
-          # The action's default is the string `x86_64`, so the arm runner has
-          # to be told, exactly as the bundle job above is told.
           arch: ${{ matrix.arch }}
-          gpg-sign: ${{ steps.gpg.outputs.fingerprint }}
+          gpg-sign: ${{ steps.signer.outputs.fingerprint }}
           flatpak-builder-args: |
             --install-deps-from=flathub
-      # What turns a directory of OSTree objects into something a person can
-      # click: the repository's title, the two descriptor files, the landing
-      # page and the icon. The script is the whole of that story and
-      # .github/workflows/site.yml runs the same one against the published
-      # repository, so a republish and a release describe the app alike.
-      - name: Describe the repository
-        run: >
-          scripts/pages-site.sh
-          "${{ steps.build.outputs.repository }}"
-          "${{ steps.gpg.outputs.fingerprint }}"
-      # The repository is the site, at the root of it, so the remote URL is
-      # the bare domain. single-commit because the branch is an artifact and
-      # not a history: every deploy replaces it whole.
+      - name: Stage this architecture's signed commits
+        env:
+          BUILD_REPOSITORY: ${{ steps.build.outputs.repository }}
+          FINGERPRINT: ${{ steps.signer.outputs.fingerprint }}
+        run: |
+          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = "$GITHUB_SHA"
+          bash scripts/release-artifacts.sh stage "$BUILD_REPOSITORY" \
+            "release-$RELEASE_ARCH" "$RELEASE_ARCH" "$RELEASE_VERSION" "$GITHUB_SHA" "$FINGERPRINT"
+      # Named handoffs, never matrix order or shared-cache contents. Upload the
+      # staged repository and provenance only, never builder state or GPG home.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.context.outputs.artifact-prefix }}-${{ matrix.arch }}
+          path: release-${{ matrix.arch }}/
+          if-no-files-found: error
+          include-hidden-files: true
+          overwrite: true
+          retention-days: 14
+
+  assemble:
+    needs: [context, build]
+    runs-on: ubuntu-24.04
+    outputs:
+      fingerprint: ${{ steps.signer.outputs.fingerprint }}
+      public-key: ${{ steps.trust.outputs.public-key }}
+    env:
+      RELEASE_VERSION: ${{ needs.context.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak ostree gnupg
+      - uses: crazy-max/ghaction-import-gpg@v7
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        id: gpg
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+      - uses: actions/download-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: validation-key
+          path: ${{ runner.temp }}/validation-key
+      - name: Select this run's signer
+        id: signer
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PRODUCTION_FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
+        run: |
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            export GNUPGHOME="$(mktemp -d "$RUNNER_TEMP/validation-signing.XXXXXXXX")"
+            echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+            gpg --batch --import "$RUNNER_TEMP/validation-key/disposable.asc"
+            fingerprint=$(gpg --batch --with-colons --list-secret-keys validation@example.invalid | awk -F: '$1 == "fpr" { print $10; exit }')
+          else
+            fingerprint=$PRODUCTION_FINGERPRINT
+          fi
+          [[ $fingerprint =~ ^[0-9A-Fa-f]{40}$ ]]
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.context.outputs.artifact-prefix }}-x86_64
+          path: staging/release-x86_64
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.context.outputs.artifact-prefix }}-aarch64
+          path: staging/release-aarch64
+      - name: Assemble and describe the single signed repository
+        env:
+          FINGERPRINT: ${{ steps.signer.outputs.fingerprint }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          bash scripts/release-artifacts.sh assemble staging assembled "$RELEASE_VERSION" "$GITHUB_SHA" "$FINGERPRINT"
+          bash scripts/pages-site.sh assembled/repository "$FINGERPRINT"
+          export FLATPAK_USER_DIR="$(mktemp -d "$RUNNER_TEMP/release-client.XXXXXXXX")"
+          flatpak remote-add --user --gpg-import=assembled/signing-key.gpg \
+            release "file://$PWD/assembled/repository"
+          while read -r ref expected; do
+            arch=$(printf '%s' "$ref" | cut -d/ -f3)
+            test "$(flatpak remote-info --user --arch="$arch" --show-commit release "$ref")" = "$expected"
+          done < assembled/commits.txt
+          bash scripts/release-artifacts.sh seal assembled "$RELEASE_VERSION" "$GITHUB_SHA" "$FINGERPRINT"
+          bash scripts/release-artifacts.sh verify assembled "$RELEASE_VERSION" "$GITHUB_SHA" "$FINGERPRINT"
+          python3 scripts/check-release-channel.py assembled/not-published-yet assembled/release.txt
+      # Trust comes from this job, not a key chosen by the downloaded artifact.
+      - id: trust
+        env:
+          FINGERPRINT: ${{ steps.signer.outputs.fingerprint }}
+        run: echo "public-key=$(gpg --batch --export "$FINGERPRINT" | base64 -w0)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.context.outputs.artifact-prefix }}-publication
+          path: |
+            assembled/repository/
+            assembled/bundles/
+            assembled/commits.txt
+            assembled/release.txt
+            assembled/payload.sha256
+            assembled/payload.sig
+          if-no-files-found: error
+          include-hidden-files: true
+          overwrite: true
+          retention-days: 14
+
+  github-release:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: assemble
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: kjerag-release-${{ github.ref_name }}
+      cancel-in-progress: false
+    env:
+      RELEASE_VERSION: ${{ github.ref_name }}
+      FINGERPRINT: ${{ needs.assemble.outputs.fingerprint }}
+      RELEASE_PUBLIC_KEY: ${{ needs.assemble.outputs.public-key }}
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-publication
+          path: assembled
+      - name: Authenticate the complete staged publication
+        run: |
+          export GNUPGHOME="$(mktemp -d "$RUNNER_TEMP/release-trust.XXXXXXXX")"
+          printf '%s' "$RELEASE_PUBLIC_KEY" | base64 --decode | gpg --batch --import
+          bash scripts/release-artifacts.sh verify assembled "$RELEASE_VERSION" "$GITHUB_SHA" "$FINGERPRINT"
+      - name: Publish downloads without replacing divergent assets
+        run: python3 scripts/publish-release-assets.py "$RELEASE_VERSION" "$GITHUB_SHA" assembled/bundles
+
+  pages:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [assemble, github-release]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    # Lock before reading gh-pages; site.yml uses the same group.
+    concurrency:
+      group: kjerag-pages-production
+      cancel-in-progress: false
+    env:
+      RELEASE_VERSION: ${{ github.ref_name }}
+      FINGERPRINT: ${{ needs.assemble.outputs.fingerprint }}
+      RELEASE_PUBLIC_KEY: ${{ needs.assemble.outputs.public-key }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: published
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-publication
+          path: assembled
+      - name: Authenticate payload and refuse a stale channel replacement
+        run: |
+          export GNUPGHOME="$(mktemp -d "$RUNNER_TEMP/release-trust.XXXXXXXX")"
+          printf '%s' "$RELEASE_PUBLIC_KEY" | base64 --decode | gpg --batch --import
+          bash scripts/release-artifacts.sh verify assembled "$RELEASE_VERSION" "$GITHUB_SHA" "$FINGERPRINT"
+          python3 scripts/check-release-channel.py published/kjerag-release.txt assembled/release.txt
       - uses: JamesIves/github-pages-deploy-action@v4
         with:
-          folder: ${{ steps.build.outputs.repository }}
+          folder: assembled/repository
           single-commit: true
+
+  validate-handoff:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [context, assemble]
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_VERSION: ${{ needs.context.outputs.version }}
+      FINGERPRINT: ${{ needs.assemble.outputs.fingerprint }}
+      RELEASE_PUBLIC_KEY: ${{ needs.assemble.outputs.public-key }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: validation-publication
+          path: assembled
+      - name: Authenticate the final downloaded validation artifact
+        run: |
+          export GNUPGHOME="$(mktemp -d "$RUNNER_TEMP/validation-trust.XXXXXXXX")"
+          printf '%s' "$RELEASE_PUBLIC_KEY" | base64 --decode | gpg --batch --import
+          bash scripts/release-artifacts.sh verify assembled "$RELEASE_VERSION" "$GITHUB_SHA" "$FINGERPRINT"

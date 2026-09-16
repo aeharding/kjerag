@@ -11,9 +11,9 @@
 //! - [`track`] is the file's own sound: one AAC stream decoded and resampled
 //!   into that ring, off the same demuxer as the pictures. [`sound`] is the
 //!   device it goes out of.
-//! - [`reader`] is one demuxer driving every video stream of a file in
-//!   lockstep and handing out [`Frames`]: the same PTS from both lenses,
-//!   always as a pair. It reads forward and it reads by [`Cue`].
+//! - [`reader`] drives the capture's video streams and hands out [`Frames`]:
+//!   the same capture instant from both lenses, after normalizing each file's
+//!   timestamp origin. It reads forward and it reads by [`Cue`].
 //! - [`player`] is the presentation clock around a [`Reader`] on its own
 //!   thread: play, pause, and "which frame is due now". The sound follows that
 //!   clock; it never sets it.
@@ -24,7 +24,12 @@
 //! [`kjerag_render`]: <https://docs.rs/kjerag-render>
 
 mod audio;
+mod capture;
+#[cfg(test)]
+mod capture_fixture;
 mod decode;
+mod decode_arrival;
+mod pairing;
 mod player;
 mod reader;
 mod sound;
@@ -37,6 +42,9 @@ use ffmpeg_next as ff;
 
 pub use audio::Audio;
 pub use decode::{DrmFrame, HwDevice, MissingDecoder, SwFrame, open_decoder};
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use player::TestDecoder;
 pub use player::{Player, PresentationPolicy, Stats};
 pub use reader::{Accuracy, Cue, FrameStamp, Frames, Read, Reader, Timing};
 pub use walk::{Chroma, Pair, Plane, Walk};
@@ -119,7 +127,7 @@ pub type Fallible<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 /// [`Self::default`] is 8-bit full-range BT.709, which is what the general
 /// pass drew before this existed. An unspecified range is read as studio
 /// swing rather than as this, while an unspecified matrix keeps the BT.709
-/// compatibility result; `reader::written` is where both choices are made
+/// compatibility result; `capture::written` is where both choices are made
 /// and argued.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Samples {
@@ -136,7 +144,7 @@ pub struct Samples {
 /// The Y'CbCr matrices the renderer currently implements.
 ///
 /// BT.709 is the compatibility default: it is what the general renderer used
-/// before the container's matrix travelled with a frame. `reader::written`
+/// before the container's matrix travelled with a frame. `capture::written`
 /// also uses it for an unspecified or presently unsupported tag, preserving
 /// playback without pretending that tag was positively identified.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

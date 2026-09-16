@@ -71,9 +71,12 @@ var<workgroup> ring_center: vec2<i32>;
 // Each texel is four consecutive horizontal bytes in explicit rgba order.
 fn reference_quad(coordinate: vec2<i32>) -> vec4<u32> {
     if PERIODIC_X {
-        // The periodic constructor requires complete four-byte texels.
+        // execute_batch already wraps landing.x before dividing it into quads.
+        // A 16-pixel row reads at most first_x..first_x+4, so coordinate.x is
+        // in 0..width+3. All admitted images have at least four complete quads:
+        // one subtraction is the exact wrap, including the unaligned last texel.
         let width = i32(params.width / 4u);
-        let x = ((coordinate.x % width) + width) % width;
+        let x = select(coordinate.x, coordinate.x - width, coordinate.x >= width);
         return textureLoad(reference_image, vec2<i32>(x, coordinate.y), 0);
     }
     return textureLoad(reference_image, coordinate, 0);

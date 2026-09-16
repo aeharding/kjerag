@@ -9,6 +9,8 @@
 # first command-line words.
 # Set KJERAG_UITEST_ONLY=stalls to run only the unsandboxed import-failure
 # checks against supplied test media.
+# Set KJERAG_UITEST_ONLY=view-paths for the spaced-filename clipboard regression.
+# Set KJERAG_UITEST_ONLY=drag-release for the video-to-controls drag regression.
 #
 # The same checks run against the installed Flatpak with
 # KJERAG_FLATPAK=dev.harding.Kjerag, which is how a bundle is checked before
@@ -201,12 +203,18 @@ fi
 
 case ${KJERAG_UITEST_ONLY:-} in
 "") ;;
+view-paths)
+	[ -n "$media" ] || die "KJERAG_UITEST_ONLY=view-paths needs test media"
+	;;
+drag-release)
+	[ -n "$media" ] || die "KJERAG_UITEST_ONLY=drag-release needs test media"
+	;;
 stalls)
 	[ -n "$media" ] || die "KJERAG_UITEST_ONLY=stalls needs test media"
 	[ -z "${KJERAG_FLATPAK:-}" ] ||
 		die "KJERAG_UITEST_ONLY=stalls cannot preload into a Flatpak"
 	;;
-*) die "KJERAG_UITEST_ONLY must be stalls when it is set" ;;
+*) die "KJERAG_UITEST_ONLY must be stalls, view-paths or drag-release when it is set" ;;
 esac
 
 # The session went away with checks still to run: a dead compositor cannot
@@ -844,6 +852,12 @@ with_media() {
 	a_still_says_where_it_was_looking
 	copies_the_view
 	returns_to_the_copied_view
+	drag_release_over_controls
+	if [ "$paused" = yes ]; then
+		failed_pasted_open_preserves_the_view
+	else
+		skip "a failed pasted open preserves the view (pause failed)"
+	fi
 	flips_the_horizon
 	survives_fullscreen
 	fullscreen_holds_the_view
@@ -1459,6 +1473,108 @@ selected_seek_fixture() {
 	esac
 }
 
+# Read the shown view within a pointer phase's two-second hold. Unlike key(),
+# this waits for the actual report rather than sleeping a full second per key.
+drag_view() {
+	local before attempt tick
+	before=$(grep -c '^view:' "$log")
+	for attempt in 1 2; do
+		env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" wtype -k i 2>>"$log" || return 1
+		for tick in {1..20}; do
+			if [ "$(grep -c '^view:' "$log")" -gt "$before" ]; then
+				view_line
+				return 0
+			fi
+			sleep 0.025
+		done
+	done
+	return 1
+}
+
+drag_phase() {
+	local pid=$1 phase=$2 report=$3 tick
+	for tick in {1..100}; do
+		kill -0 "$pid" 2>/dev/null || return 1
+		grep -qx "pointer: $phase" "$report" && return 0
+		sleep 0.025
+	done
+	return 1
+}
+
+# Issue #151: a video grab must end even when an overlay captures the release.
+# Keep ONE pointer alive through the drag, release and later bare motion.
+# Separate pointer invocations emit CursorLeft and can hide the defect.
+drag_release_over_controls() {
+	local check="releasing a video drag over the scrubber ends the camera grab"
+	local before released moved pid report=$session/drag-release-pointer.log
+	local problem= artifact
+	before=$(drag_view) || {
+		fail "$check" "no starting view report" "log: $log"
+		return
+	}
+	# A copy toast must not intercept the initiating press in the video.
+	sleep "$TOAST_GONE"
+	env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		"$poker" 1280 720 640 300 drag-release-move 640 "$CONTROL_ROW" 900 300 \
+		>"$report" 2>>"$log" &
+	pid=$!
+	if ! drag_phase "$pid" released "$report"; then
+		problem="the pointer did not report its release"
+	elif ! released=$(drag_view); then
+		problem="no view report after release"
+	else
+		artifact=$(grab drag-released) || problem="the released picture could not be captured"
+		# Slow capture/reporting must not silently compare two post-move views.
+		if grep -qx 'pointer: moved-unpressed' "$report"; then
+			problem="the released capture exceeded the pointer phase"
+		fi
+	fi
+	if [ -z "$problem" ]; then
+		if ! drag_phase "$pid" moved-unpressed "$report"; then
+			problem="the pointer did not report its unpressed move"
+		elif ! moved=$(drag_view); then
+			problem="no view report after unpressed movement"
+		else
+			artifact=$(grab drag-moved-unpressed) || problem="the moved picture could not be captured"
+		fi
+	fi
+	if [ -n "$problem" ]; then
+		kill -TERM "$pid" 2>/dev/null || true
+		wait "$pid" 2>/dev/null || true
+		fail "$check" "$problem" "pointer: $report" "log: $log"
+		return
+	fi
+	if ! wait "$pid"; then
+		fail "$check" "the pointer gesture failed" "pointer: $report"
+	elif [ "$before" = "$released" ]; then
+		fail "$check" "the held drag did not move the camera, so release was not exercised" "log: $log"
+	elif [ "$(printf '%s' "$before" | sed -n 's/.* time=\([^ ]*\).*/\1/p')" != \
+		"$(printf '%s' "$released" | sed -n 's/.* time=\([^ ]*\).*/\1/p')" ]; then
+		fail "$check" "the source frame was not held during the drag" "log: $log"
+	elif [ "$released" != "$moved" ]; then
+		fail "$check" "released: $released" "unpressed: $moved" \
+			"$session/drag-released.ppm" "$session/drag-moved-unpressed.ppm"
+	else
+		pass "$check ($artifact)"
+	fi
+}
+
+drag_release_check() {
+	boot drag-release "$media" "${play_args[@]}"
+	if ! await_visible_playback; then
+		fail "drag-release playback prerequisite" "no visible playing picture" "log: $log"
+	elif ! press_until still_picture drag-release-paused -k space; then
+		fail "drag-release pause prerequisite" "no held picture" "log: $log"
+	else
+		drag_release_over_controls
+	fi
+	if quit; then
+		pass "the drag-release session quits normally"
+	else
+		fail "the drag-release session quits normally" "log: $log"
+	fi
+}
+
 # Regression for the owner's unusable scrubber: actual mouse motion with the
 # button held, not clipboard navigation. The preceding check leaves the
 # player paused near zero. This must reach an unseen late picture promptly.
@@ -1637,7 +1753,15 @@ holds_the_command_line_view() {
 # afterwards has to differ from the first or the check says so itself.
 returns_to_the_copied_view() {
 	local check="ctrl+v goes back to the copied view"
-	local copied returned
+	local copied returned tag=goto
+	if [ "${1:-}" = printed ]; then
+		check="ctrl+v goes back to the printed view"
+		tag=goto-printed
+		if [ "$clipboard_write" = no ]; then
+			skip "$check (no wl-copy)"
+			return
+		fi
+	fi
 
 	view_lines=$(grep -c '^view:' "$log")
 	if ! press_until more_view_lines goto -k i; then
@@ -1646,16 +1770,20 @@ returns_to_the_copied_view() {
 		return
 	fi
 	copied=$(view_line)
+	if [ "${1:-}" = printed ]; then
+		printf '%s' "$copied" | env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+			wl-copy --type text/plain || { fail "$check" "wl-copy failed"; return; }
+	fi
 	sleep "$TOAST_GONE"
-	grab goto-there >/dev/null
+	grab "$tag-there" >/dev/null
 
 	key -k Right
 	key -M ctrl -k minus -m ctrl
 	alive || lost "$check"
-	grab goto-away >/dev/null
-	if same_picture "$session/goto-there.ppm" "$session/goto-away.ppm"; then
+	grab "$tag-away" >/dev/null
+	if same_picture "$session/$tag-there.ppm" "$session/$tag-away.ppm"; then
 		fail "$check" "the seek and the zoom moved nothing, so this proves nothing" \
-			"$session/goto-there.ppm" "$session/goto-away.ppm"
+			"$session/$tag-there.ppm" "$session/$tag-away.ppm"
 		return
 	fi
 
@@ -1666,7 +1794,7 @@ returns_to_the_copied_view() {
 		return
 	fi
 	sleep "$TOAST_GONE"
-	grab goto-back >/dev/null
+	grab "$tag-back" >/dev/null
 
 	view_lines=$(grep -c '^view:' "$log")
 	if ! press_until more_view_lines goto -k i; then
@@ -1680,12 +1808,188 @@ returns_to_the_copied_view() {
 		fail "$check" "copied:   $copied" "came back: $returned"
 		return
 	fi
-	if ! same_picture "$session/goto-there.ppm" "$session/goto-back.ppm"; then
+	if ! same_picture "$session/$tag-there.ppm" "$session/$tag-back.ppm"; then
 		fail "$check" "the line came back but the picture did not" \
-			"$session/goto-there.ppm" "$session/goto-back.ppm"
+			"$session/$tag-there.ppm" "$session/$tag-back.ppm"
 		return
 	fi
 	pass "$check (${copied#"$media "})"
+}
+
+# Set by failed_pasted_open_preserves_the_view and read by its predicates.
+failed_pasted_open_path=
+failed_pasted_open_lines=0
+failed_pasted_open_prior=
+
+more_failed_pasted_open_lines() {
+	[ "$(grep -Fc "$failed_pasted_open_path not shown:" "$log")" -gt \
+		"$failed_pasted_open_lines" ]
+}
+
+failed_pasted_open_alert_gone() {
+	local shot
+	shot=$(grab "$1") || return 1
+	same_picture "$failed_pasted_open_prior" "$shot"
+}
+
+# A printed view can name another file. If that file cannot open, its framing
+# belongs to nothing: the video already on screen must keep its frame, camera
+# and horizon. Exercise the real clipboard message while the picture is held,
+# and require the raw open failure before treating the paste as delivered.
+failed_pasted_open_preserves_the_view() {
+	local check="a failed pasted open preserves the view"
+	local before after alerted final alert_problem= current_time current_yaw current_pitch current_fov
+	local current_lock bad_time bad_yaw bad_pitch bad_fov bad_lock goto_before
+	if [ "$clipboard_write" = no ]; then
+		skip "$check (no wl-copy)"
+		return
+	fi
+
+	view_lines=$(grep -c '^view:' "$log")
+	if ! press_until more_view_lines failed-pasted-open-before -k i; then
+		alive || lost "$check"
+		fail "$check" "no baseline view line after $PRESSES presses of i" "log: $log"
+		return
+	fi
+	before=$(view_line)
+	sleep "$TOAST_GONE"
+	if ! still_picture failed-pasted-open-before; then
+		fail "$check" "the baseline view was not held" \
+			"$session/failed-pasted-open-before-a.ppm" \
+			"$session/failed-pasted-open-before-b.ppm"
+		return
+	fi
+	failed_pasted_open_prior=$session/failed-pasted-open-before-b.ppm
+
+	current_time=$(printf '%s\n' "$before" | sed -n 's/.* time=\([^ ]*\) .*/\1/p')
+	current_yaw=$(printf '%s\n' "$before" | sed -n 's/.* yaw=\([^ ]*\) .*/\1/p')
+	current_pitch=$(printf '%s\n' "$before" | sed -n 's/.* pitch=\([^ ]*\) .*/\1/p')
+	current_fov=$(printf '%s\n' "$before" | sed -n 's/.* fov=\([^ ]*\) .*/\1/p')
+	current_lock=$(printf '%s\n' "$before" | sed -n 's/.* lock=\([01]\)$/\1/p')
+	[ "$current_time" = 40.000 ] && bad_time=41.000 || bad_time=40.000
+	[ "$current_yaw" = 50.00 ] && bad_yaw=51.00 || bad_yaw=50.00
+	[ "$current_pitch" = 20.00 ] && bad_pitch=21.00 || bad_pitch=20.00
+	[ "$current_fov" = 60.00 ] && bad_fov=61.00 || bad_fov=60.00
+	[ "$current_lock" = 1 ] && bad_lock=0 || bad_lock=1
+
+	failed_pasted_open_path=/proc/self/kjerag-no-video.insv
+	failed_pasted_open_lines=$(grep -Fc "$failed_pasted_open_path not shown:" "$log")
+	goto_before=$(grep -c '^goto:' "$log")
+	if ! env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		wl-copy "$failed_pasted_open_path time=$bad_time yaw=$bad_yaw pitch=$bad_pitch fov=$bad_fov lock=$bad_lock" \
+		2>>"$log"; then
+		fail "$check" "wl-copy could not inject the missing-file view" "log: $log"
+		return
+	fi
+	if ! press_until more_failed_pasted_open_lines failed-pasted-open -M ctrl -k v -m ctrl; then
+		alive || lost "$check"
+		fail "$check" "no raw open failure after $PRESSES presses of ctrl+v" \
+			"$(grep -F "$failed_pasted_open_path" "$log" || echo 'the missing path was never reported')" \
+			"log: $log"
+		return
+	fi
+
+	alerted=$(grab failed-pasted-open-alert) || {
+		fail "$check" "the failure alert could not be captured" "log: $log"
+		return
+	}
+	if same_picture "$failed_pasted_open_prior" "$alerted"; then
+		alert_problem="the raw failure was printed but no alert appeared"
+	fi
+
+	if ! press_until failed_pasted_open_alert_gone failed-pasted-open-dismissed -k Escape; then
+		alive || lost "$check"
+		fail "$check" "Escape did not restore the held picture after the alert" \
+			"$failed_pasted_open_prior" "$session/failed-pasted-open-alert.ppm" \
+			"$session/failed-pasted-open-dismissed.ppm"
+		return
+	fi
+	view_lines=$(grep -c '^view:' "$log")
+	if ! press_until more_view_lines failed-pasted-open-after -k i; then
+		alive || lost "$check"
+		fail "$check" "no view line after dismissing the failure" "log: $log"
+		return
+	fi
+	after=$(view_line)
+	sleep "$TOAST_GONE"
+	if ! still_picture failed-pasted-open-after; then
+		fail "$check" "the restored view was not held" \
+			"$session/failed-pasted-open-after-a.ppm" \
+			"$session/failed-pasted-open-after-b.ppm"
+		return
+	fi
+	final=$session/failed-pasted-open-after-b.ppm
+
+	if [ "$after" != "$before" ]; then
+		fail "$check" "before: $before" "after:  $after"
+	elif [ "$(grep -c '^goto:' "$log")" -ne "$goto_before" ]; then
+		fail "$check" "the failed paste added a goto line" "log: $log"
+	elif ! same_picture "$failed_pasted_open_prior" "$final"; then
+		fail "$check" "the view line survived but the picture changed" \
+			"$failed_pasted_open_prior" "$final"
+	elif [ -n "$alert_problem" ]; then
+		fail "$check" "$alert_problem" "$failed_pasted_open_prior" "$alerted"
+	else
+		pass "$check ($before; alert: $alerted)"
+	fi
+}
+
+# Issue #174: run the real copy/paste path with whitespace in both directory
+# and filename. Symlinks avoid copying personal footage or relying on hardlinks
+# across the Flatpak's bind mounts. Preserve the paired-lens suffix when present.
+spaced_view_reference() {
+	local original=$media mate fixture=$session/'view references'
+	local media=$fixture/"pilot's flight  $(basename "$original")"
+	local expected attempt landed=no
+	printf '\n-- spaced-path view references\n'
+	mkdir -p "$fixture"
+	ln -s -- "$(realpath -- "$original")" "$media" || die "cannot link the view fixture"
+	mate=$(lens_mate "$original")
+	if [ -n "$mate" ]; then
+		ln -s -- "$(realpath -- "$mate")" "$fixture/pilot's flight  $(basename "$mate")" ||
+			die "cannot link the second view-fixture lens"
+	fi
+	boot view-paths "$media"
+	if ! await '^media:' "$READY" || ! await_paint view-paths; then
+		alive || lost "the spaced-path file opens"
+		fail "the spaced-path file opens" "log: $log"
+		teardown
+		return
+	fi
+	if ! press_until still_picture view-paths-paused -k space; then
+		alive || lost "the spaced-path file pauses"
+		fail "the spaced-path file pauses" "log: $log"
+		teardown
+		return
+	fi
+	# The first pause can land in uninterrupted warm history. A later paste
+	# restarts temporal history, an accepted picture difference, so use a
+	# keyboard seek to source zero before the pixel-equality round trips.
+	# This preparation does not depend on the clipboard parser being tested.
+	view_lines=$(grep -c '^view:' "$log")
+	if ! press_until more_view_lines view-paths-initial -k i; then
+		alive || lost "the spaced-path starting view is known"
+		fail "the spaced-path starting view is known" "log: $log"
+		teardown
+		return
+	fi
+	expected=$(view_line | sed -E 's/ time=[0-9.]+ / time=0.000 /')
+	for attempt in 1 2 3; do
+		key -k Left
+		if wait_for_displayed_view "$expected" 5 "the spaced-path fixture seeks to zero"; then
+			landed=yes
+			break
+		fi
+	done
+	if [ "$landed" = no ]; then
+		fail "the spaced-path fixture seeks to zero" "shown: $displayed_view" "log: $log"
+		teardown
+		return
+	fi
+	copies_the_view
+	returns_to_the_copied_view
+	returns_to_the_copied_view printed
+	exits_clean
 }
 
 # `h` flips the horizon lock, which is on by default, so the session's config
@@ -2915,11 +3219,16 @@ twin_guard() {
 
 # ------------------------------------------------------------------- run
 
-if [ "${KJERAG_UITEST_ONLY:-}" = stalls ]; then
+if [ "${KJERAG_UITEST_ONLY:-}" = view-paths ]; then
+	spaced_view_reference
+elif [ "${KJERAG_UITEST_ONLY:-}" = drag-release ]; then
+	drag_release_check
+elif [ "${KJERAG_UITEST_ONLY:-}" = stalls ]; then
 	stalls
 else
 	if [ -n "$media" ]; then
 		with_media
+		spaced_view_reference
 		dropped_files
 		paired_files
 		stalls
