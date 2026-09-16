@@ -71,6 +71,16 @@ paths and are not release assets.
 
 ## Qualification summary
 
+Issue [#163](https://github.com/aeharding/kjerag/issues/163) corrects missing
+evidence in the legacy `colour` profile diagnostic. Out-of-window controls,
+unsampled lags and missing side fits no longer masquerade as measured zeros.
+Each unavailable control is reported explicitly, and the excess requires all
+four declared controls; their positions and the default reach are unchanged.
+CPU regressions exercise the actual reducer, including failing-before cases,
+real zero contrast and the complete four-control mean. This changes no player
+picture, stitching/color arithmetic or performance qualification. The older
+diagnostic's compacted sparse-bin spacing remains a separate limitation.
+
 Issue [#151](https://github.com/aeharding/kjerag/issues/151), a camera drag
 continuing after release over the scrubber, is reproduced in the accepted
 `90721189` native player through real overlay routing. At one paused source
