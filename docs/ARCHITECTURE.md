@@ -316,6 +316,22 @@ both lenses at the same instant. ONE X2 uses one demuxer per file and pairs the
 two files by frame index, not by unrelated container start times. A lens frame
 without a partner is dropped.
 
+The system-memory [`Walk`](../crates/media/src/walk.rs) uses the same frame-index
+alignment decision in [`pairing.rs`](../crates/media/src/pairing.rs). Each decoded
+timestamp is normalized by its own source clock before pairing, and the first
+lens's actual normalized time accompanies the pair. Its CPU-owned queue state
+admits a frame before invoking the GPU-to-CPU transfer, so pre-cue frames cost no
+copy. This shares pairing policy, not decoder ownership, Reader lookahead or
+presentation scheduling.
+
+Both deliveries use [`capture.rs`](../crates/media/src/capture.rs) to inspect
+containers, order named siblings, prefer explicitly picked companions and check
+that two files describe matching lenses. A discovered unreadable or mismatched
+sibling leaves the named lens usable; a bad explicitly selected pair is an
+error. The existing Reader admission and color-metadata rules are the common
+policy. Demux seek targets remain unchanged; frame-origin normalization happens
+at delivery, after decode.
+
 Audio has its own demuxer in [`audio.rs`](../crates/media/src/audio.rs).
 Large video interleave gaps must not delay sound delivery. The presentation
 clock remains based on container PTS and is pumped from the shader redraw path,

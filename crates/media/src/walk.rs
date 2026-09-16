@@ -24,13 +24,9 @@ use std::time::Duration;
 
 use ffmpeg_next as ff;
 
-use super::{Fallible, HwDevice, Size, SwFrame, is_lens, open_decoder};
-
-/// Every lens stream of one container, in container order
-/// ([`is_lens`](super::is_lens)).
-fn video_streams(input: &ff::format::context::Input) -> Vec<usize> {
-    input.streams().filter(is_lens).map(|s| s.index()).collect()
-}
+use super::capture::{Opened, agreed_samples};
+use super::pairing::{Alignment, alignment};
+use super::{Fallible, HwDevice, Size, SwFrame, Timing, media_time, open_decoder};
 
 /// One frame of every stream, at one instant.
 pub struct Pair {
@@ -181,15 +177,228 @@ pub struct Walk {
     decoders: Vec<ff::decoder::Video>,
     /// `(file, stream)` per lane, in lens order.
     lanes: Vec<(usize, usize)>,
-    queues: Vec<VecDeque<(i64, Plane)>>,
+    state: WalkState,
+    size: Size,
+    /// Held so the VA-API device outlives the decoders that reference it.
+    _hw: HwDevice,
+}
+
+/// The CPU-owned clock and queues behind [`Walk`].
+///
+/// Kept apart from the demuxers and hardware decoders so the production
+/// pairing policy can be exercised without constructing either.
+struct WalkState {
+    /// Which source owns each lane, in lens order.
+    lane_sources: Vec<usize>,
+    queues: Vec<VecDeque<(Duration, Plane)>>,
+    clocks: Vec<Clock>,
+    timing: Timing,
+    drained: Vec<bool>,
+}
+
+/// One source container's own origin and exact at-or-after cue threshold.
+#[derive(Clone, Copy, Debug)]
+struct Clock {
     time_base: ff::Rational,
     start: i64,
     from_pts: i64,
-    fps: f64,
-    size: Size,
-    drained: Vec<bool>,
-    /// Held so the VA-API device outlives the decoders that reference it.
-    _hw: HwDevice,
+}
+
+impl Clock {
+    fn new(time_base: ff::Rational, start: i64, from: f64) -> Fallible<Self> {
+        if time_base.numerator() <= 0 || time_base.denominator() <= 0 {
+            return Err(format!(
+                "video stream has no time base ({}/{})",
+                time_base.numerator(),
+                time_base.denominator()
+            )
+            .into());
+        }
+        let mut clock = Self {
+            time_base,
+            // AV_NOPTS_VALUE means absent. A real negative origin is still
+            // the container's origin, the same distinction Reader keeps.
+            start: if start == ff::ffi::AV_NOPTS_VALUE {
+                0
+            } else {
+                start
+            },
+            from_pts: 0,
+        };
+        clock.cue(from);
+        Ok(clock)
+    }
+
+    fn cue(&mut self, to: f64) {
+        let ticks = (to * f64::from(self.time_base.denominator())
+            / f64::from(self.time_base.numerator())) as i64;
+        self.from_pts = self.start.saturating_add(ticks);
+    }
+
+    fn at(&self, pts: i64) -> Option<Duration> {
+        (pts >= self.from_pts).then(|| media_time(pts, self.start, self.time_base))
+    }
+}
+
+enum WalkStep {
+    Pair(Pair),
+    Pump,
+    End,
+}
+
+fn seek_inputs(inputs: &mut [ff::format::context::Input], to: f64) -> Fallible<()> {
+    let target = (to * 1e6) as i64;
+    for input in inputs {
+        input.seek(target, ..target)?;
+    }
+    Ok(())
+}
+
+impl WalkState {
+    /// Consume the same inspected container metadata as Reader, before any
+    /// decoder or pixel transfer exists.
+    fn for_sources(sources: &[Opened], from: f64) -> Fallible<Self> {
+        let first = sources
+            .iter()
+            .flat_map(|source| &source.videos)
+            .next()
+            .ok_or("file has no video stream")?;
+        let timing = Timing::new(first.rate, first.frames)?;
+        let clocks = sources
+            .iter()
+            .map(|source| {
+                for video in &source.videos {
+                    Timing::new(video.rate, video.frames)?;
+                }
+                Clock::new(source.time_base, source.start, from)
+            })
+            .collect::<Fallible<Vec<_>>>()?;
+        let lane_sources = sources
+            .iter()
+            .enumerate()
+            .flat_map(|(source, opened)| opened.videos.iter().map(move |_| source))
+            .collect();
+        Ok(Self::new(lane_sources, clocks, timing, from))
+    }
+
+    fn new(lane_sources: Vec<usize>, clocks: Vec<Clock>, timing: Timing, from: f64) -> Self {
+        let lanes = lane_sources.len();
+        let mut state = Self {
+            lane_sources,
+            queues: (0..lanes).map(|_| VecDeque::new()).collect(),
+            drained: vec![false; clocks.len()],
+            clocks,
+            timing,
+        };
+        state.cue(from);
+        state
+    }
+
+    /// Carry only the CPU pairing state to another instant. The caller seeks
+    /// and flushes every external owner before committing this reset.
+    fn cue(&mut self, to: f64) {
+        for queue in &mut self.queues {
+            queue.clear();
+        }
+        for clock in &mut self.clocks {
+            clock.cue(to);
+        }
+        self.drained.fill(false);
+    }
+
+    /// Admit one decoded timestamp and transfer its pixels only after its own
+    /// source clock says it is at or beyond the cue.
+    fn receive(
+        &mut self,
+        lane: usize,
+        pts: i64,
+        transfer: impl FnOnce() -> Fallible<Plane>,
+    ) -> Fallible<bool> {
+        let source = self.lane_sources[lane];
+        let Some(at) = self.clocks[source].at(pts) else {
+            return Ok(false);
+        };
+        let plane = transfer()?;
+        self.queues[lane].push_back((at, plane));
+        Ok(true)
+    }
+
+    fn queued(&self, lane: usize) -> usize {
+        self.queues[lane].len()
+    }
+
+    fn drained(&self, source: usize) -> bool {
+        self.drained[source]
+    }
+
+    fn mark_drained(&mut self, source: usize) {
+        self.drained[source] = true;
+    }
+
+    fn ended(&self) -> bool {
+        self.drained.iter().all(|done| *done)
+    }
+
+    /// The source whose least-filled lane is holding pairing up.
+    fn next_source(&self) -> usize {
+        let queued = |source: usize| {
+            self.lane_sources
+                .iter()
+                .enumerate()
+                .filter(|(_, owner)| **owner == source)
+                .map(|(lane, _)| self.queued(lane))
+                .min()
+                .unwrap_or(0)
+        };
+        (0..self.clocks.len())
+            .filter(|source| !self.drained(*source))
+            .min_by_key(|source| queued(*source))
+            .unwrap_or(0)
+    }
+
+    fn step(&mut self) -> WalkStep {
+        if let Some(pair) = self.take_pair() {
+            WalkStep::Pair(pair)
+        } else if self.ended() {
+            WalkStep::End
+        } else {
+            WalkStep::Pump
+        }
+    }
+
+    /// Take the next normalized frame-index match. The first lens's actual
+    /// timestamp accompanies it; the nominal index is only the alignment key.
+    fn take_pair(&mut self) -> Option<Pair> {
+        loop {
+            match alignment(
+                self.queues
+                    .iter()
+                    .map(|queue| queue.front().map(|(at, _)| self.timing.index_at(*at))),
+            ) {
+                Alignment::Waiting => return None,
+                Alignment::Ready(index) => {
+                    let at = self.queues.first()?.front()?.0;
+                    let lenses = self
+                        .queues
+                        .iter_mut()
+                        .map(|queue| queue.pop_front().expect("alignment checked every lane").1)
+                        .collect();
+                    return Some(Pair { index, at, lenses });
+                }
+                Alignment::DropBefore(newest) => {
+                    let timing = self.timing;
+                    for queue in &mut self.queues {
+                        if queue
+                            .front()
+                            .is_some_and(|(at, _)| timing.index_at(*at) < newest)
+                        {
+                            queue.pop_front();
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Walk {
@@ -203,34 +412,15 @@ impl Walk {
     pub fn open(path: &Path, from: f64, size: Size) -> Fallible<Self> {
         ff::init()?;
         let hw = HwDevice::vaapi()?;
-        let mut inputs = vec![ff::format::input(&path)?];
-        let mut lanes = Vec::new();
-        for stream in video_streams(&inputs[0]) {
-            lanes.push((0, stream));
-        }
-        // One lens in this file: the other one may be in the file beside it.
-        // Lens order is the marker's, not the order they were named in.
-        if lanes.len() == 1
-            && let Some(beside) = kjerag_meta::sibling(path)
-        {
-            let second = ff::format::input(&beside)?;
-            let streams = video_streams(&second);
-            if streams.len() == 1 {
-                inputs.push(second);
-                lanes.push((1, streams[0]));
-                if kjerag_meta::lens_index(path) == Some(1) {
-                    lanes.swap(0, 1);
-                }
-            }
-        }
-        Self::walking(inputs, lanes, from, size, hw)
+        Self::walking(Opened::discover(path, &[])?, from, size, hw)
     }
 
     /// A walk over a capture that is already composed: every file of it, in
     /// lens order, as [`Reader::paths`](crate::Reader::paths) hands them over.
     ///
-    /// Taken as given, with nothing looked up, because looking again can only
-    /// find less. A capture whose two halves were picked in a sandbox's file
+    /// The named pair is checked with Reader's rules, with nothing looked up,
+    /// because looking again can only find less. A capture whose two halves
+    /// were picked in a sandbox's file
     /// chooser arrives as two documents in two directories that hold one file
     /// each, so its second lens exists in the picked set and nowhere on the
     /// filesystem beside the first (issue #123). One path is a capture nobody
@@ -241,56 +431,44 @@ impl Walk {
         }
         ff::init()?;
         let hw = HwDevice::vaapi()?;
-        let mut inputs = Vec::new();
-        let mut lanes = Vec::new();
-        for path in files {
-            let input = ff::format::input(path)?;
-            for stream in video_streams(&input) {
-                lanes.push((inputs.len(), stream));
-            }
-            inputs.push(input);
-        }
-        Self::walking(inputs, lanes, from, size, hw)
+        let [first, second] = files else {
+            return Err("a capture must contain one or two files".into());
+        };
+        Self::walking(Opened::pair(first, second)?, from, size, hw)
     }
 
     /// One decoder per lane, every demuxer seeked to the same instant, and
     /// the timing the whole capture is read on: what the two constructors
     /// above share once they have settled which files and streams the capture
     /// is.
-    fn walking(
-        mut inputs: Vec<ff::format::context::Input>,
-        lanes: Vec<(usize, usize)>,
-        from: f64,
-        size: Size,
-        hw: HwDevice,
-    ) -> Fallible<Self> {
-        let (file, index) = *lanes.first().ok_or("this file carries no video stream")?;
-        let stream = inputs[file].stream(index).ok_or("no video stream")?;
-        let time_base = stream.time_base();
-        let start = stream.start_time().max(0);
-        let rate = stream.avg_frame_rate();
-        let fps = f64::from(rate.numerator()) / f64::from(rate.denominator());
+    fn walking(sources: Vec<Opened>, from: f64, size: Size, hw: HwDevice) -> Fallible<Self> {
+        agreed_samples(
+            sources.iter().enumerate().flat_map(|(source, opened)| {
+                opened.videos.iter().map(move |video| (source, video))
+            }),
+        )?;
+        let state = WalkState::for_sources(&sources, from)?;
+        let lanes: Vec<_> = sources
+            .iter()
+            .enumerate()
+            .flat_map(|(source, opened)| {
+                opened
+                    .videos
+                    .iter()
+                    .map(move |video| (source, video.stream))
+            })
+            .collect();
         let decoders = lanes
             .iter()
-            .map(|(file, index)| open_decoder(&inputs[*file], *index, &hw))
+            .map(|(file, index)| open_decoder(&sources[*file].input, *index, &hw))
             .collect::<Fallible<Vec<_>>>()?;
-
-        let target = (from * 1e6) as i64;
-        for input in &mut inputs {
-            input.seek(target, ..target)?;
-        }
-        let from_pts = start
-            + (from * f64::from(time_base.denominator()) / f64::from(time_base.numerator())) as i64;
+        let mut inputs: Vec<_> = sources.into_iter().map(|source| source.input).collect();
+        seek_inputs(&mut inputs, from)?;
         Ok(Self {
-            drained: vec![false; inputs.len()],
             inputs,
             decoders,
-            queues: lanes.iter().map(|_| VecDeque::new()).collect(),
             lanes,
-            time_base,
-            start,
-            from_pts,
-            fps,
+            state,
             size,
             _hw: hw,
         })
@@ -324,88 +502,30 @@ impl Walk {
     /// was mid-way through, which would pair a frame from here with a frame
     /// from there.
     pub fn jump(&mut self, to: f64) -> Fallible<()> {
-        let target = (to * 1e6) as i64;
-        for input in &mut self.inputs {
-            input.seek(target, ..target)?;
-        }
+        seek_inputs(&mut self.inputs, to)?;
         for decoder in &mut self.decoders {
             decoder.flush();
         }
-        for queue in &mut self.queues {
-            queue.clear();
-        }
-        self.from_pts = self.start + self.ticks(to);
-        self.drained = vec![false; self.inputs.len()];
+        self.state.cue(to);
         Ok(())
-    }
-
-    /// A time in seconds as this file's own stream ticks.
-    fn ticks(&self, seconds: f64) -> i64 {
-        (seconds * f64::from(self.time_base.denominator()) / f64::from(self.time_base.numerator()))
-            as i64
     }
 
     /// The next instant every stream has a frame for, at or after the one the
     /// walk was opened on.
     pub fn next_pair(&mut self) -> Fallible<Option<Pair>> {
         loop {
-            let heads: Vec<i64> = self
-                .queues
-                .iter()
-                .filter_map(|q| Some(q.front()?.0))
-                .collect();
-            if heads.len() == self.queues.len() {
-                let newest = heads.iter().copied().fold(i64::MIN, i64::max);
-                if heads.iter().all(|pts| *pts == newest) {
-                    let lenses: Vec<Plane> = self
-                        .queues
-                        .iter_mut()
-                        .filter_map(|queue| Some(queue.pop_front()?.1))
-                        .collect();
-                    let at = Duration::from_nanos(
-                        ((newest - self.start).max(0) as u128
-                            * self.time_base.numerator() as u128
-                            * 1_000_000_000
-                            / self.time_base.denominator() as u128) as u64,
-                    );
-                    return Ok(Some(Pair {
-                        index: (at.as_secs_f64() * self.fps).round() as u64,
-                        at,
-                        lenses,
-                    }));
-                }
-                // A head with no partner is dropped rather than paired with a
-                // different instant of the other lens.
-                for queue in &mut self.queues {
-                    if queue.front().is_some_and(|(pts, _)| *pts < newest) {
-                        queue.pop_front();
-                    }
-                }
-                continue;
+            match self.state.step() {
+                WalkStep::Pair(pair) => return Ok(Some(pair)),
+                WalkStep::Pump => self.pump()?,
+                WalkStep::End => return Ok(None),
             }
-            if self.drained.iter().all(|done| *done) {
-                return Ok(None);
-            }
-            self.pump()?;
         }
     }
 
     /// Reads one packet from the file with the fewest frames waiting, so a
     /// pair stays in step instead of one file running away with the memory.
     fn pump(&mut self) -> Fallible<()> {
-        let queued = |file: usize| {
-            self.lanes
-                .iter()
-                .enumerate()
-                .filter(|(_, (owner, _))| *owner == file)
-                .map(|(lane, _)| self.queues[lane].len())
-                .min()
-                .unwrap_or(0)
-        };
-        let file = (0..self.inputs.len())
-            .filter(|file| !self.drained[*file])
-            .min_by_key(|file| queued(*file))
-            .unwrap_or(0);
+        let file = self.state.next_source();
 
         let mut packet = ff::Packet::empty();
         match packet.read(&mut self.inputs[file]) {
@@ -418,7 +538,7 @@ impl Walk {
                 self.drain(lane)
             }
             Err(ff::Error::Eof) => {
-                self.drained[file] = true;
+                self.state.mark_drained(file);
                 let lanes: Vec<usize> = (0..self.lanes.len())
                     .filter(|lane| self.lanes[*lane].0 == file)
                     .collect();
@@ -444,14 +564,18 @@ impl Walk {
             let Some(pts) = frame.timestamp() else {
                 continue;
             };
-            if pts < self.from_pts {
-                continue;
-            }
-            let taken = SwFrame::transfer(&frame)?;
-            self.queues[lane].push_back((pts, Plane::of(&taken, self.size)));
+            let size = self.size;
+            self.state.receive(lane, pts, || {
+                let taken = SwFrame::transfer(&frame)?;
+                Ok(Plane::of(&taken, size))
+            })?;
         }
     }
 }
+
+#[cfg(test)]
+#[path = "walk_capture_tests.rs"]
+mod capture_tests;
 
 #[cfg(test)]
 mod tests {
@@ -479,6 +603,263 @@ mod tests {
             chroma: None,
             wide,
         }
+    }
+
+    fn ntsc_timing() -> Timing {
+        Timing::new(ff::Rational::new(30_000, 1_001), 100).unwrap()
+    }
+
+    fn receive_code(state: &mut WalkState, lane: usize, pts: i64, code: u16) -> bool {
+        state
+            .receive(lane, pts, || Ok(plane(code, false, Size::new(2, 2))))
+            .unwrap()
+    }
+
+    fn next_pair(state: &mut WalkState) -> Pair {
+        match state.step() {
+            WalkStep::Pair(pair) => pair,
+            WalkStep::Pump => panic!("pairing asked for more input"),
+            WalkStep::End => panic!("pairing ended"),
+        }
+    }
+
+    /// Two source clocks may choose different PTS origins for the same media
+    /// instants. The CPU pairing state is the production path used by Walk.
+    #[test]
+    fn source_frames_with_distinct_starts_pair_by_media_index() {
+        let time_base = ff::Rational::new(1, 30_000);
+        let starts = [0, 900];
+        let clocks = starts
+            .map(|start| Clock::new(time_base, start, 0.0).unwrap())
+            .to_vec();
+        let mut state = WalkState::new(vec![0, 1], clocks, ntsc_timing(), 0.0);
+
+        for (lane, pts, code) in [
+            (0, starts[0], 10),
+            (0, starts[0] + 1_001, 11),
+            (1, starts[1], 20),
+            (1, starts[1] + 1_001, 21),
+        ] {
+            assert!(receive_code(&mut state, lane, pts, code));
+        }
+
+        let first = next_pair(&mut state);
+        assert_eq!(first.index, 0);
+        assert_eq!(first.at, Duration::ZERO);
+        assert_eq!(first.lenses[0].luma[0], 10);
+        assert_eq!(first.lenses[1].luma[0], 20);
+
+        let second = next_pair(&mut state);
+        assert_eq!(second.index, 1);
+        assert_eq!(second.lenses[0].luma[0], 11);
+        assert_eq!(second.lenses[1].luma[0], 21);
+    }
+
+    #[test]
+    fn positive_time_bases_normalize_to_the_same_media_index() {
+        // Arithmetic coverage only. Capture admission still decides whether
+        // two real files with different time bases belong together.
+        let clocks = vec![
+            Clock::new(ff::Rational::new(1, 30_000), 0, 0.0).unwrap(),
+            Clock::new(ff::Rational::new(1, 90_000), 9_000, 0.0).unwrap(),
+        ];
+        let mut state = WalkState::new(vec![0, 1], clocks, ntsc_timing(), 0.0);
+
+        assert!(receive_code(&mut state, 0, 1_001, 10));
+        assert!(receive_code(&mut state, 1, 12_003, 20));
+
+        let pair = next_pair(&mut state);
+        assert_eq!(pair.index, 1);
+        assert_eq!(pair.at, Duration::from_nanos(33_366_666));
+        assert_eq!(pair.lenses[0].luma[0], 10);
+        assert_eq!(pair.lenses[1].luma[0], 20);
+    }
+
+    #[test]
+    fn a_pair_keeps_the_first_lens_s_actual_timestamp() {
+        let clocks = vec![
+            Clock::new(ff::Rational::new(1, 30_000), 0, 0.0).unwrap(),
+            Clock::new(ff::Rational::new(1, 30_000), 0, 0.0).unwrap(),
+        ];
+        let mut state = WalkState::new(vec![0, 1], clocks, ntsc_timing(), 0.0);
+
+        // The first lens is off the nominal grid. Neither the second lens's
+        // time nor Timing::time_of(1) may replace its actual timestamp.
+        assert!(receive_code(&mut state, 0, 1_002, 10));
+        assert!(receive_code(&mut state, 1, 1_001, 20));
+
+        let pair = next_pair(&mut state);
+        assert_eq!(pair.index, 1);
+        assert_eq!(pair.at, Duration::from_nanos(33_400_000));
+    }
+
+    #[test]
+    fn unknown_and_real_negative_starts_keep_reader_s_rule() {
+        let clocks = vec![
+            Clock::new(ff::Rational::new(1, 30_000), -900, 0.0).unwrap(),
+            Clock::new(ff::Rational::new(1, 30_000), ff::ffi::AV_NOPTS_VALUE, 0.0).unwrap(),
+        ];
+        let mut state = WalkState::new(vec![0, 1], clocks, ntsc_timing(), 0.0);
+
+        assert!(receive_code(&mut state, 0, -900, 10));
+        assert!(receive_code(&mut state, 1, 0, 20));
+
+        let pair = next_pair(&mut state);
+        assert_eq!(pair.index, 0);
+        assert_eq!(pair.at, Duration::ZERO);
+    }
+
+    #[test]
+    fn reversed_lens_order_uses_each_lane_s_source_clock() {
+        // Source 0 was the named lens 1; lens order swaps the lanes to 1, 0.
+        let clocks = vec![
+            Clock::new(ff::Rational::new(1, 30_000), 900, 0.0).unwrap(),
+            Clock::new(ff::Rational::new(1, 30_000), 0, 0.0).unwrap(),
+        ];
+        let mut state = WalkState::new(vec![1, 0], clocks, ntsc_timing(), 0.0);
+
+        assert_eq!(state.next_source(), 0, "input order settles an empty tie");
+        assert!(receive_code(&mut state, 0, 0, 10));
+        assert_eq!(state.next_source(), 0, "source 0 still has the empty lane");
+        assert!(receive_code(&mut state, 1, 900, 20));
+
+        let pair = next_pair(&mut state);
+        assert_eq!(pair.index, 0);
+        assert_eq!(pair.at, Duration::ZERO);
+        assert_eq!(pair.lenses[0].luma[0], 10);
+        assert_eq!(pair.lenses[1].luma[0], 20);
+    }
+
+    #[test]
+    fn two_lanes_in_one_source_share_its_clock() {
+        let clocks = vec![Clock::new(ff::Rational::new(1, 30_000), 900, 0.0).unwrap()];
+        let mut state = WalkState::new(vec![0, 0], clocks, ntsc_timing(), 0.0);
+
+        assert!(receive_code(&mut state, 0, 1_901, 10));
+        assert!(receive_code(&mut state, 1, 1_901, 20));
+
+        let pair = next_pair(&mut state);
+        assert_eq!(pair.index, 1);
+        assert_eq!(pair.at, Duration::from_nanos(33_366_666));
+        assert_eq!(pair.lenses.len(), 2);
+    }
+
+    #[test]
+    fn missing_heads_wait_then_converge_without_discarding_early() {
+        let clocks = vec![
+            Clock::new(ff::Rational::new(1, 30_000), 0, 0.0).unwrap(),
+            Clock::new(ff::Rational::new(1, 30_000), 0, 0.0).unwrap(),
+        ];
+        let mut state = WalkState::new(vec![0, 1], clocks, ntsc_timing(), 0.0);
+
+        assert!(receive_code(&mut state, 0, 0, 10));
+        assert!(receive_code(&mut state, 0, 1_001, 11));
+        assert!(matches!(state.step(), WalkStep::Pump));
+        assert_eq!(state.queued(0), 2);
+
+        assert!(receive_code(&mut state, 1, 1_001, 21));
+        let pair = next_pair(&mut state);
+        assert_eq!(pair.index, 1);
+        assert_eq!(pair.lenses[0].luma[0], 11);
+        assert_eq!(pair.lenses[1].luma[0], 21);
+    }
+
+    #[test]
+    fn unmatched_tail_is_not_emitted_at_eof() {
+        let clocks = vec![
+            Clock::new(ff::Rational::new(1, 30_000), 0, 0.0).unwrap(),
+            Clock::new(ff::Rational::new(1, 30_000), 0, 0.0).unwrap(),
+        ];
+        let mut state = WalkState::new(vec![0, 1], clocks, ntsc_timing(), 0.0);
+
+        assert!(receive_code(&mut state, 0, 0, 10));
+        assert!(receive_code(&mut state, 1, 0, 20));
+        assert_eq!(next_pair(&mut state).index, 0);
+        assert!(receive_code(&mut state, 0, 1_001, 11));
+
+        state.mark_drained(1);
+        assert!(matches!(state.step(), WalkStep::Pump));
+        assert_eq!(state.next_source(), 0);
+        state.mark_drained(0);
+        assert!(matches!(state.step(), WalkStep::End));
+        assert_eq!(state.queued(0), 1, "the unmatched plane was not emitted");
+    }
+
+    #[test]
+    fn cue_reset_uses_each_clock_and_rejects_before_transfer() {
+        use std::cell::Cell;
+
+        let clocks = vec![
+            Clock::new(ff::Rational::new(1, 30_000), 0, 0.0).unwrap(),
+            Clock::new(ff::Rational::new(1, 30_000), 900, 0.0).unwrap(),
+        ];
+        let mut state = WalkState::new(vec![0, 1], clocks, ntsc_timing(), 0.0);
+        assert!(receive_code(&mut state, 0, 0, 1));
+        assert!(receive_code(&mut state, 1, 900, 2));
+        state.mark_drained(0);
+        state.mark_drained(1);
+
+        state.cue(0.05);
+        assert_eq!(state.queued(0), 0);
+        assert_eq!(state.queued(1), 0);
+        assert!(!state.ended());
+
+        let transfers = Cell::new(0);
+        let try_receive = |state: &mut WalkState, lane, pts, code| {
+            state
+                .receive(lane, pts, || {
+                    transfers.set(transfers.get() + 1);
+                    Ok(plane(code, false, Size::new(2, 2)))
+                })
+                .unwrap()
+        };
+        assert!(!try_receive(&mut state, 0, 1_499, 10));
+        assert!(!try_receive(&mut state, 1, 2_399, 20));
+        assert_eq!(transfers.get(), 0, "rejected frames must stay on the GPU");
+
+        assert!(try_receive(&mut state, 0, 1_500, 11));
+        assert!(try_receive(&mut state, 1, 2_400, 21));
+        assert_eq!(transfers.get(), 2);
+        let pair = next_pair(&mut state);
+        assert_eq!(pair.at, Duration::from_millis(50));
+        assert_eq!(pair.lenses[0].luma[0], 11);
+        assert_eq!(pair.lenses[1].luma[0], 21);
+    }
+
+    #[test]
+    fn invalid_clock_and_capture_rate_are_raw_errors() {
+        let time_base_error = Clock::new(ff::Rational::new(0, 1), 0, 0.0)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(time_base_error, "video stream has no time base (0/1)");
+
+        let rate_error = Timing::new(ff::Rational::new(0, 1), 100)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(rate_error, "stream has no frame rate (0/1)");
+    }
+
+    #[test]
+    fn fractional_cues_keep_the_existing_stream_tick_truncation() {
+        let clocks = vec![Clock::new(ff::Rational::new(1, 30_000), 900, 0.0).unwrap()];
+        let mut state = WalkState::new(vec![0], clocks, ntsc_timing(), 0.050_025);
+        // Preserve Walk's existing conversion: 1500.75 ticks truncates to
+        // 1500 ticks before adding this source's 900-tick origin.
+        assert!(!receive_code(&mut state, 0, 2_399, 10));
+        assert!(receive_code(&mut state, 0, 2_400, 11));
+        assert_eq!(next_pair(&mut state).at, Duration::from_millis(50));
+    }
+
+    #[test]
+    fn a_transfer_error_is_preserved_without_queuing_a_partial_frame() {
+        let clocks = vec![Clock::new(ff::Rational::new(1, 30_000), 0, 0.0).unwrap()];
+        let mut state = WalkState::new(vec![0], clocks, ntsc_timing(), 0.0);
+        let error = state
+            .receive(0, 0, || Err("test transfer failed".into()))
+            .unwrap_err();
+        assert_eq!(error.to_string(), "test transfer failed");
+        assert_eq!(state.queued(0), 0);
+        assert!(matches!(state.step(), WalkStep::Pump));
     }
 
     /// The whole of the ten-bit bug in one assertion: a P010 plane indexed a
