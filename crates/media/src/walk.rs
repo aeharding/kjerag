@@ -24,14 +24,9 @@ use std::time::Duration;
 
 use ffmpeg_next as ff;
 
+use super::capture::{Opened, agreed_samples};
 use super::pairing::{Alignment, alignment};
-use super::{Fallible, HwDevice, Size, SwFrame, Timing, is_lens, media_time, open_decoder};
-
-/// Every lens stream of one container, in container order
-/// ([`is_lens`](super::is_lens)).
-fn video_streams(input: &ff::format::context::Input) -> Vec<usize> {
-    input.streams().filter(is_lens).map(|s| s.index()).collect()
-}
+use super::{Fallible, HwDevice, Size, SwFrame, Timing, media_time, open_decoder};
 
 /// One frame of every stream, at one instant.
 pub struct Pair {
@@ -251,7 +246,41 @@ enum WalkStep {
     End,
 }
 
+fn seek_inputs(inputs: &mut [ff::format::context::Input], to: f64) -> Fallible<()> {
+    let target = (to * 1e6) as i64;
+    for input in inputs {
+        input.seek(target, ..target)?;
+    }
+    Ok(())
+}
+
 impl WalkState {
+    /// Consume the same inspected container metadata as Reader, before any
+    /// decoder or pixel transfer exists.
+    fn for_sources(sources: &[Opened], from: f64) -> Fallible<Self> {
+        let first = sources
+            .iter()
+            .flat_map(|source| &source.videos)
+            .next()
+            .ok_or("file has no video stream")?;
+        let timing = Timing::new(first.rate, first.frames)?;
+        let clocks = sources
+            .iter()
+            .map(|source| {
+                for video in &source.videos {
+                    Timing::new(video.rate, video.frames)?;
+                }
+                Clock::new(source.time_base, source.start, from)
+            })
+            .collect::<Fallible<Vec<_>>>()?;
+        let lane_sources = sources
+            .iter()
+            .enumerate()
+            .flat_map(|(source, opened)| opened.videos.iter().map(move |_| source))
+            .collect();
+        Ok(Self::new(lane_sources, clocks, timing, from))
+    }
+
     fn new(lane_sources: Vec<usize>, clocks: Vec<Clock>, timing: Timing, from: f64) -> Self {
         let lanes = lane_sources.len();
         let mut state = Self {
@@ -383,34 +412,15 @@ impl Walk {
     pub fn open(path: &Path, from: f64, size: Size) -> Fallible<Self> {
         ff::init()?;
         let hw = HwDevice::vaapi()?;
-        let mut inputs = vec![ff::format::input(&path)?];
-        let mut lanes = Vec::new();
-        for stream in video_streams(&inputs[0]) {
-            lanes.push((0, stream));
-        }
-        // One lens in this file: the other one may be in the file beside it.
-        // Lens order is the marker's, not the order they were named in.
-        if lanes.len() == 1
-            && let Some(beside) = kjerag_meta::sibling(path)
-        {
-            let second = ff::format::input(&beside)?;
-            let streams = video_streams(&second);
-            if streams.len() == 1 {
-                inputs.push(second);
-                lanes.push((1, streams[0]));
-                if kjerag_meta::lens_index(path) == Some(1) {
-                    lanes.swap(0, 1);
-                }
-            }
-        }
-        Self::walking(inputs, lanes, from, size, hw)
+        Self::walking(Opened::discover(path, &[])?, from, size, hw)
     }
 
     /// A walk over a capture that is already composed: every file of it, in
     /// lens order, as [`Reader::paths`](crate::Reader::paths) hands them over.
     ///
-    /// Taken as given, with nothing looked up, because looking again can only
-    /// find less. A capture whose two halves were picked in a sandbox's file
+    /// The named pair is checked with Reader's rules, with nothing looked up,
+    /// because looking again can only find less. A capture whose two halves
+    /// were picked in a sandbox's file
     /// chooser arrives as two documents in two directories that hold one file
     /// each, so its second lens exists in the picked set and nowhere on the
     /// filesystem beside the first (issue #123). One path is a capture nobody
@@ -421,64 +431,39 @@ impl Walk {
         }
         ff::init()?;
         let hw = HwDevice::vaapi()?;
-        let mut inputs = Vec::new();
-        let mut lanes = Vec::new();
-        for path in files {
-            let input = ff::format::input(path)?;
-            for stream in video_streams(&input) {
-                lanes.push((inputs.len(), stream));
-            }
-            inputs.push(input);
-        }
-        Self::walking(inputs, lanes, from, size, hw)
+        let [first, second] = files else {
+            return Err("a capture must contain one or two files".into());
+        };
+        Self::walking(Opened::pair(first, second)?, from, size, hw)
     }
 
     /// One decoder per lane, every demuxer seeked to the same instant, and
     /// the timing the whole capture is read on: what the two constructors
     /// above share once they have settled which files and streams the capture
     /// is.
-    fn walking(
-        mut inputs: Vec<ff::format::context::Input>,
-        lanes: Vec<(usize, usize)>,
-        from: f64,
-        size: Size,
-        hw: HwDevice,
-    ) -> Fallible<Self> {
-        let (file, index) = *lanes.first().ok_or("this file carries no video stream")?;
-        let stream = inputs[file].stream(index).ok_or("no video stream")?;
-        let rate = stream.avg_frame_rate();
-        let timing = Timing::new(rate, stream.frames().max(0) as u64)?;
-        let clocks = inputs
+    fn walking(sources: Vec<Opened>, from: f64, size: Size, hw: HwDevice) -> Fallible<Self> {
+        agreed_samples(
+            sources.iter().enumerate().flat_map(|(source, opened)| {
+                opened.videos.iter().map(move |video| (source, video))
+            }),
+        )?;
+        let state = WalkState::for_sources(&sources, from)?;
+        let lanes: Vec<_> = sources
             .iter()
-            .map(|input| {
-                let mut streams = input.streams().filter(is_lens);
-                let stream = streams.next().ok_or("this file carries no video stream")?;
-                // Validate every source's rate even though the capture index
-                // is deliberately paced by the first lens's rational.
-                Timing::new(stream.avg_frame_rate(), stream.frames().max(0) as u64)?;
-                let time_base = stream.time_base();
-                let clock = Clock::new(time_base, stream.start_time(), from)?;
-                for stream in streams {
-                    Timing::new(stream.avg_frame_rate(), stream.frames().max(0) as u64)?;
-                    Clock::new(stream.time_base(), stream.start_time(), from)?;
-                    if stream.time_base() != time_base {
-                        return Err("video streams disagree about their time base".into());
-                    }
-                }
-                Ok(clock)
+            .enumerate()
+            .flat_map(|(source, opened)| {
+                opened
+                    .videos
+                    .iter()
+                    .map(move |video| (source, video.stream))
             })
-            .collect::<Fallible<Vec<_>>>()?;
+            .collect();
         let decoders = lanes
             .iter()
-            .map(|(file, index)| open_decoder(&inputs[*file], *index, &hw))
+            .map(|(file, index)| open_decoder(&sources[*file].input, *index, &hw))
             .collect::<Fallible<Vec<_>>>()?;
-
-        let target = (from * 1e6) as i64;
-        for input in &mut inputs {
-            input.seek(target, ..target)?;
-        }
-        let lane_sources = lanes.iter().map(|(source, _)| *source).collect();
-        let state = WalkState::new(lane_sources, clocks, timing, from);
+        let mut inputs: Vec<_> = sources.into_iter().map(|source| source.input).collect();
+        seek_inputs(&mut inputs, from)?;
         Ok(Self {
             inputs,
             decoders,
@@ -517,10 +502,7 @@ impl Walk {
     /// was mid-way through, which would pair a frame from here with a frame
     /// from there.
     pub fn jump(&mut self, to: f64) -> Fallible<()> {
-        let target = (to * 1e6) as i64;
-        for input in &mut self.inputs {
-            input.seek(target, ..target)?;
-        }
+        seek_inputs(&mut self.inputs, to)?;
         for decoder in &mut self.decoders {
             decoder.flush();
         }
@@ -590,6 +572,10 @@ impl Walk {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "walk_capture_tests.rs"]
+mod capture_tests;
 
 #[cfg(test)]
 mod tests {

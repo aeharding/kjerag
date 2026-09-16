@@ -77,14 +77,26 @@ using its first source's clock, while `Reader` normalized each source's origin
 and matched frame indices. A regression through an extracted production queue
 adapter fails with starts 0/900 and passes after per-source normalization. The
 candidate shares the alignment decision without changing Reader's lookahead,
-mapping, stamps or scheduling. Its device-hidden media gate passes 116 tests
-with three ignored and no failures, plus media Clippy and formatting. Tests
-exercise actual admission, queued payloads, source ordering, cue resets and EOF;
-unavailable media returns are not hardware coverage. Full workspace and both
-camera runtime gates remain pending. Actual demux seeking with shifted origins,
-capture discovery and sibling validation also remain open, so this does not
-close #86 or establish arbitrary-origin file playback. No app/package/release
-change or performance improvement is claimed.
+mapping, stamps or scheduling. Capture discovery and sibling validation now
+also share Reader's existing policy: named pairs stay in lens order, selected
+companions take precedence, unsuitable discovered siblings fall back to one
+lens, and unsuitable explicitly selected pairs are errors.
+
+The device-hidden media gate passes 122 tests with four ignored and no
+failures. Generated CPU-only MOVs exercise
+real container admission, software decode and repeated forward/backward demux
+seeks through Walk's production clock/queue adapter with starts 0/60000. Both
+lenses deliver every expected frame after each cue. A separate H.264 MOV probe
+found extra preroll with the existing raw seek target but no wrong at-or-after
+packet; seek targets are unchanged. These checks do not cover hardware decode,
+negative-origin containers or arbitrary-origin playback. The final-source
+device-hidden workspace gate passes 1,566 tests with 53 ignored and no failures,
+plus formatting, full workspace Clippy, naming and dependency-source checks.
+Unavailable GPU/media returns are not hardware coverage. Independent review
+found no blocker and identified public hardware delivery as the remaining
+coverage boundary; a separately ignored Reader/Walk comparison is ready for
+both cameras. Both-camera runtime gates remain pending, so #86 stays open.
+No installed app/package/release change or performance improvement is claimed.
 
 Both actual 0.3.1 x86_64 distribution routes independently pass 40 X4 Air and
 44 ONE X2 installed UI checks. Their reported views match the accepted

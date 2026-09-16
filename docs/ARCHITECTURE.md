@@ -322,8 +322,15 @@ timestamp is normalized by its own source clock before pairing, and the first
 lens's actual normalized time accompanies the pair. Its CPU-owned queue state
 admits a frame before invoking the GPU-to-CPU transfer, so pre-cue frames cost no
 copy. This shares pairing policy, not decoder ownership, Reader lookahead or
-presentation scheduling. Capture discovery, sibling validation and the demux
-seek-target calculation are not consolidated by this change.
+presentation scheduling.
+
+Both deliveries use [`capture.rs`](../crates/media/src/capture.rs) to inspect
+containers, order named siblings, prefer explicitly picked companions and check
+that two files describe matching lenses. A discovered unreadable or mismatched
+sibling leaves the named lens usable; a bad explicitly selected pair is an
+error. The existing Reader admission and color-metadata rules are the common
+policy. Demux seek targets remain unchanged; frame-origin normalization happens
+at delivery, after decode.
 
 Audio has its own demuxer in [`audio.rs`](../crates/media/src/audio.rs).
 Large video interleave gaps must not delay sound delivery. The presentation
