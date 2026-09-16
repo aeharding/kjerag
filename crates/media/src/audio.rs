@@ -184,7 +184,14 @@ impl Pipe {
     }
 
     pub fn set_volume(&self, volume: f32) {
-        self.locked().volume = volume.clamp(0.0, 1.0);
+        // RON settings can contain NaN, which clamp preserves. It is not a
+        // gain target: approach would walk below zero instead of converging.
+        // Fail silent through the existing fade, retaining all other clamps.
+        self.locked().volume = if volume.is_nan() {
+            0.0
+        } else {
+            volume.clamp(0.0, 1.0)
+        };
     }
 
     pub fn set_muted(&self, muted: bool) {
@@ -480,6 +487,52 @@ mod tests {
 
     fn at(frames: usize) -> Duration {
         Duration::from_secs_f64(frames as f64 / f64::from(RATE))
+    }
+
+    #[test]
+    fn nan_volume_cannot_invert_or_amplify_pipe_output() {
+        for initial_volume in [0.0, 0.5, 1.0] {
+            let pipe = Pipe::new(RATE, CHANNELS, Duration::from_secs(1));
+            pipe.set_volume(initial_volume);
+            pipe.write(&frames(960, 1.0), at(960));
+            pipe.fill(&mut frames(480, 0.0), Some(Duration::ZERO));
+
+            // A live config update may contain RON's NaN literal. Exercise
+            // the public callback boundary without opening an audio device.
+            pipe.set_volume(f32::NAN);
+            let mut out = frames(480, 0.0);
+            pipe.fill(&mut out, Some(at(480)));
+            assert!(
+                out.iter()
+                    .all(|sample| sample.is_finite() && (0.0..=initial_volume).contains(sample)),
+                "invalid gain after NaN volume: initial={initial_volume}, first={}, last={}",
+                out[0],
+                out[out.len() - 1]
+            );
+            assert_eq!(out[out.len() - 1], 0.0, "invalid volume fades to silence");
+            assert_eq!(pipe.health().underruns, 0);
+        }
+    }
+
+    #[test]
+    fn pipe_volume_preserves_existing_finite_and_infinite_clamps() {
+        for (volume, expected) in [
+            (f32::NEG_INFINITY, 0.0),
+            (-1.0, 0.0),
+            (0.0, 0.0),
+            (0.25, 0.25),
+            (1.0, 1.0),
+            (2.0, 1.0),
+            (f32::INFINITY, 1.0),
+        ] {
+            let pipe = Pipe::new(RATE, CHANNELS, Duration::from_secs(1));
+            pipe.set_volume(volume);
+            pipe.write(&frames(480, 1.0), at(480));
+            let mut out = frames(480, 0.0);
+            pipe.fill(&mut out, Some(Duration::ZERO));
+            assert!(out.iter().all(|sample| (0.0..=expected).contains(sample)));
+            assert_eq!(out[out.len() - 1], expected, "volume={volume}");
+        }
     }
 
     /// The whole clock slave rests on this one line of arithmetic: what the
