@@ -2195,13 +2195,11 @@ impl Reframe {
         Blend { landings, weights }
     }
 
-    /// What the band holds at a ray's azimuth, in radians, interpolated
-    /// between the two cells it lands between.
+    /// Instrument-side reading at a ray's azimuth, in radians.
     ///
-    /// The field is a circle, so the lookup wraps: a step between neighbouring
-    /// cells would be a step in the picture.
-    ///
-    /// WGSL twin: the `band[..]` lookup inside `band_bend`.
+    /// Interpolates retained epipolar cells around the circular seam and
+    /// evaluates the fitted along-seam field. The draw does not consume either
+    /// displacement.
     pub fn reading_at(
         &self,
         view_ray: [f32; 3],
