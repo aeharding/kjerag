@@ -192,7 +192,28 @@ fn write<T: CosmicConfigEntry>(what: &str, entry: &T, handler: Option<&cosmic_co
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
+
+    /// A config root of this test's own, removed when the test is done. Passing
+    /// it to `with_custom_path` avoids reading or watching the pilot's config.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("kjerag-config-nan-volume-{}", std::process::id()));
+            fs::create_dir(&path).expect("a fresh temporary config directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn paths(state: &ConfigState) -> Vec<&str> {
         state
@@ -219,5 +240,34 @@ mod tests {
         }
         assert_eq!(state.recent_files.len(), RECENT);
         assert_eq!(paths(&state)[0], "/24.insv");
+    }
+
+    /// RON admits non-finite floats, so a persisted NaN reaches the app's
+    /// config unchanged. The media boundary must therefore reject it even
+    /// though the slider itself only produces values from zero to one.
+    #[test]
+    fn persisted_nan_reaches_the_config_entry() {
+        let scratch = Scratch::new();
+        let handler = cosmic_config::Config::with_custom_path(
+            crate::APP_ID,
+            CONFIG_VERSION,
+            scratch.0.clone(),
+        )
+        .unwrap();
+        Config::default().write_entry(&handler).unwrap();
+        fs::write(
+            scratch
+                .0
+                .join("cosmic")
+                .join(crate::APP_ID)
+                .join(format!("v{CONFIG_VERSION}"))
+                .join("volume"),
+            "NaN",
+        )
+        .unwrap();
+
+        let (_, config) = read::<Config>("test config", Ok(handler));
+
+        assert!(config.volume.is_nan());
     }
 }

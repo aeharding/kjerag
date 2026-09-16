@@ -71,6 +71,19 @@ paths and are not release assets.
 
 ## Qualification summary
 
+Issue [#229](https://github.com/aeharding/kjerag/issues/229) covers a malformed
+saved volume reaching the audio callback. An isolated real COSMIC/RON config
+test confirms that `NaN` is admitted, and a failing-before public Pipe test
+shows positive samples inverted and amplified beyond full scale within 10 ms.
+The media boundary now maps NaN to zero through its existing fade, preserving
+finite and infinity clamps. The reproduction uses memory only, with no audio
+device or GPU access; it is not an owner-reported audible defect or an
+established cause of playback hitches. The device-hidden full workspace passes
+1,598 tests with 53 ignored and no failures, including unavailable-device
+returns rather than hardware coverage. Full formatting, Clippy, vendor warning,
+naming and dependency-source gates pass. Independent source review approves
+the bounded guard. The installed Flatpak is unchanged.
+
 Issue [#227](https://github.com/aeharding/kjerag/issues/227) covers the generic
 player's end-of-timeline seek. Its inclusive duration endpoint requested a
 nonexistent source after the final frame, and terminal EOF/disconnection could
