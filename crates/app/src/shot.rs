@@ -26,6 +26,7 @@
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -83,11 +84,9 @@ pub fn finish(shot: &Shot, video: &Path, to: Destination) -> Fallible<Done> {
     match to {
         Destination::Copy => Ok(Done::Copied(Png(png(shot)?))),
         Destination::Save => {
+            let bytes = jpeg(shot)?;
             let folder = folder()?;
-            let path = folder.join(unused(&name(stem(video), shot.time), |name| {
-                folder.join(name).exists()
-            }));
-            fs::write(&path, jpeg(shot)?)?;
+            let path = write_new(&folder, &name(stem(video), shot.time), &bytes)?;
             Ok(Done::Saved(path))
         }
     }
@@ -181,27 +180,130 @@ fn name(stem: &str, at: Duration) -> String {
     )
 }
 
-/// How many names past the first one to try before giving up and writing
-/// over something. Reaching it means a thousand stills of one frame.
-const CROWDED: u32 = 1_000;
-
-/// The first name nothing has taken. Two captures of one paused frame are
-/// two different views of it, and the second must not replace the first
-/// just because the timecode is the same.
-fn unused(name: &str, taken: impl Fn(&str) -> bool) -> String {
-    if !taken(name) {
-        return name.to_owned();
-    }
+/// Reserve and write the first free name. Checking existence before writing
+/// races other captures and follows dangling symlinks; exclusive creation does
+/// neither. A write failure is returned without deleting a path that another
+/// process could already have replaced. This does not promise atomic publication
+/// of the complete JPEG: a failed write may leave our newly created partial file.
+fn write_new(folder: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
     let (stem, extension) = name.rsplit_once('.').unwrap_or((name, "jpg"));
-    (2..CROWDED)
-        .map(|n| format!("{stem}-{n}.{extension}"))
-        .find(|name| !taken(name))
-        .unwrap_or_else(|| name.to_owned())
+    let mut number = 1u64;
+    loop {
+        let path = folder.join(match number {
+            1 => name.to_owned(),
+            _ => format!("{stem}-{number}.{extension}"),
+        });
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(bytes)?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let Some(next) = number.checked_add(1) else {
+                    return Err(error);
+                };
+                number = next;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Set the real save destination in a child rather than changing the
+    /// environment of parallel tests. Only synthetic images live here; the
+    /// directory is newly created inside this checkout's ignored scratch area.
+    fn isolated_save_folder(test: &str) -> Option<PathBuf> {
+        const CHILD: &str = "KJERAG_TEST_SAVE_CHILD";
+        if std::env::var(CHILD).as_deref() == Ok(test) {
+            return Some(std::env::var_os("XDG_SCREENSHOTS_DIR").unwrap().into());
+        }
+        struct Folder(PathBuf);
+        impl Drop for Folder {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/frame-save-tests");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join(format!("{test}-{}", std::process::id()));
+        fs::create_dir(&path).unwrap();
+        let folder = Folder(path);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("shot::tests::{test}"), "--nocapture"])
+            .env(CHILD, test)
+            .env("XDG_SCREENSHOTS_DIR", folder.0.join("Screenshots"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        None
+    }
+
+    #[test]
+    fn saving_after_a_thousand_name_collisions_keeps_every_old_capture() {
+        let Some(folder) =
+            isolated_save_folder("saving_after_a_thousand_name_collisions_keeps_every_old_capture")
+        else {
+            return;
+        };
+        fs::create_dir_all(&folder).unwrap();
+        let original = name("flight", Duration::ZERO);
+        fs::write(folder.join(&original), b"previous capture").unwrap();
+        for number in 2..=1_000 {
+            fs::write(
+                folder.join(format!("flight_00-00-00.000-{number}.jpg")),
+                b"previous capture",
+            )
+            .unwrap();
+        }
+        let Done::Saved(path) =
+            finish(&shot(), Path::new("flight.insv"), Destination::Save).unwrap()
+        else {
+            panic!("save returned a clipboard image");
+        };
+        assert_eq!(
+            fs::read(folder.join(&original)).unwrap(),
+            b"previous capture"
+        );
+        assert_eq!(path, folder.join("flight_00-00-00.000-1001.jpg"));
+        assert_eq!(fs::read(path).unwrap(), jpeg(&shot()).unwrap());
+        for number in 2..=1_000 {
+            assert_eq!(
+                fs::read(folder.join(format!("flight_00-00-00.000-{number}.jpg"))).unwrap(),
+                b"previous capture"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_capture_symlink_is_not_followed_or_replaced() {
+        let Some(folder) =
+            isolated_save_folder("a_dangling_capture_symlink_is_not_followed_or_replaced")
+        else {
+            return;
+        };
+        fs::create_dir_all(&folder).unwrap();
+        let original = folder.join(name("flight", Duration::ZERO));
+        let target = folder.join("do-not-create.jpg");
+        std::os::unix::fs::symlink(&target, &original).unwrap();
+        let Done::Saved(path) =
+            finish(&shot(), Path::new("flight.insv"), Destination::Save).unwrap()
+        else {
+            panic!("save returned a clipboard image");
+        };
+        assert!(!target.exists(), "saving followed the existing symlink");
+        assert_eq!(fs::read_link(&original).unwrap(), target);
+        assert_eq!(path, folder.join("flight_00-00-00.000-2.jpg"));
+        assert_eq!(fs::read(path).unwrap(), jpeg(&shot()).unwrap());
+    }
 
     /// The question a still has to answer months later: which video, and
     /// which moment.
@@ -236,18 +338,116 @@ mod tests {
     /// A paused frame captured twice from two directions is two stills.
     #[test]
     fn a_taken_name_gets_a_number() {
-        let taken = ["f_00-00-01.000.jpg", "f_00-00-01.000-2.jpg"];
-        let free = |name: &str| taken.contains(&name);
-
-        assert_eq!(unused("f_00-00-02.000.jpg", free), "f_00-00-02.000.jpg");
-        assert_eq!(unused(taken[0], free), "f_00-00-01.000-3.jpg");
+        let Some(folder) = isolated_save_folder("a_taken_name_gets_a_number") else {
+            return;
+        };
+        fs::create_dir_all(&folder).unwrap();
+        let taken = ["f_00-00-00.000.jpg", "f_00-00-00.000-2.jpg"];
+        for name in taken {
+            fs::write(folder.join(name), b"previous capture").unwrap();
+        }
+        let Done::Saved(path) = finish(&shot(), Path::new("f.insv"), Destination::Save).unwrap()
+        else {
+            panic!("save returned a clipboard image");
+        };
+        assert_eq!(path, folder.join("f_00-00-00.000-3.jpg"));
+        assert_eq!(fs::read(path).unwrap(), jpeg(&shot()).unwrap());
+        for name in taken {
+            assert_eq!(fs::read(folder.join(name)).unwrap(), b"previous capture");
+        }
     }
 
     /// The suffix goes before the extension, not after it: a `.jpg-2` is
     /// not a picture to anything that reads names.
     #[test]
     fn the_number_keeps_the_extension_last() {
-        assert!(unused("f.jpg", |_| true).ends_with(".jpg"));
+        let Some(folder) = isolated_save_folder("the_number_keeps_the_extension_last") else {
+            return;
+        };
+        fs::create_dir_all(&folder).unwrap();
+        assert_eq!(
+            write_new(&folder, "f.jpg", b"first").unwrap(),
+            folder.join("f.jpg")
+        );
+        let second = write_new(&folder, "f.jpg", b"second").unwrap();
+        assert_eq!(second, folder.join("f-2.jpg"));
+        assert_eq!(fs::read(folder.join("f.jpg")).unwrap(), b"first");
+        assert_eq!(fs::read(second).unwrap(), b"second");
+    }
+
+    #[test]
+    fn concurrent_captures_each_keep_their_own_jpeg() {
+        let Some(folder) = isolated_save_folder("concurrent_captures_each_keep_their_own_jpeg")
+        else {
+            return;
+        };
+        let barrier = std::sync::Barrier::new(8);
+        let saved = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|color| {
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        let mut shot = shot();
+                        for pixel in shot.rgba.chunks_exact_mut(4) {
+                            pixel[1] = color * 30;
+                        }
+                        let expected = jpeg(&shot).unwrap();
+                        barrier.wait();
+                        let Done::Saved(path) =
+                            finish(&shot, Path::new("flight.insv"), Destination::Save).unwrap()
+                        else {
+                            panic!("save returned a clipboard image");
+                        };
+                        (path, expected)
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let mut paths = std::collections::BTreeSet::new();
+        for (path, expected) in saved {
+            assert_eq!(fs::read(&path).unwrap(), expected);
+            assert!(paths.insert(path), "two saves returned the same path");
+        }
+        assert!(paths.contains(&folder.join("flight_00-00-00.000.jpg")));
+        for number in 2..=8 {
+            assert!(paths.contains(&folder.join(format!("flight_00-00-00.000-{number}.jpg"))));
+        }
+    }
+
+    #[test]
+    fn encoding_failure_creates_no_folder_or_file() {
+        let Some(folder) = isolated_save_folder("encoding_failure_creates_no_folder_or_file")
+        else {
+            return;
+        };
+        let mut shot = shot();
+        shot.width = 65_536;
+        let error = finish(&shot, Path::new("flight.insv"), Destination::Save).unwrap_err();
+        assert_eq!(error.to_string(), "a 65536 px edge is past JPEG's 65535");
+        assert!(!folder.exists());
+    }
+
+    #[test]
+    fn noncollision_file_errors_are_returned_unchanged() {
+        let Some(folder) = isolated_save_folder("noncollision_file_errors_are_returned_unchanged")
+        else {
+            return;
+        };
+        fs::write(&folder, b"not a directory").unwrap();
+        let expected = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(folder.join("f.jpg"))
+            .unwrap_err();
+        let actual = write_new(&folder, "f.jpg", b"capture").unwrap_err();
+        assert_eq!(actual.kind(), expected.kind());
+        assert_eq!(actual.raw_os_error(), expected.raw_os_error());
+        assert_eq!(actual.to_string(), expected.to_string());
+        assert_eq!(fs::read(&folder).unwrap(), b"not a directory");
     }
 
     /// A capture small enough to encode in a test. The encoders below run
