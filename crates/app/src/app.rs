@@ -1009,15 +1009,18 @@ impl App {
     /// A failed open takes nothing away (owner's call, 2026-08-01): the video
     /// that was playing carries on playing behind the alert, because a file
     /// that would not open is not a reason to stop the one that did.
-    fn load(&mut self, path: &Path) {
-        self.load_with(path, &[]);
+    ///
+    /// Returns whether this attempt opened a new video, not whether a video
+    /// (possibly the previous one) remains open.
+    fn load(&mut self, path: &Path) -> bool {
+        self.load_with(path, &[])
     }
 
     /// The same, told about the other files the pilot picked alongside this
     /// one: inside a sandbox that is where a capture written one lens per
     /// file finds its other half, because the chooser hands over a document
     /// with nothing beside it (issue #123).
-    fn load_with(&mut self, path: &Path, alongside: &[PathBuf]) {
+    fn load_with(&mut self, path: &Path, alongside: &[PathBuf]) -> bool {
         match Scene::open_with(path, alongside) {
             Ok(scene) => {
                 self.alert.close();
@@ -1033,8 +1036,12 @@ impl App {
                 self.hold_horizon();
                 self.hold_flow();
                 self.hold_sound();
+                true
             }
-            Err(e) => self.alert.raise(Failure::Open(path.to_path_buf(), e)),
+            Err(e) => {
+                self.alert.raise(Failure::Open(path.to_path_buf(), e));
+                false
+            }
         }
     }
 
@@ -1320,9 +1327,9 @@ impl App {
                 self.toast(strings::WENT_TO_VIEW.to_owned())
             }
             Goto::Open(file, framing) => {
-                self.load(&file);
+                let loaded = self.load(&file);
                 let titled = self.retitle();
-                if self.open.is_none() {
+                if !loaded {
                     return titled;
                 }
                 self.place(framing);
@@ -1861,37 +1868,46 @@ fn applied_optical_flow(saved: bool, available: bool) -> bool {
 mod tests {
     use super::*;
 
+    /// App initialization may read COSMIC settings. Keep shell-message tests
+    /// away from the desktop and from real settings, without mutating the
+    /// parallel test runner's environment.
+    #[cfg(target_os = "linux")]
+    fn isolated_app_test(name: &str) -> Option<std::process::Output> {
+        const CHILD: &str = "KJERAG_TEST_APP_CHILD";
+        if std::env::var(CHILD).as_deref() == Ok(name) {
+            return None;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("app::tests::{name}"), "--nocapture"])
+            .env(CHILD, name)
+            .env("PATH", "/proc/self/kjerag-no-launchers")
+            .env("XDG_CONFIG_HOME", "/proc/self/kjerag-no-config")
+            .env("XDG_STATE_HOME", "/proc/self/kjerag-no-state")
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
+            .env_remove("XDG_RUNTIME_DIR")
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("DISPLAY")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        Some(output)
+    }
+
     /// Exercise the About link's real message handler without opening a browser
     /// or changing the test process's environment. A child has no launchers,
     /// settings directory or desktop session; App init opens no media or GPU.
     #[cfg(target_os = "linux")]
     #[test]
     fn failed_about_link_spawn_shows_the_raw_error_in_a_toast() {
-        const CHILD: &str = "KJERAG_TEST_ABOUT_LINK_CHILD";
         let said = format!(
             "{} not opened: {}",
             strings::REPOSITORY_URL,
             std::io::Error::from_raw_os_error(2)
         );
-        if std::env::var_os(CHILD).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "app::tests::failed_about_link_spawn_shows_the_raw_error_in_a_toast",
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .env("PATH", "/proc/self/kjerag-no-launchers")
-                .env("XDG_CONFIG_HOME", "/proc/self/kjerag-no-config")
-                .env("XDG_STATE_HOME", "/proc/self/kjerag-no-state")
-                .env_remove("DBUS_SESSION_BUS_ADDRESS")
-                .env_remove("XDG_RUNTIME_DIR")
-                .env_remove("WAYLAND_DISPLAY")
-                .env_remove("DISPLAY")
-                .output()
-                .unwrap();
+        if let Some(output) =
+            isolated_app_test("failed_about_link_spawn_shows_the_raw_error_in_a_toast")
+        {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(output.status.success(), "{output:?}");
             assert!(stderr.contains(&format!("kjerag: {said}")), "{stderr}");
             return;
         }
@@ -1908,6 +1924,65 @@ mod tests {
         assert_eq!(lines(&app.toasts), [said.as_str()]);
         assert!(!app.alert.is_up());
         assert!(app.open.is_none());
+    }
+
+    /// Use the real paste handler and real failed open, with a blank Scene
+    /// carrying the old view. The .360 suffix is refused before decoder/GPU
+    /// initialization; an absent .insv would initialize VA-API first.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_pasted_open_preserves_the_existing_view() {
+        if isolated_app_test("failed_pasted_open_preserves_the_existing_view").is_some() {
+            return;
+        }
+        let (mut app, _initial_task) = App::init(
+            Core::default(),
+            Flags {
+                stored: Stored::default(),
+                input: None,
+                at: None,
+            },
+        );
+        let original_lock = app.stored.config.horizon_lock;
+        let bad_view = format!(
+            "/proc/self/kjerag-no-video.360 time=40 yaw=50 pitch=20 fov=60 lock={}",
+            u8::from(!original_lock)
+        );
+        // With no old video, failure must not apply the view either.
+        let _task = app.update(Message::PastedView(Some(bad_view.clone())));
+        assert!(app.open.is_none());
+        assert!(app.alert.is_up());
+        assert!(lines(&app.toasts).is_empty());
+        assert_eq!(app.stored.config.horizon_lock, original_lock);
+
+        app.open = Some(Open {
+            path: watching(),
+            scene: Scene::blank(),
+            duration: Duration::from_secs(100),
+            position: Duration::from_secs(12),
+        });
+        app.hold_horizon();
+        let scene = &app.open.as_ref().unwrap().scene;
+        let camera = scene.viewpoint().camera();
+        let horizon = scene.horizon();
+        let _task = app.update(Message::PastedView(Some(bad_view)));
+        let open = app.open.as_ref().unwrap();
+        // Apply any queued camera change through the widget's real redraw
+        // handler. The blank scene never submits rendering work.
+        let _redraw = <Scene as shader::Program<Message>>::update(
+            &open.scene,
+            &mut (),
+            &Event::Window(window::Event::RedrawRequested(Instant::now())),
+            cosmic::iced::Rectangle::with_size(cosmic::iced::Size::new(800.0, 600.0)),
+            cosmic::iced::mouse::Cursor::Unavailable,
+        );
+        assert_eq!(open.path, watching());
+        assert_eq!(open.position, Duration::from_secs(12));
+        assert_eq!(open.scene.viewpoint().camera(), camera);
+        assert_eq!(open.scene.horizon(), horizon);
+        assert_eq!(app.stored.config.horizon_lock, original_lock);
+        assert!(lines(&app.toasts).is_empty());
+        assert!(app.alert.is_up());
     }
 
     /// The stock COSMIC template inserts its named header before its named
