@@ -152,17 +152,26 @@ impl Framing {
         for term in terms {
             let (key, value) = term.split_once('=').ok_or(USAGE)?;
             let degrees = || {
-                value
+                let degrees = value
                     .parse::<f32>()
-                    .map(f32::to_radians)
-                    .map_err(|_| format!("{key}={value} is not a number of degrees"))
+                    .map_err(|_| format!("{key}={value} is not a number of degrees"))?;
+                if !degrees.is_finite() {
+                    return Err(format!("{key}={value} is not a finite number of degrees"));
+                }
+                Ok(degrees.to_radians())
             };
             match key {
                 TIME => {
                     let seconds = value
                         .parse::<f64>()
                         .map_err(|_| format!("{key}={value} is not a number of seconds"))?;
-                    at = Some(Duration::try_from_secs_f64(seconds.max(0.0)).unwrap_or_default());
+                    if !seconds.is_finite() {
+                        return Err(format!("{key}={value} is not a finite number of seconds"));
+                    }
+                    at = Some(
+                        Duration::try_from_secs_f64(seconds.max(0.0))
+                            .map_err(|error| format!("{key}={value}: {error}"))?,
+                    );
                 }
                 YAW => yaw = Some(degrees()?),
                 PITCH => pitch = Some(degrees()?),
@@ -388,6 +397,33 @@ mod tests {
         let line = "f.insv time=-5.000 yaw=0.00 pitch=0.00 fov=90.00 lock=0";
         let (_, read) = Framing::read_line(line).expect("a line");
         assert_eq!(read.at, Duration::ZERO);
+    }
+
+    #[test]
+    fn non_finite_view_angles_do_not_change_the_camera() {
+        use crate::{Nudge, Viewpoint};
+
+        for key in ["yaw", "pitch", "fov"] {
+            for value in ["NaN", "inf", "-inf", "1e999", "-1e999"] {
+                let line = format!("f.insv time=1 yaw=0 pitch=0 fov=90 lock=1 {key}={value}");
+                let mut viewpoint = Viewpoint::default();
+                let original = viewpoint.camera();
+                if let Some((_, view)) = Framing::read_line(&line) {
+                    // The same camera handoff used by pasted/command-line views.
+                    viewpoint.nudge(Nudge::Point(view.camera), 16.0 / 9.0);
+                }
+                assert_eq!(viewpoint.camera(), original, "{line}");
+                assert!(Framing::read_line(&line).is_none(), "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_view_times_are_not_silently_changed_to_zero() {
+        for value in ["NaN", "inf", "-inf", "1e999", "-1e999", "1e20"] {
+            let line = format!("f.insv time={value} yaw=0 pitch=0 fov=90 lock=1");
+            assert!(Framing::read_line(&line).is_none(), "{line}");
+        }
     }
 }
 
