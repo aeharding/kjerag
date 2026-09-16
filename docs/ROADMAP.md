@@ -71,6 +71,30 @@ paths and are not release assets.
 
 ## Qualification summary
 
+Issue [#151](https://github.com/aeharding/kjerag/issues/151), a camera drag
+continuing after release over the scrubber, is reproduced in the accepted
+`90721189` native player through real overlay routing. At one paused source
+frame, releasing over the controls and then moving the same pointer without a
+button changes the view; the Scene trace still reports an active grab. A queued
+window-level release candidate was rejected before playback testing: iced can
+process subsequent pointer events before applying its delayed release message.
+The branch UI harness includes the observed same-pointer gesture and rejects a
+missing initial drag or a moving source frame. The selected candidate replaces
+the bar and volume-popup MouseArea shields with stock iced `opaque`: presses
+remain shielded, while unowned releases reach the video in normal event order.
+Global left-press activity preserves blank-padding timer rearming. No renderer,
+media, dependency, stitching or color changes are needed. The tracked X4 native
+regression fails on the unchanged player and passes on the candidate, with an
+unchanged view after bare motion and normal candidate exit. The focused route
+does not itself generate same-batch release/move/new-press input. The device-hidden
+workspace passes 1,546 tests with 52 ignored and no failures, plus full Clippy,
+vendor warnings, formatting, source/name checks, five startup regressions and
+18 synthetic playback checks. Unavailable GPU/media paths are not hardware
+qualification. Full native UI suites pass 52 X4 and 53 ONE X2 checks with no
+failures; the existing portal, single-file-pair, cross-filesystem hard-link and
+explicit-view-fixture skips remain. Owner branch retest is pending. The installed
+Flatpak is unchanged and no merge or release is claimed for this fix.
+
 Both actual 0.3.1 x86_64 distribution routes independently pass 40 X4 Air and
 44 ONE X2 installed UI checks. Their reported views match the accepted
 `48e1d741` package byte-for-byte, and both include the exact source LICENSE,
@@ -176,8 +200,11 @@ color-update policy is selected.
   `32b5c881` branch exactly. The updated device-hidden workspace gate reports
   1,544 passes, 52 ignored and zero failures; format, full Clippy, vendor,
   source/name/whitespace and all 20 CI shell-step checks pass. All 51 isolated
-  signed-release tests pass on Flatpak 1.14.6. Fresh exact-head CI is the remaining
-  integration gate, not another rebuild or installation of the accepted player.
+  signed-release tests pass on Flatpak 1.14.6. All eight fresh CI jobs passed on
+  final head `0a4b9130` in run `35032370751`; PR #202 merged as `c5462d21`, and
+  post-merge main CI `35032879851` also passed. The merge author was explicitly
+  set to the mandated address and the resulting tree verified against the
+  reviewed head. No production release or installed-player change followed.
 - **Decoder starvation wakeups, issue
   [#136](https://github.com/aeharding/kjerag/issues/136):** delayed video-packet
   delivery reproduces repeated overdue-empty redraws in the actual generic X3
@@ -563,8 +590,9 @@ On September 15 the owner approved and the coordinator merged CI-only PR
 [#203](https://github.com/aeharding/kjerag/pull/203) at `005d4dcc`, after all
 six CI jobs passed. It bounds FFmpeg PPA registration to five minutes; a
 genuinely slow request may fail and need a rerun. This does not change the
-installed player. For draft PR [#202](https://github.com/aeharding/kjerag/pull/202),
+installed player. For PR [#202](https://github.com/aeharding/kjerag/pull/202),
 the owner also explicitly accepted withholding the entire release if signing
 is unavailable or either x86_64/ARM build fails. That policy acceptance does
-not waive the remaining qualification. The separately disclosed non-atomic
-GitHub/Pages publication boundary is not newly accepted by that reply.
+did not waive qualification. That PR subsequently merged after its integration
+and CI gates, as recorded above. The separately disclosed non-atomic GitHub/Pages
+publication boundary is not newly accepted by that reply.
