@@ -27,9 +27,9 @@
 //! are 2880x2880 but the stream decodes 736x368".
 //!
 //! What this does not cover, deliberately: a capture that could not be
-//! written says so in a toast, because the picture is still there and the
-//! pilot is still watching it (docs/UI.md, "The capture toast"). The funnel
-//! is for the failures that leave him with no video.
+//! written or an About link whose launcher could not start says so in a
+//! toast, because the picture is still available (docs/UI.md, "The capture
+//! toast"). The funnel is for the failures that leave him with no video.
 
 use std::error::Error;
 use std::path::{Path, PathBuf};

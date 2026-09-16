@@ -120,6 +120,7 @@ impl ConfigState {
 }
 
 /// Both entries, and the handlers that write them back.
+#[cfg_attr(test, derive(Default))]
 pub struct Stored {
     pub config: Config,
     pub state: ConfigState,

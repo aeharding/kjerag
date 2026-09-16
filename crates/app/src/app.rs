@@ -272,7 +272,7 @@ pub struct App {
     context_page: ContextPage,
     /// The theme names the settings dropdown shows, in its own order.
     themes: Vec<String>,
-    /// What a capture says when it lands.
+    /// Short notifications that leave the current picture available.
     toasts: Toasts,
     controls: Controls,
     /// Set while the scrubber is being dragged, to whether the file was
@@ -601,7 +601,9 @@ impl cosmic::Application for App {
             }
             Message::LaunchUrl(url) => {
                 if let Err(e) = open::that_detached(&url) {
-                    eprintln!("kjerag: {url} not opened: {e}");
+                    let said = format!("{url} not opened: {e}");
+                    eprintln!("kjerag: {said}");
+                    return self.toast(said);
                 }
             }
             Message::LockHorizon => {
@@ -1858,6 +1860,55 @@ fn applied_optical_flow(saved: bool, available: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exercise the About link's real message handler without opening a browser
+    /// or changing the test process's environment. A child has no launchers,
+    /// settings directory or desktop session; App init opens no media or GPU.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_about_link_spawn_shows_the_raw_error_in_a_toast() {
+        const CHILD: &str = "KJERAG_TEST_ABOUT_LINK_CHILD";
+        let said = format!(
+            "{} not opened: {}",
+            strings::REPOSITORY_URL,
+            std::io::Error::from_raw_os_error(2)
+        );
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "app::tests::failed_about_link_spawn_shows_the_raw_error_in_a_toast",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("PATH", "/proc/self/kjerag-no-launchers")
+                .env("XDG_CONFIG_HOME", "/proc/self/kjerag-no-config")
+                .env("XDG_STATE_HOME", "/proc/self/kjerag-no-state")
+                .env_remove("DBUS_SESSION_BUS_ADDRESS")
+                .env_remove("XDG_RUNTIME_DIR")
+                .env_remove("WAYLAND_DISPLAY")
+                .env_remove("DISPLAY")
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{output:?}");
+            assert!(stderr.contains(&format!("kjerag: {said}")), "{stderr}");
+            return;
+        }
+
+        let (mut app, _initial_task) = App::init(
+            Core::default(),
+            Flags {
+                stored: Stored::default(),
+                input: None,
+                at: None,
+            },
+        );
+        let _dismissal = app.update(Message::LaunchUrl(strings::REPOSITORY_URL.to_owned()));
+        assert_eq!(lines(&app.toasts), [said.as_str()]);
+        assert!(!app.alert.is_up());
+        assert!(app.open.is_none());
+    }
 
     /// The stock COSMIC template inserts its named header before its named
     /// content when the controls wake. Losing that second child also loses

@@ -176,6 +176,14 @@ color-update policy is selected.
 
 ## Remaining work
 
+- **About-link spawn errors, issue
+  [#131](https://github.com/aeharding/kjerag/issues/131):** branch work routes
+  the existing raw launcher-spawn error to both the terminal and an on-screen
+  toast. A device-hidden regression through the actual application message
+  handler reproduces the missing notification with no launchers in PATH.
+  Detached launching remains unchanged: a launcher that starts and later fails
+  is outside this error API's coverage. This does not alter playback or the
+  separate file-chooser cancellation behavior in #141.
 - **Legacy band comments, issue
   [#179](https://github.com/aeharding/kjerag/issues/179):** three stale comments
   now describe retained instrument measurements rather than the deleted
