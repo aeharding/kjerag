@@ -71,6 +71,21 @@ paths and are not release assets.
 
 ## Qualification summary
 
+Issue [#86](https://github.com/aeharding/kjerag/issues/86) has a reproduced
+post-decode pairing inconsistency: the analysis `Walk` matched raw timestamps
+using its first source's clock, while `Reader` normalized each source's origin
+and matched frame indices. A regression through an extracted production queue
+adapter fails with starts 0/900 and passes after per-source normalization. The
+candidate shares the alignment decision without changing Reader's lookahead,
+mapping, stamps or scheduling. Its device-hidden media gate passes 116 tests
+with three ignored and no failures, plus media Clippy and formatting. Tests
+exercise actual admission, queued payloads, source ordering, cue resets and EOF;
+unavailable media returns are not hardware coverage. Full workspace and both
+camera runtime gates remain pending. Actual demux seeking with shifted origins,
+capture discovery and sibling validation also remain open, so this does not
+close #86 or establish arbitrary-origin file playback. No app/package/release
+change or performance improvement is claimed.
+
 Both actual 0.3.1 x86_64 distribution routes independently pass 40 X4 Air and
 44 ONE X2 installed UI checks. Their reported views match the accepted
 `48e1d741` package byte-for-byte, and both include the exact source LICENSE,

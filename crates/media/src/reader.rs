@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use ffmpeg_next as ff;
 
+use super::pairing::{Alignment, alignment};
 use super::sound::Sound;
 use super::track::Track;
 use super::{DrmFrame, Fallible, HwDevice, NANOS, Samples, Size, decode, media_time, read_only};
@@ -139,8 +140,8 @@ pub enum Read {
     Interrupted,
 }
 
-/// One instant of the recording: every lens at the same PTS, mapped to
-/// DRM_PRIME and ready for `kjerag_render::dmabuf::import`.
+/// One instant of the recording: every lens at the same capture frame index,
+/// mapped to DRM_PRIME and ready for `kjerag_render::dmabuf::import`.
 ///
 /// Dropping this returns the surfaces to the decoder's pools, so it has to
 /// outlive every texture imported from it (`kjerag_render::ScenePipeline`
@@ -941,13 +942,12 @@ impl Reader {
         if self.lanes.iter().any(|lane| lane.queue.len() < depth) {
             return Ok(None);
         }
-        let heads: Vec<u64> = self.lanes.iter().filter_map(|lane| self.at(lane)).collect();
-        if heads.len() != self.lanes.len() {
-            return Err("a decoded frame has no timestamp".into());
-        }
-        match heads.iter().all(|index| *index == heads[0]) {
-            true => Ok(Some(heads[0])),
-            false => Ok(None),
+        match alignment(self.lanes.iter().map(|lane| self.at(lane))) {
+            Alignment::Ready(index) => Ok(Some(index)),
+            // Depth was checked above, so this is a frame without a timestamp,
+            // not an empty queue. Preserve the existing raw error.
+            Alignment::Waiting => Err("a decoded frame has no timestamp".into()),
+            Alignment::DropBefore(_) => Ok(None),
         }
     }
 
@@ -960,16 +960,10 @@ impl Reader {
     /// than its partner.
     fn align(&mut self) {
         loop {
-            let heads: Vec<u64> = self.lanes.iter().filter_map(|lane| self.at(lane)).collect();
-            if heads.len() != self.lanes.len() {
-                return;
-            }
-            let Some(&newest) = heads.iter().max() else {
-                return;
+            let newest = match alignment(self.lanes.iter().map(|lane| self.at(lane))) {
+                Alignment::DropBefore(index) => index,
+                Alignment::Waiting | Alignment::Ready(_) => return,
             };
-            if heads.iter().all(|index| *index == newest) {
-                return;
-            }
             let behind: Vec<bool> = self
                 .lanes
                 .iter()

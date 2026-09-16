@@ -11,9 +11,9 @@
 //! - [`track`] is the file's own sound: one AAC stream decoded and resampled
 //!   into that ring, off the same demuxer as the pictures. [`sound`] is the
 //!   device it goes out of.
-//! - [`reader`] is one demuxer driving every video stream of a file in
-//!   lockstep and handing out [`Frames`]: the same PTS from both lenses,
-//!   always as a pair. It reads forward and it reads by [`Cue`].
+//! - [`reader`] drives the capture's video streams and hands out [`Frames`]:
+//!   the same capture instant from both lenses, after normalizing each file's
+//!   timestamp origin. It reads forward and it reads by [`Cue`].
 //! - [`player`] is the presentation clock around a [`Reader`] on its own
 //!   thread: play, pause, and "which frame is due now". The sound follows that
 //!   clock; it never sets it.
@@ -26,6 +26,7 @@
 mod audio;
 mod decode;
 mod decode_arrival;
+mod pairing;
 mod player;
 mod reader;
 mod sound;
