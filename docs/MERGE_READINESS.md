@@ -1,6 +1,6 @@
 # GPU stitching delivery: merge and release review
 
-Current checkpoint: 2026-09-12. PR #183 is merged and 0.3.0 is published.
+Published-release checkpoint: 2026-09-12. PR #183 is merged and 0.3.0 is published.
 Packaging-only PR #188 is also merged; 0.3.1 is published.
 Release qualification remains open because high-rate X4 playback falls behind
 in both the release and a restored accepted-build control. This page
@@ -12,6 +12,47 @@ is now separated from its verbatim [historical record](ROADMAP-HISTORY-20260912.
 with a [research navigation index](research/README.md). The shared playback
 slowdown, native/Flatpak differences and frame-time spikes are tracked in
 [issue #186](https://github.com/aeharding/kjerag/issues/186).
+
+## Current private test package, September 16
+
+The installed private test package now comes from merged main
+`1d5e9e46179dd5f445d85bc1c19eb00b3b01cc0f`. This is not a new tag, public
+release or signed-channel update. The earlier release evidence below remains
+historical; its capacity failures are not erased by this functional handoff.
+
+- Installed OSTree: `19b12aecff2fea225650b648481138b723b845e1f4f34c16fd3fb7dda161bd97`.
+- Executable SHA256: `3a779b020814c2b83026181136692576fcb94a56ba8569539b2967beb59fda74`.
+- Bundle SHA256: `4774863f06652d157e33ed5493b38bcc86aedbb13d58ecb7b85179940ecaa35f`.
+
+The device-hidden offline SDK build and separate actual-bundle import audit
+passed executable, metadata, FFmpeg 7 and license checks. Separate app-path
+runtime suites passed 43 X4 Air and 44 ONE X2 checks before installation;
+actual installed suites independently passed 43 and 44. Every running player
+executable was authenticated, and both motion captures from all four suites
+were inspected. The drag-release and failed-paste regressions passed on both
+cameras. The usual sound-device, portal, exact-view, sandbox import-fault and
+cross-mount pair-fixture skips remain. The native shader/Rust-twin check is
+separate from SDK-shader provenance. These are 1280x720 functional checks, not
+capacity or hitch-free qualification.
+
+No new kernel entries or scoped memory-limit/OOM events appeared during the
+runtime suites, and each returned to its pre-test GPU-memory counters. Host
+pressure/swap counters varied. The CPU-only build reached its 6 GiB limit
+without OOM; these checks do not prove GPU containment or a desktop-freeze fix.
+
+Only the app deployment was replaced, preserving data, runtimes, related refs
+and remote settings. Origin remains `kjerag-origin`. The previously accepted
+`90721189` / `660d46ac` / `440c490f` package and the signed 0.3.1 recovery
+artifacts remain available. The owner's earlier "lgtm" applies to that prior
+package; the "Yes, fixed" drag verdict applies to frozen native `5b87ed90`.
+Neither is silently reassigned as an owner test of this combined SDK binary.
+Selected stitching/color arithmetic, cadence, dependencies and permissions are
+unchanged from `90721189`. Normal-channel restoration remains due after review.
+
+Private receipts: `scratch/main-package-20260916/`. The
+[issue #187 handoff](https://github.com/aeharding/kjerag/issues/187#issuecomment-5694076900)
+records the same identities and limits. No new visible tradeoff, performance
+acceptance or closure of #186/#187 is implied.
 
 ## Accepted tradeoffs
 
