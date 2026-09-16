@@ -11,6 +11,7 @@
 # checks against supplied test media.
 # Set KJERAG_UITEST_ONLY=view-paths for the spaced-filename clipboard regression.
 # Set KJERAG_UITEST_ONLY=drag-release for the video-to-controls drag regression.
+# Set KJERAG_UITEST_ONLY=end-seek for the scrubber endpoint regression.
 #
 # The same checks run against the installed Flatpak with
 # KJERAG_FLATPAK=dev.harding.Kjerag, which is how a bundle is checked before
@@ -209,12 +210,15 @@ view-paths)
 drag-release)
 	[ -n "$media" ] || die "KJERAG_UITEST_ONLY=drag-release needs test media"
 	;;
+end-seek)
+	[ -n "$media" ] || die "KJERAG_UITEST_ONLY=end-seek needs test media"
+	;;
 stalls)
 	[ -n "$media" ] || die "KJERAG_UITEST_ONLY=stalls needs test media"
 	[ -z "${KJERAG_FLATPAK:-}" ] ||
 		die "KJERAG_UITEST_ONLY=stalls cannot preload into a Flatpak"
 	;;
-*) die "KJERAG_UITEST_ONLY must be stalls, view-paths or drag-release when it is set" ;;
+*) die "KJERAG_UITEST_ONLY must be stalls, view-paths, drag-release or end-seek when it is set" ;;
 esac
 
 # The session went away with checks still to run: a dead compositor cannot
@@ -241,11 +245,69 @@ lens_mate() {
 	printf '%s' "$mate"
 }
 
+# end_seek_metadata <file>: the capture's frame count, last index, rational
+# rate and last-frame timestamp. Upper-case `V` asks ffprobe for ordinary
+# video streams, excluding attached cover pictures just as the reader does.
+# A two-file capture is the shortest lens: its unmatched final picture cannot
+# make a panorama (`Reader::over`). Keep the rate rational all the way to the
+# nanosecond and millisecond answers; the rounded duration printed by the app
+# is deliberately not an input to this check.
+end_seek_metadata() {
+	local file=$1 mate
+	mate=$(lens_mate "$file")
+	{
+		ffprobe -v error -select_streams V \
+			-show_entries stream=width,height,avg_frame_rate,nb_frames \
+			-of compact=p=0:nk=0 "$file"
+		[ -z "$mate" ] || ffprobe -v error -select_streams V \
+			-show_entries stream=width,height,avg_frame_rate,nb_frames \
+			-of compact=p=0:nk=0 "$mate"
+	} | python3 -c '
+import sys
+from fractions import Fraction
+
+streams = []
+for line in sys.stdin:
+    fields = dict(field.split("=", 1) for field in line.strip().split("|") if "=" in field)
+    rate = fields.get("avg_frame_rate", "")
+    frames = fields.get("nb_frames", "")
+    width = fields.get("width", "")
+    height = fields.get("height", "")
+    if not frames.isdecimal() or not width.isdecimal() or not height.isdecimal() or "/" not in rate:
+        raise SystemExit("a lens stream has no exact geometry, nb_frames or rational avg_frame_rate")
+    num, den = rate.split("/", 1)
+    if not num.isdecimal() or not den.isdecimal() or int(num) == 0 or int(den) == 0:
+        raise SystemExit(f"invalid lens frame rate {rate}")
+    streams.append((int(frames), Fraction(int(num), int(den)), int(width), int(height)))
+if len(streams) < 2:
+    raise SystemExit("the endpoint fixture does not expose both lens streams")
+if min(frames for frames, _, _, _ in streams) == 0:
+    raise SystemExit("the capture has no counted lens frames")
+rates = {rate for _, rate, _, _ in streams}
+if len(rates) != 1:
+    raise SystemExit("lens streams disagree about their frame rate")
+geometry = {(width, height) for _, _, width, height in streams}
+if len(geometry) != 1:
+    raise SystemExit("lens streams disagree about their geometry")
+frames = min(frames for frames, _, _, _ in streams)
+rate = rates.pop()
+num, den = rate.numerator, rate.denominator
+width, height = geometry.pop()
+last = frames - 1
+nanos = last * den * 1_000_000_000 // num
+millis = (nanos + 500_000) // 1_000_000
+print(frames, last, num, den, width, height, nanos, f"{millis // 1000}.{millis % 1000:03d}")
+'
+}
+
 # ------------------------------------------------------------- preflight
 
 for tool in cage wtype grim ffmpeg python3; do
 	command -v "$tool" >/dev/null || die "$tool is not installed (AGENTS.md, UI verification)"
 done
+if [ "${KJERAG_UITEST_ONLY:-}" = end-seek ]; then
+	command -v ffprobe >/dev/null || die "ffprobe is not installed (end-seek metadata)"
+fi
 
 # Reject a copied view beyond the file before building or opening a window.
 # ffprobe reads the container duration when it can; a file or format it cannot
@@ -1572,6 +1634,202 @@ drag_release_check() {
 		pass "the drag-release session quits normally"
 	else
 		fail "the drag-release session quits normally" "log: $log"
+	fi
+}
+
+# Poll `i` until the frame actually on screen names this source timestamp.
+# The slider label is not evidence: it moves to the pointer before an exact
+# seek has produced a picture.
+endpoint_view=
+wait_for_endpoint_time() {
+	local expected=$1 limit=$2 check=$3 started=$SECONDS shown
+	endpoint_view=
+	while [ $((SECONDS - started)) -lt "$limit" ]; do
+		if endpoint_view=$(drag_view); then
+			shown=$(printf '%s' "$endpoint_view" |
+				sed -n 's/.* time=\([0-9.]*\) .*/\1/p')
+			[ "$shown" = "$expected" ] && return 0
+		fi
+		alive || lost "$check"
+		sleep 0.2
+	done
+	return 1
+}
+
+# The complementary navigation probe: a backward jump must leave the final
+# source rather than merely redraw it.
+wait_for_time_before() {
+	local before=$1 limit=$2 check=$3 started=$SECONDS shown
+	endpoint_view=
+	while [ $((SECONDS - started)) -lt "$limit" ]; do
+		if endpoint_view=$(drag_view); then
+			shown=$(printf '%s' "$endpoint_view" |
+				sed -n 's/.* time=\([0-9.]*\) .*/\1/p')
+			if [[ $shown =~ ^[0-9]+([.][0-9]+)?$ ]] &&
+				LC_ALL=C awk -v shown="$shown" -v before="$before" \
+					'BEGIN { exit !(shown < before) }'; then
+				return 0
+			fi
+		fi
+		alive || lost "$check"
+		sleep 0.2
+	done
+	return 1
+}
+
+# Issue #227: dragging the stock scrubber to its duration endpoint asks for
+# the instant just beyond the final source. The real Player must clamp that
+# request to the last index, deliver it and leave that meaningful picture
+# held. This focused mode is deliberately separate from the established full
+# suite until it has been qualified on X3, X4 and X2 footage.
+end_seek_check() {
+	local check="the scrubber endpoint displays and holds the final source frame"
+	local metadata expected_frames last_index rate_num rate_den expected_width expected_height
+	local expected_ns expected_time reported reported_width reported_height reported_frames
+	local start_view start_time start_picture final_picture back_time
+
+	if ! metadata=$(end_seek_metadata "$media"); then
+		die "the endpoint fixture has no trustworthy lens metadata"
+	fi
+	read -r expected_frames last_index rate_num rate_den expected_width expected_height \
+		expected_ns expected_time <<<"$metadata"
+
+	printf '\n-- endpoint seek check (%s; last index %s, %s ns at %s/%s fps)\n' \
+		"$media" "$last_index" "$expected_ns" "$rate_num" "$rate_den"
+	boot end-seek "$media" "${play_args[@]}"
+	if ! await '^media:' "$READY"; then
+		fail "$check" "no media line in $READY s" "log: $log"
+		teardown
+		return
+	fi
+	reported=$(sed -n \
+		's/^media:.*, \([0-9][0-9]*\)x\([0-9][0-9]*\), [0-9.]* fps, \([0-9][0-9]*\) frames,.*/\1 \2 \3/p' \
+		"$log" | head -1)
+	read -r reported_width reported_height reported_frames <<<"$reported"
+	if [ "$reported_width $reported_height $reported_frames" != \
+		"$expected_width $expected_height $expected_frames" ]; then
+		fail "$check" \
+			"ffprobe lenses: ${expected_width}x${expected_height}, $expected_frames frames" \
+			"app: ${reported_width:-unknown}x${reported_height:-unknown}, ${reported_frames:-unknown} frames" \
+			"log: $log"
+		teardown
+		return
+	fi
+	pass "the app and the lens indexes agree on $expected_frames source frames"
+
+	if await 'dmabuf import: all extensions enabled' "$REPORT"; then
+		pass "the endpoint check uses the zero-copy frame path"
+	else
+		fail "the endpoint check uses the zero-copy frame path" \
+			"$(grep '^device:' "$log" || echo 'no device line')" "log: $log"
+	fi
+	if ! await_visible_playback; then
+		fail "$check" "no visible playing picture in $READY s" "log: $log"
+		teardown
+		return
+	fi
+	if ! press_until still_picture end-seek-paused -k space; then
+		alive || lost "$check"
+		fail "$check" "the starting picture would not pause" "log: $log"
+		teardown
+		return
+	fi
+	start_view=$(drag_view) || {
+		fail "$check" "i did not report the starting displayed view" "log: $log"
+		teardown
+		return
+	}
+	start_time=$(printf '%s' "$start_view" | sed -n 's/.* time=\([0-9.]*\) .*/\1/p')
+	if ! [[ $start_time =~ ^[0-9]+([.][0-9]+)?$ ]] ||
+		! LC_ALL=C awk -v start="$start_time" -v last="$expected_time" \
+			'BEGIN { exit !(start < last) }'; then
+		fail "$check" "the starting displayed view is not before the tail: $start_view"
+		teardown
+		return
+	fi
+	sleep "$TOAST_GONE"
+	start_picture=$(grab end-seek-start) || {
+		fail "$check" "the starting picture could not be captured" "log: $log"
+		teardown
+		return
+	}
+	if ! visible_picture "$start_picture"; then
+		fail "$check" "the starting picture is invalid or flat" "$start_picture"
+		teardown
+		return
+	fi
+
+	# The stock 1280-wide rail is x=220..1058. Begin well inside it so the
+	# gesture is indisputably a slider drag, then carry the held pointer beyond
+	# its right endpoint while still inside the window so the slider clamps.
+	if ! env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		"$poker" 1280 720 350 "$CONTROL_ROW" drag 1100 "$CONTROL_ROW" 2>>"$log"; then
+		fail "$check" "the virtual pointer endpoint drag failed" "log: $log"
+		teardown
+		return
+	fi
+	if ! wait_for_endpoint_time "$expected_time" "$READY" "$check"; then
+		grab end-seek-missed >/dev/null || true
+		fail "$check" \
+			"expected last source index $last_index at $expected_ns ns (time=$expected_time)" \
+			"displayed: ${endpoint_view:-no view line}" \
+			"capture: $session/end-seek-missed.ppm" "log: $log"
+		teardown
+		return
+	fi
+	sleep "$TOAST_GONE"
+	final_picture=$(grab end-seek-final) || {
+		fail "$check" "the endpoint picture could not be captured" "log: $log"
+		teardown
+		return
+	}
+	if ! visible_picture "$final_picture"; then
+		fail "$check" "the endpoint picture is invalid or flat" "$final_picture"
+	elif same_picture "$start_picture" "$final_picture"; then
+		fail "$check" "the source time changed but the displayed picture did not" \
+			"start: $start_view" "end: $endpoint_view" "$start_picture" "$final_picture"
+	elif ! still_picture end-seek-final-held; then
+		fail "$check" "the final source picture did not remain stable while paused" "log: $log"
+	else
+		pass "$check (index $last_index, time=$expected_time; $final_picture)"
+	fi
+
+	# Paused transport remains usable at the boundary: leave the endpoint,
+	# then approach it again through the ordinary forward binding.
+	local try navigation_wait=3
+	for ((try = 0; try < PRESSES; try++)); do
+		key -k Left
+		wait_for_time_before "$expected_time" "$navigation_wait" "$check" && break
+	done
+	if [ "$try" = "$PRESSES" ]; then
+		fail "backward navigation leaves the endpoint" \
+			"displayed: ${endpoint_view:-no view line}" "log: $log"
+	else
+		back_time=$(printf '%s' "$endpoint_view" | sed -n 's/.* time=\([0-9.]*\) .*/\1/p')
+		pass "backward navigation leaves the endpoint (time=$back_time)"
+	fi
+	for ((try = 0; try < PRESSES; try++)); do
+		key -k Right
+		wait_for_endpoint_time "$expected_time" "$navigation_wait" "$check" && break
+	done
+	if [ "$try" = "$PRESSES" ]; then
+		fail "forward navigation returns to the endpoint" \
+			"expected time=$expected_time" \
+			"displayed: ${endpoint_view:-no view line}" "log: $log"
+	else
+		sleep "$TOAST_GONE"
+		if still_picture end-seek-returned-held; then
+			pass "forward navigation returns to the stable endpoint"
+		else
+			fail "forward navigation returns to the stable endpoint" \
+				"the returned picture did not remain held" "log: $log"
+		fi
+	fi
+
+	if quit; then
+		pass "the endpoint-seek session quits normally"
+	else
+		fail "the endpoint-seek session quits normally" "log: $log"
 	fi
 }
 
@@ -3223,6 +3481,8 @@ if [ "${KJERAG_UITEST_ONLY:-}" = view-paths ]; then
 	spaced_view_reference
 elif [ "${KJERAG_UITEST_ONLY:-}" = drag-release ]; then
 	drag_release_check
+elif [ "${KJERAG_UITEST_ONLY:-}" = end-seek ]; then
+	end_seek_check
 elif [ "${KJERAG_UITEST_ONLY:-}" = stalls ]; then
 	stalls
 else

@@ -71,6 +71,25 @@ paths and are not release assets.
 
 ## Qualification summary
 
+Issue [#227](https://github.com/aeharding/kjerag/issues/227) covers the generic
+player's end-of-timeline seek. Its inclusive duration endpoint requested a
+nonexistent source after the final frame, and terminal EOF/disconnection could
+leave a seek marked outstanding. Deterministic tests reproduce both failures
+through the actual Player pump. The candidate clamps known-length captures,
+preserves requests for unknown-length streams, and retires terminal waits
+without accepting a superseded epoch or hiding replay errors. The selected
+resident route already clamps endpoint seeks. The real X3 scrubber reproduces
+the old player's failure: its shown view stays at 84.885 seconds instead of the
+final source at 85.152. Native candidate `965e35dd` passes six focused endpoint
+checks each on X3, X4 Air and ONE X2, including stable final pictures, backward
+navigation and return to the end. All candidates quit normally; the failed
+baseline's forced cleanup triggered a private-compositor assertion, with no
+new kernel entries or scoped memory-limit events. Captures were inspected.
+The device-hidden workspace reports 1,595 passes, 53 ignored and no failures,
+including unavailable-device returns rather than hardware coverage. These are
+focused native checks, not full UI suites, Flatpak delivery, a performance
+result or a stitching/color change. The separate X3 horizon review is unchanged.
+
 Issue [#163](https://github.com/aeharding/kjerag/issues/163) corrects missing
 evidence in the legacy `colour` profile diagnostic. Out-of-window controls,
 unsampled lags and missing side fits no longer masquerade as measured zeros.
