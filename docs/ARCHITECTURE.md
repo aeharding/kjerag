@@ -117,8 +117,10 @@ The worker and facade live in
 [`filtered_capture.rs`](../crates/render/src/flow/one_xs/filtered_capture.rs),
 [`resident_worker.rs`](../crates/render/src/flow/one_xs/resident_worker.rs),
 and [`temporal_worker.rs`](../crates/render/src/flow/one_xs/temporal_worker.rs).
-Completion cannot publish a frame. Only the UI-side due-frame transaction may
-install the completed result matching `Player`'s opaque `FrameStamp`.
+Completion cannot publish a frame. Only the UI-side playback event transaction
+may install the completed result matching `Player`'s opaque `FrameStamp`.
+That transaction is independent of surface redraw callbacks. A redraw consumes
+the latest due completed picture, not the source-processing queues.
 
 The resident map path remains GPU-owned. After capture-session construction,
 ordinary live processing maps only the four-byte final validity word to the CPU.
@@ -253,7 +255,20 @@ fitting and crossover measurements belong in research and architecture history.
 Qualified captures use `PresentationPolicy::SequentialRealtime` in
 [`player.rs`](../crates/media/src/player.rs). Media PTS controls presentation
 deadlines. The capture worker advances source computation in order while the
-UI retains publication authority.
+UI retains publication authority. For the selected filtered path,
+`Scene::progress` handles source admission, completed-output installation and
+clock transitions on decoder/worker notifications and absolute media deadlines.
+It consumes sources in order even when the compositor withholds redraws.
+
+Source processing never skips camera inputs. With the owner's approval,
+obsolete completed screen updates may be omitted while the playback owner
+catches up with the audio clock. A render preparation samples the latest due
+complete output. `Shown` separately retains the exact corrected-frame owner
+used by the most recent draw preparation; screenshots, copied views, map
+inspection and terminal-picture recovery follow it rather than a newer logical
+installation. Neither logical progression nor draw submission proves physical
+scanout. Filtered playback reports source advances and progress pumps, not
+physical presentation rates.
 
 Admission and ready queues are bounded. Backpressure may block a worker handoff,
 never the UI thread. Only completed outputs enter the ready queue. The currently
@@ -281,6 +296,16 @@ Startup and exact seek landing hold picture and audio time until the requested
 resident result is installed and acknowledged. Pausing during startup cancels
 autoplay intent. EOF waits for admitted real inputs to drain before flushing
 the temporal tail.
+
+Coalesced progress notifications also cover startup operations that produce no
+temporal output, shared executor capacity across seek epochs, and ready-FIFO
+space released by logical installation. A preparation-specific decoder wait
+supports paused startup and detects delivery racing registration. Only proven
+source-retirement backpressure adds an event-owner poll deadline; a paused,
+complete pipeline has no periodic playback timer. Renderer attachment supplies
+the authenticated GPU context once, but renderer preparation no longer submits
+filtered sources or installs completed outputs. Other paths retain their
+existing redraw-driven behavior.
 
 The worker uses completion callbacks plus nonblocking device polls. Resident
 L1 keeps its six chunks and five prefix-completion waits on the worker; these
@@ -349,9 +374,9 @@ ring. The existing callback, gain fades, resampling and splice arithmetic in
 
 The presentation clock remains based on container PTS. Its published `Beat`
 anchor is extrapolated by the audio callback without needing redraw ticks.
-Video promotion and source admission still depend on the shader redraw path;
-decoupling audio supply alone does not clear a late-video backlog or make
-background video processing independent of compositor callbacks.
+Filtered video promotion and source admission use the playback event owner
+described above. Generic and resident-spatial video paths still use the shader
+redraw path; the independent audio producer is shared by all live Readers.
 
 The gyro clock is distinct. Frame orientation uses the camera timestamp from
 the exposure track, not nominal container PTS. Trailer tick units depend on

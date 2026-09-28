@@ -74,6 +74,8 @@ struct State {
     finished: bool,
     failure: Option<String>,
     due_waiter: Option<(FrameStamp, ReadyWake)>,
+    progress_wake: Option<ReadyWake>,
+    retirement_full: bool,
 }
 
 impl State {
@@ -92,6 +94,8 @@ impl State {
             finished: false,
             failure: None,
             due_waiter: None,
+            progress_wake: None,
+            retirement_full: false,
         }
     }
 }
@@ -138,6 +142,35 @@ pub(crate) struct FilteredCaptureFacade {
 }
 
 impl FilteredCaptureFacade {
+    pub(crate) const READY_CAPACITY: usize = READY_CAPACITY;
+
+    pub(crate) fn is_attached(&self) -> Fallible<bool> {
+        let state = self.state()?;
+        self.ensure_healthy(&state)?;
+        Ok(state.session.is_some())
+    }
+
+    pub(crate) fn set_progress_wake(&self, wake: &ReadyWake) -> Fallible<()> {
+        let session = {
+            let mut state = self.state()?;
+            self.ensure_healthy(&state)?;
+            state.progress_wake = Some(wake.clone());
+            state.session.clone()
+        };
+        if let Some(session) = session {
+            session.resident.worker.set_progress_wake(wake);
+            session.temporal.set_progress_wake(wake);
+        }
+        Ok(())
+    }
+
+    /// Only this refusal needs a nonblocking device-poll retry when all
+    /// executors are idle. Worker/channel/FIFO fullness uses progress wakes.
+    pub(crate) fn source_retirement_full(&self) -> Fallible<bool> {
+        let state = self.state()?;
+        self.ensure_healthy(&state)?;
+        Ok(state.retirement_full)
+    }
     /// Construct the CPU owner. GPU resources remain lazy until [`Self::attach`].
     pub(crate) fn new(
         profile: Arc<ResidentCameraProfile>,
@@ -170,12 +203,12 @@ impl FilteredCaptureFacade {
     /// Create a fresh decode epoch, sharing immutable GPU pipelines when the
     /// original owner was already attached.
     pub(crate) fn restart(&self) -> Fallible<Self> {
-        let old_session = {
+        let (old_session, progress_wake) = {
             let state = self.state()?;
             if let Some(error) = &state.failure {
                 return Err(error.clone().into());
             }
-            state.session.clone()
+            (state.session.clone(), state.progress_wake.clone())
         };
         let session = old_session
             .as_ref()
@@ -197,6 +230,7 @@ impl FilteredCaptureFacade {
             .transpose()?;
         let mut state = State::new();
         state.session = session;
+        state.progress_wake = progress_wake;
         // The installed old picture remains usable during seeking, but no
         // unpublished source/correction should accumulate across old epochs.
         // Cancellation never blocks the UI behind the temporal worker.
@@ -256,7 +290,14 @@ impl FilteredCaptureFacade {
                 .resident
                 .ensure_renderer(&candidate.resident.context, wgpu::TextureFormat::Rgba8Unorm)
         } else {
-            state.session = Some(candidate);
+            state.session = Some(candidate.clone());
+            let wake = state.progress_wake.clone();
+            drop(state);
+            if let Some(wake) = wake {
+                candidate.resident.worker.set_progress_wake(&wake);
+                candidate.temporal.set_progress_wake(&wake);
+                wake.notify();
+            }
             Ok(())
         }
     }
@@ -275,12 +316,16 @@ impl FilteredCaptureFacade {
         }
         let permit = match session.resident.retirements.reserve() {
             Ok(permit) => permit,
-            Err(DrawRetirementError::Full) => return Ok(false),
+            Err(DrawRetirementError::Full) => {
+                self.state()?.retirement_full = true;
+                return Ok(false);
+            }
             Err(error) => return Err(error.into()),
         };
         {
             let mut state = self.state()?;
             self.ensure_healthy(&state)?;
+            state.retirement_full = false;
             if state.finished || state.finish_requested {
                 return Err("filtered capture received a source after finish".into());
             }
@@ -418,6 +463,11 @@ impl FilteredCaptureFacade {
             .pop_front()
             .expect("checked filtered FIFO front");
         state.installed = Some(Arc::clone(&output));
+        let progress = state.progress_wake.clone();
+        drop(state);
+        if let Some(progress) = progress {
+            progress.notify();
+        }
         Ok(Some(output))
     }
 
@@ -433,6 +483,7 @@ impl FilteredCaptureFacade {
     /// Preserve the last complete picture for a terminal-error screenshot.
     /// Unlike observed-state queries, this deliberately does not mask that
     /// already-installed resource with a later sticky worker failure.
+    #[cfg(test)]
     pub(crate) fn installed(&self) -> Fallible<Option<Arc<CorrectedFrame>>> {
         Ok(self.state()?.installed.clone())
     }
@@ -661,7 +712,13 @@ impl FilteredCaptureInner {
             stamp: pending,
             output_capacity,
         });
-        Ok(state.due_waiter.take().map(|(_, wake)| wake))
+        let wake = state.due_waiter.take().map(|(_, wake)| wake);
+        let progress = state.progress_wake.clone();
+        drop(state);
+        if let Some(progress) = progress {
+            progress.notify();
+        }
+        Ok(wake)
     }
 
     fn handoff_finish(&self) -> Fallible<Option<ReadyWake>> {
@@ -671,7 +728,13 @@ impl FilteredCaptureInner {
             return Err("filtered stitch handoff has no pending finish".into());
         }
         state.temporal_pending.push_back(TemporalPending::Finish);
-        Ok(state.due_waiter.take().map(|(_, wake)| wake))
+        let wake = state.due_waiter.take().map(|(_, wake)| wake);
+        let progress = state.progress_wake.clone();
+        drop(state);
+        if let Some(progress) = progress {
+            progress.notify();
+        }
+        Ok(wake)
     }
 
     pub(super) fn complete_source(
@@ -691,7 +754,7 @@ impl FilteredCaptureInner {
         pending: PendingKind,
         outputs: Vec<CorrectedFrame>,
     ) -> Fallible<()> {
-        let wake = {
+        let (wake, progress) = {
             let mut state = self.state()?;
             ensure_healthy_state(&state)?;
             if state.retired {
@@ -733,10 +796,16 @@ impl FilteredCaptureInner {
                 state.finished = true;
             }
             state.temporal_pending.pop_front();
-            state.due_waiter.take().map(|(_, wake)| wake)
+            (
+                state.due_waiter.take().map(|(_, wake)| wake),
+                state.progress_wake.clone(),
+            )
         };
         if let Some(wake) = wake {
             wake.notify();
+        }
+        if let Some(progress) = progress {
+            progress.notify();
         }
         Ok(())
     }
@@ -765,6 +834,9 @@ impl FilteredCaptureInner {
             }
             _ => return Err("filtered backpressure changed its pending request".into()),
         }
+        // This is a failed-admission rollback, not newly available capacity.
+        // Waking here on channel Full would create a self-sustaining retry
+        // loop. The shared worker notifies when it actually dequeues a job.
         Ok(())
     }
 
@@ -775,6 +847,13 @@ impl FilteredCaptureInner {
         }
         if let Some(wake) = wake {
             wake.notify();
+        }
+        let progress = self
+            .state()
+            .ok()
+            .and_then(|state| state.progress_wake.clone());
+        if let Some(progress) = progress {
+            progress.notify();
         }
         if report {
             eprintln!("{message}");
@@ -815,6 +894,7 @@ fn record_failure(state: &mut State, message: &str) -> (Option<ReadyWake>, bool)
     state.stitch_pending = None;
     state.temporal_pending.clear();
     state.ready.clear();
+    state.retirement_full = false;
     let report = state.failure.is_none();
     if report {
         state.failure = Some(message.to_owned());

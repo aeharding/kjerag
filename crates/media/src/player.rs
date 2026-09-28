@@ -82,12 +82,14 @@ impl PresentationPolicy {
 /// measures. Every count here is a defect except `presented`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
-    /// Calls to [`Player::pump`], which is one per redraw. Reported
+    /// Calls to [`Player::pump`]. Generic playback pumps on redraw; a filtered
+    /// source consumer can pump independently of physical drawing. Reported
     /// because the presented rate alone cannot tell a player that wakes
     /// once per frame from one that wakes twice and shows the same picture
     /// again, and the two cost very different amounts of battery.
     pub redraws: u64,
-    /// Frames that reached the screen.
+    /// Frames promoted by Player. This is not physical scanout when the
+    /// filtered source consumer progresses independently of drawing.
     pub presented: u64,
     /// Frames decoded but never shown, because their moment had passed
     /// before the picture next changed. Stutter, in other words.
@@ -123,9 +125,19 @@ impl Stats {
 
     /// One line, for a run of `over`.
     pub fn report(&self, over: Duration) -> String {
+        self.report_with_labels(over, "fps presented", "redraws/s")
+    }
+
+    /// Source admission progress is not a display-fps or completed-draw
+    /// measurement. Keep the historical counters but name their actual work.
+    pub fn report_source_progress(&self, over: Duration) -> String {
+        self.report_with_labels(over, "source advances/s", "progress pumps/s")
+    }
+
+    fn report_with_labels(&self, over: Duration, advances: &str, pumps: &str) -> String {
         let per_second = |count: u64| count as f64 / over.as_secs_f64().max(f64::EPSILON);
         let line = format!(
-            "{:.2} fps presented in {:.1} redraws/s, {} dropped, {} starved, \
+            "{:.2} {advances} in {:.1} {pumps}, {} dropped, {} starved, \
              worst {:.1} ms late",
             per_second(self.presented),
             per_second(self.redraws),
@@ -570,7 +582,10 @@ impl Player {
             return Ok(self.presenter.peeked.len().min(capacity));
         }
 
+        self.cancel_decode_wait();
         while self.presenter.peeked.len() < capacity {
+            let generation = self.decode_arrival.generation();
+            self.last_empty_generation = None;
             match self.notes.try_recv() {
                 Ok(Note::Frames(tag, _)) if !self.epochs.is_newest(tag) => continue,
                 Ok(Note::Frames(_, frames)) => {
@@ -611,7 +626,10 @@ impl Player {
                     break;
                 }
                 Ok(Note::Failed(error)) => return Err(error),
-                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Empty) => {
+                    self.last_empty_generation = Some(generation);
+                    break;
+                }
                 Err(TryRecvError::Disconnected) => {
                     if let Some(target) = self.replay_target
                         && self
@@ -710,6 +728,27 @@ impl Player {
         }
         self.last_empty_generation
             .is_some_and(|generation| self.decode_arrival.wait_after(generation, waker))
+    }
+
+    /// Arm the last observed empty decoder queue for a sequential source
+    /// consumer, including paused startup and seek preparation. Unlike the
+    /// generic display wait, this does not require an overdue picture. The
+    /// caller decides whether another bounded preparation slot is needed.
+    /// A delivery racing registration wakes the caller immediately; false
+    /// never means that a previously observed Empty may safely be forgotten.
+    pub fn wait_for_prepared_decode(&self, waker: Waker) -> bool {
+        if self.presenter.policy != PresentationPolicy::SequentialRealtime || self.ended {
+            return false;
+        }
+        let Some(generation) = self.last_empty_generation else {
+            return false;
+        };
+        if self.decode_arrival.wait_after(generation, waker.clone()) {
+            true
+        } else {
+            waker.wake();
+            false
+        }
     }
 
     fn cancel_decode_wait(&mut self) {
@@ -1480,6 +1519,27 @@ mod tests {
     const NTSC: Duration = Duration::from_nanos(33_366_666);
 
     #[test]
+    fn filtered_progress_report_does_not_claim_physical_present_or_redraw_rates() {
+        let stats = Stats {
+            presented: 60,
+            redraws: 120,
+            worst_late: Duration::from_millis(7),
+            ..Stats::default()
+        };
+        let report = stats.report_source_progress(Duration::from_secs(2));
+        assert_eq!(
+            report,
+            "30.00 source advances/s in 60.0 progress pumps/s, 0 dropped, 0 starved, worst 7.0 ms late"
+        );
+        assert!(!report.contains("presented"));
+        assert!(!report.contains("redraws"));
+        assert_eq!(
+            stats.report(Duration::from_secs(2)),
+            "30.00 fps presented in 60.0 redraws/s, 0 dropped, 0 starved, worst 7.0 ms late"
+        );
+    }
+
+    #[test]
     fn full_video_delivery_cannot_stop_independent_audio_refill() {
         use crate::audio::Pipe;
         use crate::audio_worker::{AudioWorker, tests as producer};
@@ -1578,6 +1638,85 @@ mod tests {
         fn wake(self: Arc<Self>) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    #[test]
+    fn paused_sequential_preparation_wait_wakes_without_moving_media_time() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        let now = Instant::now();
+        bench.decoded(0, 0);
+        assert_eq!(bench.redraw(now), Some(0));
+        let position = bench.player.position(now);
+        assert_eq!(bench.player.prepare_ahead(6).unwrap(), 0);
+        let counter = Arc::new(WakeCount::default());
+        assert!(
+            bench
+                .player
+                .wait_for_prepared_decode(Waker::from(counter.clone()))
+        );
+        bench.decoded(0, 1);
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+        assert_eq!(bench.player.prepare_ahead(6).unwrap(), 1);
+        assert_eq!(bench.player.index(), Some(0));
+        assert_eq!(
+            bench.player.position(now + Duration::from_secs(1)),
+            position
+        );
+    }
+
+    #[test]
+    fn sequential_preparation_arrival_racing_registration_requeues_progress() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.decoded(0, 0);
+        assert_eq!(bench.redraw(Instant::now()), Some(0));
+        assert_eq!(bench.player.prepare_ahead(6).unwrap(), 0);
+        bench.decoded(0, 1);
+        let counter = Arc::new(WakeCount::default());
+        assert!(
+            !bench
+                .player
+                .wait_for_prepared_decode(Waker::from(counter.clone()))
+        );
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+        assert_eq!(bench.player.prepare_ahead(6).unwrap(), 1);
+        assert_eq!(bench.player.prepared_ahead(0).unwrap().index, 1);
+    }
+
+    #[test]
+    fn sequential_startup_wait_survives_empty_preparation_and_seek_cancels_it() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        assert_eq!(bench.redraw(Instant::now()), None);
+        assert_eq!(bench.player.prepare_ahead(6).unwrap(), 0);
+        let counter = Arc::new(WakeCount::default());
+        assert!(
+            bench
+                .player
+                .wait_for_prepared_decode(Waker::from(counter.clone()))
+        );
+        bench.player.seek(Cue::Index(7), Accuracy::Exact);
+        bench.decoded(1, 7);
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+        assert!(
+            !bench
+                .player
+                .wait_for_prepared_decode(Waker::from(counter.clone()))
+        );
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
     }
 
     fn starved_bench() -> (Bench, Instant) {

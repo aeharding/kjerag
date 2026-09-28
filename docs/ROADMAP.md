@@ -298,8 +298,10 @@ change installed code or add qualification claims.
 
   Branch work gives audio its own bounded producer, preserving decoding and
   correction arithmetic, with seek-authorized writes and explicit failure
-  and shutdown handling. Video redraw independence and late-picture recovery
-  remain separate unfinished work. The owner approved skipping obsolete
+  and shutdown handling. The filtered X4/ONE X2 branch path now also moves
+  source admission and ordered completion out of renderer preparation into a
+  playback event owner, with absolute deadlines and coalesced readiness wakes.
+  The owner approved skipping obsolete
   completed screen updates to catch up with audio while retaining every source's
   stitching and color processing. No stitching inputs,
   source cadence, color law or installed package changes in this slice.
@@ -308,8 +310,13 @@ change installed code or add qualification claims.
   starvation test uses the real bounded video-delivery loop and audio ring with
   a controlled PCM producer, not AAC decoding or a physical output device.
   Independent concurrency review found and corrected a startup authorization
-  race. Native/Flatpak playback qualification and the full event-owner redesign
-  remain pending; this is not an installed A/V-sync fix.
+  race. The integrated device-hidden working-tree gate reports 1,618 passes,
+  53 ignored and no failures, including unavailable-device returns rather than
+  hardware coverage. Full workspace Clippy, formatting, source/name checks and
+  20 portable UI regressions pass. Native/Flatpak playback qualification
+  remains pending; this is not an installed A/V-sync fix. Generic/spatial video
+  paths retain their existing scheduling, while audio supply is independent
+  for all live Readers.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes

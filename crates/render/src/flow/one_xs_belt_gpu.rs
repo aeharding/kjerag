@@ -35,7 +35,7 @@ use kjerag_meta::{CalibrationSet, OrientationTrack, Readout};
 mod corrected;
 #[path = "one_xs/filtered_capture.rs"]
 mod filtered_capture;
-pub(crate) use corrected::PreparedCorrectionDraw;
+pub(crate) use corrected::{CorrectedFrame, PreparedCorrectionDraw};
 #[path = "one_xs/native_capacity.rs"]
 mod native_capacity;
 #[path = "one_xs/panorama_ingest.rs"]

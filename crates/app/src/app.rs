@@ -109,6 +109,15 @@ const CONTROLS_POLL: Duration = Duration::from_millis(250);
 /// way to see dropped frames without a profiler.
 const REPORT_EVERY: Duration = Duration::from_secs(5);
 
+fn playback_report(stats: Stats, over: Duration, event_playback: bool) -> String {
+    let report = stats.report(over);
+    if event_playback {
+        stats.report_source_progress(over)
+    } else {
+        report
+    }
+}
+
 /// How long a toast stays up, and how many are kept: libcosmic's own numbers
 /// (`src/widget/toaster/mod.rs:79-85`, `162-181`), which cosmic-files takes
 /// unchanged.
@@ -192,8 +201,8 @@ pub enum Message {
     Quit,
     /// Five seconds have passed and playback has a line to print.
     Report,
-    /// Missing source input or a due stitch result is ready. Rebuild/redraw
-    /// without moving the clock here or treating speculative completion as a tick.
+    /// A source/worker wake or absolute media deadline. Progress happens here,
+    /// independently of whether the compositor offers another surface redraw.
     SceneReady,
     /// The pass gave up on the file that was playing and stopped it
     /// (issue #124). It arrives here because `kjerag_render`'s widget can only
@@ -759,6 +768,13 @@ impl cosmic::Application for App {
             }
             Message::VideoAreaClick => self.hide_volume(),
         }
+        if let Some(open) = &self.open
+            && open.scene.event_playback()
+            && let kjerag_render::Next::Stopped(stall) = open.scene.progress(now)
+        {
+            self.alert.raise(Failure::Stopped(open.path.clone(), stall));
+            self.show_controls(now);
+        }
         Task::none()
     }
 
@@ -949,6 +965,18 @@ impl cosmic::Application for App {
                     .ready_subscription()
                     .map(|()| Message::SceneReady),
             );
+            if let Some(deadline) = open.scene.playback_deadline() {
+                sources.push(Subscription::run_with(
+                    (open.path.clone(), deadline),
+                    |(_, deadline)| {
+                        let deadline = *deadline;
+                        cosmic::iced::futures::stream::once(async move {
+                            tokio::time::sleep_until(deadline.into()).await;
+                            Message::SceneReady
+                        })
+                    },
+                ));
+            }
         }
         if self.is_playing() {
             sources.push(time::every(REPORT_EVERY).map(|_| Message::Report));
@@ -1422,14 +1450,19 @@ impl App {
         let Some(stats) = self.open.as_ref().and_then(|open| open.scene.stats()) else {
             return;
         };
+        let report = playback_report(
+            stats.since(self.counted),
+            now.duration_since(self.reported),
+            self.open
+                .as_ref()
+                .is_some_and(|open| open.scene.event_playback()),
+        );
         println!(
             "play:   {:>8.2} s, {}",
             self.open
                 .as_ref()
                 .map_or(0.0, |open| open.scene.position(now).as_secs_f64()),
-            stats
-                .since(self.counted)
-                .report(now.duration_since(self.reported)),
+            report,
         );
         self.counted = stats;
         self.reported = now;
