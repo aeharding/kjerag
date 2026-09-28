@@ -157,6 +157,17 @@ impl Beat {
 #[derive(Clone)]
 pub struct Pipe(Arc<Mutex<Buffer>>);
 
+/// A producer's authorization to write one audio lineage. Flush replaces it
+/// under the ring lock, so an old packet cannot refill a newly cleared ring.
+#[derive(Clone, Debug)]
+pub(crate) struct AudioEpoch(Arc<()>);
+
+impl AudioEpoch {
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 impl Pipe {
     /// A ring `depth` long, in the device's own format.
     pub fn new(rate: u32, channels: usize, depth: Duration) -> Self {
@@ -170,8 +181,24 @@ impl Pipe {
     /// Take one decoded and resampled chunk. `through` is the media time just
     /// past its last frame, and it is what the whole clock slave measures
     /// from.
+    #[cfg(test)]
     pub fn write(&self, samples: &[f32], through: Duration) {
         self.locked().write(samples, through);
+    }
+
+    pub(crate) fn epoch(&self) -> AudioEpoch {
+        self.locked().epoch.clone()
+    }
+
+    pub(crate) fn is_current(&self, epoch: &AudioEpoch) -> bool {
+        self.locked().epoch.same(epoch)
+    }
+
+    pub(crate) fn write_in(&self, epoch: &AudioEpoch, samples: &[f32], through: Duration) {
+        let mut buffer = self.locked();
+        if buffer.epoch.same(epoch) {
+            buffer.write(samples, through);
+        }
     }
 
     /// Throw the sound away, and fade what is already on its way out.
@@ -179,8 +206,11 @@ impl Pipe {
     /// A seek calls this, on the shell's thread. Everything in the ring was
     /// decoded before it, and playing that after a scrub is exactly the stale
     /// tail the epoch discipline exists to prevent (issue #5).
-    pub fn flush(&self) {
-        self.locked().flush();
+    pub(crate) fn invalidate(&self) -> AudioEpoch {
+        let mut buffer = self.locked();
+        buffer.epoch = AudioEpoch(Arc::new(()));
+        buffer.flush();
+        buffer.epoch.clone()
     }
 
     pub fn set_volume(&self, volume: f32) {
@@ -203,7 +233,7 @@ impl Pipe {
     }
 
     /// How much more sound the ring would take. This is the pacing for the
-    /// sound's own demuxer ([`super::track::Track::pump`]): it reads until
+    /// sound's own producer: it reads until
     /// the ring is nearly full and stops, so nothing it reads is ever
     /// dropped for want of room.
     ///
@@ -247,6 +277,7 @@ enum Splice {
 
 /// The ring, the media time it carries, and the gain being applied to it.
 struct Buffer {
+    epoch: AudioEpoch,
     /// Interleaved frames, `channels` values each, laid out as a ring.
     samples: Box<[f32]>,
     channels: usize,
@@ -276,6 +307,7 @@ impl Buffer {
     fn new(rate: u32, channels: usize, depth: Duration) -> Self {
         let frames = (depth.as_secs_f64() * f64::from(rate)).ceil() as usize;
         Self {
+            epoch: AudioEpoch(Arc::new(())),
             samples: vec![0.0; frames.max(1) * channels].into_boxed_slice(),
             channels,
             rate,

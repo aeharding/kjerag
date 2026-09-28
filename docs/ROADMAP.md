@@ -281,6 +281,35 @@ change installed code or add qualification claims.
 
 ## Remaining work
 
+- **Playback scheduling and audio starvation, issue
+  [#186](https://github.com/aeharding/kjerag/issues/186):** after the owner
+  restored CPU boost by reconnecting external power, a fresh installed-player
+  foreground run on the 4K display sustains consecutive source cadence without
+  accumulating lag or reporting audio underruns. This short idle-view result
+  does not establish the 240 fps target or resolve the owner's broader report.
+  A separate desktop run receives redraws at about 1 Hz: its bounded
+  video channel blocks the decoder, which also stops refilling audio despite
+  the independently running media clock. The fullscreen video in that first
+  desktop capture belonged to another app, and the measured surface was
+  1331x998. The owner reports Kjerag was visible on the 4K display; without
+  contemporaneous window-state evidence this must not be dismissed as hidden
+  playback. An already-late sequential session does not discard its
+  backlog when normal throughput returns.
+
+  Branch work gives audio its own bounded producer, preserving decoding and
+  correction arithmetic, with seek-authorized writes and explicit failure
+  and shutdown handling. Video redraw independence and late-picture recovery
+  remain separate unfinished work. The owner approved skipping obsolete
+  completed screen updates to catch up with audio while retaining every source's
+  stitching and color processing. No stitching inputs,
+  source cadence, color law or installed package changes in this slice.
+  The device-hidden media gate passes 137 tests with four ignored and no
+  failures, including eight new producer/seek/lifecycle regressions. The
+  starvation test uses the real bounded video-delivery loop and audio ring with
+  a controlled PCM producer, not AAC decoding or a physical output device.
+  Independent concurrency review found and corrected a startup authorization
+  race. Native/Flatpak playback qualification and the full event-owner redesign
+  remain pending; this is not an installed A/V-sync fix.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes

@@ -332,10 +332,26 @@ error. The existing Reader admission and color-metadata rules are the common
 policy. Demux seek targets remain unchanged; frame-origin normalization happens
 at delivery, after decode.
 
-Audio has its own demuxer in [`audio.rs`](../crates/media/src/audio.rs).
-Large video interleave gaps must not delay sound delivery. The presentation
-clock remains based on container PTS and is pumped from the shader redraw path,
-not a shell-side tick counter.
+Audio has its own demuxer and decoder in
+[`track.rs`](../crates/media/src/track.rs), and an independent producer in
+[`audio_worker.rs`](../crates/media/src/audio_worker.rs). Ring capacity paces
+refill; a full video delivery channel cannot stop it. The producer parks at
+audio EOF until a seek or shutdown. Video decode waits for audio-seek
+acknowledgment, but the UI and device callback never join the producer or wait
+for its I/O. Player observes the producer's underlying errors independently
+of the video delivery channel and stops it when the capture closes.
+
+A seek invalidates audio writes under the ring lock before returning to the
+UI. That authorization travels with the video seek command and the audio
+decoder; an older in-flight packet or superseded seek cannot refill the new
+ring. The existing callback, gain fades, resampling and splice arithmetic in
+[`audio.rs`](../crates/media/src/audio.rs) remain unchanged.
+
+The presentation clock remains based on container PTS. Its published `Beat`
+anchor is extrapolated by the audio callback without needing redraw ticks.
+Video promotion and source admission still depend on the shader redraw path;
+decoupling audio supply alone does not clear a late-video backlog or make
+background video processing independent of compositor callbacks.
 
 The gyro clock is distinct. Frame orientation uses the camera timestamp from
 the exposure track, not nominal container PTS. Trailer tick units depend on
