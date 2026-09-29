@@ -336,6 +336,26 @@ change installed code or add qualification claims.
   scheduling as a complete A/V-sync fix. The owner was asked about holding
   picture and sound together to refill, but that policy is not implemented or
   accepted yet. Receipts: `scratch/playback-independent-20260927/`.
+
+  The owner's September 20 clip at 1281.413 seconds, FOV 166.23, reproduces
+  a severe failure in the installed `68591c10` player: 2.8 source advances/s,
+  almost 18 seconds of accumulated video delay and hundreds of audio gaps.
+  A later repeat reaches near source cadence but still accumulates 710 ms
+  lateness. Live thread samples show audio and video waiting for GVFS reads;
+  high GPU use on the wide view remains a separate unresolved factor. These
+  measurements do not isolate the network or projection as the sole cause.
+
+  Dedicated branch `refactor/playback-compressed-input` separates compressed
+  reading from video decode and PCM refill with bounded per-file packet
+  queues. It is based on the installed scheduling, not the unaccepted clock-
+  hold prototype. Seven CPU regressions cover read-ahead during a blocked
+  read, byte/count limits, in-flight seek invalidation, raw failures, shutdown,
+  panic wakeup and byte/metadata identity against real libavformat input.
+  The media gate passes 148 tests with four ignored and Clippy passes.
+  No stitching/color arithmetic changes. This input candidate is not installed
+  or a demonstrated fix: exact-source packaging, actual clip throughput and
+  cadence, both-camera runtime/UI checks and owner retest remain due. The
+  wide-view GPU cost and late-picture recovery must still be addressed.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes

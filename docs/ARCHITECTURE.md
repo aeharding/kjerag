@@ -366,6 +366,23 @@ acknowledgment, but the UI and device callback never join the producer or wait
 for its I/O. Player observes the producer's underlying errors independently
 of the video delivery channel and stops it when the capture closes.
 
+Live Reader and Track input now passes through
+[`packet_input.rs`](../crates/media/src/packet_input.rs). A sole worker owns
+each libavformat demuxer and reads compressed packets independently of decoder
+surface delivery and PCM ring capacity. Video queues stop at 64 MiB or 512
+packets per file; audio stops at 256 KiB or 128 packets. Byte accounting permits
+one packet of overshoot because its size is known only after the read. These
+are compressed-input limits, not added decoded/GPU frame retention. Walk
+instruments retain their synchronous reference input.
+
+Input remains idle until the first read or seek. A seek empties the compressed
+queue and invalidates an in-flight read before the same demuxer repositions;
+the decoder waits for acknowledgment. Closing signals the reader without
+joining a possibly blocked filesystem call. The worker owns the input until
+that read returns. Packet bytes, order, stream identity, timestamps, seek
+targets, EOF and raw errors remain unchanged. This read-ahead stage absorbs
+input bursts; it cannot make sustained slow input or GPU work run at realtime.
+
 A seek invalidates audio writes under the ring lock before returning to the
 UI. That authorization travels with the video seek command and the audio
 decoder; an older in-flight packet or superseded seek cannot refill the new

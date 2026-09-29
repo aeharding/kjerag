@@ -34,6 +34,7 @@ use std::time::Duration;
 use ffmpeg_next as ff;
 
 use super::audio::{AudioEpoch, Pipe, compensation};
+use super::packet_input::{Limits, PacketInput};
 use super::{Fallible, media_time, read_only};
 
 /// Output frames the drift correction is spread over: one second. Long enough
@@ -55,7 +56,7 @@ pub struct Track {
     /// The same file the pictures are read from, opened again with every
     /// other stream discarded. Two file handles rather than one, which is
     /// what the interleave costs (issue #97).
-    input: ff::format::context::Input,
+    input: PacketInput,
     stream: usize,
     /// The file has been read to its end. Cleared by a seek, which is the
     /// only way back into it.
@@ -102,7 +103,7 @@ impl Track {
         read_only(&mut input, &[index]);
 
         Ok(Some(Self {
-            input,
+            input: PacketInput::new(input, Limits::AUDIO)?,
             stream: index,
             drained: false,
             decoder: context.decoder().audio()?,
@@ -148,18 +149,16 @@ impl Track {
     /// between packets, without changing decoding or resampling arithmetic.
     pub(crate) fn pump_one(&mut self) -> Fallible<bool> {
         if !self.drained {
-            let mut packet = ff::Packet::empty();
-            match packet.read(&mut self.input) {
+            match self.input.read()? {
                 // Every other stream is discarded, so this is the sound's own
                 // packet; the guard is for a container that puts something
                 // else through anyway.
-                Ok(()) if packet.stream() == self.stream => self.take(&packet)?,
-                Ok(()) => {}
-                Err(ff::Error::Eof) => {
+                Some(packet) if packet.stream() == self.stream => self.take(&packet)?,
+                Some(_) => {}
+                None => {
                     self.drained = true;
                     self.end()?;
                 }
-                Err(e) => return Err(e.into()),
             }
         }
         Ok(self.drained)
@@ -174,7 +173,7 @@ impl Track {
     /// within one packet of it.
     pub(crate) fn seek_in(&mut self, to: i64, epoch: AudioEpoch) -> Fallible<()> {
         self.flush();
-        self.input.seek(to, ..to)?;
+        self.input.seek(to)?;
         self.drained = false;
         self.epoch = epoch;
         Ok(())
