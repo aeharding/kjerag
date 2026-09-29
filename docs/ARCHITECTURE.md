@@ -103,6 +103,7 @@ paired VA-API decoded Frames
   -> one source-preparation command buffer producing:
        raw lenses + map + colour -> world panorama for temporal input
        raw lenses -> prefiltered R8/RG8 display snapshots owned by wgpu
+       source map -> native endpoint cache for curved view drawing
   -> reduced periodic temporal correction over seven real sources
   -> CorrectedFrame pairing the exact source, map, colour, matrix, current
      low-resolution control, and filtered low-resolution result
@@ -150,6 +151,20 @@ carrier or decoder leases. Explicit Scene map inspection follows the retained
 filtered owner when that path is selected; it must not consult the separate
 spatial facade. Map readback remains diagnostic-only, never a playback step.
 
+The filtered path also evaluates its 51 by 101 native map endpoints once in
+the same source-preparation command buffer. Each source owns a 164,832-byte
+GPU cache containing endpoint positions and packed map samples. Curved-view
+fragments reuse these values instead of recomputing them for each screen pixel
+and redraw. Native cell search, watertight triangle admission, barycentrics,
+alpha, fusion and full-resolution source sampling remain in the final draw.
+The cache names the same opaque frame and graphics context as the map and
+source snapshots; their completed owner retains its binding until retirement.
+It introduces no readback, CPU wait, extra queue submission or source-cadence
+change. Temporal-input panorama evaluation is unchanged. The uncached draw
+remains a test-only same-owner reference. Separate GPU compilation can change
+floating-point rounding, so this optimization requires rendered comparison,
+not an assumed pixel-identity claim.
+
 [`panorama.rs`](../crates/render/src/direct_type2/panorama.rs) distinguishes:
 
 - `RgbPanorama`, a coordinate-neutral source-stamped gamma-RGB texture;
@@ -161,6 +176,7 @@ The temporal image stream consumes only the coordinate-neutral panorama.
 Coordinate ownership stays beside the matching high-resolution display source.
 [`corrected.rs`](../crates/render/src/flow/one_xs/corrected.rs) enforces that
 `CorrectionInput` names the same `FrameStamp` for panorama, source, and map.
+Its view endpoint cache must name that same frame and graphics context too.
 
 [`correction_stream.rs`](../crates/render/src/temporal_fusion/correction_stream.rs)
 owns two low-resolution textures per emitted source:

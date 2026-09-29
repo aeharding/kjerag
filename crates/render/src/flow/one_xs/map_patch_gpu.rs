@@ -749,6 +749,7 @@ pub(super) struct InstalledGpuMapBinding {
 /// textures; unlike imported source textures, none aliases decoder memory.
 pub(super) struct MapSnapshot {
     frame: FrameStamp,
+    #[cfg(test)]
     read: wgpu::BindGroup,
     fusion_read: Option<wgpu::BindGroup>,
     // Explicit diagnostics need handles to the same allocations already
@@ -760,10 +761,25 @@ pub(super) struct MapSnapshot {
 }
 
 impl MapSnapshot {
+    pub(super) fn cache_for_view(
+        &self,
+        pipeline: &crate::direct_type2::view_mesh_cache::Pipeline,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Fallible<crate::direct_type2::view_mesh_cache::CachedMap> {
+        pipeline.encode(
+            &self.context,
+            encoder,
+            self.frame.clone(),
+            &self.packed,
+            &self.alpha,
+        )
+    }
+
     pub(super) fn frame(&self) -> &FrameStamp {
         &self.frame
     }
 
+    #[cfg(test)]
     pub(super) fn read(&self) -> &wgpu::BindGroup {
         &self.read
     }
@@ -909,6 +925,7 @@ impl InstalledGpuMapBinding {
         self.context.ensure_same(context)?;
         Ok(MapSnapshot {
             frame: self.frame.clone(),
+            #[cfg(test)]
             read: self.read.clone(),
             fusion_read: self.fusion_read.clone(),
             packed: self.packed.clone(),

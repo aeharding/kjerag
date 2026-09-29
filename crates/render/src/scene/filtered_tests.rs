@@ -107,7 +107,13 @@ fn reported_filtered_correction_fields() {
     let (path, view) = crate::Framing::read_line(&line).expect("invalid review view line");
     assert_eq!(view.horizon, Horizon::Locked);
     std::fs::create_dir(&output).expect("review output must be a new directory");
-    for arm in ["current", "filtered", "shown", "temporal-off"] {
+    for arm in [
+        "current",
+        "filtered",
+        "shown",
+        "temporal-off",
+        "uncached-view",
+    ] {
         std::fs::create_dir(output.join(arm)).unwrap();
     }
     std::fs::write(output.join("request.txt"), format!("{line}\n")).unwrap();
@@ -207,6 +213,26 @@ fn reported_filtered_correction_fields() {
             capture_correction_draw(&normal, &device, &queue, shot.width, shot.height),
             shot.rgba,
             "diagnostic draw must reproduce the exact shown pixels before removing the temporal term"
+        );
+        let reference = installed
+            .prepare_view_uncached_for_review(&device, &reframe, wgpu::TextureFormat::Rgba8Unorm)
+            .unwrap();
+        assert_eq!(reference.frame(), &stamp);
+        let reference_pixels =
+            capture_correction_draw(&reference, &device, &queue, shot.width, shot.height);
+        assert!(
+            shot.rgba
+                .chunks_exact(4)
+                .zip(reference_pixels.chunks_exact(4))
+                .all(|(cached, reference)| cached[3] == reference[3]),
+            "view cache changed picture coverage"
+        );
+        super::tests::write_review_ppm_sized(
+            &output.join("uncached-view"),
+            stamp.index(),
+            shot.width,
+            shot.height,
+            &reference_pixels,
         );
         let temporal_off = installed
             .prepare_view_without_temporal_for_review(
