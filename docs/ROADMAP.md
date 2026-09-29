@@ -313,10 +313,29 @@ change installed code or add qualification claims.
   race. The integrated device-hidden working-tree gate reports 1,618 passes,
   53 ignored and no failures, including unavailable-device returns rather than
   hardware coverage. Full workspace Clippy, formatting, source/name checks and
-  20 portable UI regressions pass. Native/Flatpak playback qualification
-  remains pending; this is not an installed A/V-sync fix. Generic/spatial video
+  20 portable UI regressions pass. Those CPU-only gates did not qualify
+  native/Flatpak playback. Generic/spatial video
   paths retain their existing scheduling, while audio supply is independent
   for all live Readers.
+
+  September 29 qualification of exact source `68591c10` establishes a narrower
+  real-player win. In the same X4 session at 2256x1504, eight seconds of 1 Hz
+  compositor updates followed by restored 60 Hz causes the old package 735
+  audio underruns and almost eight seconds of draw lag. The candidate reports
+  no underruns, retains 988 contiguous completed source transactions, and
+  restored draw age stays within 16.65 ms of its pre-slowdown anchor. These are
+  authenticated draw/completion records, not physical scanout or a capacity
+  qualification. Both full app-path UI suites pass, 43 X4 and 44 ONE X2 checks,
+  with the documented isolated-service/fixture skips and inspected pictures.
+  The private candidate is now installed; owner acceptance is pending.
+
+  A separate delayed-packet test still reduces input to about 23.7 fps and
+  accumulates 3.332 seconds of video lateness while audio stays supplied.
+  Normal reading lets it catch up. This explicitly leaves slow-input buffering
+  and sustained sub-realtime processing unresolved; do not describe the new
+  scheduling as a complete A/V-sync fix. The owner was asked about holding
+  picture and sound together to refill, but that policy is not implemented or
+  accepted yet. Receipts: `scratch/playback-independent-20260927/`.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes
@@ -687,7 +706,20 @@ change installed code or add qualification claims.
 
 ## Delivery next steps
 
-### Current private installation, September 16
+### Current private installation, September 29
+
+Exact source `68591c10` adds the independent audio producer and redraw-independent
+filtered playback described above. It changes no stitching/color arithmetic.
+Its app-path camera checks passed before installation. The installed executable
+and OSTree identity match the candidate; the previous `f557ee59` bundle is
+retained for rollback. An old installer unexpectedly updated five shared runtime
+refs; all five exact pre-installation versions were subsequently restored and
+verified. Future installs must disable dependency and related-ref updates.
+Origin remains `kjerag-origin`. This is an interim private test build, not a
+merge, release, complete performance fix or owner acceptance. Exact identities
+and qualification limits are in [MERGE_READINESS.md](MERGE_READINESS.md).
+
+### Previous private installation, September 16
 
 The installed private test Flatpak was built from `f557ee59`, whose tree is
 identical to merged main `748ea008`. Relative to the previous `1d5e9e46`

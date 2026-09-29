@@ -13,7 +13,48 @@ with a [research navigation index](research/README.md). The shared playback
 slowdown, native/Flatpak differences and frame-time spikes are tracked in
 [issue #186](https://github.com/aeharding/kjerag/issues/186).
 
-## Current private test package, September 16
+## Current private test package, September 29
+
+The interim playback redesign is installed from source
+`68591c10df7c7771b8e735866d2f0eadaf45622a`. Audio refill no longer waits behind
+bounded video delivery, and filtered source progression no longer depends on
+compositor redraws. The approved presentation policy may omit stale completed
+screen updates, while every stitching/color input remains ordered. Shown-frame
+ownership is retained separately. Stitching and color arithmetic are unchanged;
+two parked working-tree color changes were excluded by building a clean archive.
+
+- Installed OSTree: `075b9f58b288b83233e75fba9c409cd2d6ea4cf226cd17169440c094578280bd`.
+- Executable SHA256: `9510194b623b6e3ae3d67a64052420d667b69c961bfc24e21d3a7be008399cc6`.
+- Bundle SHA256: `4422659a01af887466b9cba6f35a59e6831e510558d62e04ea630e46d972cdde`.
+
+Separate actual app-path UI suites pass 43 X4 and 44 ONE X2 checks, zero failures,
+with the existing sound-device, portal, exact-view, sandbox import-fault and
+paired-fixture skips. Four motion captures were inspected. A separate X4
+60-to-1-to-60-Hz compositor experiment keeps audio supplied and source completion
+ordered, eliminating the old package's accumulating draw lag in that scenario.
+It is not proof of physical scanout, all-camera coverage or 240 fps capacity.
+The native shader-twin helper uses the working tree, not the packaged SDK shader.
+After installation and runtime restoration, a normal installed launch (no
+app-path override) also sustains 30 source advances/s in its short X4 check,
+with no audio underruns, a normal exit and no new kernel entries. Its executable
+is authenticated and its final picture inspected. This is a smoke check, not
+a second full installed camera suite or capacity qualification.
+
+The slow-input defect remains: a delayed-packet experiment reduces delivery to
+about 23.7 fps and accumulates 3.332 seconds of video lateness before catching up.
+The package is not a complete A/V-sync fix. Coordinated rebuffering is not yet
+implemented or owner-approved. New branch acceptance and merge gates remain due.
+
+The old installer unexpectedly updated five shared runtime refs. Their exact
+pre-installation commits were recovered from the transaction journal, restored
+and verified; this was not an intentional dependency upgrade. Future installation
+commands must use `--no-deps --no-related --no-pull`. Origin remains
+`kjerag-origin`, and the verified September16 `f557ee59` package below is retained
+for rollback. No release was published. Private receipts and restoration log:
+`scratch/playback-independent-20260927/`; immutable build:
+`scratch/flatpak-delivery-68591c10/`.
+
+## Previous private test package, September 16
 
 The installed private test package was built from exact source
 `f557ee5970e37e18c1e1561ba76081ff914f3494`, tree
@@ -68,6 +109,10 @@ tradeoff, performance acceptance or closure of #186/#187 is implied.
 
 ## Accepted tradeoffs
 
+- For the September29 playback redesign, the owner approved omitting outdated
+  completed screen updates to recover synchronization. Every camera source still
+  receives ordered stitching and color processing. This does not authorize
+  reduced source/seam cadence or accept sustained A/V lag.
 - The owner accepts the installed branch player: "looks good. not perfect but
   pretty damn good" (2026-09-12). This is Studio-like output on reviewed footage,
   not exact Studio parity or universal camera/mode coverage.
