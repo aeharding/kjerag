@@ -42,8 +42,9 @@ a second full installed camera suite or capacity qualification.
 
 The slow-input defect remains: a delayed-packet experiment reduces delivery to
 about 23.7 fps and accumulates 3.332 seconds of video lateness before catching up.
-The package is not a complete A/V-sync fix. Coordinated rebuffering is not yet
-implemented or owner-approved. New branch acceptance and merge gates remain due.
+The package is not a complete A/V-sync fix. It does not include the separate
+buffering prototype below; that policy is not owner-approved. New branch
+acceptance and merge gates remain due.
 
 The old installer unexpectedly updated five shared runtime refs. Their exact
 pre-installation commits were recovered from the transaction journal, restored
@@ -53,6 +54,56 @@ commands must use `--no-deps --no-related --no-pull`. Origin remains
 for rollback. No release was published. Private receipts and restoration log:
 `scratch/playback-independent-20260927/`; immutable build:
 `scratch/flatpak-delivery-68591c10/`.
+
+## Uninstalled buffering prototype, September 29
+
+Draft PR [#234](https://github.com/aeharding/kjerag/pull/234), stacked on #233,
+holds the common media clock during source/audio shortages while processing
+every camera input in order. Two completed successors and audio lead permit
+resume at held PTS without a seek or temporal/color-history restart. Pause and
+seek cancel automatic resume; a finished tail owes no impossible lead.
+**Refill holds and their thresholds are proposed, not owner-accepted.** This
+does not increase input or stitching throughput. No stitching/color arithmetic,
+dependencies or Flatpak permissions change. The installed package above and
+shared runtimes remain unchanged.
+
+- Exact SDK build source: `323c609a624d71695e9bb46547c8510ca248a7bf`.
+- OSTree: `54e987fbd1eb3bb23d261b026406201dd7e1ca16347d30801aa27ba4579191d3`.
+- Executable SHA256: `65d412e77be184ae90ff1403014af78258a4da89e025e7394ff51f891c154a9a`.
+- Bundle SHA256: `4e99f30aef61977f4c893d3fd3719fa14bce509d8390024217c74d0d513dc7ab`.
+
+The clean source archive excludes two parked temporal-color edits. Device-hidden
+working-tree checks pass 1,630 tests with 53 ignored and zero failures, plus
+full Clippy, vendor warnings, formatting, source/name checks. That count includes
+unavailable-device returns and the parked variation, not extra hardware coverage.
+All eight CI jobs pass on the exact committed code above. Separate real-Scene
+clock/history regressions pass on X4 and ONE X2; the muted ONE X2 test logs a
+sound-device buffer error, so it is not clean audible-device qualification.
+
+The actual SDK package passes 43 X4 and 44 ONE X2 app-path UI checks, zero
+failures, with the usual sound-device, portal, exact-view, sandbox import-fault
+and paired-file fixture skips. Every running player was authenticated, and all
+four motion pictures inspected. The native shader-twin helper remains separate
+from SDK-shader provenance. No new kernel entries or scoped memory-limit/OOM
+events appear. Heap counters vary; this is not proof of GPU containment or a
+desktop-freeze fix.
+
+With the same 20 ms/video-packet delay from process seconds 12 to 28, reported
+video lateness stays within 33.8 ms instead of 3.332 seconds in the installed
+control. All 1,362 logged source transactions complete contiguously. Media time
+holds to refill, and the candidate reports eight audio underrun events around
+holds/resumes versus zero in that control. **Audio recovery is not qualified as
+smooth or accepted.** This is deliberate delayed delivery, not a NAS or audible
+A/B test. Ordinary separate 2256x1504, requested-300-Hz, 40-second pans maintain
+29.950/29.975 source changes/s with zero reported underruns and 305.899/319.875
+completed redraws/s on X4/ONE X2. Completion-spacing p99/max remains
+11.162/21.065 ms and 11.063/29.262 ms. This is average capacity, not physical
+scanout, all-camera coverage or the 4.17 ms tail requirement.
+
+Owner testing, acceptance of the new visible policy and final merge gates are
+still required. No installation, merge or release is implied. Private package:
+`scratch/flatpak-delivery-323c609a/`; receipts:
+`scratch/playback-independent-20260927/`.
 
 ## Previous private test package, September 16
 

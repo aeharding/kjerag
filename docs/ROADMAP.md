@@ -333,9 +333,60 @@ change installed code or add qualification claims.
   accumulates 3.332 seconds of video lateness while audio stays supplied.
   Normal reading lets it catch up. This explicitly leaves slow-input buffering
   and sustained sub-realtime processing unresolved; do not describe the new
-  scheduling as a complete A/V-sync fix. The owner was asked about holding
-  picture and sound together to refill, but that policy is not implemented or
-  accepted yet. Receipts: `scratch/playback-independent-20260927/`.
+  scheduling as a complete A/V-sync fix.
+
+  Two subsequent installed-package pans at 2256x1504, requested 300 Hz and
+  1,000 Hz pointer movement maintain 29.950 consecutive source changes/s with
+  zero reported audio underruns. Completed redraws/s are 302.725 for the
+  September 24 X4 Air capture and 320.250 for ONE X2. Completion-spacing
+  p99/max remains 11.472/21.019 ms and 11.218/28.426 ms respectively. The strict
+  40-second sourced cohorts pass, not every startup record or the 4.17 ms tail
+  requirement. These are completion records, not physical scanout. They do
+  not invalidate the owner's normal-use report.
+
+  The `fix/playback-buffering` branch now prototypes holding the common media
+  clock after a source or audio shortage, continuing ordered source processing
+  and resuming from the held PTS after two completed successors and audio lead.
+  It does not seek, reset stitching/color history, or change image arithmetic.
+  Explicit Pause and seek supersede the temporary hold; EOF needs no impossible
+  lead. The visible hold/refill policy remains proposed, not owner-accepted or
+  installed. The device-hidden workspace gate reports 1,630 passes, 53 ignored
+  and no failures, including unavailable-device returns. Separate exact X4
+  and ONE X2 real-Scene regressions pass through decode, stitching, temporal
+  completion and final drawing without changing decode epoch. They exercise
+  held-time recovery, not actual delayed-file delivery or audible sync. The
+  muted ONE X2 case logs an underlying sound-device buffer error; no new kernel
+  faults appear.
+
+  Exact committed source `323c609a` is separately built with the Flatpak SDK,
+  excluding the parked color edits. Its delayed-packet player experiment holds
+  media time to refill and limits reported video lateness to 33.8 ms, versus
+  3.332 seconds in the installed control. All 1,362 logged source transactions
+  complete contiguously. It also reports eight audio underrun events around
+  holds/resumes, versus zero in that control; do not claim smooth audio recovery
+  or an accepted tradeoff. This is deliberate packet delay, not an actual NAS
+  test or audible A/B. Ordinary 2256x1504, 40-second pans retain 29.950/29.975
+  source changes/s with zero reported underruns and 305.899/319.875 completed
+  redraws/s on X4/ONE X2. Completion-spacing p99/max remains
+  11.162/21.065 ms and 11.063/29.262 ms, not the 4.17 ms tail target.
+  Both exact app-path UI suites pass, 43 X4 and 44 ONE X2 checks with no
+  failures, documented service/fixture skips and inspected motion captures.
+  All eight CI jobs pass on code commit `323c609a`. Draft PR
+  [#234](https://github.com/aeharding/kjerag/pull/234) is stacked on #233;
+  neither is merged or owner-accepted. The installed package is unchanged.
+  Receipts: `scratch/playback-independent-20260927/`.
+
+  A follow-up reproduces a restart gap through the actual PCM ring and published
+  clock arithmetic: an ordinary sub-splice audio lead, a queued device callback
+  and the stop fade leave the read head past the held PTS. The proposed correction
+  retains one ring depth of consumed PCM and restores actual samples at resume.
+  Future audio lead remains 500 ms; seek invalidation, ordinary drift correction
+  and real-gap accounting remain intact. Five new CPU regressions cover the
+  failing-before restart, wraparound/refill, unavailable history, uninterrupted
+  drift and seek isolation. The device-hidden media suite passes 156 tests with
+  four ignored. This locates a restart mechanism, not every one of the eight
+  measured events or the owner's complete lag report. Packaged playback and
+  owner review remain due; the installed app is unchanged.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes

@@ -36,8 +36,16 @@ struct State {
     failure: Option<String>,
     stopped: bool,
     failure_wake: Option<Waker>,
+    buffer_wait: Option<BufferWait>,
+    ended: bool,
     #[cfg(test)]
     waiting_for_epoch: bool,
+}
+
+struct BufferWait {
+    at: std::time::Duration,
+    lead: std::time::Duration,
+    wake: Waker,
 }
 
 struct Seek {
@@ -147,7 +155,53 @@ impl Drop for AudioWorker {
 
 impl AudioControl {
     pub(crate) fn invalidate(&self) -> AudioEpoch {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.buffer_wait = None;
+        state.ended = false;
         self.0.pipe.invalidate()
+    }
+
+    pub(crate) fn has_sound_at(&self, at: std::time::Duration) -> Fallible<bool> {
+        let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(error) = &state.failure {
+            return Err(error.clone().into());
+        }
+        Ok(state.ended || self.0.pipe.buffered_through(at, std::time::Duration::ZERO))
+    }
+
+    /// Register only while refill is owed. The producer publishes after each
+    /// write under this same state lock, so arrival racing registration wakes
+    /// the consumer or is already visible. EOF does not owe impossible lead.
+    pub(crate) fn buffered_or_wait(
+        &self,
+        at: std::time::Duration,
+        lead: std::time::Duration,
+        wake: Waker,
+    ) -> Fallible<bool> {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(error) = &state.failure {
+            return Err(error.clone().into());
+        }
+        let ready = state.ended || self.0.pipe.buffered_through(at, lead);
+        let notify = !ready
+            && state
+                .buffer_wait
+                .as_ref()
+                .is_none_or(|wait| wait.at != at || wait.lead != lead);
+        state.buffer_wait = (!ready).then_some(BufferWait { at, lead, wake });
+        drop(state);
+        if notify {
+            self.0.changed.notify_one();
+        }
+        Ok(ready)
+    }
+
+    pub(crate) fn cancel_buffer_wait(&self) {
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .buffer_wait = None;
     }
 
     pub(crate) fn check(&self) -> Fallible<()> {
@@ -201,6 +255,7 @@ impl AudioControl {
                 return;
             }
             state.stopped = true;
+            state.buffer_wait = None;
             (state.pending.take(), state.active.take())
         };
         self.0.pipe.invalidate();
@@ -216,7 +271,7 @@ impl AudioControl {
     }
 
     fn fail(&self, error: String) {
-        let (pending, active, wake) = {
+        let (pending, active, wake, buffer_wake) = {
             let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.failure.is_some() {
                 return;
@@ -226,6 +281,7 @@ impl AudioControl {
                 state.pending.take(),
                 state.active.take(),
                 state.failure_wake.take(),
+                state.buffer_wait.take().map(|wait| wait.wake),
             )
         };
         if let Some(pending) = pending {
@@ -235,6 +291,9 @@ impl AudioControl {
             active.complete(Err(error));
         }
         if let Some(wake) = wake {
+            wake.wake();
+        }
+        if let Some(wake) = buffer_wake {
             wake.wake();
         }
         self.0.changed.notify_all();
@@ -248,9 +307,12 @@ fn run(mut source: impl Source, control: &AudioControl, mut epoch: AudioEpoch) -
             let mut state = control.0.state.lock().unwrap_or_else(|e| e.into_inner());
             while !state.stopped
                 && state.pending.is_none()
-                && (ended
-                    || !control.0.pipe.is_current(&epoch)
-                    || control.0.pipe.room() <= HEADROOM)
+                && (ended || !control.0.pipe.is_current(&epoch) || {
+                    if let Some(wait) = &state.buffer_wait {
+                        control.0.pipe.discard_before_if_silent(wait.at);
+                    }
+                    control.0.pipe.room() <= HEADROOM
+                })
             {
                 #[cfg(test)]
                 {
@@ -306,6 +368,25 @@ fn run(mut source: impl Source, control: &AudioControl, mut epoch: AudioEpoch) -
             result.map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
         } else {
             ended = source.pump_one()?;
+        }
+        let wake = {
+            let mut state = control.0.state.lock().unwrap_or_else(|e| e.into_inner());
+            if control.0.pipe.is_current(&epoch) {
+                state.ended = ended;
+                let ready = state.buffer_wait.as_ref().is_some_and(|wait| {
+                    ended || control.0.pipe.buffered_through(wait.at, wait.lead)
+                });
+                if ready {
+                    state.buffer_wait.take().map(|wait| wait.wake)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(wake) = wake {
+            wake.wake();
         }
     }
 }
@@ -381,6 +462,67 @@ pub(crate) mod tests {
             );
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn buffered_refill_retires_old_sound_and_wakes_once_without_a_seek() {
+        #[derive(Default)]
+        struct WakeCount(AtomicUsize);
+        impl std::task::Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Release);
+            }
+        }
+        let pipe = Pipe::new(1000, 1, Duration::from_millis(500));
+        let epoch = pipe.epoch();
+        let (worker, _) = fixture(pipe.clone());
+        until(|| pipe.room() <= HEADROOM);
+        let wake = Arc::new(WakeCount::default());
+        let at = Duration::from_secs(2);
+        let lead = Duration::from_millis(67);
+        assert!(
+            !worker
+                .control
+                .buffered_or_wait(at, lead, Waker::from(wake.clone()))
+                .unwrap()
+        );
+        until(|| wake.0.load(Ordering::Acquire) == 1);
+        assert!(
+            pipe.is_current(&epoch),
+            "refill must preserve audio lineage"
+        );
+        assert!(
+            worker
+                .control
+                .buffered_or_wait(at, lead, Waker::from(wake.clone()))
+                .unwrap()
+        );
+        assert_eq!(wake.0.load(Ordering::Acquire), 1);
+        assert_eq!(pipe.health().dropped, 0);
+    }
+
+    #[test]
+    fn audio_eof_does_not_wait_for_an_impossible_refill_lead() {
+        let pipe = Pipe::new(1000, 1, Duration::from_millis(500));
+        let source = Samples {
+            epoch: pipe.epoch(),
+            pipe: pipe.clone(),
+            through: Duration::ZERO,
+            count: Arc::new(AtomicUsize::new(0)),
+            once: true,
+        };
+        let worker = AudioWorker::spawn(source, pipe).unwrap();
+        until(|| worker.control.0.state.lock().unwrap().ended);
+        assert!(
+            worker
+                .control
+                .buffered_or_wait(
+                    Duration::from_secs(10),
+                    Duration::from_millis(67),
+                    Waker::noop().clone(),
+                )
+                .unwrap()
+        );
     }
 
     #[test]

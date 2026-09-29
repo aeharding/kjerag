@@ -3,8 +3,10 @@
 //!
 //! The shell owns almost nothing of the playback. It opens the file, it turns
 //! keys and buttons into transport calls, and it asks the [`Scene`] for a
-//! frame once per window redraw. The clock, the decode thread and the camera
-//! all live below it in `kjerag-render` and `kjerag-media`.
+//! completed picture once per window redraw. The clock, decode, stitching and
+//! camera live below it in `kjerag-render` and `kjerag-media`. Readiness events
+//! and absolute deadlines drive the selected filtered playback independently
+//! of those window redraws.
 //!
 //! docs/UI.md is the specification for everything in this file, and it cites
 //! a first-party COSMIC app for every call it makes. The two places where a
@@ -14,25 +16,15 @@
 //!
 //! 29.97 fps content divides evenly into no display refresh rate anyone
 //! ships, so there is no "hold each frame for N refreshes" rule that does
-//! not drift. Every redraw instead asks the presentation clock which frame
-//! is due at that instant, and the widget then asks iced to come back at the
-//! instant the next one is due (`kjerag_render`'s `tick`, which is where the
-//! clock is pumped). A frame is held for 2 refreshes at 60 Hz and for 4 or 5
-//! at 144 Hz, in whatever pattern the arithmetic gives, with no error
-//! carried forward.
-//!
-//! The pacing is deliberately not driven from here. The obvious shell-side
-//! version, a `window::frames()` subscription that pumps the clock on each
-//! redraw message, was written first and measured: it holds only 33 to 46
-//! redraws a second on this box against a 60 Hz display, and drops 1 to 18
-//! frames every 5 seconds, because the redraw event has to travel out to a
-//! subscription and back through `update` before the next redraw can even be
-//! asked for. Pumping inside the redraw pass, where iced already is, drops
-//! nothing.
+//! not drift. Selected filtered playback promotes complete pictures against
+//! one shared media/audio clock on readiness events and absolute deadlines.
+//! A redraw samples that completed picture without advancing the source
+//! pipeline. Withheld compositor callbacks cannot stop audio refill or ordered
+//! stitching. Generic and resident-spatial paths still pump inside the redraw
+//! pass and request their next media deadline through the shader widget.
 //!
 //! It is also why the position on the scrubber is refreshed by a timer while
-//! the controls are up: no message is sent per frame, so nothing else would
-//! rebuild the view.
+//! the controls are up: pipeline notifications need not rebuild the controls.
 
 use std::any::TypeId;
 use std::collections::HashMap;

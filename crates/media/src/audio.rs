@@ -1,11 +1,12 @@
 //! The sound between the decode thread and the audio device, and the
 //! presentation clock in a form the device's callback can read.
 //!
-//! **The picture is the clock.** Issue #4 anchors playback on video frames and
-//! nothing here re-anchors it: every device callback asks where the picture is
-//! and makes the sound follow. A sound-mastered clock would move the picture
-//! instead, and a reframing player whose frames are paced by a sound card is a
-//! player that judders.
+//! **Picture and sound share media time.** Player anchors the timeline to
+//! container PTS and publishes a `Beat`. While running, it advances against
+//! `Instant`, independently of window redraws. Every device callback schedules
+//! sound against that timeline at its expected device-playback time. A stopped
+//! Beat lets the callback fade and hold while the producer can keep refilling.
+//! This is the selected clock policy, not proof against audio-mastered playback.
 //!
 //! Following it takes two corrections, and they are different in kind:
 //!
@@ -248,6 +249,28 @@ impl Pipe {
         }
     }
 
+    /// Whether this lineage has decoded sound through the requested lead.
+    /// The existing callback owns timestamp gaps and device latency. Holding
+    /// playback must not flush its ring or discard the fade's remaining sound.
+    pub(crate) fn buffered_through(&self, at: Duration, lead: Duration) -> bool {
+        let buffer = self.locked();
+        buffer.muted
+            || buffer.volume == 0.0
+            || (!buffer.stale && buffer.frames > 0 && buffer.through >= at.saturating_add(lead))
+    }
+
+    /// Once the callback has faded to silence, remove only sound whose PTS
+    /// precedes the held clock. Otherwise a full old ring could prevent refill
+    /// forever. This is the existing late-audio splice, without a seek/flush.
+    pub(crate) fn discard_before_if_silent(&self, at: Duration) {
+        let mut buffer = self.locked();
+        if !buffer.stale && buffer.gain == 0.0 && at > buffer.head_time() {
+            let behind = i64::try_from((at - buffer.head_time()).as_micros()).unwrap_or(i64::MAX);
+            let frames = buffer.frames_in(behind);
+            buffer.drop_front(frames);
+        }
+    }
+
     /// How the sound stood against the picture when it was last measured, in
     /// microseconds, positive when the sound is ahead. The decode thread turns
     /// this into a resampling ratio.
@@ -278,7 +301,9 @@ enum Splice {
 /// The ring, the media time it carries, and the gain being applied to it.
 struct Buffer {
     epoch: AudioEpoch,
-    /// Interleaved frames, `channels` values each, laid out as a ring.
+    /// Interleaved frames, `channels` values each, laid out as a ring. Half
+    /// holds decoded successors; half retains recently consumed samples so a
+    /// stopped media clock can resume behind the device's queued-ahead sound.
     samples: Box<[f32]>,
     channels: usize,
     rate: u32,
@@ -286,6 +311,11 @@ struct Buffer {
     head: usize,
     /// Frames held.
     frames: usize,
+    /// Contiguous samples before `head`, retained for a stopped-clock resume.
+    past: usize,
+    /// A stopped callback was observed. Rewind is not a steady-state drift
+    /// correction: uninterrupted playback retains the existing splice law.
+    resume_pending: bool,
     /// Media time just past the last frame written, which together with
     /// `frames` is what says where the head of the ring belongs.
     through: Duration,
@@ -308,11 +338,13 @@ impl Buffer {
         let frames = (depth.as_secs_f64() * f64::from(rate)).ceil() as usize;
         Self {
             epoch: AudioEpoch(Arc::new(())),
-            samples: vec![0.0; frames.max(1) * channels].into_boxed_slice(),
+            samples: vec![0.0; frames.max(1) * 2 * channels].into_boxed_slice(),
             channels,
             rate,
             head: 0,
             frames: 0,
+            past: 0,
+            resume_pending: false,
             through: Duration::ZERO,
             stale: false,
             volume: 1.0,
@@ -324,11 +356,13 @@ impl Buffer {
     }
 
     fn capacity(&self) -> usize {
-        self.samples.len() / self.channels
+        self.samples.len() / self.channels / 2
     }
 
     fn room(&self) -> usize {
-        self.capacity() - self.frames
+        // A resume can temporarily restore more than the normal future lead.
+        // The producer waits for that restored sound rather than overwriting it.
+        self.capacity().saturating_sub(self.frames)
     }
 
     fn seconds(&self, frames: usize) -> Duration {
@@ -359,6 +393,7 @@ impl Buffer {
         let fits = frames <= self.room();
         self.through = through;
         if !fits {
+            self.past = 0;
             self.health.dropped += 1;
             return;
         }
@@ -376,6 +411,8 @@ impl Buffer {
     fn clear(&mut self) {
         self.head = 0;
         self.frames = 0;
+        self.past = 0;
+        self.resume_pending = false;
         self.stale = false;
     }
 
@@ -384,6 +421,21 @@ impl Buffer {
         let frames = frames.min(self.frames);
         self.head = (self.head + frames * self.channels) % self.samples.len();
         self.frames -= frames;
+        self.past = (self.past + frames).min(self.capacity());
+    }
+
+    /// Device callbacks consume future audio before it is heard. A pause
+    /// freezes the media clock earlier than that read head, then consumes its
+    /// fade. Restore the actual retained samples at the resumed device PTS,
+    /// without moving the media clock, manufacturing sound or changing the
+    /// ordinary splice threshold. Missing history still produces a real gap.
+    fn rewind_to(&mut self, due: Duration) {
+        let ahead = self.head_time().saturating_sub(due);
+        let micros = i64::try_from(ahead.as_micros()).unwrap_or(i64::MAX);
+        let frames = self.frames_in(micros).min(self.past);
+        self.head = (self.head + self.samples.len() - frames * self.channels) % self.samples.len();
+        self.frames += frames;
+        self.past -= frames;
     }
 
     /// The head of the ring against the picture, in microseconds, positive
@@ -420,6 +472,15 @@ impl Buffer {
     /// One device callback's worth of sound.
     fn fill(&mut self, out: &mut [f32], due: Option<Duration>) {
         out.fill(0.0);
+        if due.is_none() && !self.stale {
+            self.resume_pending = true;
+        }
+        if let Some(due) =
+            due.filter(|_| self.resume_pending && self.gain == 0.0 && self.target(true) > 0.0)
+        {
+            self.rewind_to(due);
+            self.resume_pending = false;
+        }
         self.health.queued = self.seconds(self.frames).as_micros() as i64;
         // What the pilot asked to hear, kept from before the splice logic
         // lowers it: a hole is a hole whether or not the ring was also too
@@ -519,6 +580,178 @@ mod tests {
 
     fn at(frames: usize) -> Duration {
         Duration::from_secs_f64(frames as f64 / f64::from(RATE))
+    }
+
+    #[test]
+    fn buffering_readiness_requires_current_samples_through_the_refill_lead() {
+        let pipe = Pipe::new(RATE, CHANNELS, Duration::from_secs(1));
+        assert!(!pipe.buffered_through(Duration::ZERO, Duration::ZERO));
+        pipe.write(&frames(4_800, 0.5), at(4_800));
+        assert!(pipe.buffered_through(at(2_400), at(2_400)));
+        assert!(!pipe.buffered_through(at(2_400), at(2_401)));
+        pipe.invalidate();
+        assert!(!pipe.buffered_through(Duration::ZERO, Duration::ZERO));
+        pipe.fill(&mut frames(480, 0.0), None);
+        assert!(!pipe.buffered_through(Duration::ZERO, Duration::ZERO));
+    }
+
+    #[test]
+    fn inaudible_sound_does_not_hold_video_for_an_unconsumed_audio_ring() {
+        let pipe = Pipe::new(RATE, CHANNELS, Duration::from_secs(1));
+        pipe.set_muted(true);
+        assert!(pipe.buffered_through(Duration::from_secs(10), Duration::from_secs(1)));
+        pipe.set_muted(false);
+        assert!(!pipe.buffered_through(Duration::from_secs(10), Duration::ZERO));
+        pipe.set_volume(0.0);
+        assert!(pipe.buffered_through(Duration::from_secs(10), Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_full_old_audio_ring_is_retired_only_after_the_buffer_hold_fades() {
+        let pipe = Pipe::new(RATE, CHANNELS, Duration::from_secs(1));
+        pipe.write(&frames(RATE as usize, 0.5), Duration::from_secs(1));
+        pipe.fill(&mut frames(480, 0.0), Some(Duration::ZERO));
+        let occupied_room = pipe.room();
+        pipe.discard_before_if_silent(Duration::from_secs(2));
+        assert_eq!(pipe.room(), occupied_room, "do not cut a live fade");
+        pipe.fill(&mut frames(480, 0.0), None);
+        pipe.discard_before_if_silent(Duration::from_secs(2));
+        assert_eq!(pipe.room(), Duration::from_secs(1));
+        assert!(!pipe.buffered_through(Duration::from_secs(2), Duration::ZERO));
+    }
+
+    #[test]
+    fn resuming_a_hold_can_reuse_samples_already_scheduled_ahead_of_the_clock() {
+        let pipe = Pipe::new(RATE, CHANNELS, Duration::from_millis(500));
+        // 512-frame periods match the slow-input player's PipeWire request.
+        // An ordinary 20 ms lead is below the existing splice threshold.
+        // Stopping the UI clock just after a callback adds that callback's
+        // remainder and the fade, pushing the next head beyond the threshold.
+        let period = at(512);
+        let latency = at(1_536);
+        let offset = at(960);
+        let origin = Instant::now();
+        let playing = Reading {
+            playing: true,
+            position: Duration::ZERO,
+            origin: Some(origin),
+        };
+        let samples: Vec<_> = (0..24_000)
+            .flat_map(|index| [index as f32 / 48_000.0; CHANNELS])
+            .collect();
+        pipe.write(&samples, latency + offset + at(24_000));
+        let mut out = frames(512, 0.0);
+        for callback in 0..10 {
+            pipe.fill(
+                &mut out,
+                playing.running_at(origin + period * callback + latency),
+            );
+        }
+        assert_eq!(pipe.health().underruns, 0);
+        let stopped = Reading {
+            playing: false,
+            position: playing.position(origin + period * 9 + at(48)),
+            origin: Some(origin + period * 9 + at(48)),
+        };
+        pipe.fill(&mut out, stopped.running_at(origin + period * 10 + latency));
+        let resumed = Reading {
+            playing: true,
+            origin: Some(origin + Duration::from_secs(1)),
+            ..stopped
+        };
+        let due = resumed.running_at(origin + Duration::from_secs(1) + latency);
+        pipe.fill(&mut out, due);
+        assert!(
+            out.iter().any(|sample| *sample > 0.0),
+            "resume must emit the retained audio, not a blank callback"
+        );
+        assert_eq!(
+            pipe.health().underruns,
+            0,
+            "a full ring must not restart with a timestamp-induced audio gap"
+        );
+        assert!(
+            pipe.health().offset.abs() <= 21,
+            "restored PCM must match the resumed device PTS to one sample"
+        );
+        let first_full_gain = out[240 * CHANNELS];
+        let expected_index =
+            (due.unwrap() - latency - offset).as_secs_f64() * f64::from(RATE) + 240.0;
+        assert!((first_full_gain - expected_index as f32 / 48_000.0).abs() <= 1.0 / 48_000.0);
+    }
+
+    #[test]
+    fn consumed_history_survives_refill_wrapping_the_ring() {
+        let mut buffer = Buffer::new(1_000, 1, Duration::from_millis(8));
+        let samples: Vec<_> = (0..20).map(|index| index as f32 / 20.0).collect();
+        buffer.write(&samples[..8], Duration::from_millis(8));
+        buffer.fill(&mut [0.0; 4], Some(Duration::ZERO));
+        buffer.fill(&mut [0.0; 4], Some(Duration::from_millis(4)));
+        buffer.write(&samples[8..16], Duration::from_millis(16));
+        buffer.fill(&mut [0.0; 8], None);
+        assert!(matches!(buffer.head_time().as_millis(), 13 | 14));
+        buffer.write(&samples[16..20], Duration::from_millis(20));
+        let mut out = [0.0; 3];
+        buffer.fill(&mut out, Some(Duration::from_millis(9)));
+        for (index, sample) in out.into_iter().enumerate() {
+            let gain = (index + 1) as f32 * buffer.step;
+            assert!((sample - samples[index + 9] * gain).abs() < f32::EPSILON);
+        }
+        assert_eq!(buffer.head_time(), Duration::from_millis(12));
+        assert_eq!(buffer.health.underruns, 0);
+        assert_eq!(
+            buffer.room(),
+            0,
+            "restored future lead must throttle refill"
+        );
+        assert!(buffer.past + buffer.frames <= buffer.capacity() * 2);
+    }
+
+    #[test]
+    fn unavailable_history_still_reports_a_real_resume_gap() {
+        let mut buffer = Buffer::new(1_000, 1, Duration::from_millis(20));
+        buffer.write(&[0.5; 20], Duration::from_millis(1_010));
+        buffer.fill(&mut [0.0; 5], Some(Duration::from_millis(990)));
+        buffer.fill(&mut [0.0; 8], None);
+        let mut out = [1.0; 5];
+        buffer.fill(&mut out, Some(Duration::from_millis(900)));
+        assert_eq!(out, [0.0; 5]);
+        assert_eq!(buffer.health.underruns, 1);
+        assert_eq!(buffer.head_time(), Duration::from_millis(990));
+    }
+
+    #[test]
+    fn uninterrupted_audio_does_not_replay_consumed_history_to_correct_drift() {
+        let mut buffer = buffer();
+        buffer.write(&frames(24_000, 0.5), at(24_000));
+        for _ in 0..4 {
+            buffer.fill(&mut frames(480, 0.0), Some(Duration::ZERO));
+        }
+        assert_eq!(buffer.gain, 0.0);
+        let head = buffer.head_time();
+        assert!(buffer.past > 0);
+        let mut out = frames(480, 1.0);
+        buffer.fill(&mut out, Some(Duration::ZERO));
+        assert!(out.iter().all(|sample| *sample == 0.0));
+        assert_eq!(buffer.head_time(), head);
+        assert_eq!(buffer.health.underruns, 1);
+    }
+
+    #[test]
+    fn a_seek_discards_consumed_history_as_well_as_queued_audio() {
+        let pipe = Pipe::new(RATE, CHANNELS, Duration::from_millis(500));
+        pipe.write(&frames(24_000, 0.5), at(24_000));
+        pipe.fill(&mut frames(480, 0.0), Some(Duration::ZERO));
+        assert!(pipe.locked().past > 0);
+        pipe.invalidate();
+        pipe.fill(&mut frames(480, 0.0), None);
+        pipe.fill(&mut frames(480, 0.0), None);
+        assert_eq!(pipe.locked().past, 0);
+        pipe.write(&frames(4_800, 0.25), Duration::from_secs(2) + at(4_800));
+        let mut out = frames(480, 1.0);
+        pipe.fill(&mut out, Some(Duration::from_secs(1)));
+        assert!(out.iter().all(|sample| *sample == 0.0));
+        assert_eq!(pipe.health().underruns, 1);
     }
 
     #[test]

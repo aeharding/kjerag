@@ -11,6 +11,69 @@ use std::io::Write;
 const DEADLINE: Duration = Duration::from_secs(60);
 
 #[test]
+fn x4_filtered_buffering_holds_time_and_retains_source_history() {
+    let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
+        return;
+    };
+    assert_buffering_retains_history(Path::new(&path));
+}
+
+#[test]
+fn one_x2_filtered_buffering_holds_time_and_retains_source_history() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    assert_buffering_retains_history(Path::new(&path));
+}
+
+fn assert_buffering_retains_history(path: &Path) {
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let mut scene = Scene::open(path).unwrap();
+    scene.set_muted(true);
+    scene.pause(Instant::now());
+    let first = super::tests::wait_for_new_scene_frame(&scene, None);
+    let camera = Camera::default();
+    let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    settle_filtered(&scene, &mut pipeline, &device, &queue, &first, camera, None);
+    scene.play();
+    let start = Instant::now();
+    assert!(!matches!(scene.progress(start), Next::Stopped(_)));
+    // A withheld event owner leaves multiple real source deadlines overdue.
+    // Re-enter through the actual Scene gate, not a separate clock model.
+    let resumed = start + Duration::from_millis(500);
+    assert!(!matches!(scene.progress(resumed), Next::Stopped(_)));
+    assert_eq!(scene.player(Player::is_buffering), Some(true));
+    assert!(scene.is_playing(), "buffering retains user play intent");
+    let held = scene.position(resumed);
+    assert_eq!(scene.position(resumed + Duration::from_secs(5)), held);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+    let deadline = Instant::now() + DEADLINE;
+    while scene.player(Player::is_buffering) == Some(true) {
+        if let Next::Stopped(error) = scene.progress(resumed) {
+            panic!("buffering stopped the capture: {error}");
+        }
+        assert_eq!(scene.position(resumed), held);
+        assert!(Instant::now() < deadline, "buffering could not refill");
+        device.poll(wgpu::PollType::Poll).unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let complete = scene.frame_stamp().unwrap();
+    assert!(
+        first.same_decode_epoch(&complete),
+        "buffering sought or restarted history"
+    );
+    assert!(complete.timestamp() <= held);
+    assert!(held < complete.timestamp() + scene.player(|p| p.timing().interval()).unwrap());
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+    prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&complete));
+    assert_eq!(
+        scene.position(resumed + Duration::from_millis(20)),
+        held + Duration::from_millis(20)
+    );
+}
+
+#[test]
 fn x4_filtered_progress_without_redraw_retains_shown_on_terminal_failure() {
     let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
         return;

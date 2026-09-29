@@ -480,6 +480,21 @@ impl FilteredCaptureFacade {
             .map(|output| output.frame().clone()))
     }
 
+    /// Completed contiguous successors of the exact installed owner. Pending
+    /// source work is not playback lead, and another epoch cannot count.
+    pub(crate) fn ready_successors(&self, stamp: &FrameStamp) -> Fallible<usize> {
+        let state = self.state()?;
+        self.ensure_healthy(&state)?;
+        if state
+            .installed
+            .as_ref()
+            .is_none_or(|output| output.frame() != stamp)
+        {
+            return Ok(0);
+        }
+        Ok(state.ready.len())
+    }
+
     /// Preserve the last complete picture for a terminal-error screenshot.
     /// Unlike observed-state queries, this deliberately does not mask that
     /// already-installed resource with a later sticky worker failure.

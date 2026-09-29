@@ -297,6 +297,15 @@ resident result is installed and acknowledged. Pausing during startup cancels
 autoplay intent. EOF waits for admitted real inputs to drain before flushing
 the temporal tail.
 
+The uninstalled buffering branch also distinguishes user play intent from a
+temporary common-clock hold. After a missing source interval or unavailable
+audio, media PTS stops while the same ordered source queues continue processing.
+Logical promotion may catch up to the held PTS without a seek or history reset.
+Two completed successors and audio through the same lead permit a single
+reanchor at that PTS; a finished tail owes no successor lead. Pause and seek
+cancel automatic resume. This visible refill policy is proposed, not accepted
+or part of the currently installed package.
+
 Coalesced progress notifications also cover startup operations that produce no
 temporal output, shared executor capacity across seek epochs, and ready-FIFO
 space released by logical installation. A preparation-specific decoder wait
@@ -371,6 +380,21 @@ UI. That authorization travels with the video seek command and the audio
 decoder; an older in-flight packet or superseded seek cannot refill the new
 ring. The existing callback, gain fades, resampling and splice arithmetic in
 [`audio.rs`](../crates/media/src/audio.rs) remain unchanged.
+
+In the buffering prototype, the producer also publishes one-shot refill
+readiness. It retains audio authorization and ring contents across a hold.
+Only after the callback has faded to silence may pre-held-PTS samples leave
+the ring to permit refill. Muted or zero-volume audio cannot hold video for
+an intentionally unconsumed ring. EOF and raw producer errors wake the waiter.
+
+The current uninstalled follow-up also retains consumed PCM for one ring depth.
+Device callbacks schedule sound ahead of media time; freezing that time can
+leave the read head past the resumed PTS. After an observed stopped callback
+has faded to silence, resume can restore actual retained samples at its device
+PTS. This does not increase the producer's 500 ms future lead, change ordinary
+drift/splice arithmetic, manufacture missing sound or retain audio across a
+seek. It doubles the PCM ring allocation, not playback latency. CPU regressions
+cover the timestamp-induced restart gap; actual-device qualification is pending.
 
 The presentation clock remains based on container PTS. Its published `Beat`
 anchor is extrapolated by the audio callback without needing redraw ticks.
