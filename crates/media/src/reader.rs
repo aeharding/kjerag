@@ -36,6 +36,7 @@ use ffmpeg_next as ff;
 use super::audio::AudioEpoch;
 use super::audio_worker::{AudioControl, AudioWorker};
 use super::capture::{Opened, agreed_samples};
+use super::packet_input::{Limits, PacketInput};
 use super::pairing::{Alignment, alignment};
 use super::sound::Sound;
 use super::track::Track;
@@ -342,7 +343,8 @@ struct Source {
     /// Kept because the sound opens the same file again, for its own demuxer
     /// ([`Track::open`]).
     path: PathBuf,
-    input: ff::format::context::Input,
+    input: PacketInput,
+    sound_rate: Option<u32>,
     /// Stream time base, shared by every video stream of this file (checked
     /// at open, and checked between files when there are two).
     time_base: ff::Rational,
@@ -451,7 +453,10 @@ impl Reader {
         // favour.
         let frames = videos().map(|video| video.frames).min().unwrap_or(0);
         Ok(Self {
-            sources: sources.into_iter().map(Opened::into_source).collect(),
+            sources: sources
+                .into_iter()
+                .map(Opened::into_source)
+                .collect::<Fallible<_>>()?,
             lanes,
             track: None,
             timing: Timing::new(rate, frames)?,
@@ -504,16 +509,7 @@ impl Reader {
     /// no sound in it. Read before a device is opened, so the device can be
     /// asked for the rate that needs no resampling.
     pub fn sound_rate(&self) -> Option<u32> {
-        let stream = self
-            .sources
-            .get(SOUND_SOURCE)?
-            .input
-            .streams()
-            .find(|s| s.parameters().medium() == ff::media::Type::Audio)?;
-        // `Parameters` hands out no accessors, and opening a second decoder to
-        // read one integer is worse than reading the integer.
-        let rate = unsafe { (*stream.parameters().as_ptr()).sample_rate };
-        u32::try_from(rate).ok().filter(|rate| *rate > 0)
+        self.sources.get(SOUND_SOURCE)?.sound_rate
     }
 
     pub fn timing(&self) -> Timing {
@@ -660,7 +656,7 @@ impl Reader {
         // Every file of the capture goes to the same media time. They share a
         // frame grid exactly, so this lands both of them on the same frame.
         for source in &mut self.sources {
-            source.input.seek(target, ..target)?;
+            source.input.seek(target)?;
             source.drained = false;
         }
         for lane in &mut self.lanes {
@@ -709,7 +705,7 @@ impl Reader {
         let video_index = video_at.index(self.timing);
         let video_target = self.timing.time_of(video_index).as_micros() as i64;
         for source in &mut self.sources {
-            source.input.seek(video_target, ..video_target)?;
+            source.input.seek(video_target)?;
             source.drained = false;
         }
         for lane in &mut self.lanes {
@@ -735,9 +731,8 @@ impl Reader {
     /// holding [`Self::ready`] up, so its file is the one to read.
     fn pump(&mut self) -> Fallible<()> {
         let source = self.hungriest();
-        let mut packet = ff::Packet::empty();
-        match packet.read(&mut self.sources[source].input) {
-            Ok(()) => {
+        match self.sources[source].input.read()? {
+            Some(packet) => {
                 let stream = packet.stream();
                 let Some(lane) = self
                     .lanes
@@ -749,7 +744,7 @@ impl Reader {
                 lane.decoder.send_packet(&packet)?;
                 lane.drain()
             }
-            Err(ff::Error::Eof) => {
+            None => {
                 self.sources[source].drained = true;
                 for lane in self.lanes.iter_mut().filter(|l| l.source == source) {
                     lane.decoder.send_eof()?;
@@ -757,7 +752,6 @@ impl Reader {
                 }
                 Ok(())
             }
-            Err(e) => Err(e.into()),
         }
     }
 
@@ -909,14 +903,23 @@ impl Lane {
 }
 
 impl Opened {
-    fn into_source(self) -> Source {
-        Source {
+    fn into_source(self) -> Fallible<Source> {
+        let sound_rate = self
+            .input
+            .streams()
+            .find(|s| s.parameters().medium() == ff::media::Type::Audio)
+            .and_then(|stream| {
+                let rate = unsafe { (*stream.parameters().as_ptr()).sample_rate };
+                u32::try_from(rate).ok().filter(|rate| *rate > 0)
+            });
+        Ok(Source {
             path: self.path,
-            input: self.input,
+            input: PacketInput::new(self.input, Limits::VIDEO)?,
+            sound_rate,
             time_base: self.time_base,
             start: self.start,
             drained: false,
-        }
+        })
     }
 }
 
