@@ -2558,10 +2558,12 @@ impl InstalledOneXsReady {
             )?;
             #[cfg(test)]
             gpu_profile.mark(encoder, "original_plane_copies");
+            let view_map = map.cache_for_view(installed.pipeline.view_mesh_cache(), encoder)?;
             corrected::CorrectionInput::new(
                 world,
                 source,
                 map,
+                view_map,
                 Arc::clone(&installed.pipeline),
                 context,
             )

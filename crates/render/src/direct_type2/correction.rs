@@ -10,7 +10,7 @@
 use crate::temporal_fusion::correction_stream::CorrectionFrame;
 use crate::{Fallible, MAX_LENSES, Planes, Reframe};
 
-use super::{DirectType2Pipeline, draw_wgsl_with_fusion_mode};
+use super::{DirectType2Pipeline, vertex_cached_draw_wgsl_with_fusion_mode};
 
 const LOW_CURRENT_BINDING: u32 = 6;
 const LOW_FILTERED_BINDING: u32 = 7;
@@ -102,6 +102,24 @@ impl CorrectionPipeline {
         direct: &DirectType2Pipeline,
         output_format: wgpu::TextureFormat,
     ) -> Fallible<Self> {
+        Self::with_map_cache(device, direct, output_format, true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn uncached_for_review(
+        device: &wgpu::Device,
+        direct: &DirectType2Pipeline,
+        output_format: wgpu::TextureFormat,
+    ) -> Fallible<Self> {
+        Self::with_map_cache(device, direct, output_format, false)
+    }
+
+    fn with_map_cache(
+        device: &wgpu::Device,
+        direct: &DirectType2Pipeline,
+        output_format: wgpu::TextureFormat,
+        cached: bool,
+    ) -> Fallible<Self> {
         if direct.device != *device {
             return Err("corrected direct view belongs to a different graphics device".into());
         }
@@ -122,7 +140,14 @@ impl CorrectionPipeline {
         }
 
         let fusion = direct.fusion_layout.is_some();
-        let source = shader_source(fusion, direct.fusion_sampler.is_some());
+        let source = if cached {
+            shader_source(fusion, direct.fusion_sampler.is_some())
+        } else {
+            format!(
+                "{}\n{CORRECTION_WGSL}",
+                super::draw_wgsl_with_fusion_mode(fusion, direct.fusion_sampler.is_some())
+            )
+        };
         #[cfg(test)]
         if let Some(output) = std::env::var_os("KJERAG_CORRECTION_FIELDS_DIR") {
             std::fs::write(
@@ -136,7 +161,12 @@ impl CorrectionPipeline {
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
         let picture_layout = picture_layout(device);
-        let mut layouts = vec![&picture_layout, &direct.map_layout];
+        let map_layout = if cached {
+            &direct.view_mesh_cache().draw_layout
+        } else {
+            &direct.map_layout
+        };
+        let mut layouts = vec![&picture_layout, map_layout];
         layouts.extend(direct.fusion_layout.as_ref());
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ONE X2 corrected direct view"),
@@ -450,7 +480,7 @@ fn validate_low(texture: &wgpu::Texture, role: &str) -> Fallible<[u32; 2]> {
 fn shader_source(fusion: bool, hardware_fusion: bool) -> String {
     format!(
         "{}\n{CORRECTION_WGSL}",
-        draw_wgsl_with_fusion_mode(fusion, hardware_fusion)
+        vertex_cached_draw_wgsl_with_fusion_mode(fusion, hardware_fusion)
     )
 }
 

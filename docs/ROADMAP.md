@@ -352,10 +352,37 @@ change installed code or add qualification claims.
   read, byte/count limits, in-flight seek invalidation, raw failures, shutdown,
   panic wakeup and byte/metadata identity against real libavformat input.
   The media gate passes 148 tests with four ignored and Clippy passes.
-  No stitching/color arithmetic changes. This input candidate is not installed
-  or a demonstrated fix: exact-source packaging, actual clip throughput and
-  cadence, both-camera runtime/UI checks and owner retest remain due. The
-  wide-view GPU cost and late-picture recovery must still be addressed.
+  No stitching/color arithmetic changes. Clean SDK source `88f0d350` is built
+  but not installed. Its actual NAS/full-size wide-view run still accumulates
+  912 ms lateness with 28.8-29.6 source advances/s and no audio gaps. Input
+  read-ahead alone is not the fix; both-camera runtime/UI checks and owner
+  retest remain due.
+
+  A complete local copy isolates a separate rendering failure in the installed
+  player. At the exact reported 166.23-degree view and 2256x1504, lateness
+  grows to 654 ms. At 1128x752 with the same aspect ratio, camera pose and file,
+  source cadence remains 29.8-30.0/s and worst lateness holds at 34 ms. Both
+  controls have no reported audio gaps or new kernel entries. The smaller
+  surface is a diagnostic, not an accepted picture-resolution reduction.
+
+  Branch `perf/source-map-view-cache` moves native endpoint position and packed
+  map evaluation from curved screen fragments to one source-owned GPU cache.
+  It preserves full-resolution sampling, triangle/alpha rules, panorama input
+  and source history; narrow mesh rasterization remains unchanged. A same-owner
+  uncached draw is retained for rendered regression comparisons. The bounded,
+  device-hidden working-tree workspace passes 1,626 tests with 53 ignored and
+  no failures, plus full Clippy, vendor-warning, formatting, name/source gates.
+  These results include unavailable-device returns and the separately parked
+  color variation, not clean-package qualification. Separate bounded real-GPU
+  Scene cases compare 31 consecutive sources per camera against the uncached
+  draw of the same completed owner, with unchanged coverage. At the reported
+  X4 wide view, 47 pixels across the 31 1280x720 captures differ by at most one
+  RGB8 code; the ONE X2 riser sequence is byte-identical. A paired X4 frame was
+  inspected. These working-tree tests isolate view arithmetic, not the parked
+  color variation or actual surface performance. Clean SDK full-size player
+  performance, both-camera UI qualification and owner retest are still pending.
+  No installed fix or performance win is claimed for the cache yet. Issue #186
+  remains open.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes
