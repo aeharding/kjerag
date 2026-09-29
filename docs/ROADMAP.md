@@ -375,6 +375,18 @@ change installed code or add qualification claims.
   [#234](https://github.com/aeharding/kjerag/pull/234) is stacked on #233;
   neither is merged or owner-accepted. The installed package is unchanged.
   Receipts: `scratch/playback-independent-20260927/`.
+
+  A follow-up reproduces a restart gap through the actual PCM ring and published
+  clock arithmetic: an ordinary sub-splice audio lead, a queued device callback
+  and the stop fade leave the read head past the held PTS. The proposed correction
+  retains one ring depth of consumed PCM and restores actual samples at resume.
+  Future audio lead remains 500 ms; seek invalidation, ordinary drift correction
+  and real-gap accounting remain intact. Five new CPU regressions cover the
+  failing-before restart, wraparound/refill, unavailable history, uninterrupted
+  drift and seek isolation. The device-hidden media suite passes 156 tests with
+  four ignored. This locates a restart mechanism, not every one of the eight
+  measured events or the owner's complete lag report. Packaged playback and
+  owner review remain due; the installed app is unchanged.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes

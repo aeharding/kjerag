@@ -387,6 +387,15 @@ Only after the callback has faded to silence may pre-held-PTS samples leave
 the ring to permit refill. Muted or zero-volume audio cannot hold video for
 an intentionally unconsumed ring. EOF and raw producer errors wake the waiter.
 
+The current uninstalled follow-up also retains consumed PCM for one ring depth.
+Device callbacks schedule sound ahead of media time; freezing that time can
+leave the read head past the resumed PTS. After an observed stopped callback
+has faded to silence, resume can restore actual retained samples at its device
+PTS. This does not increase the producer's 500 ms future lead, change ordinary
+drift/splice arithmetic, manufacture missing sound or retain audio across a
+seek. It doubles the PCM ring allocation, not playback latency. CPU regressions
+cover the timestamp-induced restart gap; actual-device qualification is pending.
+
 The presentation clock remains based on container PTS. Its published `Beat`
 anchor is extrapolated by the audio callback without needing redraw ticks.
 Filtered video promotion and source admission use the playback event owner
