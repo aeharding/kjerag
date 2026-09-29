@@ -27,9 +27,8 @@ use cpal::{Device, SampleFormat, StreamConfig, SupportedStreamConfig};
 use super::Fallible;
 use super::audio::{Beat, Pipe, Reading};
 
-/// How much sound the ring holds. Two orders of magnitude more than a device
-/// callback needs, because what it is really covering is the decode thread
-/// blocking on the picture queue, which it does for a frame at a time.
+/// Bounded decoded-sound headroom. Ring capacity paces the independent audio
+/// producer; a blocked video-delivery queue must not stop its refill.
 const DEPTH: Duration = Duration::from_millis(500);
 
 /// An open output device with the file's sound going to it.

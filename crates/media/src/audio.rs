@@ -1,11 +1,12 @@
 //! The sound between the decode thread and the audio device, and the
 //! presentation clock in a form the device's callback can read.
 //!
-//! **The picture is the clock.** Issue #4 anchors playback on video frames and
-//! nothing here re-anchors it: every device callback asks where the picture is
-//! and makes the sound follow. A sound-mastered clock would move the picture
-//! instead, and a reframing player whose frames are paced by a sound card is a
-//! player that judders.
+//! **Picture and sound share media time.** Player anchors the timeline to
+//! container PTS and publishes a `Beat`. While running, it advances against
+//! `Instant`, independently of window redraws. Every device callback schedules
+//! sound against that timeline at its expected device-playback time. A stopped
+//! Beat lets the callback fade and hold while the producer can keep refilling.
+//! This is the selected clock policy, not proof against audio-mastered playback.
 //!
 //! Following it takes two corrections, and they are different in kind:
 //!

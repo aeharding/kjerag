@@ -356,7 +356,24 @@ change installed code or add qualification claims.
   completion and final drawing without changing decode epoch. They exercise
   held-time recovery, not actual delayed-file delivery or audible sync. The
   muted ONE X2 case logs an underlying sound-device buffer error; no new kernel
-  faults appear. Clean SDK package/runtime qualification is still due.
+  faults appear.
+
+  Exact committed source `323c609a` is separately built with the Flatpak SDK,
+  excluding the parked color edits. Its delayed-packet player experiment holds
+  media time to refill and limits reported video lateness to 33.8 ms, versus
+  3.332 seconds in the installed control. All 1,362 logged source transactions
+  complete contiguously. It also reports eight audio underrun events around
+  holds/resumes, versus zero in that control; do not claim smooth audio recovery
+  or an accepted tradeoff. This is deliberate packet delay, not an actual NAS
+  test or audible A/B. Ordinary 2256x1504, 40-second pans retain 29.950/29.975
+  source changes/s with zero reported underruns and 305.899/319.875 completed
+  redraws/s on X4/ONE X2. Completion-spacing p99/max remains
+  11.162/21.065 ms and 11.063/29.262 ms, not the 4.17 ms tail target.
+  Both exact app-path UI suites pass, 43 X4 and 44 ONE X2 checks with no
+  failures, documented service/fixture skips and inspected motion captures.
+  All eight CI jobs pass on code commit `323c609a`. Draft PR
+  [#234](https://github.com/aeharding/kjerag/pull/234) is stacked on #233;
+  neither is merged or owner-accepted. The installed package is unchanged.
   Receipts: `scratch/playback-independent-20260927/`.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
