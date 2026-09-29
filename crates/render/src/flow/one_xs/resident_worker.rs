@@ -78,6 +78,21 @@ enum Job {
     Capture(Arc<ResidentCaptureFacadeInner>),
     Panorama(Box<PanoramaJob>),
     Filtered(FilteredJob),
+    #[cfg(test)]
+    Pause {
+        entered: mpsc::SyncSender<()>,
+        release: mpsc::Receiver<()>,
+    },
+}
+
+#[cfg(test)]
+pub(crate) struct StitchPause(mpsc::SyncSender<()>);
+
+#[cfg(test)]
+impl Drop for StitchPause {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
 }
 
 pub(super) struct ResidentStitchWorker {
@@ -116,6 +131,11 @@ impl ResidentStitchWorker {
                                 owner.fail_worker(&error.to_string());
                             }
                         }
+                        #[cfg(test)]
+                        Job::Pause { entered, release } => {
+                            let _ = entered.send(());
+                            let _ = release.recv();
+                        }
                     }
                     running_progress.notify();
                 }
@@ -129,6 +149,25 @@ impl ResidentStitchWorker {
 
     pub(super) fn set_progress_wake(&self, wake: &ReadyWake) {
         self.progress.set(wake);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_for_test(&self) -> StitchPause {
+        let (entered, incoming) = mpsc::sync_channel(1);
+        let (release, waiting) = mpsc::sync_channel(1);
+        assert!(
+            self.jobs
+                .send(Job::Pause {
+                    entered,
+                    release: waiting
+                })
+                .is_ok()
+        );
+        let guard = StitchPause(release);
+        incoming
+            .recv_timeout(Duration::from_secs(10))
+            .expect("stitch pause did not enter");
+        guard
     }
 
     /// Schedule one capture actor without waiting. The caller has already set
