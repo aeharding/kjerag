@@ -1298,10 +1298,22 @@ fn draw_wgsl_with_fusion_mode(fusion: bool, hardware_fusion: bool) -> String {
     )
 }
 
+#[cfg(test)]
 pub(in crate::direct_type2) fn vertex_cached_draw_wgsl_with_fusion_mode(
     fusion: bool,
     hardware_fusion: bool,
 ) -> String {
+    cached_draw_wgsl(fusion, hardware_fusion, vertex_cached_map_wgsl())
+}
+
+pub(in crate::direct_type2) fn compiled_triangle_draw_wgsl_with_fusion_mode(
+    fusion: bool,
+    hardware_fusion: bool,
+) -> String {
+    cached_draw_wgsl(fusion, hardware_fusion, compiled_triangle_map_wgsl())
+}
+
+fn cached_draw_wgsl(fusion: bool, hardware_fusion: bool, map: String) -> String {
     let correction = if fusion {
         if hardware_fusion {
             crate::image_fusion::FILTERED_WGSL
@@ -1314,7 +1326,7 @@ pub(in crate::direct_type2) fn vertex_cached_draw_wgsl_with_fusion_mode(
     format!(
         "{}\n{}\n{correction}\n{DRAW}\n{SOURCE_FILTER_WGSL}\n{DRAW_COLOR}",
         source_wgsl(),
-        vertex_cached_map_wgsl()
+        map
     )
 }
 
@@ -1328,6 +1340,10 @@ pub(in crate::direct_type2) fn vertex_cache_prepass_wgsl() -> String {
     )
 }
 
+pub(in crate::direct_type2) fn compiled_triangle_prepass_wgsl() -> String {
+    format!("{}\n{TRIANGLE_CACHE_PREPASS}", vertex_cache_prepass_wgsl())
+}
+
 fn vertex_cached_map_wgsl() -> String {
     let cell = MAP
         .find("fn type2_cell(")
@@ -1336,6 +1352,13 @@ fn vertex_cached_map_wgsl() -> String {
         .find("fn type2_mesh(")
         .expect("type-2 map shader contains its mesh function");
     format!("{}\n{VERTEX_CACHED_CELL}\n{}", &MAP[..cell], &MAP[mesh..])
+}
+
+fn compiled_triangle_map_wgsl() -> String {
+    // Keep the readable watertight draw as the exact boundary fallback.
+    // Only this selected map requires the triangle-coefficient binding.
+    let fallback = vertex_cached_map_wgsl().replace("fn type2_mesh(", "fn type2_mesh_fallback(");
+    format!("{fallback}\n{TRIANGLE_CACHED_MAP}")
 }
 
 pub(crate) fn map_wgsl() -> &'static str {
@@ -1573,6 +1596,84 @@ fn cache_type2_vertices(@builtin(global_invocation_id) invocation: vec3<u32>) {
   let uv = type2_varying(row, col);
   type2_vertices[index].position = vec4<f32>(type2_position(row, col), 0.0);
   type2_vertices[index].packed = type2_sample4(uv);
+}
+"#;
+
+const TRIANGLE_CACHE_PREPASS: &str = r#"
+struct Type2CachedTriangle {
+  a: vec4<f32>,
+  b: vec4<f32>,
+  c: vec4<f32>,
+};
+@group(0) @binding(3) var<storage, read_write> type2_triangles: array<Type2CachedTriangle>;
+
+@compute @workgroup_size(64)
+fn cache_type2_triangles(@builtin(global_invocation_id) invocation: vec3<u32>) {
+  let index = invocation.x;
+  if index >= 50u * 100u * 2u { return; }
+  let cell = index / 2u;
+  let row = cell / 100u;
+  let col = cell % 100u;
+  let p00 = type2_vertices[row * 101u + col].position.xyz;
+  let p01 = type2_vertices[row * 101u + col + 1u].position.xyz;
+  let p10 = type2_vertices[(row + 1u) * 101u + col].position.xyz;
+  let p11 = type2_vertices[(row + 1u) * 101u + col + 1u].position.xyz;
+  let a = select(p00, p01, index % 2u == 1u);
+  let b = select(p01, p11, index % 2u == 1u);
+  let c = p10;
+  // Adjugate rows of [a b c]. Dividing their ray dot products by
+  // their sum gives barycentrics at the ray/triangle intersection.
+  // The determinant retains the forward-intersection admission check.
+  let pa = cross(b, c);
+  let pb = cross(c, a);
+  let pc = cross(a, b);
+  type2_triangles[index].a = vec4<f32>(pa, dot(a, pa));
+  type2_triangles[index].b = vec4<f32>(pb, 0.0);
+  type2_triangles[index].c = vec4<f32>(pc, 0.0);
+}
+"#;
+
+const TRIANGLE_CACHED_MAP: &str = r#"
+struct Type2CachedTriangle {
+  a: vec4<f32>,
+  b: vec4<f32>,
+  c: vec4<f32>,
+};
+@group(1) @binding(3) var<storage, read> type2_triangles: array<Type2CachedTriangle>;
+
+fn type2_compiled_weights(ray: vec3<f32>, index: u32) -> vec4<f32> {
+  let triangle = type2_triangles[index];
+  let weights = vec3<f32>(dot(triangle.a.xyz, ray), dot(triangle.b.xyz, ray), dot(triangle.c.xyz, ray));
+  let negative = weights.x < 0.0 || weights.y < 0.0 || weights.z < 0.0;
+  let positive = weights.x > 0.0 || weights.y > 0.0 || weights.z > 0.0;
+  let sum = weights.x + weights.y + weights.z;
+  if (negative && positive) || sum == 0.0 || triangle.a.w * sum <= 0.0 {
+    return vec4<f32>(0.0);
+  }
+  return vec4<f32>(weights / sum, 1.0);
+}
+
+fn type2_mesh(body: vec3<f32>) -> Type2Sample {
+  let ray = normalize(vec3<f32>(-body.x, body.y, -body.z));
+  let row = i32(clamp(floor(acos(clamp(ray.y, -1.0, 1.0)) * f32(TYPE2_STACKS) / TYPE2_PI), 0.0, f32(TYPE2_STACKS - 1)));
+  var theta = atan2(-ray.x, ray.z);
+  if theta < 0.0 { theta += TYPE2_TAU; }
+  let col = i32(floor(theta * f32(TYPE2_SLICES) / TYPE2_TAU)) % TYPE2_SLICES;
+  let cell = u32(row * 100 + col) * 2u;
+  var weights = type2_compiled_weights(ray, cell);
+  var second = false;
+  if weights.w == 0.0 {
+    weights = type2_compiled_weights(ray, cell + 1u);
+    second = true;
+  }
+  if weights.w == 0.0 { return type2_mesh_fallback(body); }
+  let at_a = vec2<i32>(row, col + select(0, 1, second));
+  let at_b = vec2<i32>(row + select(0, 1, second), col + 1);
+  let at_c = vec2<i32>(row + 1, col);
+  let uv = weights.x * type2_varying(at_a.x, at_a.y) + weights.y * type2_varying(at_b.x, at_b.y) + weights.z * type2_varying(at_c.x, at_c.y);
+  let fusion_uv = weights.x * type2_fusion_varying(at_a.x, at_a.y) + weights.y * type2_fusion_varying(at_b.x, at_b.y) + weights.z * type2_fusion_varying(at_c.x, at_c.y);
+  let packed = weights.x * type2_cached_vertex(at_a.x, at_a.y).packed + weights.y * type2_cached_vertex(at_b.x, at_b.y).packed + weights.z * type2_cached_vertex(at_c.x, at_c.y).packed;
+  return Type2Sample(packed, type2_sample1(uv), 1.0, fusion_uv);
 }
 "#;
 

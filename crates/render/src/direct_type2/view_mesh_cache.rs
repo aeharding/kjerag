@@ -1,9 +1,10 @@
 //! Native map vertices evaluated once per source, never once per screen pixel.
 //!
 //! This does not rasterize or resample the picture. Curved-view fragments keep
-//! the original cell search, watertight triangle test, barycentrics, alpha and
-//! source sampling. Only the endpoint positions and packed vertex samples are
-//! cached, using the existing GPU functions at the native 51 by 101 endpoints.
+//! the native cell geometry, barycentrics, alpha and source sampling. Endpoint
+//! positions, packed samples and triangle adjugates are source-owned GPU data.
+//! A fragment evaluates ray dot products, with the watertight reference retained
+//! as the fallback when neither compiled triangle admits the ray.
 
 use std::num::NonZeroU64;
 
@@ -13,12 +14,15 @@ use crate::{Fallible, FrameStamp};
 
 pub(crate) const VERTICES: u32 = 51 * 101;
 pub(crate) const CACHE_BYTES: u64 = VERTICES as u64 * std::mem::size_of::<[f32; 8]>() as u64;
+pub(crate) const TRIANGLES: u32 = 50 * 100 * 2;
+pub(crate) const TRIANGLE_BYTES: u64 = TRIANGLES as u64 * std::mem::size_of::<[f32; 12]>() as u64;
 
 pub(crate) struct Pipeline {
     device: wgpu::Device,
     compute_layout: wgpu::BindGroupLayout,
     pub(super) draw_layout: wgpu::BindGroupLayout,
     compute: wgpu::ComputePipeline,
+    triangles: wgpu::ComputePipeline,
 }
 
 /// GPU-owned data and map binding inseparably named by the source delivery.
@@ -52,7 +56,7 @@ impl Pipeline {
         );
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("native view mesh vertex preparation"),
-            source: wgpu::ShaderSource::Wgsl(super::vertex_cache_prepass_wgsl().into()),
+            source: wgpu::ShaderSource::Wgsl(super::compiled_triangle_prepass_wgsl().into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("native view mesh vertex preparation"),
@@ -67,11 +71,20 @@ impl Pipeline {
             compilation_options: Default::default(),
             cache: None,
         });
+        let triangles = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("native view triangle preparation"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("cache_type2_triangles"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         Self {
             device: device.clone(),
             compute_layout,
             draw_layout,
             compute,
+            triangles,
         }
     }
 
@@ -92,8 +105,28 @@ impl Pipeline {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
-        let compute = binding(&self.device, &self.compute_layout, packed, alpha, &cache);
-        let read = binding(&self.device, &self.draw_layout, packed, alpha, &cache);
+        let triangles = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("source-owned native view triangle coefficients"),
+            size: TRIANGLE_BYTES,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let compute = binding(
+            &self.device,
+            &self.compute_layout,
+            packed,
+            alpha,
+            &cache,
+            &triangles,
+        );
+        let read = binding(
+            &self.device,
+            &self.draw_layout,
+            packed,
+            alpha,
+            &cache,
+            &triangles,
+        );
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("source-owned native view mesh preparation"),
@@ -102,6 +135,15 @@ impl Pipeline {
             pass.set_pipeline(&self.compute);
             pass.set_bind_group(0, &compute, &[]);
             pass.dispatch_workgroups(VERTICES.div_ceil(64), 1, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("source-owned native view triangle preparation"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.triangles);
+            pass.set_bind_group(0, &compute, &[]);
+            pass.dispatch_workgroups(TRIANGLES.div_ceil(64), 1, 1);
         }
         // Both bind groups retain the cache allocation through submitted work.
         // The displayed owner retains the read binding after source retirement.
@@ -134,6 +176,7 @@ fn layout(
             entry(0, PACKED_BYTES as u64, true),
             entry(1, ALPHA_BYTES as u64, true),
             entry(2, CACHE_BYTES, cache_read_only),
+            entry(3, TRIANGLE_BYTES, cache_read_only),
         ],
     })
 }
@@ -144,6 +187,7 @@ fn binding(
     packed: &wgpu::Buffer,
     alpha: &wgpu::Buffer,
     cache: &wgpu::Buffer,
+    triangles: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("source-owned native view mesh map"),
@@ -161,6 +205,10 @@ fn binding(
                 binding: 2,
                 resource: cache.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: triangles.as_entire_binding(),
+            },
         ],
     })
 }
@@ -174,7 +222,9 @@ mod tests {
     fn cache_retains_native_endpoints_and_record_layout() {
         assert_eq!(VERTICES, 5151);
         assert_eq!(CACHE_BYTES, 164_832);
-        let source = super::super::vertex_cache_prepass_wgsl();
+        assert_eq!(TRIANGLES, 10_000);
+        assert_eq!(TRIANGLE_BYTES, 480_000);
+        let source = super::super::compiled_triangle_prepass_wgsl();
         assert!(source.contains("type2_position(row, col)"));
         assert!(source.contains("type2_sample4(uv)"));
         assert!(source.contains("index / 101u"));

@@ -10,7 +10,7 @@
 use crate::temporal_fusion::correction_stream::CorrectionFrame;
 use crate::{Fallible, MAX_LENSES, Planes, Reframe};
 
-use super::{DirectType2Pipeline, vertex_cached_draw_wgsl_with_fusion_mode};
+use super::{DirectType2Pipeline, compiled_triangle_draw_wgsl_with_fusion_mode};
 
 const LOW_CURRENT_BINDING: u32 = 6;
 const LOW_FILTERED_BINDING: u32 = 7;
@@ -480,7 +480,7 @@ fn validate_low(texture: &wgpu::Texture, role: &str) -> Fallible<[u32; 2]> {
 fn shader_source(fusion: bool, hardware_fusion: bool) -> String {
     format!(
         "{}\n{CORRECTION_WGSL}",
-        vertex_cached_draw_wgsl_with_fusion_mode(fusion, hardware_fusion)
+        compiled_triangle_draw_wgsl_with_fusion_mode(fusion, hardware_fusion)
     )
 }
 

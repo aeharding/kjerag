@@ -381,8 +381,32 @@ change installed code or add qualification claims.
   inspected. These working-tree tests isolate view arithmetic, not the parked
   color variation or actual surface performance. Clean SDK full-size player
   performance, both-camera UI qualification and owner retest are still pending.
-  No installed fix or performance win is claimed for the cache yet. Issue #186
-  remains open.
+  No installed fix is claimed for the cache. Subsequent measured performance
+  is recorded below; issue #186 remains open.
+
+  The clean `2769072d` cache package demonstrates a limited local win: at the
+  full-size reported view it maintains roughly 30 source advances/s without
+  growing delay, while the same-runtime input-only control accumulates 2.44
+  seconds of delay at 27-28 sources/s. However, the actual NAS run still
+  accumulates 1.14 seconds, and a 40-second local changing-view capacity test
+  reaches only 210.5 completed redraws/s with 18.47 source advances/s. Delay
+  grows past 16 seconds. Its draw callback p99/max is 25.1/32.6 ms. This is not
+  a 240-capacity pass or a complete fix. The package remains uninstalled.
+
+  Branch `perf/source-triangle-coefficients` now compiles each native triangle's
+  intersection coefficients during source preparation, retaining the original
+  watertight calculation as fallback and the uncached same-owner draw as the
+  reference. Its first bounded X4 GPU comparison preserves coverage across 31
+  consecutive sources at the reported view; 175,905 pixels across the 31
+  1280x720 captures differ by at most two RGB8 codes. This is a prototype,
+  not owner quality acceptance. Final-source device-hidden CPU gates pass:
+  1,626 tests pass, 53 are ignored, and full Clippy/vendor/fmt/name/source
+  checks pass. Separate final-source GPU comparisons preserve coverage on 31
+  X4 sources and 31 ONE X2 sources at FOV 166.23. Maximum RGB8 changes are two
+  codes for X4 and one for ONE X2. These native working-tree comparisons
+  include parked color variation in both arms. Clean-package full-size
+  performance, runtime/UI qualification and owner retest remain pending.
+  Neither cache candidate is an installed fix.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes

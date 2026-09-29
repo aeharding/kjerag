@@ -153,14 +153,18 @@ spatial facade. Map readback remains diagnostic-only, never a playback step.
 
 The filtered path also evaluates its 51 by 101 native map endpoints once in
 the same source-preparation command buffer. Each source owns a 164,832-byte
-GPU cache containing endpoint positions and packed map samples. Curved-view
-fragments reuse these values instead of recomputing them for each screen pixel
-and redraw. Native cell search, watertight triangle admission, barycentrics,
+GPU cache containing endpoint positions and packed map samples. A second
+480,000-byte source-owned cache contains the adjugate rows and determinant of
+each native triangle. Curved-view fragments evaluate ray dot products against
+these coefficients and normalize their barycentrics rather than rebuilding
+the intersection. If neither compiled triangle in the primary cell admits the
+ray, the retained watertight neighbor search supplies the result. Native cells,
 alpha, fusion and full-resolution source sampling remain in the final draw.
 The cache names the same opaque frame and graphics context as the map and
 source snapshots; their completed owner retains its binding until retirement.
-It introduces no readback, CPU wait, extra queue submission or source-cadence
-change. Temporal-input panorama evaluation is unchanged. The uncached draw
+Both compute passes use the same source encoder. They introduce no readback,
+CPU wait, extra queue submission or source-cadence change. Temporal-input
+panorama evaluation is unchanged. The uncached draw
 remains a test-only same-owner reference. Separate GPU compilation can change
 floating-point rounding, so this optimization requires rendered comparison,
 not an assumed pixel-identity claim.
