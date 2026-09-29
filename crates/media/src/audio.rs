@@ -248,6 +248,28 @@ impl Pipe {
         }
     }
 
+    /// Whether this lineage has decoded sound through the requested lead.
+    /// The existing callback owns timestamp gaps and device latency. Holding
+    /// playback must not flush its ring or discard the fade's remaining sound.
+    pub(crate) fn buffered_through(&self, at: Duration, lead: Duration) -> bool {
+        let buffer = self.locked();
+        buffer.muted
+            || buffer.volume == 0.0
+            || (!buffer.stale && buffer.frames > 0 && buffer.through >= at.saturating_add(lead))
+    }
+
+    /// Once the callback has faded to silence, remove only sound whose PTS
+    /// precedes the held clock. Otherwise a full old ring could prevent refill
+    /// forever. This is the existing late-audio splice, without a seek/flush.
+    pub(crate) fn discard_before_if_silent(&self, at: Duration) {
+        let mut buffer = self.locked();
+        if !buffer.stale && buffer.gain == 0.0 && at > buffer.head_time() {
+            let behind = i64::try_from((at - buffer.head_time()).as_micros()).unwrap_or(i64::MAX);
+            let frames = buffer.frames_in(behind);
+            buffer.drop_front(frames);
+        }
+    }
+
     /// How the sound stood against the picture when it was last measured, in
     /// microseconds, positive when the sound is ahead. The decode thread turns
     /// this into a resampling ratio.
@@ -519,6 +541,44 @@ mod tests {
 
     fn at(frames: usize) -> Duration {
         Duration::from_secs_f64(frames as f64 / f64::from(RATE))
+    }
+
+    #[test]
+    fn buffering_readiness_requires_current_samples_through_the_refill_lead() {
+        let pipe = Pipe::new(RATE, CHANNELS, Duration::from_secs(1));
+        assert!(!pipe.buffered_through(Duration::ZERO, Duration::ZERO));
+        pipe.write(&frames(4_800, 0.5), at(4_800));
+        assert!(pipe.buffered_through(at(2_400), at(2_400)));
+        assert!(!pipe.buffered_through(at(2_400), at(2_401)));
+        pipe.invalidate();
+        assert!(!pipe.buffered_through(Duration::ZERO, Duration::ZERO));
+        pipe.fill(&mut frames(480, 0.0), None);
+        assert!(!pipe.buffered_through(Duration::ZERO, Duration::ZERO));
+    }
+
+    #[test]
+    fn inaudible_sound_does_not_hold_video_for_an_unconsumed_audio_ring() {
+        let pipe = Pipe::new(RATE, CHANNELS, Duration::from_secs(1));
+        pipe.set_muted(true);
+        assert!(pipe.buffered_through(Duration::from_secs(10), Duration::from_secs(1)));
+        pipe.set_muted(false);
+        assert!(!pipe.buffered_through(Duration::from_secs(10), Duration::ZERO));
+        pipe.set_volume(0.0);
+        assert!(pipe.buffered_through(Duration::from_secs(10), Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_full_old_audio_ring_is_retired_only_after_the_buffer_hold_fades() {
+        let pipe = Pipe::new(RATE, CHANNELS, Duration::from_secs(1));
+        pipe.write(&frames(RATE as usize, 0.5), Duration::from_secs(1));
+        pipe.fill(&mut frames(480, 0.0), Some(Duration::ZERO));
+        let occupied_room = pipe.room();
+        pipe.discard_before_if_silent(Duration::from_secs(2));
+        assert_eq!(pipe.room(), occupied_room, "do not cut a live fade");
+        pipe.fill(&mut frames(480, 0.0), None);
+        pipe.discard_before_if_silent(Duration::from_secs(2));
+        assert_eq!(pipe.room(), Duration::from_secs(1));
+        assert!(!pipe.buffered_through(Duration::from_secs(2), Duration::ZERO));
     }
 
     #[test]
