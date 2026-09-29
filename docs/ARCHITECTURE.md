@@ -123,6 +123,20 @@ may install the completed result matching `Player`'s opaque `FrameStamp`.
 That transaction is independent of surface redraw callbacks. A redraw consumes
 the latest due completed picture, not the source-processing queues.
 
+The filtered stitch executor owns a capture actor with a bounded ordered work
+queue, rather than one shared-executor channel message per source. Executing
+stitch, queued stitch and temporal work still share the existing two-source
+limit and four-output reservation bound. An admitted successor continues
+without another shell handoff. Actor exit and admission use the same short
+state lock, so the successor either belongs to the running actor or kicks its
+replacement. Queue payloads hold no back-reference to their capture owner.
+Busy-source refusal happens before any graphics-device poll or GPU-lifetime
+reservation; mouse events do not repeatedly poll just to discover backpressure.
+The shell checks that CPU admission capacity before constructing another source
+projection; the final admission still rechecks it under the same state lock.
+Seek and terminal failure discard unexecuted queue payloads, while submitted
+work keeps its existing GPU-retirement ownership.
+
 The resident map path remains GPU-owned. After capture-session construction,
 ordinary live processing maps only the four-byte final validity word to the CPU.
 It does not read back solver belts, sparse terminals, full maps, source images,

@@ -105,10 +105,11 @@ impl Scene {
             for source in &sources {
                 let accepted = capture.accepted_stamp()?;
                 if resident_stamp_follows(accepted.as_ref(), &source.frames.stamp())
-                    && !capture.try_submit(
-                        source.frames.clone(),
-                        filtered_source_reframe(source, self.sampling.get()),
-                    )?
+                    && (!capture.wants_source()?
+                        || !capture.try_submit(
+                            source.frames.clone(),
+                            filtered_source_reframe(source, self.sampling.get()),
+                        )?)
                 {
                     break;
                 }

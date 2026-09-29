@@ -379,10 +379,41 @@ change installed code or add qualification claims.
   X4 wide view, 47 pixels across the 31 1280x720 captures differ by at most one
   RGB8 code; the ONE X2 riser sequence is byte-identical. A paired X4 frame was
   inspected. These working-tree tests isolate view arithmetic, not the parked
-  color variation or actual surface performance. Clean SDK full-size player
-  performance, both-camera UI qualification and owner retest are still pending.
-  No installed fix or performance win is claimed for the cache yet. Issue #186
-  remains open.
+  color variation or actual surface performance. Subsequent clean SDK runs
+  demonstrate only a limited win: the local stationary view maintains source
+  cadence, but NAS delay still reaches 1.14 seconds. At 300 Hz changing-view
+  stress, the cache reaches 210.5 completed redraws/s with only 18.47 source
+  advances/s and 16.79 seconds of growing delay. At normal 60 Hz, the local
+  pan maintains 29.95 source advances/s and worst lateness stays at 82 ms,
+  but completion gaps reach 37.1 ms. None of this is a hitch-free verdict.
+  The clean package remains uninstalled; both-camera UI qualification and
+  owner retest remain due. Issue #186 stays open.
+
+  The compiled-triangle follow-on was rejected after its clean package reached
+  only 205.9 redraws/s and 18.12 source advances/s in the same changing-view
+  stress, with continuing delay. Passing its two-camera pixel comparison did
+  not establish a useful performance improvement. Its code is not included in
+  branch `refactor/filtered-source-admission`.
+
+  That branch replaces per-source shared-worker messages with one capture
+  actor draining a bounded source queue. Admitted successors no longer require
+  an intervening shell handoff; stitch/temporal work retains the existing
+  two-source and four-output bounds. Busy refusal precedes graphics-device
+  polling and GPU retirement reservations. A real-decoder/GPU regression holds
+  the worker, admits two sources, then requires both to finish without further
+  shell progression or renderer callbacks. The device-hidden render suite
+  passes 1,119 tests with 43 ignored. The separate actual-decoder/GPU case at
+  the exact September cue passes: both sources finish without further shell
+  progress or test-side device polling. No new kernel entries, sampled memory
+  pressure averages zero. Final device-hidden workspace passes 1,630 tests
+  with 53 ignored, plus full fmt/Clippy/vendor/name/source gates. These include
+  no-device returns and parked color variation, not hardware qualification.
+  Final-source no-shell GPU cases pass on both cameras. Separate 31-source
+  rendered sequences at the reported X4 view and ONE X2 riser view are
+  byte-identical to their retained parent captures; first frames inspected.
+  No new kernel entries and postflight pressure averages zero in those runs.
+  Clean-package performance, sandbox/UI and owner gates remain pending.
+  No installed fix.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes

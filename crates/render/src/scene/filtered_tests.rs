@@ -10,6 +10,92 @@ use std::io::Write;
 
 const DEADLINE: Duration = Duration::from_secs(60);
 
+/// Actual decoder and both GPU workers, with no shell progress or redraw
+/// after admission. Holding the stitch worker makes the former single-source
+/// handshake refusal deterministic, rather than relying on thread timing.
+#[test]
+fn reported_filtered_worker_drains_without_shell() {
+    let Ok(line) = std::env::var("KJERAG_REPORTED_SEAM_VIEW") else {
+        return;
+    };
+    let (path, framing) = crate::Framing::read_line(&line).expect("invalid actor review view");
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let mut scene = Scene::open(&path).unwrap();
+    scene.set_muted(true);
+    scene.pause(Instant::now());
+    scene.set_horizon(framing.horizon);
+    scene.seek(framing.at, Accuracy::Exact);
+    let deadline = Instant::now() + DEADLINE;
+    let held = Holding {
+        horizon: scene.horizon.get(),
+        clock: scene.clock.get(),
+        forced: scene.forced.get(),
+        readout: scene.readout.get(),
+    };
+    let (first, second) = loop {
+        // Decode preparation only. Do not admit a source through progress().
+        if let Next::Stopped(error) = scene.pump_inner(Instant::now()) {
+            panic!("actor input stopped: {error}");
+        }
+        if let Some(show) = scene.show.as_ref()
+            && let (Some(first), Some(second)) = (show.view(held), show.prepared_view(held, 0))
+        {
+            break (first, second);
+        }
+        assert!(Instant::now() < deadline, "actor input did not decode");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert_eq!(second.frames.index, first.frames.index + 1);
+    let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    pipeline.prepare(
+        &scene.primitive(framing.camera),
+        &device,
+        &queue,
+        16.0 / 9.0,
+    );
+    let capture = scene.primitive(framing.camera).filtered_capture.unwrap();
+    let blocked = capture.pause_stitch_for_test();
+    assert!(
+        capture
+            .try_submit(
+                first.frames.clone(),
+                super::filtered::filtered_source_reframe(&first, Sampling::default())
+            )
+            .unwrap()
+    );
+    assert!(
+        capture
+            .try_submit(
+                second.frames.clone(),
+                super::filtered::filtered_source_reframe(&second, Sampling::default())
+            )
+            .unwrap(),
+        "successor admission still requires the first source's shell handoff"
+    );
+    assert_eq!(
+        capture.accepted_stamp().unwrap(),
+        Some(second.frames.stamp())
+    );
+    drop(blocked);
+    while !capture.work_idle_for_test().unwrap() {
+        assert!(
+            Instant::now() < deadline,
+            "stitch actor needed shell progress"
+        );
+        // No Scene progress, renderer callback or test-side device polling.
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        capture.accepted_stamp().unwrap(),
+        Some(second.frames.stamp())
+    );
+    assert!(capture.installed_stamp().unwrap().is_none());
+    assert!(scene.displayed_frame_stamp().is_none());
+    capture.assert_unpublished_history_for_test();
+    capture.fail_for_test("actor regression terminal cleanup", false);
+    capture.assert_history_released_for_test();
+}
+
 #[test]
 fn x4_filtered_progress_without_redraw_retains_shown_on_terminal_failure() {
     let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
