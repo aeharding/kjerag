@@ -412,8 +412,35 @@ change installed code or add qualification claims.
   rendered sequences at the reported X4 view and ONE X2 riser view are
   byte-identical to their retained parent captures; first frames inspected.
   No new kernel entries and postflight pressure averages zero in those runs.
-  Clean-package performance, sandbox/UI and owner gates remain pending.
-  No installed fix.
+  Clean source `635e9b04` has all eight CI jobs passing. At2256x1504 its
+  60Hz local pan keeps29.95source advances/s without growing lag, worst25.2ms;
+  its NAS stationary-view repeat also keeps up. Neither is a general fix:
+  the300Hz pan reaches only213.9redraws/s and19.4source advances/s, with14.1s
+  delay. Separate app-path UI suites pass43X4 and44ONE X2 checks, with the
+  documented service/fixture skips and inspected captures. It is installed as
+  an interim test package, retaining68591c10rollback. The final actual-installed
+  NAS60Hz pan FAILS: roughly20source advances/s, delay grows to10.91s, despite
+  no audio underruns or new kernel entries. Its strict capacity parser also
+  rejects a skipped screen source, separately from the genuine cadence failure.
+  One successful cached range does not establish robust playback. No merge,
+  owner acceptance, hitch-free verdict or complete A/V-sync fix.
+
+  Branch `perf/curved-view-cell-hints` evaluates a renderer follow-on. A static
+  indexed screen grid supplies only native cell search hints. The exact pixel
+  ray must pass the existing watertight cell test; a missed hint uses the
+  complete original search. No picture, lens UV, alpha or temporal field is
+  interpolated from this grid, and no source work or cadence is removed. This
+  unqualified candidate is not installed. Actual rendered sequences and player
+  source cadence, completion spikes and audio synchronization remain its gates.
+  Device-hidden workspace gates pass1,632tests, with53ignored. Three separately
+  bounded31-source Scene comparisons pass: the reported X4 wide view, ONE X2
+  wide view and ONE X2 riser. The riser is byte-identical; X4 differs by at most
+  two RGB8 codes. The X2 wide view additionally fills one reference coverage
+  hole, with a49-code difference there, and one other three-code difference.
+  Transparent-target checks report zero removed coverage in all three cases.
+  This replaces the earlier opaque-black alpha check, which could not measure
+  coverage. First rendered frames inspected; no owner quality acceptance or
+  actual-player speed result yet. All three runs have no new kernel entries.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes
@@ -785,6 +812,20 @@ change installed code or add qualification claims.
 ## Delivery next steps
 
 ### Current private installation, September 29
+
+Source `635e9b04` is now installed. It adds bounded compressed read-ahead,
+source-owned native endpoint caching and a capture actor draining admitted
+sources to the earlier independent-audio/redraw-independent design. The clean
+SDK archive excludes parked color edits and the unaccepted clock-hold prototype.
+Both app-path camera suites pass43X4 and44ONE X2 checks, zero failures, with
+documented sandbox skips. Executable and OSTree identity are authenticated;
+origin, permissions and shared runtimes remain unchanged. The68591c10bundle
+is retained for rollback. The actual-installed NAS moving-view check still
+falls behind at60Hz; this is an interim test build, not the promised reliable
+playback fix. Owner acceptance and merge remain due. Exact identities and
+qualification limits are in [MERGE_READINESS.md](MERGE_READINESS.md).
+
+### Earlier September 29 private installation
 
 Exact source `68591c10` adds the independent audio producer and redraw-independent
 filtered playback described above. It changes no stitching/color arithmetic.

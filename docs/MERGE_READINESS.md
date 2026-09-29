@@ -15,6 +15,48 @@ slowdown, native/Flatpak differences and frame-time spikes are tracked in
 
 ## Current private test package, September 29
 
+The interim source-actor package is installed from exact source
+`635e9b04e81c4601915a77b953165fb46d4ad732`. It retains the prior independent
+audio/source scheduling, adds bounded compressed read-ahead, prepares native
+map endpoints once per source, and drains a capture-owned ordered source queue
+without a per-source shell handoff. It changes no stitching/color arithmetic,
+source cadence or clock-hold policy. The failed triangle prototype, unaccepted
+buffering prototype and two parked color edits are excluded.
+
+- Installed OSTree: `122c2d2dce79c2131bbde0e6cad8f9022d7f153c1a1a40930414812119a36278`.
+- Executable SHA256: `06ae1bccddfb2996f6e70903102934b1c1a14d3eadfa960426db11fd60ebf63e`.
+- Bundle SHA256: `14eefdc4019bf513af5b2a5b1683149487929afc2d72b5054426b6fcf39710b4`.
+
+All eight CI jobs pass. Full device-hidden workspace gates pass1,630tests with
+53ignored, including unavailable-device returns and parked color variation,
+not hardware qualification. Real GPU no-shell regressions pass on both cameras;
+31-source sequences on the reported X4 wide view and ONE X2 riser view are
+byte-identical to retained parent captures. Separate actual app-path suites
+pass43X4 and44ONE X2 checks, zero failures, with the existing sandbox-service,
+exact-view, import-fault and pair-fixture skips. Motion captures inspected;
+the shader/Rust-twin helper is native, not the clean SDK shader. X4 postflight
+records dock-disconnect/USB-C events, not a GPU reset; ONE X2 has no new kernel
+entries. Global postflight memory-pressure averages settle at zero.
+
+Packaged full-size60Hz local pan keeps29.95source advances/s without growing
+delay, worst25.2ms. Completion gaps still reach34.1ms. A NAS idle-view repeat
+also keeps up, but is a previously exercised range. The300Hz pan FAILS:
+213.9redraws/s,19.4source advances/s and14.1s growing delay. More importantly,
+the final actual-installed NAS60Hz pan also FAILS, roughly20source advances/s
+and10.91s growing delay, no audio underruns. Its capacity parser separately
+rejects a skipped screen source; this does not erase the genuine cadence
+failure. No new kernel entries in that run. These are callback/wall-time
+measurements, not physical scanout or a complete performance qualification.
+
+Installation uses `--no-deps --no-related --no-pull`: origin and permissions
+are unchanged and shared runtimes are not updated. The prior68591c10bundle is
+retained for rollback. This package is not a reliable playback fix, accepted
+branch, merge or release. Owner retest and remaining architecture/performance
+work remain due. Immutable build: `scratch/flatpak-delivery-635e9b04/`;
+runtime/UI receipts: `scratch/playback-independent-20260927/`.
+
+## Earlier September 29 private test package
+
 The interim playback redesign is installed from source
 `68591c10df7c7771b8e735866d2f0eadaf45622a`. Audio refill no longer waits behind
 bounded video delivery, and filtered source progression no longer depends on

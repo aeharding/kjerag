@@ -306,13 +306,29 @@ fn reported_filtered_correction_fields() {
         assert_eq!(reference.frame(), &stamp);
         let reference_pixels =
             capture_correction_draw(&reference, &device, &queue, shot.width, shot.height);
-        assert!(
-            shot.rgba
-                .chunks_exact(4)
-                .zip(reference_pixels.chunks_exact(4))
-                .all(|(cached, reference)| cached[3] == reference[3]),
-            "view cache changed picture coverage"
+        // Screenshot targets flatten onto opaque black. Their alpha cannot
+        // distinguish a legitimate black picture pixel from an uncovered ray.
+        let coverage = [&normal, &reference].map(|draw| {
+            capture_correction_draw_with_clear(
+                draw,
+                &device,
+                &queue,
+                shot.width,
+                shot.height,
+                wgpu::Color::TRANSPARENT,
+            )
+        });
+        let mut added = 0;
+        let mut removed = 0;
+        for (candidate, original) in coverage[0].chunks_exact(4).zip(coverage[1].chunks_exact(4)) {
+            added += usize::from(candidate[3] > original[3]);
+            removed += usize::from(candidate[3] < original[3]);
+        }
+        eprintln!(
+            "view-coverage: source={} added={added} removed={removed}",
+            stamp.index()
         );
+        assert_eq!(removed, 0, "candidate removed original picture coverage");
         super::tests::write_review_ppm_sized(
             &output.join("uncached-view"),
             stamp.index(),
@@ -374,6 +390,17 @@ fn capture_correction_draw(
     width: u32,
     height: u32,
 ) -> Vec<u8> {
+    capture_correction_draw_with_clear(draw, device, queue, width, height, wgpu::Color::BLACK)
+}
+
+fn capture_correction_draw_with_clear(
+    draw: &PreparedCorrectionDraw,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    clear: wgpu::Color,
+) -> Vec<u8> {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("filtered Scene temporal-off diagnostic target"),
         size: wgpu::Extent3d {
@@ -398,7 +425,7 @@ fn capture_correction_draw(
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    load: wgpu::LoadOp::Clear(clear),
                     store: wgpu::StoreOp::Store,
                 },
             })],

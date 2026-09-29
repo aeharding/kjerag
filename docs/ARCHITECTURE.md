@@ -179,6 +179,18 @@ remains a test-only same-owner reference. Separate GPU compilation can change
 floating-point rounding, so this optimization requires rendered comparison,
 not an assumed pixel-identity claim.
 
+The unqualified curved-view follow-on replaces the screen-filling triangle
+with a static indexed 128 by 128 screen grid. Vertex interpolation provides
+native cell search hints only. Each pixel still reconstructs its exact body
+ray, uses the unchanged watertight cell intersection and samples the original
+full-resolution lens planes, alpha, fusion and temporal correction. A missed
+hint returns to the complete native search, including at chart cuts and poles.
+The grid neither interpolates lens coordinates nor changes source cadence.
+Its immutable 196,608-byte index buffer is retained by the target-format draw
+pipeline. It adds no source pass, queue submission, readback or temporal work.
+This candidate is not in the installed `635e9b04` package; rendered and
+actual-player performance qualification remain required.
+
 [`panorama.rs`](../crates/render/src/direct_type2/panorama.rs) distinguishes:
 
 - `RgbPanorama`, a coordinate-neutral source-stamped gamma-RGB texture;
