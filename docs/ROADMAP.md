@@ -281,6 +281,61 @@ change installed code or add qualification claims.
 
 ## Remaining work
 
+- **Playback scheduling and audio starvation, issue
+  [#186](https://github.com/aeharding/kjerag/issues/186):** after the owner
+  restored CPU boost by reconnecting external power, a fresh installed-player
+  foreground run on the 4K display sustains consecutive source cadence without
+  accumulating lag or reporting audio underruns. This short idle-view result
+  does not establish the 240 fps target or resolve the owner's broader report.
+  A separate desktop run receives redraws at about 1 Hz: its bounded
+  video channel blocks the decoder, which also stops refilling audio despite
+  the independently running media clock. The fullscreen video in that first
+  desktop capture belonged to another app, and the measured surface was
+  1331x998. The owner reports Kjerag was visible on the 4K display; without
+  contemporaneous window-state evidence this must not be dismissed as hidden
+  playback. An already-late sequential session does not discard its
+  backlog when normal throughput returns.
+
+  Branch work gives audio its own bounded producer, preserving decoding and
+  correction arithmetic, with seek-authorized writes and explicit failure
+  and shutdown handling. The filtered X4/ONE X2 branch path now also moves
+  source admission and ordered completion out of renderer preparation into a
+  playback event owner, with absolute deadlines and coalesced readiness wakes.
+  The owner approved skipping obsolete
+  completed screen updates to catch up with audio while retaining every source's
+  stitching and color processing. No stitching inputs,
+  source cadence, color law or installed package changes in this slice.
+  The device-hidden media gate passes 137 tests with four ignored and no
+  failures, including eight new producer/seek/lifecycle regressions. The
+  starvation test uses the real bounded video-delivery loop and audio ring with
+  a controlled PCM producer, not AAC decoding or a physical output device.
+  Independent concurrency review found and corrected a startup authorization
+  race. The integrated device-hidden working-tree gate reports 1,618 passes,
+  53 ignored and no failures, including unavailable-device returns rather than
+  hardware coverage. Full workspace Clippy, formatting, source/name checks and
+  20 portable UI regressions pass. Those CPU-only gates did not qualify
+  native/Flatpak playback. Generic/spatial video
+  paths retain their existing scheduling, while audio supply is independent
+  for all live Readers.
+
+  September 29 qualification of exact source `68591c10` establishes a narrower
+  real-player win. In the same X4 session at 2256x1504, eight seconds of 1 Hz
+  compositor updates followed by restored 60 Hz causes the old package 735
+  audio underruns and almost eight seconds of draw lag. The candidate reports
+  no underruns, retains 988 contiguous completed source transactions, and
+  restored draw age stays within 16.65 ms of its pre-slowdown anchor. These are
+  authenticated draw/completion records, not physical scanout or a capacity
+  qualification. Both full app-path UI suites pass, 43 X4 and 44 ONE X2 checks,
+  with the documented isolated-service/fixture skips and inspected pictures.
+  The private candidate is now installed; owner acceptance is pending.
+
+  A separate delayed-packet test still reduces input to about 23.7 fps and
+  accumulates 3.332 seconds of video lateness while audio stays supplied.
+  Normal reading lets it catch up. This explicitly leaves slow-input buffering
+  and sustained sub-realtime processing unresolved; do not describe the new
+  scheduling as a complete A/V-sync fix. The owner was asked about holding
+  picture and sound together to refill, but that policy is not implemented or
+  accepted yet. Receipts: `scratch/playback-independent-20260927/`.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes
@@ -651,7 +706,20 @@ change installed code or add qualification claims.
 
 ## Delivery next steps
 
-### Current private installation, September 16
+### Current private installation, September 29
+
+Exact source `68591c10` adds the independent audio producer and redraw-independent
+filtered playback described above. It changes no stitching/color arithmetic.
+Its app-path camera checks passed before installation. The installed executable
+and OSTree identity match the candidate; the previous `f557ee59` bundle is
+retained for rollback. An old installer unexpectedly updated five shared runtime
+refs; all five exact pre-installation versions were subsequently restored and
+verified. Future installs must disable dependency and related-ref updates.
+Origin remains `kjerag-origin`. This is an interim private test build, not a
+merge, release, complete performance fix or owner acceptance. Exact identities
+and qualification limits are in [MERGE_READINESS.md](MERGE_READINESS.md).
+
+### Previous private installation, September 16
 
 The installed private test Flatpak was built from `f557ee59`, whose tree is
 identical to merged main `748ea008`. Relative to the previous `1d5e9e46`

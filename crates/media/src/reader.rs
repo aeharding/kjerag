@@ -33,6 +33,8 @@ use std::time::Duration;
 
 use ffmpeg_next as ff;
 
+use super::audio::AudioEpoch;
+use super::audio_worker::{AudioControl, AudioWorker};
 use super::capture::{Opened, agreed_samples};
 use super::pairing::{Alignment, alignment};
 use super::sound::Sound;
@@ -303,8 +305,9 @@ pub struct Reader {
     /// The capture's sound, when it has one and a device took it. It carries
     /// a demuxer of its own over [`SOUND_SOURCE`]'s file: a real capture's
     /// interleave will not let it share one, and the three seconds of silence
-    /// that proved it are issue #97 ([`Track`]).
-    track: Option<Track>,
+    /// that proved it are issue #97 ([`Track`]). Its producer is independent
+    /// too: bounded video delivery must not stop audio refill.
+    track: Option<AudioWorker>,
     timing: Timing,
     size: Size,
     /// How the planes of every frame this hands out are written. One answer
@@ -487,8 +490,14 @@ impl Reader {
         let Some(source) = self.sources.get(SOUND_SOURCE) else {
             return Ok(self);
         };
-        self.track = Track::open(&source.path, sound.pipe(), sound.rate(), sound.channels())?;
+        self.track = Track::open(&source.path, sound.pipe(), sound.rate(), sound.channels())?
+            .map(|track| AudioWorker::new(track, sound.pipe()))
+            .transpose()?;
         Ok(self)
+    }
+
+    pub(crate) fn audio_control(&self) -> Option<AudioControl> {
+        self.track.as_ref().map(AudioWorker::control)
     }
 
     /// The sample rate of the capture's audio stream, or `None` for one with
@@ -582,12 +591,10 @@ impl Reader {
     /// reader's own 21.
     pub fn read_until(&mut self, mut interrupted: impl FnMut() -> bool) -> Fallible<Read> {
         loop {
-            // Before the pictures, and on the way past every one of them: the
-            // sound reads on its own demuxer now, and this is what turns it
-            // (issue #97). Once per pair is the slowest this can happen, and
-            // a pair is 33 ms against a ring holding 500.
-            if let Some(track) = &mut self.track {
-                track.pump()?;
+            // Audio refills independently, including while video delivery is
+            // blocked. Keep its underlying failure on the same error path.
+            if let Some(track) = &self.track {
+                track.check()?;
             }
             if let Some(frames) = self.take()? {
                 return Ok(Read::Frames(frames));
@@ -630,6 +637,15 @@ impl Reader {
     /// of that table would buy nothing;
     /// `cargo run --release -p kjerag-spike --bin seek` is the measurement.
     pub fn seek(&mut self, at: Cue, accuracy: Accuracy) -> Fallible<()> {
+        self.seek_in(at, accuracy, None)
+    }
+
+    pub(crate) fn seek_in(
+        &mut self,
+        at: Cue,
+        accuracy: Accuracy,
+        audio_epoch: Option<AudioEpoch>,
+    ) -> Fallible<()> {
         // Rotate before the first mutation. A seek can fail after moving one
         // source or flushing part of the retained state; any later delivery
         // must then refuse continuity with the position this call tried to
@@ -655,8 +671,8 @@ impl Reader {
         // time. Everything already decoded is from before the seek, and a
         // scrub that leaves a tail of it playing is the thing the epoch
         // discipline exists to stop.
-        if let Some(track) = &mut self.track {
-            track.seek(target)?;
+        if let Some(track) = &self.track {
+            track.seek(target, audio_epoch)?;
         }
         self.skip_before = match accuracy {
             Accuracy::Exact => index,
@@ -680,6 +696,15 @@ impl Reader {
     /// Start a causal video replay at `video_at` while positioning the
     /// independent sound demuxer at the eventual presented target.
     pub(crate) fn replay_from(&mut self, video_at: Cue, audio_at: Cue) -> Fallible<()> {
+        self.replay_from_in(video_at, audio_at, None)
+    }
+
+    pub(crate) fn replay_from_in(
+        &mut self,
+        video_at: Cue,
+        audio_at: Cue,
+        audio_epoch: Option<AudioEpoch>,
+    ) -> Fallible<()> {
         self.decode_epoch = DecodeEpoch::new();
         let video_index = video_at.index(self.timing);
         let video_target = self.timing.time_of(video_index).as_micros() as i64;
@@ -691,9 +716,9 @@ impl Reader {
             lane.decoder.flush();
             lane.queue.clear();
         }
-        if let Some(track) = &mut self.track {
+        if let Some(track) = &self.track {
             let target = self.timing.time_of(audio_at.index(self.timing)).as_micros() as i64;
-            track.seek(target)?;
+            track.seek(target, audio_epoch)?;
         }
         self.skip_before = video_index;
         self.landing = true;

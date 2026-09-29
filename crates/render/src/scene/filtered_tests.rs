@@ -10,6 +10,91 @@ use std::io::Write;
 
 const DEADLINE: Duration = Duration::from_secs(60);
 
+#[test]
+fn x4_filtered_progress_without_redraw_retains_shown_on_terminal_failure() {
+    let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
+        return;
+    };
+    assert_progress_without_redraw(Path::new(&path));
+}
+
+#[test]
+fn one_x2_filtered_progress_without_redraw_retains_shown_on_terminal_failure() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    assert_progress_without_redraw(Path::new(&path));
+}
+
+fn assert_progress_without_redraw(path: &Path) {
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let mut scene = Scene::open(path).unwrap();
+    scene.set_muted(true);
+    scene.pause(Instant::now());
+    let first = super::tests::wait_for_new_scene_frame(&scene, None);
+    let camera = Camera::default();
+    let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    settle_filtered(&scene, &mut pipeline, &device, &queue, &first, camera, None);
+    let shown = scene.shown.get().unwrap();
+    let shown_picture = shown.complete.as_ref().unwrap().0.clone();
+    let before = capture_shown(&scene, &mut pipeline, &device, &queue, camera);
+    let capture = scene
+        .show
+        .as_ref()
+        .unwrap()
+        .filtered
+        .as_ref()
+        .unwrap()
+        .clone();
+    scene.play();
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        // No renderer preparation or draw: simulate withheld compositor
+        // callbacks while the shell handles media/worker events.
+        if let Next::Stopped(error) = scene.progress(Instant::now()) {
+            panic!("event-owned playback stopped: {error}");
+        }
+        assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+        assert!(Arc::ptr_eq(
+            &scene.shown.get().unwrap().complete.as_ref().unwrap().0,
+            &shown_picture,
+        ));
+        if capture
+            .installed_stamp()
+            .unwrap()
+            .is_some_and(|stamp| stamp.index() >= first.index() + 5)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "playback waited for a surface redraw"
+        );
+        device.poll(wgpu::PollType::Poll).unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_ne!(capture.installed_stamp().unwrap().as_ref(), Some(&first));
+    capture.fail_for_test(
+        "injected failure after undisplayed source progression",
+        false,
+    );
+    assert!(matches!(scene.progress(Instant::now()), Next::Stopped(_)));
+    prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+    assert_eq!(
+        scene
+            .diagnostic_filtered_displayed_frame()
+            .unwrap()
+            .as_ref(),
+        Some(&first)
+    );
+    let shown_map = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
+    assert_eq!(shown_map.frame(), &first);
+    let after = capture_shown(&scene, &mut pipeline, &device, &queue, camera);
+    assert_eq!(after.index, before.index);
+    assert_eq!(after.rgba, before.rgba);
+}
+
 /// Capture the selected player's actual current/filtered fields, without
 /// rebuilding either term through an offline approximation. A reported line
 /// can then be compared with the panorama boundary and the real shown view.

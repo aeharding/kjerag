@@ -740,9 +740,9 @@ press_until() {
 	return 1
 }
 
-# The last report line's presented rate: "play:  12.34 s, 27.34 fps ...".
-presented_fps() {
-	grep '^play:' "$log" | tail -1 | sed -n 's/.*, \([0-9.]*\) fps presented.*/\1/p'
+# The last report's source advance rate, not proof of visible motion.
+playback_rate() {
+	grep '^play:' "$log" | tail -1 | sed -n -E 's/.*, ([0-9.]+) (fps presented|source advances\/s).*/\1/p'
 }
 
 # Wait for a painted window before sending input. Its backdrop can paint
@@ -781,7 +781,9 @@ await_visible_playback() {
 	while [ $((SECONDS - started)) -lt "$READY" ]; do
 		alive || return 1
 		if [ "$positive" = no ] && awk '
-			/^play:/ && $4 ~ /^[0-9]+[.][0-9]+$/ && $4 + 0 > 0 && $5 == "fps" {
+			/^play:/ && $4 ~ /^[0-9]+[.][0-9]+$/ && $4 + 0 > 0 &&
+				(($5 == "fps" && $6 == "presented") ||
+				 ($5 == "source" && $6 == "advances/s")) {
 				found = 1; exit
 			}
 			END { exit !found }
@@ -935,7 +937,7 @@ with_media() {
 	if [ "$paused" = no ]; then
 		skip "space resumes (nothing paused to resume)"
 	elif press_until more_report_lines resumed -k space; then
-		pass "space resumes ($(presented_fps) fps presented)"
+		pass "space resumes ($(playback_rate) source advances/s)"
 	else
 		alive || lost "space resumes"
 		fail "space resumes" \
@@ -958,7 +960,7 @@ more_report_lines() {
 	local waited=0
 	while [ "$waited" -le $((REPORT * 2)) ]; do
 		alive || return 1
-		if [ "$(grep -c '^play:' "$log")" -gt "$reported" ] && [ "$(presented_fps)" != 0.00 ]; then
+		if [ "$(grep -c '^play:' "$log")" -gt "$reported" ] && [ -n "$(playback_rate)" ] && [ "$(playback_rate)" != 0.00 ]; then
 			return 0
 		fi
 		sleep 0.5

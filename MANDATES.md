@@ -85,6 +85,17 @@ stitching deliverable for it. A new photometric-isolation export is not part
 of this stitching deliverable. This does not exclude ordinary Studio output
 verification of the owner's reported X4 stitching defect.
 
+### Late-picture recovery, owner approval 2026-09-27
+
+The owner approved skipping outdated completed screen updates so playback can
+catch up with audio: "Yes, keep playback in sync". Every camera source must
+still be processed in order for stitching and color. This permits presentation
+to sample the latest due completed picture; it does not permit dropping solver
+inputs, reducing source/seam cadence, changing color updates, or claiming
+repeated/skipped display pictures as additional source throughput. Separate
+logical playback progression from physical window redraws, and preserve the
+exact actually shown owner for screenshots and stopped-picture access.
+
 ### Player performance target, owner clarification 2026-09-05
 
 "we need to do at least 240fps on this computer", clarified as "when I play

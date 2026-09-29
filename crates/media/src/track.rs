@@ -33,7 +33,7 @@ use std::time::Duration;
 
 use ffmpeg_next as ff;
 
-use super::audio::{Pipe, compensation};
+use super::audio::{AudioEpoch, Pipe, compensation};
 use super::{Fallible, media_time, read_only};
 
 /// Output frames the drift correction is spread over: one second. Long enough
@@ -45,7 +45,7 @@ const DISTANCE: u32 = 1;
 /// packet is 21 ms of sound and a decoder can hand over more than one at a
 /// time, so the margin is a few of them: read past it and [`Pipe::write`]
 /// would drop what it had just read.
-const HEADROOM: Duration = Duration::from_millis(100);
+pub(crate) const HEADROOM: Duration = Duration::from_millis(100);
 
 type Resampler = ff::software::resampling::Context;
 
@@ -72,12 +72,17 @@ pub struct Track {
     time_base: ff::Rational,
     start: i64,
     pipe: Pipe,
+    epoch: AudioEpoch,
     /// Interleaved scratch the planar output is woven into, kept between
     /// chunks so a packet costs no allocation.
     woven: Vec<f32>,
 }
 
 impl Track {
+    pub(crate) fn epoch(&self) -> AudioEpoch {
+        self.epoch.clone()
+    }
+
     /// Opens `path` again for its first audio stream, if it has one, to be
     /// resampled into `rate` and `channels`.
     ///
@@ -110,6 +115,7 @@ impl Track {
                 true => 0,
                 false => start,
             },
+            epoch: pipe.epoch(),
             pipe,
             woven: Vec::new(),
         }))
@@ -128,13 +134,20 @@ impl Track {
 
     /// Read sound until the ring is nearly full, and no further.
     ///
-    /// The ring is the pacing: the reader calls this once per turn of its own
-    /// loop ([`Reader::read_until`](super::Reader::read_until)), which is at
-    /// least once per pair of pictures, and it returns at once with nothing
-    /// read when there is no room. Sound the ring cannot take yet is sound
-    /// that would be dropped, and it is still in the file next time.
+    /// The retained interleave regression uses this synchronous reference.
+    /// Production performs one packet per independent producer turn.
+    #[cfg(test)]
     pub fn pump(&mut self) -> Fallible<()> {
         while !self.drained && self.pipe.room() > HEADROOM {
+            self.pump_one()?;
+        }
+        Ok(())
+    }
+
+    /// One packet per producer turn leaves seeks and shutdown interruptible
+    /// between packets, without changing decoding or resampling arithmetic.
+    pub(crate) fn pump_one(&mut self) -> Fallible<bool> {
+        if !self.drained {
             let mut packet = ff::Packet::empty();
             match packet.read(&mut self.input) {
                 // Every other stream is discarded, so this is the sound's own
@@ -149,7 +162,7 @@ impl Track {
                 Err(e) => return Err(e.into()),
             }
         }
-        Ok(())
+        Ok(self.drained)
     }
 
     /// Put the sound where a seek has put the pictures, and throw away
@@ -159,10 +172,11 @@ impl Track {
     /// [`Reader::seek`](super::Reader::seek) gives its own demuxers, so both
     /// land on the same instant. AAC frames are all keyframes, so this lands
     /// within one packet of it.
-    pub fn seek(&mut self, to: i64) -> Fallible<()> {
+    pub(crate) fn seek_in(&mut self, to: i64, epoch: AudioEpoch) -> Fallible<()> {
         self.flush();
         self.input.seek(to, ..to)?;
         self.drained = false;
+        self.epoch = epoch;
         Ok(())
     }
 
@@ -192,7 +206,6 @@ impl Track {
             let mut spill = ff::frame::Audio::new(self.format, self.rate as usize, layout);
             while matches!(resampler.flush(&mut spill), Ok(Some(_))) {}
         }
-        self.pipe.flush();
     }
 
     fn drain(&mut self) -> Fallible<()> {
@@ -204,7 +217,7 @@ impl Track {
             let through = self.through(&frame);
             self.aim(pipe.offset(), &frame)?;
             if self.weave(&frame)? {
-                pipe.write(&self.woven, through);
+                pipe.write_in(&self.epoch, &self.woven, through);
             }
         }
         Ok(())

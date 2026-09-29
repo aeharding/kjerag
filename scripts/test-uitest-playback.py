@@ -74,6 +74,7 @@ class VisiblePlaybackTest(unittest.TestCase):
             "moving_picture",
             "visible_picture",
             "await_visible_playback",
+            "playback_rate",
             "with_media",
         )
         functions = [function for name in names if (function := extract_function(source, name))]
@@ -292,6 +293,21 @@ if await_visible_playback; then echo ready; else echo not-ready; fi
             initial_log="play:       0.61 s, 1.81 fps presented in 2.0 redraws/s\n",
             capture="flat-then-video",
         )
+
+    def test_filtered_source_report_still_requires_visible_picture(self) -> None:
+        report = "play:       0.61 s, 29.97 source advances/s in 31.0 progress pumps/s\n"
+        self.assert_ready(True, initial_log=report, capture="flat-then-video")
+        self.assert_ready(False, initial_log=report, capture="flat")
+        self.assert_ready(False, initial_log=report.replace("29.97", "0.00"), capture="video")
+
+    def test_rate_parser_accepts_both_truthful_counter_labels(self) -> None:
+        for label in ("fps presented", "source advances/s"):
+            with self.subTest(label=label):
+                result = self.assert_shell(
+                    f"printf '%s\\n' 'play: 1.00 s, 29.97 {label} in 30.0 events/s' > \"$log\"\n"
+                    "playback_rate\n"
+                )
+                self.assertEqual(result.stdout.strip(), "29.97")
 
     def test_readiness_accepts_picture_then_report(self) -> None:
         self.assert_ready(

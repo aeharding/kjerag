@@ -15,12 +15,13 @@ use cosmic::iced::{Event, Point, Rectangle, mouse, window};
 use super::{Next, Scene, ScenePipeline, ScenePrimitive, Stall, Viewpoint};
 
 impl Scene {
-    /// Wake the shell when missing decoder input arrives or a due stitch
-    /// result it waited for completes.
-    /// The video clock still runs inside the redraw event, not this stream.
+    /// Coalesced source/worker events. The shell advances selected filtered
+    /// playback independently of compositor redraw delivery.
     pub fn ready_subscription(&self) -> cosmic::iced::Subscription<()> {
         cosmic::iced::Subscription::run_with(self.ready_wake(), |wake| {
-            cosmic::iced::futures::stream::unfold(wake.listen(), |mut listener| async move {
+            let listener = wake.listen();
+            wake.notify();
+            cosmic::iced::futures::stream::unfold(listener, |mut listener| async move {
                 std::future::poll_fn(|cx| listener.poll_ready(cx)).await;
                 Some(((), listener))
             })
@@ -72,7 +73,11 @@ impl<Message: From<Stall>> shader::Program<Message> for Scene {
                 if let Some(nudge) = self.take_nudge() {
                     self.steer(|viewpoint| viewpoint.nudge(nudge, aspect(bounds)));
                 }
-                tick(self, *now)
+                if self.event_playback() && self.ready_wake().listening() {
+                    None
+                } else {
+                    tick(self, *now)
+                }
             }
             // Alt-tabbing away mid-drag takes the release with it, and a grab
             // nothing can end is a camera glued to the cursor.

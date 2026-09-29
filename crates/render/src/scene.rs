@@ -59,9 +59,9 @@ use super::flow::one_xs::scalar::{
 };
 use super::flow::one_xs::temporal::BlurredBelts;
 use super::flow::one_xs_belt_gpu::{
-    FilteredCaptureFacade, PendingBlurredBelts, PreparedCorrectionDraw, ResidentCameraProfile,
-    ResidentCaptureFacade, ResidentDrain, ResidentPrepare, ResidentRetry, ResidentSceneFacade,
-    ResidentScreenshotPrepare, ResidentSubmit,
+    CorrectedFrame, FilteredCaptureFacade, PendingBlurredBelts, PreparedCorrectionDraw,
+    ResidentCameraProfile, ResidentCaptureFacade, ResidentDrain, ResidentPrepare, ResidentRetry,
+    ResidentSceneFacade, ResidentScreenshotPrepare, ResidentSubmit,
 };
 use super::flow::{Cadence, Estimate};
 use super::image_fusion::PendingOneXsFusionInputs;
@@ -220,6 +220,9 @@ pub struct Scene {
     stalled: Stalled,
     /// And what it last managed to draw of this file, for the same reason.
     shown: Shown,
+    /// Latest due complete picture, independent of the last submitted view.
+    filtered_display: Shown,
+    playback_deadline: Cell<Option<Instant>>,
     resident_refresh: Arc<AtomicBool>,
     /// Preparation found only an admitted due source waiting on its worker.
     /// The live shell subscription can wake us when that exact result commits.
@@ -1244,6 +1247,8 @@ impl Scene {
             flow: Cell::new(false),
             stalled: Stalled::default(),
             shown: Shown::default(),
+            filtered_display: Shown::default(),
+            playback_deadline: Cell::new(None),
             resident_refresh: Arc::new(AtomicBool::new(false)),
             resident_waiting: Arc::new(AtomicBool::new(false)),
             ready_wake: ReadyWake::default(),
@@ -1620,14 +1625,14 @@ impl Scene {
         let Some(shown) = self.shown.get() else {
             return Ok(None);
         };
-        if let Some(capture) = &shown.filtered {
-            let Some(installed) = capture.installed()? else {
+        if shown.filtered.is_some() {
+            let Some(installed) = shown.complete.as_ref() else {
                 return Ok(None);
             };
-            if installed.frame() != &shown.frames.stamp() {
+            if installed.0.frame() != &shown.frames.stamp() {
                 return Err("filtered stitch map differs from the displayed Scene frame".into());
             }
-            return installed.diagnostic_map().map(Some);
+            return installed.0.diagnostic_map().map(Some);
         }
         let Some(capture) = shown.resident_one_xs.clone() else {
             return Ok(None);
@@ -1642,14 +1647,14 @@ impl Scene {
         let Some(shown) = self.shown.get() else {
             return Ok(None);
         };
-        let Some(capture) = shown.filtered.as_ref() else {
+        let Some(_) = shown.filtered.as_ref() else {
             return Ok(None);
         };
-        let Some(installed) = capture.installed()? else {
+        let Some(installed) = shown.complete.as_ref() else {
             return Ok(None);
         };
         let shown_stamp = shown.frames.stamp();
-        if installed.frame() != &shown_stamp {
+        if installed.0.frame() != &shown_stamp {
             return Err("filtered panorama differs from the displayed Scene frame".into());
         }
         Ok(Some(shown_stamp))
@@ -1659,6 +1664,9 @@ impl Scene {
     /// come back. Call it on every redraw: this is the presentation clock's
     /// only tick.
     pub fn pump(&self, now: Instant) -> Next {
+        if self.event_playback() {
+            return self.progress(now);
+        }
         let next = self.pump_inner(now);
         let full = self.draw_retirement_full.load(AtomicOrdering::Acquire);
         if matches!(next, Next::At(due) if due <= now)
@@ -1860,6 +1868,7 @@ impl Scene {
     }
 
     pub fn play(&mut self) {
+        self.ready_wake.notify();
         if let Some(show) = &self.show
             && let Some(replay) = show.replay.borrow_mut().as_mut()
         {
@@ -1872,6 +1881,8 @@ impl Scene {
     }
 
     pub fn pause(&mut self, now: Instant) {
+        self.playback_deadline.set(None);
+        self.ready_wake.notify();
         if let Some(show) = &self.show
             && let Some(replay) = show.replay.borrow_mut().as_mut()
         {
@@ -1886,6 +1897,8 @@ impl Scene {
     /// Move the picture, to a keyframe while a drag is still going and to the
     /// frame itself when it ends (issue #5).
     pub fn seek(&mut self, to: Duration, accuracy: Accuracy) {
+        self.playback_deadline.set(None);
+        self.ready_wake.notify();
         if self.stalled.stopped() {
             return;
         }
@@ -1909,6 +1922,8 @@ impl Scene {
 
     /// One frame forward or back.
     pub fn step(&mut self, now: Instant, frames: i64) {
+        self.playback_deadline.set(None);
+        self.ready_wake.notify();
         if self.stalled.stopped() {
             return;
         }
@@ -2226,18 +2241,20 @@ impl Scene {
         };
         ScenePrimitive {
             camera,
-            view: self.show.as_ref().and_then(|show| show.view(held)),
+            view: if self.event_playback() {
+                self.filtered_display.get().map(|mut view| {
+                    if let Some(show) = self.show.as_ref() {
+                        view.held = show.view_for(view.frames.clone(), held).held;
+                    }
+                    view
+                })
+            } else {
+                self.show.as_ref().and_then(|show| show.view(held))
+            },
             resident_next: self.show.as_ref().and_then(|show| show.next_view(held, 0)),
             resident_next_after: self.show.as_ref().and_then(|show| show.next_view(held, 1)),
             resident_capture: self.show.as_ref().and_then(|show| show.one_xs.clone()),
             filtered_capture: self.show.as_ref().and_then(|show| show.filtered.clone()),
-            filtered_ahead: self.show.as_ref().map_or_else(Vec::new, |show| {
-                (0..6).filter_map(|ahead| show.prepared_view(held, ahead)).collect()
-            }),
-            filtered_eof: self.show.as_ref().is_some_and(|show| {
-                show.filtered.is_some()
-                    && matches!(&show.playing.borrow().source, Source::Live(player) if player.is_input_exhausted())
-            }),
             resident_target: self.show.as_ref().and_then(|show| {
                 show.replay
                     .borrow()
@@ -2352,6 +2369,7 @@ impl Show {
             one_xs: None,
             resident_one_xs: self.one_xs.clone(),
             filtered: self.filtered.clone(),
+            complete: None,
             one_xs_profile: self.one_xs_profile.clone(),
         }
     }
@@ -2742,8 +2760,6 @@ pub struct ScenePrimitive {
     /// Current live lineage even while replay has cleared its offered frame.
     resident_capture: Option<ResidentCaptureFacade>,
     filtered_capture: Option<FilteredCaptureFacade>,
-    filtered_ahead: Vec<View>,
-    filtered_eof: bool,
     /// Replay input is not a new displayed position until this target lands.
     resident_target: Option<u64>,
     /// How the pass samples a magnified picture, which is a property of the
@@ -2794,7 +2810,20 @@ struct View {
     one_xs: Option<Arc<OneXsCapture>>,
     resident_one_xs: Option<ResidentCaptureFacade>,
     filtered: Option<FilteredCaptureFacade>,
+    complete: Option<CompleteFiltered>,
     one_xs_profile: Option<Arc<ResidentCameraProfile>>,
+}
+
+#[derive(Clone)]
+struct CompleteFiltered(Arc<CorrectedFrame>);
+
+impl std::fmt::Debug for CompleteFiltered {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("CompleteFiltered")
+            .field(self.0.frame())
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -11216,7 +11245,7 @@ mod tests {
                 let video_deadline = matches!(next, Next::At(due)
                     if scene.player(Player::is_playing) == Some(true)
                         && scene.player(Player::next_due) == Some(Some(due)));
-                if !video_deadline {
+                if !video_deadline && !scene.event_playback() {
                     assert_eq!(
                         next,
                         if scene.draw_retirement_full.load(AtomicOrdering::Acquire) {

@@ -17,7 +17,9 @@ use std::sync::{Arc, Mutex, mpsc};
 use super::corrected::{CorrectionInput, CorrectionSequence};
 use super::filtered_capture::FilteredCaptureInner;
 use super::native_lifecycle_event;
+use super::resident_worker::WorkerProgressWake;
 use crate::Fallible;
+use crate::ready_wake::ReadyWake;
 
 pub(super) enum TemporalJob {
     Push {
@@ -43,6 +45,7 @@ pub(super) struct TemporalEpoch {
 
 pub(super) struct TemporalWorker {
     jobs: mpsc::SyncSender<ExecutorJob>,
+    progress: Arc<WorkerProgressWake>,
 }
 
 impl TemporalWorker {
@@ -52,10 +55,13 @@ impl TemporalWorker {
         // which is deliberate cross-epoch backpressure rather than another
         // temporal thread or an unbounded collection of histories.
         let (jobs, incoming) = mpsc::sync_channel::<ExecutorJob>(1);
+        let progress = Arc::new(WorkerProgressWake::default());
+        let running_progress = progress.clone();
         let thread = std::thread::Builder::new()
             .name("kjerag-temporal".into())
             .spawn(move || {
                 for job in incoming {
+                    running_progress.notify();
                     match job {
                         ExecutorJob::Run(job) => {
                             let owner = job.owner();
@@ -69,12 +75,17 @@ impl TemporalWorker {
                             let _ = release.recv();
                         }
                     }
+                    running_progress.notify();
                 }
             })?;
         // The sender owns shutdown. Jobs retain their capture only while
         // queued or executing, so dropping the facade cannot form a cycle.
         drop(thread);
-        Ok(Self { jobs })
+        Ok(Self { jobs, progress })
+    }
+
+    pub(super) fn set_progress_wake(&self, wake: &ReadyWake) {
+        self.progress.set(wake);
     }
 
     pub(super) fn send(&self, job: TemporalJob) -> Fallible<()> {
