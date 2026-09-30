@@ -1077,6 +1077,16 @@ verdict. Exact identities and limits are in [MERGE_READINESS.md](MERGE_READINESS
 
 The owner has since rejected this build's network seeking and ongoing hitches.
 The request-sized byte-cache follow-up above is not installed or accepted yet.
+Its clean SDK long NAS pan still accumulates 4.45 seconds of delay, whereas
+the same local-file control holds source cadence with worst 38.8 ms lateness.
+The owner's requested processing-disabled control also fails over NAS: both
+lenses and audio remain active, but the raw fisheye display has no seam solver,
+color matching, temporal filter or projection. It runs around 25 to 27 fps and
+accumulates 6.53 seconds of delay. The defect therefore does not require those
+processing stages; investigate input/demux/decode waits before changing stitch
+arithmetic. This diagnostic is not a speed or capacity qualification, and its
+temporary bypass has been removed. Details and limits are in
+[the network-input follow-up](research/network-file-buffering-20260930.md).
 
 ### Previous source-completion private installation, September 30
 

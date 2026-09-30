@@ -169,3 +169,45 @@ does not yet establish real NAS seeking or smoothness.
 Private receipts: `scratch/playback-independent-20260927/runtime/installed-nas-seek-hitches-01`
 through `-03`, with separate health directories. The first failing CPU case was
 run before changing production cache code.
+
+## Longer controls and the owner's processing-bypass test
+
+Clean SDK source `8123893c` completes the three valid pasted seeks in about
+1.78, 2.03 and 0.95 seconds. The first two are shorter than the installed
+diagnostic above, but the runs are not paired cold-cache conditions. Audio-side
+backend bytes fall substantially with smaller requests. A subsequent long
+2256x1504, 60 Hz NAS pan still falls behind: later source rates are 17.8 to
+28.4/s, with worst lateness growing to 4.45 seconds. The identical SDK and view
+against the authenticated local counterpart maintain approximately 30 sources/s
+through the same long pan, with worst lateness staying at 38.8 ms. These runs
+have no new kernel entries or postflight memory pressure. `8123893c` is not
+installed or a completed network fix; the short seek/idle success is insufficient.
+
+At the owner's request, a temporary native diagnostic removes the resident
+profile and therefore the seam solver, photometric matching and temporal filter.
+It also bypasses generic band measurement and optical flow, and replaces the
+projection shader with direct luma/chroma sampling of lens 0. Both actual camera
+streams still read and hardware-decode, normal silent-output audio remains active,
+and sequential presentation prevents dropping source pictures to conceal slow
+input. Actual output inspection confirms a raw fisheye image, not a corrected
+panorama. The same reported NAS cue and long pan run at about 25 to 27 fps after
+startup, with repeated empty decoded-delivery waits and worst lateness growing
+to 6.53 seconds. Audio has zero underruns. The player exits normally and the
+postflight has no new kernel entries or memory pressure.
+
+This establishes that the network defect can occur without stitching/color/
+temporal processing. It does not establish the precise backend or decode cause,
+exclude additional processing bottlenecks, compare matched native/SDK speed,
+or qualify 240 fps. The diagnostic retains the two parked owner color edits,
+but constructs no color-processing owner. The resident-only capacity parser
+cannot qualify its deliberately generic draw route and fails; this is a causal
+control, not a passed playback qualification. Its private source patch and
+binary are retained; the bypass is removed from the worktree and the ordinary
+native renderer rebuilt. The installed Flatpak remains unchanged.
+
+Private receipts: `runtime/sdk-nas-sparse-read-seeks-01`,
+`runtime/sdk-nas-sparse-read-pan-01`, `runtime/sdk-local-sparse-read-pan-01`,
+and `runtime/native-nas-unprocessed-pan-01` under
+`scratch/playback-independent-20260927/`, with separate health directories.
+`unprocessed-control.patch` records the temporary source change; its binary SHA
+is `5d3d17b7b53f5a222071be9a2c193c8b83a216305aa5d4a86f3ff7f6bbb26645`.
