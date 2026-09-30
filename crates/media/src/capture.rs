@@ -9,7 +9,7 @@ use super::{Fallible, Samples, Size, read_only};
 /// A container opened and looked at, before any decoder exists.
 pub(super) struct Opened {
     pub(super) path: PathBuf,
-    pub(super) input: ff::format::context::Input,
+    pub(super) input: super::file_input::Input,
     /// One per video stream, in container order.
     pub(super) videos: Vec<Video>,
     pub(super) time_base: ff::Rational,
@@ -152,7 +152,7 @@ impl Opened {
     }
 
     pub(super) fn new(path: &Path) -> Fallible<Self> {
-        let mut input = ff::format::input(&path)?;
+        let mut input = super::file_input::Input::open(path)?;
         let videos: Vec<Video> = input
             .streams()
             // The cover an Osmo attaches to its container is not a lens, and

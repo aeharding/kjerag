@@ -916,7 +916,7 @@ impl Opened {
                 let rate = unsafe { (*stream.parameters().as_ptr()).sample_rate };
                 u32::try_from(rate).ok().filter(|rate| *rate > 0)
             });
-        let input = crate::file_input::Input::from_opened(self.input, &self.path)?;
+        let input = self.input;
         let file = input.source();
         Ok(Source {
             path: self.path,

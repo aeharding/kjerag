@@ -17,6 +17,7 @@ The complete pre-release experiment chronology is preserved in
 | Temporal filtering, motion and historical GPU experiments | [Temporal fusion](studio-image-fusion-temporal-602.md) |
 | Camera ISO and effective denoise parameters | [ISO decoding](studio-denoise-iso-602.md), [parameter selection](studio-denoise-config-602.md) |
 | Decoder/map ownership, submission and retirement invariants | [Root capture](gpu-root-capture-state-qualification.md), [drawable](gpu-drawable-install-qualification.md), [retirement](gpu-nonblocking-retirement-qualification.md), [draw retirement](gpu-draw-retirement-qualification.md) |
+| Network playback, shared file buffering and demux I/O ownership | [September 30 input controls](network-file-buffering-20260930.md) |
 | Exact motion/map context and asynchronous validity | [Motion context](gpu-motion-context-qualification.md), [final map context](gpu-final-map-context-qualification.md), [validity gate](gpu-async-validity-gate-qualification.md) |
 | Camera metadata/calibration fixtures | [INSV format](insv-format.md), [X4 Air fixture](x4air-calibration.json), [ONE X2 fixture](onex2-calibration.json), [OSV format](osv-format.md) |
 | Original stack feasibility and rejected alternatives | [GPU feasibility](gpu-pipeline.md), [Linux landscape](linux-landscape.md) |

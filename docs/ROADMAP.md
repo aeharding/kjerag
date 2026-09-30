@@ -650,6 +650,19 @@ change installed code or add qualification claims.
   packet workers and raw callback errors. Clean-source sandbox qualification
   and installation remain due.
   This is not yet an accepted network fix or 240 fps qualification.
+
+  The first clean `2e4466a8` package also holds NAS cadence after startup,
+  but its X4 UI suite crashes inside libavformat on a pasted reopen. Installation
+  is held. MOV retains per-stream pointers to its original AVIO context; the
+  post-inspection context replacement is unsafe and removed. Capture inspection
+  now opens on its final custom IO, shared by Reader and synchronous Walk.
+  Requalification of this corrected ownership path is required before delivery.
+  Corrected ownership passes all 1,645 workspace CPU tests, 53 ignored, and
+  the remaining CPU gates. The new allocation-churn regression repeats open,
+  seek and close 32 times with other AVIO contexts alive. Native NAS playback
+  again reaches 30 sources/s with no audio gaps or new kernel entries, but
+  startup reaches 1844.2 ms worst lateness and catches up before steady playback;
+  its whole-run cadence parser fails. Clean SDK/UI qualification remains due.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes

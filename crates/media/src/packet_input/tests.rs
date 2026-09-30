@@ -194,7 +194,7 @@ fn real_demux_packets_and_seek_results_are_unchanged_by_prefetch() {
     let fixture = crate::capture_fixture::FixtureDir::new();
     let path = fixture.write("packet-input.insv", crate::Size::new(32, 16), 129, 0);
     let mut reference = ff::format::input(&path).unwrap();
-    let input = Input::from_opened(ff::format::input(&path).unwrap(), &path).unwrap();
+    let input = Input::open(&path).unwrap();
     let mut cached = PacketInput::new(input, small_limits()).unwrap();
     for target in [None, Some(1_500_000), Some(0)] {
         if let Some(to) = target {

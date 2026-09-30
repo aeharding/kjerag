@@ -228,33 +228,10 @@ pub(crate) struct Input {
 }
 
 impl Input {
-    pub(crate) fn from_opened(
-        mut format: ff::format::context::Input,
-        path: &Path,
-    ) -> Fallible<Self> {
-        let source = SharedFile::open(path)?;
-        let context = unsafe { format.as_mut_ptr() };
-        let mut previous = unsafe { (*context).pb };
-        if previous.is_null() {
-            return Err("input has no byte stream".into());
-        }
-        let at = unsafe { ff::ffi::avio_seek(previous, 0, 1) };
-        if at < 0 {
-            return Err(ff::Error::from(at as c_int).into());
-        }
-        unsafe {
-            (*context).pb = ptr::null_mut();
-        }
-        let result = unsafe { ff::ffi::avio_closep(&mut previous) };
-        if result < 0 {
-            return Err(ff::Error::from(result).into());
-        }
-        let io = Io::new(source, at as u64)?;
-        unsafe {
-            (*context).pb = io.context;
-            (*context).flags |= ff::ffi::AVFMT_FLAG_CUSTOM_IO;
-        }
-        Ok(Self { format, io })
+    pub(crate) fn open(path: &Path) -> Fallible<Self> {
+        // MOV retains per-stream AVIO pointers during header inspection.
+        // Install custom IO before opening, never replace an opened input's pb.
+        Self::open_shared(SharedFile::open(path)?)
     }
 
     pub(crate) fn source(&self) -> Arc<SharedFile> {

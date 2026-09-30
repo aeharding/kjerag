@@ -37,10 +37,10 @@ network-only user setting, or proxy requirement.
 
 Preserving independent demuxers is important: issue #97 measured a 67 MiB
 interleave gap where one shared audio/video demux timeline delivered sound too
-late. Sharing bytes does not restore that coupling. FFmpeg's normal input is
-transferred after inspection at its exact AVIO byte position. Its buffered
-packets and stream metadata are retained. Format ownership closes before
-custom AVIO buffer/cursor ownership. Offline Walk stays on normal FFmpeg input.
+late. Sharing bytes does not restore that coupling. Custom AVIO is installed
+before opening and inspecting the container, never substituted after inspection.
+Format ownership closes before custom AVIO buffer/cursor ownership. Reader and
+Walk share this capture input; Walk retains synchronous packet delivery.
 
 ## Qualification so far
 
@@ -69,3 +69,24 @@ Private receipts are under
 `scratch/playback-independent-20260927/runtime/installed-nas-*-control-01`,
 `installed-nas-source-completion-repro-01`, `native-nas-shared-file-01` and
 `native-nas-shared-file-later-01`, with separate health captures for each run.
+
+## First clean candidate rejected during UI qualification
+
+The clean `2e4466a8` package holds source cadence in the reported NAS region
+after startup, with zero audio underruns and no growing delay. However, its X4
+UI suite crashes in libavformat on a later pasted reopen. It was not installed.
+The first constructor substituted AVIO after inspection. FFmpeg's MOV demuxer
+retains the previous pointer in each stream (`mov.c`, `mov_read_trak`), making
+that substitution unsafe even though the original small MPEG-4 fixtures pass.
+The constructor is removed, rather than relying on allocation address reuse.
+All capture inspection now begins on its final custom IO. Requalification and
+an allocation-churn reopen regression remain required.
+Source: [FFmpeg 7.1 MOV demuxer](https://github.com/FFmpeg/FFmpeg/blob/n7.1.3/libavformat/mov.c).
+
+Corrected ownership passes all 1,645 workspace tests, 53 ignored, and Clippy,
+formatting, vendor warnings, naming and source-list gates. A new regression
+repeats open/seek/close 32 times while other AVIO allocations stay alive. The
+native reported-view NAS run still reaches approximately 30 sources/s without
+audio gaps or new kernel entries after startup. Startup worst lateness is
+1844.2 ms; the catch-up interval reaches 40.8 sources/s, so its whole-run cadence
+parser fails. This is not a hitch-free pass. Clean SDK qualification remains due.

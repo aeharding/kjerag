@@ -95,7 +95,7 @@ impl Track {
     /// silently rather than by refusing to open.
     #[cfg(test)]
     pub fn open(path: &Path, pipe: Pipe, rate: u32, channels: usize) -> Fallible<Option<Self>> {
-        let input = Input::from_opened(ff::format::input(&path)?, path)?;
+        let input = Input::open(path)?;
         Self::from_input(input, pipe, rate, channels)
     }
 

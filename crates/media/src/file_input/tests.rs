@@ -97,7 +97,7 @@ fn custom_io_and_reopened_demux_preserve_original_packets_and_independent_seeks(
     let fixture = FixtureDir::new();
     let path = fixture.write("two-cursors.insv", crate::Size::new(32, 16), 129, 0);
     let mut original = ff::format::input(&path).unwrap();
-    let mut first = Input::from_opened(ff::format::input(&path).unwrap(), &path).unwrap();
+    let mut first = Input::open(&path).unwrap();
     let mut second = Input::open_shared(first.source()).unwrap();
     for target in [None, Some(1_500_000), Some(0)] {
         if let Some(to) = target {
@@ -131,7 +131,7 @@ fn custom_io_and_reopened_demux_preserve_original_packets_and_independent_seeks(
 fn reopened_demux_reads_the_retained_file_not_a_replaced_path() {
     let fixture = FixtureDir::new();
     let path = fixture.write("retained.insv", crate::Size::new(32, 16), 129, 0);
-    let mut first = Input::from_opened(ff::format::input(&path).unwrap(), &path).unwrap();
+    let mut first = Input::open(&path).unwrap();
     std::fs::rename(&path, path.with_extension("original")).unwrap();
     fixture.write("retained.insv", crate::Size::new(64, 32), 3, 0);
     let mut second = Input::open_shared(first.source()).unwrap();
@@ -164,6 +164,33 @@ fn callback_read_failure_remains_the_underlying_error() {
         Some("input byte cache is poisoned")
     );
     assert!(io.failure().is_none());
+}
+
+#[test]
+fn repeated_open_seek_and_close_keeps_demux_io_owned_through_allocation_churn() {
+    let fixture = FixtureDir::new();
+    let path = fixture.write("reopen.insv", crate::Size::new(32, 16), 129, 0);
+    for round in 0..32 {
+        let mut input = Input::open(&path).unwrap();
+        // Keep other AVIO allocations alive. Correctness must not depend on
+        // the allocator returning the address of a previously closed context.
+        let churn: Vec<_> = (0..8)
+            .map(|_| Io::new(input.source(), 0).unwrap())
+            .collect();
+        let to = if round % 2 == 0 { 1_500_000 } else { 0 };
+        input.seek(to, ..to).unwrap();
+        let mut reference = ff::format::input(&path).unwrap();
+        reference.seek(to, ..to).unwrap();
+        for _ in 0..10 {
+            let mut expected = ff::Packet::empty();
+            let mut actual = ff::Packet::empty();
+            expected.read(&mut reference).unwrap();
+            actual.read(&mut input).unwrap();
+            assert_packet(&expected, &actual);
+        }
+        drop(input);
+        drop(churn);
+    }
 }
 
 #[test]
@@ -211,7 +238,7 @@ fn shared_audio_and_video_packet_workers_keep_independent_timelines() {
         "{}",
         String::from_utf8_lossy(&generated.stderr)
     );
-    let mut video = Input::from_opened(ff::format::input(&path).unwrap(), &path).unwrap();
+    let mut video = Input::open(&path).unwrap();
     let mut audio = Input::open_shared(video.source()).unwrap();
     let mut reference = ff::format::input(&path).unwrap();
     crate::read_only(&mut video, &[0]);

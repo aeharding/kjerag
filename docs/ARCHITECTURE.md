@@ -509,8 +509,10 @@ reuse bytes without retaining more decoded surfaces or PCM. Independent seeks
 do not reposition the other cursor or clear its packet queue. The cache lock
 is confined to the demux workers, never the UI or sound-device callback.
 Closing leaves the one file alive until both demuxers finish any pending I/O.
-The normal opened container is transferred at its exact current byte position;
-its buffered packets and metadata remain intact. Walk retains normal FFmpeg I/O.
+Custom IO is installed before container inspection, never substituted afterward:
+MOV retains private per-stream AVIO pointers while reading the header. Reader
+and offline Walk share capture inspection and this input ownership, while Walk
+retains synchronous packet delivery. Normal FFmpeg input is the CPU byte oracle.
 CPU regressions compare packet bytes, timestamps, positions and flags with normal
 FFmpeg reads, including two real audio/video workers with independent seeks.
 That synthetic audio/video fixture uses the `ffmpeg` executable, installed
