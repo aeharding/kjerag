@@ -90,3 +90,32 @@ native reported-view NAS run still reaches approximately 30 sources/s without
 audio gaps or new kernel entries after startup. Startup worst lateness is
 1844.2 ms; the catch-up interval reaches 40.8 sources/s, so its whole-run cadence
 parser fails. This is not a hitch-free pass. Clean SDK qualification remains due.
+
+## Corrected package qualification and installation
+
+Exact source `591cf695` passes all eight CI jobs, the clean SDK build and both
+app-path camera suites: 43 X4 and 44 ONE X2 checks, zero failures. The real
+pasted-reopen path that crashed the first candidate now passes. Existing
+isolated-service/fixture skips remain. Both camera motion captures were inspected.
+The real exported bundle passes a private import and binary/metadata/license
+audit; this is an unsigned local test, not release-signature qualification.
+
+Normal-audio 2256x1504 60 Hz NAS pan at the reported cue settles at 30 sources/s,
+zero audio underruns and no growing delay after startup. Startup worst lateness
+is 1238.9 ms. Another region, 1481.413 seconds, maintains approximately 30
+sources/s with worst 36.9 ms lateness and zero underruns. The qualified package
+is installed; origin, permissions and shared runtimes are unchanged, with the
+authenticated `dd908324` package retained for rollback.
+
+The actual installed NAS run still has startup spikes, reaching 2284.5 ms picture
+lateness before settling at 30 sources/s with zero audio gaps. Its whole-run
+cadence parser fails. Several early draw-completion receipts span 100 to 235 ms;
+these alone do not distinguish execution, submission, callback or scheduling
+delays. The installed ONE X2 riser run reaches 30 sources/s, worst 39.8 ms and
+zero underruns. No new kernel entries or postflight pressure in these corrected
+runs. Startup is unresolved, not an accepted delay. Owner retest and 240 fps
+capacity remain open; no merge or release.
+
+Package identities and qualification limits are in
+[MERGE_READINESS](../MERGE_READINESS.md). Initial native receipts from the unsafe
+constructor are historical diagnostics, not qualification of the corrected code.

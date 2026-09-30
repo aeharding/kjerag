@@ -663,6 +663,20 @@ change installed code or add qualification claims.
   again reaches 30 sources/s with no audio gaps or new kernel entries, but
   startup reaches 1844.2 ms worst lateness and catches up before steady playback;
   its whole-run cadence parser fails. Clean SDK/UI qualification remains due.
+  Exact corrected source `591cf695` subsequently passes the clean SDK build,
+  43 X4 and 44 ONE X2 app-path UI checks, zero failures, including the reopen
+  that crashed the first candidate. All eight CI jobs pass. The exported bundle
+  passes private payload authentication. Normal-audio SDK NAS checks settle at
+  30 sources/s at both 1281.413 and 1481.413 seconds, without audio gaps or growing
+  delay after startup. The first reaches 1238.9 ms worst lateness; the later
+  reaches only 36.9 ms. The package is installed with origin, permissions and
+  shared runtimes unchanged; the authenticated `dd908324` rollback is retained.
+  Actual-installed NAS playback also settles at 30 sources/s, zero audio gaps,
+  but startup reaches 2284.5 ms and its whole-run cadence parser fails. The
+  installed ONE X2 riser smoke reaches 30 sources/s, worst 39.8 ms and zero gaps.
+  No new kernel entries or postflight pressure in these corrected runs. This is
+  a steady-playback input improvement, not a hitch-free or 240 fps verdict.
+  Owner network retesting, startup spikes and capacity remain open. No merge.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes
@@ -1035,7 +1049,22 @@ change installed code or add qualification claims.
 
 ### Current private installation, September 30
 
-Source `dd908324` is installed as an interim test Flatpak after separate clean
+Exact source `591cf695` is installed from draft
+[PR #241](https://github.com/aeharding/kjerag/pull/241). It shares one bounded
+file-byte cache beneath independent audio/video demuxers, created before capture
+inspection. It includes the prior source-completion/native-mesh work, excluding
+the two parked color edits. Both clean-source SDK camera suites, all eight CI
+jobs and the actual bundle audit pass. Normal-audio NAS playback now reaches
+30 sources/s after startup in the tested regions; installed startup still
+reaches 2.3 seconds of picture lateness before catching up. Actual installed
+ONE X2 playback reaches recorded cadence without growing delay or audio gaps.
+The `dd908324` rollback is retained. Origin, permissions and shared runtimes
+are unchanged. This is not a hitch-free, 240 fps, owner-accepted, merge or release
+verdict. Exact identities and limits are in [MERGE_READINESS.md](MERGE_READINESS.md).
+
+### Previous source-completion private installation, September 30
+
+Source `dd908324` was installed as an interim test Flatpak after separate clean
 SDK app-path suites pass 43 X4 and 44 ONE X2 checks, zero failures, and the actual
 bundle passes a private payload import/audit. It brings the source-specific
 completion and finite curved-mesh changes above, not the parked periodic-color

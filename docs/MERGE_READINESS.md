@@ -56,7 +56,55 @@ The local test bundle is unsigned, not a release-signature qualification.
 
 ## Current private test package, September 30
 
-The clean `dd908324` package described above is now installed. Its archived
+Source `591cf695c5a1142732d4b60fd8e9cbeec1d2b0c8`, draft
+[PR #241](https://github.com/aeharding/kjerag/pull/241), is installed. Audio and
+video keep independent demux timelines over one bounded shared file-byte cache.
+Custom IO exists before capture inspection. The first `2e4466a8` candidate's
+post-inspection AVIO replacement was unsafe; its X4 pasted-reopen crash rejected
+it before installation. Do not install that superseded package or treat its
+native measurements as qualification. The corrected candidate passes that exact
+reopen path and the repeated-open allocation-churn regression.
+
+- Installed OSTree: `82a418bb0c1688b1a9f1ead5c76e4e3421c786773cc01819d6e9e6056a1aa063`.
+- Executable SHA256: `5028b0917d86ea92f443685812a1399d1e3ca7ed9e6e4f28713d623dd9b7452e`.
+- Bundle SHA256: `6ac6bb68008ada1cdde16c61956a213b8795aada27afa8aa6602c02d5f58818f`.
+
+Device-hidden CPU gates pass 1,645 workspace tests, 53 ignored, plus Clippy,
+formatting, vendor warnings, naming and source-list checks. All eight CI jobs
+pass on that source. The clean SDK archive excludes the two preserved parked
+color edits. Its app-path suites pass 43 X4 and 44 ONE X2 checks, zero failures,
+with the existing isolated-service/fixture skips. Both camera motion captures
+were inspected. The shader/Rust-twin helper is native, not a clean SDK shader
+test. The real exported bundle passes a private, device-hidden import and
+executable/metadata/license audit. This local test bundle is unsigned.
+
+Normal-audio 2256x1504 60 Hz NAS pan at 1281.413 seconds settles at 30 sources/s,
+zero underruns and no growing delay after startup, but worst startup lateness
+reaches 1238.9 ms. A different NAS section, 1481.413 seconds, holds recorded
+cadence with worst 36.9 ms lateness and zero underruns. Neither result establishes
+hitch-free playback, all-file coverage or 240 fps capacity.
+
+The actual installed app, with no app-path override, also settles at 30 sources/s
+on the reported NAS view, zero audio underruns. Startup still reaches 2284.5 ms
+picture lateness and catches up during subsequent intervals; the whole-run
+cadence parser fails. Existing trace receipts show several 100 to 235 ms draw
+completion spikes early in that run, but do not isolate GPU execution from
+submission, callback delivery or scheduling. Startup remains a defect, not an
+accepted delay. Installed ONE X2 riser pan settles at 30 sources/s, worst 39.8 ms
+lateness and zero audio underruns. No new kernel entries or scoped OOM events;
+postflight pressure averages are zero in the corrected playback/UI runs.
+
+Installation disables dependency/related-ref/pull updates. Origin, permissions
+and all recorded shared runtime identities remain unchanged. The authenticated
+`dd908324` package is retained for rollback. Owner network retesting remains the
+merge gate. No merge, release, general performance fix or 240 fps pass is claimed.
+Package: `scratch/flatpak-delivery-591cf695/`; evidence and the dated input
+controls: `scratch/playback-independent-20260927/` and
+[network buffering record](research/network-file-buffering-20260930.md).
+
+## Previous source-completion private test package, September 30
+
+The clean `dd908324` package described above was installed. Its archived
 source excludes the two parked periodic-color edits present in the accepted
 native preview; both dirty files remain preserved. Exact package identities:
 
