@@ -194,14 +194,20 @@ fn real_demux_packets_and_seek_results_are_unchanged_by_prefetch() {
     let fixture = crate::capture_fixture::FixtureDir::new();
     let path = fixture.write("packet-input.insv", crate::Size::new(32, 16), 129, 0);
     let mut reference = ff::format::input(&path).unwrap();
-    let mut cached = PacketInput::new(ff::format::input(&path).unwrap(), small_limits()).unwrap();
+    let input = Input::from_opened(ff::format::input(&path).unwrap(), &path).unwrap();
+    let mut cached = PacketInput::new(input, small_limits()).unwrap();
     for target in [None, Some(1_500_000), Some(0)] {
         if let Some(to) = target {
-            Demux::seek(&mut reference, to).unwrap();
+            reference.seek(to, ..to).unwrap();
             cached.seek(to).unwrap();
         }
         loop {
-            let expected = Demux::read(&mut reference).unwrap();
+            let mut packet = ff::Packet::empty();
+            let expected = match packet.read(&mut reference) {
+                Ok(()) => Some(packet),
+                Err(ff::Error::Eof) => None,
+                Err(error) => panic!("reference packet read failed: {error}"),
+            };
             let actual = cached.read().unwrap();
             match (expected, actual) {
                 (Some(expected), Some(actual)) => {

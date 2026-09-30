@@ -632,6 +632,24 @@ change installed code or add qualification claims.
   only 129.31 redraws/s with 29.44 sources/s and 236.9 ms worst lateness. These current
   failures do not erase the native preview win or satisfy 240 fps capacity. No merge
   or release. Exact identities and qualifications are in MERGE_READINESS.
+
+  September 30 network follow-up isolates an input contribution: the installed
+  package falls behind with normal NAS audio/video; removing only its private
+  sound access holds source cadence; restoring sound fails again. Keeping sound
+  active but redirecting only its input to the authenticated local counterpart
+  also holds cadence. This supports sharing file bytes below the independent
+  demuxers, not muting sound or combining the two timelines. The branch adds one
+  file handle and a bounded 16 MiB byte cache with independent AVIO cursors.
+  Initial native NAS pan holds approximately 30 sources/s after startup, with
+  no audio underruns or growing delay at both 1281.413 and 1381.413 seconds.
+  Startup still hitches, reaching 701.5 and 1231.0 ms worst lateness respectively;
+  the later run temporarily processes 36 sources/s while catching up. There are
+  no new kernel entries or memory pressure. All 1,644 workspace tests pass,
+  with 53 ignored, plus Clippy, formatting, vendored warnings and source-list
+  checks. Six byte-cache regressions include actual independent audio/video
+  packet workers and raw callback errors. Clean-source sandbox qualification
+  and installation remain due.
+  This is not yet an accepted network fix or 240 fps qualification.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes

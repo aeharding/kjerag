@@ -11,6 +11,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use ffmpeg_next as ff;
 
 use crate::Fallible;
+use crate::file_input::Input;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Limits {
@@ -34,10 +35,14 @@ trait Demux: Send + 'static {
     fn seek(&mut self, to: i64) -> Result<(), String>;
 }
 
-impl Demux for ff::format::context::Input {
+impl Demux for Input {
     fn read(&mut self) -> Result<Option<ff::Packet>, String> {
         let mut packet = ff::Packet::empty();
-        match packet.read(self) {
+        let result = packet.read(self);
+        if let Some(error) = self.failure() {
+            return Err(error);
+        }
+        match result {
             Ok(()) => Ok(Some(packet)),
             Err(ff::Error::Eof) => Ok(None),
             Err(error) => Err(error.to_string()),
@@ -45,7 +50,8 @@ impl Demux for ff::format::context::Input {
     }
 
     fn seek(&mut self, to: i64) -> Result<(), String> {
-        ff::format::context::Input::seek(self, to, ..to).map_err(|error| error.to_string())
+        ff::format::context::Input::seek(self, to, ..to)
+            .map_err(|error| self.failure().unwrap_or_else(|| error.to_string()))
     }
 }
 
@@ -71,7 +77,7 @@ struct Shared {
 pub(crate) struct PacketInput(Arc<Shared>);
 
 impl PacketInput {
-    pub(crate) fn new(input: ff::format::context::Input, limits: Limits) -> Fallible<Self> {
+    pub(crate) fn new(input: Input, limits: Limits) -> Fallible<Self> {
         Self::spawn(input, limits)
     }
 

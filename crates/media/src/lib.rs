@@ -30,6 +30,7 @@ mod capture;
 mod capture_fixture;
 mod decode;
 mod decode_arrival;
+mod file_input;
 mod packet_input;
 mod pairing;
 mod player;

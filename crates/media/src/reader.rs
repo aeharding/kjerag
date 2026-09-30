@@ -340,9 +340,9 @@ const SOUND_SOURCE: usize = 0;
 /// One file: its demuxer, its own timeline, and whether it has been read to
 /// the end.
 struct Source {
-    /// Kept because the sound opens the same file again, for its own demuxer
-    /// ([`Track::open`]).
+    /// Original capture path, handed back to the caller without another lookup.
     path: PathBuf,
+    file: Arc<crate::file_input::SharedFile>,
     input: PacketInput,
     sound_rate: Option<u32>,
     /// Stream time base, shared by every video stream of this file (checked
@@ -488,16 +488,20 @@ impl Reader {
 
     /// Decode this capture's sound as well, into `sound`'s ring (issue #13).
     ///
-    /// A file with no audio stream takes this and stays silent. What it costs
-    /// is a second open of [`SOUND_SOURCE`]'s file, because the sound is read
-    /// on a demuxer of its own (issue #97, [`Track`]).
+    /// A file with no audio stream takes this and stays silent. Sound retains
+    /// its independent demuxer (issue #97), over the pictures' shared bytes.
     pub fn listen(mut self, sound: &Sound) -> Fallible<Self> {
         let Some(source) = self.sources.get(SOUND_SOURCE) else {
             return Ok(self);
         };
-        self.track = Track::open(&source.path, sound.pipe(), sound.rate(), sound.channels())?
-            .map(|track| AudioWorker::new(track, sound.pipe()))
-            .transpose()?;
+        self.track = Track::open_shared(
+            source.file.clone(),
+            sound.pipe(),
+            sound.rate(),
+            sound.channels(),
+        )?
+        .map(|track| AudioWorker::new(track, sound.pipe()))
+        .transpose()?;
         Ok(self)
     }
 
@@ -912,9 +916,12 @@ impl Opened {
                 let rate = unsafe { (*stream.parameters().as_ptr()).sample_rate };
                 u32::try_from(rate).ok().filter(|rate| *rate > 0)
             });
+        let input = crate::file_input::Input::from_opened(self.input, &self.path)?;
+        let file = input.source();
         Ok(Source {
             path: self.path,
-            input: PacketInput::new(self.input, Limits::VIDEO)?,
+            file,
+            input: PacketInput::new(input, Limits::VIDEO)?,
             sound_rate,
             time_base: self.time_base,
             start: self.start,

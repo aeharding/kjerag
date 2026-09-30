@@ -500,6 +500,22 @@ that read returns. Packet bytes, order, stream identity, timestamps, seek
 targets, EOF and raw errors remain unchanged. This read-ahead stage absorbs
 input bursts; it cannot make sustained slow input or GPU work run at realtime.
 
+Live audio and video demuxers share one underlying file handle through
+[`file_input.rs`](../crates/media/src/file_input.rs), not one demux timeline.
+Each has its own AVIO position and stream-discard selection. A serialized,
+16 MiB byte cache reads aligned 1 MiB blocks and retains the sixteen most
+recently used blocks. This coalesces small network reads and lets audio/video
+reuse bytes without retaining more decoded surfaces or PCM. Independent seeks
+do not reposition the other cursor or clear its packet queue. The cache lock
+is confined to the demux workers, never the UI or sound-device callback.
+Closing leaves the one file alive until both demuxers finish any pending I/O.
+The normal opened container is transferred at its exact current byte position;
+its buffered packets and metadata remain intact. Walk retains normal FFmpeg I/O.
+CPU regressions compare packet bytes, timestamps, positions and flags with normal
+FFmpeg reads, including two real audio/video workers with independent seeks.
+That synthetic audio/video fixture uses the `ffmpeg` executable, installed
+explicitly in both architecture CI jobs; no footage or sound device is required.
+
 A seek invalidates audio writes under the ring lock before returning to the
 UI. That authorization travels with the video seek command and the audio
 decoder; an older in-flight packet or superseded seek cannot refill the new

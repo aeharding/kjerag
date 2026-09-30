@@ -17,8 +17,9 @@
 //! A demuxer of its own has no other stream to fall behind. It carries the
 //! same file, with the pictures discarded, so libavformat seeks straight to
 //! each audio chunk: 190 kbps of a 180 Mbps file, measured at 40x realtime
-//! for the whole 30 minute capture. The cost is one more open of the
-//! container (measured at 0.2 s on the 36 GB file) and one more file handle.
+//! for the whole 30 minute capture. Opening that second container measured
+//! 0.2 s locally. Production now shares one file-byte cache beneath these
+//! independent demuxers: two network file handles made playback fall behind.
 //!
 //! What leaves the decoder is planar `fltp` at the file's own rate; what the
 //! device wants is interleaved at the device's rate and channel count. So
@@ -28,12 +29,15 @@
 //! card's.
 
 use std::ffi::c_int;
+#[cfg(test)]
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ffmpeg_next as ff;
 
 use super::audio::{AudioEpoch, Pipe, compensation};
+use super::file_input::{Input, SharedFile};
 use super::packet_input::{Limits, PacketInput};
 use super::{Fallible, media_time, read_only};
 
@@ -53,9 +57,8 @@ type Resampler = ff::software::resampling::Context;
 /// One audio stream, on its own demuxer, decoded and resampled into the
 /// device's own format.
 pub struct Track {
-    /// The same file the pictures are read from, opened again with every
-    /// other stream discarded. Two file handles rather than one, which is
-    /// what the interleave costs (issue #97).
+    /// Independent audio demuxing, with other streams discarded (issue #97).
+    /// Production shares its file bytes, not its timeline, with video.
     input: PacketInput,
     stream: usize,
     /// The file has been read to its end. Cleared by a seek, which is the
@@ -90,8 +93,27 @@ impl Track {
     /// `Ok(None)` is a file with no sound in it, which the older cameras'
     /// per-lens files are. Those play their pictures exactly as before, and
     /// silently rather than by refusing to open.
+    #[cfg(test)]
     pub fn open(path: &Path, pipe: Pipe, rate: u32, channels: usize) -> Fallible<Option<Self>> {
-        let mut input = ff::format::input(&path)?;
+        let input = Input::from_opened(ff::format::input(&path)?, path)?;
+        Self::from_input(input, pipe, rate, channels)
+    }
+
+    pub(crate) fn open_shared(
+        source: Arc<SharedFile>,
+        pipe: Pipe,
+        rate: u32,
+        channels: usize,
+    ) -> Fallible<Option<Self>> {
+        Self::from_input(Input::open_shared(source)?, pipe, rate, channels)
+    }
+
+    fn from_input(
+        mut input: Input,
+        pipe: Pipe,
+        rate: u32,
+        channels: usize,
+    ) -> Fallible<Option<Self>> {
         let Some(stream) = input
             .streams()
             .find(|s| s.parameters().medium() == ff::media::Type::Audio)
