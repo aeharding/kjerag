@@ -613,9 +613,25 @@ change installed code or add qualification claims.
   control reaching34.2paired frames/s. Do not claim the input architecture is
   fixed or blame network bandwidth alone. ONE X2's31-source riser comparison
   is byte-identical to its uncached reference, with no removed coverage.
-  Workspace CPU gates and both-camera moving coverage pass; installed635
-  is unchanged. Native UI qualification, owner eye and clean SDK delivery remain
-  due. No merge, release or accepted new image/performance tradeoff.
+  Workspace CPU gates and both-camera moving coverage pass. Native X4 UI
+  qualification passes 55 checks with zero failures;
+  all eight CI jobs pass on committed head `dd908324`. After trying the frozen
+  native preview, the owner reports "Performance looks much improved" and,
+  when asked to check the moving picture/seam and audio sync, "Good enough".
+  This accepts that preview for the next delivery step, not network playback,
+  the 240 fps capacity target or arbitrary-camera coverage. Its parked periodic-color
+  optimization is preserved but excluded from the commit. Clean committed-source
+  SDK/Flatpak verification subsequently passes 43 X4 and 44 ONE X2 UI checks,
+  zero failures, with the documented isolated-service/fixture skips. The real
+  exported bundle passes executable, metadata and license authentication in a
+  separate device-hidden import. The clean package is now installed, retaining
+  the 635 rollback; origin, permissions and shared runtimes are unchanged.
+  Actual-installed local 2256x1504 pan maintains 29.94 consecutive sources/s,
+  worst 45.1 ms lateness, zero audio underruns and no new kernel entries. Clean
+  package NAS pan still reaches 6.05 s growing delay, and 300 Hz local pan reaches
+  only 129.31 redraws/s with 29.44 sources/s and 236.9 ms worst lateness. These current
+  failures do not erase the native preview win or satisfy 240 fps capacity. No merge
+  or release. Exact identities and qualifications are in MERGE_READINESS.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes
@@ -986,9 +1002,22 @@ change installed code or add qualification claims.
 
 ## Delivery next steps
 
-### Current private installation, September 29
+### Current private installation, September 30
 
-Source `635e9b04` is now installed. It adds bounded compressed read-ahead,
+Source `dd908324` is installed as an interim test Flatpak after separate clean
+SDK app-path suites pass 43 X4 and 44 ONE X2 checks, zero failures, and the actual
+bundle passes a private payload import/audit. It brings the source-specific
+completion and finite curved-mesh changes above, not the parked periodic-color
+edits from the owner-accepted native preview. The actual installed local X4 pan
+holds recorded source cadence without growing delay or audio underruns.
+Network-backed pan and the 240 fps capacity target still fail. Executable, OSTree,
+permissions, origin and unchanged shared runtimes are authenticated; source 635
+is retained for rollback. No merge or release. Exact identities and qualification
+limits are in [MERGE_READINESS.md](MERGE_READINESS.md).
+
+### Previous private installation, September 29
+
+Source `635e9b04` was installed. It adds bounded compressed read-ahead,
 source-owned native endpoint caching and a capture actor draining admitted
 sources to the earlier independent-audio/redraw-independent design. The clean
 SDK archive excludes parked color edits and the unaccepted clock-hold prototype.

@@ -405,7 +405,9 @@ curved screens. Four subdivisions per native edge
 follow the original triangle diagonal, positions and packed lens coordinates.
 Hardware interpolation replaces per-pixel ray intersection on those views.
 This approximates curved projection between subdivision vertices and can alter
-subpixel detail/temporal coordinates; its moving-image quality is not accepted.
+subpixel detail/temporal coordinates. The frozen native preview has owner
+acceptance. The clean committed-source package passes both camera UI suites;
+network playback and the capacity requirement remain unresolved.
 Original lens planes remain full resolution, with the same source history,
 alpha map, photometric matching and temporal residual law. Ball views and
 diagnostic uncached draws retain the original complete ray renderer. The static
@@ -419,14 +421,16 @@ view with a hidden-cell clipping rim halfway between the visible corner and
 the projection singularity. Admission leaves a whole native cell outside the
 visible cone before that rim; narrow-margin/ball views retain the ray path.
 The real-source moving comparison now uses the actual full-window1.5aspect,
-not a16:9 screenshot that misses this selection boundary. Its coverage,
-moving-image acceptance remains pending.
+not a16:9 screenshot that misses this selection boundary. The owner subsequently
+accepted the frozen native preview as "Good enough" after reporting improved
+performance. The preview contains parked periodic-color edits excluded from
+the clean SDK package. Qualification and identities are in MERGE_READINESS.
 
 The corrected full-window mesh captures31ordered sources with no removed
 coverage and at most8RGB8codes difference from the ray reference. It still fails
 real-player runs before the source-specific retirement correction: NAS and local
 storage both accumulate large video lateness. The later local results above
-do not erase the unresolved network failure or establish image acceptance.
+do not erase the unresolved network failure or establish the240capacity target.
 
 The local iced renderer prepares the Scene before surface acquisition. If no
 exact resident draw can be reserved, it keeps the previous complete surface
