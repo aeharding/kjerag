@@ -739,7 +739,18 @@ impl cosmic::Application for App {
                 self.show_controls(now);
             }
             Message::Report => self.report(now),
-            Message::SceneReady => {}
+            Message::SceneReady => {
+                // Media deadlines and decoder/worker notifications own source
+                // progression. Mouse and unrelated UI messages only update
+                // the view; they must not rerun the playback scheduler.
+                if let Some(open) = &self.open
+                    && open.scene.event_playback()
+                    && let kjerag_render::Next::Stopped(stall) = open.scene.progress(now)
+                {
+                    self.alert.raise(Failure::Stopped(open.path.clone(), stall));
+                    self.show_controls(now);
+                }
+            }
             Message::ShowControls => self.show_controls(now),
             Message::Surface(action) => {
                 return cosmic::task::message(cosmic::Action::Cosmic(
@@ -767,13 +778,6 @@ impl cosmic::Application for App {
                 }
             }
             Message::VideoAreaClick => self.hide_volume(),
-        }
-        if let Some(open) = &self.open
-            && open.scene.event_playback()
-            && let kjerag_render::Next::Stopped(stall) = open.scene.progress(now)
-        {
-            self.alert.raise(Failure::Stopped(open.path.clone(), stall));
-            self.show_controls(now);
         }
         Task::none()
     }

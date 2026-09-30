@@ -13,7 +13,129 @@ with a [research navigation index](research/README.md). The shared playback
 slowdown, native/Flatpak differences and frame-time spikes are tracked in
 [issue #186](https://github.com/aeharding/kjerag/issues/186).
 
-## Current private test package, September 29
+## Accepted native preview, September 30
+
+Draft PR [#240](https://github.com/aeharding/kjerag/pull/240) adds source-specific
+GPU completion proofs, bounded worker-owned source admission and output
+completion, and a finite curved native-mesh renderer. The source/seam/color
+cadence is unchanged. The renderer keeps full-resolution source planes but
+approximates subpixel projection and sampling; the original ray renderer remains
+the diagnostic reference and ball fallback.
+
+The frozen preview uses committed source
+`dd908324f0e23039a6037d3f4ecb74d6b110264b` plus the two preserved parked
+periodic-color edits. Its executable SHA256 is
+`668ed968def53d23319fe4f023062e0e2c1f4b6d0f008261524c80f6eae4456c`.
+After running it at the reported September 20 view, the owner reports
+"Performance looks much improved" and "Good enough" in response to the requested
+moving-picture/seam and audio-sync check. This accepts that preview for the
+next delivery step. It does not qualify a clean committed-source package,
+arbitrary footage, network playback or the 240 fps capacity target.
+
+All eight CI jobs pass on `dd908324`. Native X4 UI passes 55 checks, zero failures.
+The bounded device-hidden workspace passes 1,638 tests with 53 ignored; unavailable
+hardware returns are not GPU coverage. The real seven-source no-shell regression
+and both-camera moving coverage checks pass separately. Local 2256x1504 playback
+maintains 30 source advances/s, including 60 Hz pan. Uncapped pan reaches 155.06
+completed redraws/s with full source cadence, still below 240; callback
+p99/max 27.33/32.78 ms does not establish the 4.17 ms budget. Network pan still fails
+badly despite a realtime decoder-only control. No general playback fix is claimed.
+
+The clean committed-source SDK build passes separate app-path UI suites,
+43 X4 and 44 ONE X2 checks with zero failures. Existing sound-device, portal,
+exact-view, sandbox import-fault and cross-mount paired-fixture skips remain.
+Both motion captures for each camera were inspected; the shader/Rust-twin
+helper remains native rather than a clean SDK shader test. Each launched
+package executable is authenticated. Both suites have no new kernel entries
+or scoped memory-limit/OOM events, and postflight pressure averages are zero.
+These are functional checks, not capacity, all-camera or freeze-cause proof.
+
+The actual exported bundle passes a separate device-hidden private import:
+its commit, executable, metadata and license match the archived source/build.
+The local test bundle is unsigned, not a release-signature qualification.
+
+## Current private test package, September 30
+
+The clean `dd908324` package described above is now installed. Its archived
+source excludes the two parked periodic-color edits present in the accepted
+native preview; both dirty files remain preserved. Exact package identities:
+
+- Installed OSTree: `ecaf7ca759ed4576b93ef73518ec89d1118d543a2b2760eac77a8c4aa15b6354`.
+- Executable SHA256: `26dff50a64214df96e803bc078423f8629267a6fe7235d719184d41b3ac78fc9`.
+- Bundle SHA256: `19b70da525c14a2e4373c7f632413c475d4f377636fdee70cecb94afa87c59d6`.
+
+Before installation, the actual runtime's local 2256x1504 60 Hz pan maintains
+29.96 consecutive source advances/s, with no audio underruns or growing delay.
+Network-backed pan still fails, roughly 18.6-22.4 sources/s and 6.05 seconds of
+worst accumulated lateness. The separate local 300 Hz pan fails capacity:
+129.31 completed redraws/s, 29.44 consecutive sources/s, callback p99/max
+33.73/38.53 ms and 236.9 ms worst lateness. Host conditions differ from the
+earlier native cohorts; these runs are not an isolated performance comparison.
+No new kernel entries or postflight pressure in these checks.
+
+After replacement, the actual installed app, without an app-path override,
+maintains 29.94 consecutive sources/s and 62.37 completed redraws/s during a
+short local full-window 60 Hz pan at the reported September 20 view. Worst
+reported lateness stays at 45.1 ms, with zero audio underruns and no new kernel
+entries. Callback p99/max is 21.19/27.84 ms, not the 4.17 ms budget. This is a
+smoke check, not a repeated full installed UI suite or hitch-free verdict.
+
+The separate actual-installed ONE X2 riser check maintains 29.92 consecutive
+sources/s and 62.33 completed redraws/s in its short 60 Hz pan. Worst lateness
+stays at 44.9 ms, with zero underruns and no new kernel entries. Callback
+p99/max is 17.07/22.34 ms. Both installed checks' initial pictures were inspected;
+neither establishes a 240 fps result or physical scanout timing.
+
+Installation uses `--no-deps --no-related --no-pull`. Origin, permissions and
+all recorded shared runtime identities are unchanged. The source `635e9b04`
+bundle is authenticated and retained for rollback. This is an interim test
+delivery, not a complete network fix, 240 fps pass, merge or release.
+Immutable package: `scratch/flatpak-delivery-dd908324/`; runtime/UI and frozen
+preview evidence: `scratch/playback-independent-20260927/`.
+
+## Previous private test package, September 29
+
+The interim source-actor package is installed from exact source
+`635e9b04e81c4601915a77b953165fb46d4ad732`. It retains the prior independent
+audio/source scheduling, adds bounded compressed read-ahead, prepares native
+map endpoints once per source, and drains a capture-owned ordered source queue
+without a per-source shell handoff. It changes no stitching/color arithmetic,
+source cadence or clock-hold policy. The failed triangle prototype, unaccepted
+buffering prototype and two parked color edits are excluded.
+
+- Installed OSTree: `122c2d2dce79c2131bbde0e6cad8f9022d7f153c1a1a40930414812119a36278`.
+- Executable SHA256: `06ae1bccddfb2996f6e70903102934b1c1a14d3eadfa960426db11fd60ebf63e`.
+- Bundle SHA256: `14eefdc4019bf513af5b2a5b1683149487929afc2d72b5054426b6fcf39710b4`.
+
+All eight CI jobs pass. Full device-hidden workspace gates pass1,630tests with
+53ignored, including unavailable-device returns and parked color variation,
+not hardware qualification. Real GPU no-shell regressions pass on both cameras;
+31-source sequences on the reported X4 wide view and ONE X2 riser view are
+byte-identical to retained parent captures. Separate actual app-path suites
+pass43X4 and44ONE X2 checks, zero failures, with the existing sandbox-service,
+exact-view, import-fault and pair-fixture skips. Motion captures inspected;
+the shader/Rust-twin helper is native, not the clean SDK shader. X4 postflight
+records dock-disconnect/USB-C events, not a GPU reset; ONE X2 has no new kernel
+entries. Global postflight memory-pressure averages settle at zero.
+
+Packaged full-size60Hz local pan keeps29.95source advances/s without growing
+delay, worst25.2ms. Completion gaps still reach34.1ms. A NAS idle-view repeat
+also keeps up, but is a previously exercised range. The300Hz pan FAILS:
+213.9redraws/s,19.4source advances/s and14.1s growing delay. More importantly,
+the final actual-installed NAS60Hz pan also FAILS, roughly20source advances/s
+and10.91s growing delay, no audio underruns. Its capacity parser separately
+rejects a skipped screen source; this does not erase the genuine cadence
+failure. No new kernel entries in that run. These are callback/wall-time
+measurements, not physical scanout or a complete performance qualification.
+
+Installation uses `--no-deps --no-related --no-pull`: origin and permissions
+are unchanged and shared runtimes are not updated. The prior68591c10bundle is
+retained for rollback. This package is not a reliable playback fix, accepted
+branch, merge or release. Owner retest and remaining architecture/performance
+work remain due. Immutable build: `scratch/flatpak-delivery-635e9b04/`;
+runtime/UI receipts: `scratch/playback-independent-20260927/`.
+
+## Earlier September 29 private test package
 
 The interim playback redesign is installed from source
 `68591c10df7c7771b8e735866d2f0eadaf45622a`. Audio refill no longer waits behind

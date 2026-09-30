@@ -264,10 +264,12 @@ fn prepare_panorama_draw(
         || started.elapsed(),
         std::thread::sleep,
     )?;
+    super::native_lifecycle_event("filtered-source-imported", stamp, Some(started.elapsed()));
     if source.resident_frame() != *stamp {
         return Err("ONE X2 panorama import differs from its decoded source delivery".into());
     }
     let ready = super::resident_worker::finish_pending(session, session.submit(source)?)?;
+    super::native_lifecycle_event("filtered-map-valid", stamp, Some(started.elapsed()));
     if ready.frame() != stamp {
         return Err("ONE X2 panorama map differs from its decoded source delivery".into());
     }

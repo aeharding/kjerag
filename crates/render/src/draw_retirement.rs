@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::Fallible;
+use crate::gpu_completion::CompletionStatus;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DrawRetirementError {
@@ -76,7 +77,17 @@ impl Drop for DrawPermit {
 struct Retiring<P> {
     completed_generation: Arc<AtomicU64>,
     generation: u64,
+    completion: Option<CompletionStatus>,
     payload: Option<P>,
+}
+
+impl<P> Retiring<P> {
+    fn ready(&self) -> Fallible<bool> {
+        match &self.completion {
+            Some(completion) => completion.ready(),
+            None => Ok(self.completed_generation.load(Ordering::Acquire) == self.generation),
+        }
+    }
 }
 
 enum Poller {
@@ -172,6 +183,21 @@ impl<P> IcedDrawRetirements<P> {
     ) {
         self.lock()
             .arm_and_draw_borrowed(permit, pass, payload, draw);
+    }
+
+    /// The source snapshot encoder owns a unique last-use marker. Unlike a
+    /// shared queue callback, its proof cannot slide to a concurrent later
+    /// display submission. Retention still precedes every source-reading draw.
+    pub(crate) fn arm_and_draw_with_completion<'pass>(
+        &self,
+        permit: DrawPermit,
+        pass: &mut wgpu::RenderPass<'pass>,
+        payload: Arc<P>,
+        completion: CompletionStatus,
+        draw: impl FnOnce(&P, &mut wgpu::RenderPass<'pass>),
+    ) {
+        self.lock()
+            .arm_and_draw_with_proof(permit, pass, payload, Some(completion), draw);
     }
 
     fn lock(&self) -> MutexGuard<'_, DrawRetirements<P>> {
@@ -270,6 +296,17 @@ impl<P> DrawRetirements<P> {
         payload: Arc<P>,
         draw: impl FnOnce(&P, &mut wgpu::RenderPass<'pass>),
     ) {
+        self.arm_and_draw_with_proof(permit, pass, payload, None, draw);
+    }
+
+    fn arm_and_draw_with_proof<'pass>(
+        &mut self,
+        permit: DrawPermit,
+        pass: &mut wgpu::RenderPass<'pass>,
+        payload: Arc<P>,
+        completion: Option<CompletionStatus>,
+        draw: impl FnOnce(&P, &mut wgpu::RenderPass<'pass>),
+    ) {
         if self.failed
             || !permit.active
             || !Arc::ptr_eq(&permit.admission, &self.admission)
@@ -292,6 +329,7 @@ impl<P> DrawRetirements<P> {
         let retiring = Retiring {
             completed_generation: Arc::clone(&completed_generation),
             generation,
+            completion: completion.clone(),
             payload: Some(payload),
         };
         #[cfg(test)]
@@ -301,9 +339,11 @@ impl<P> DrawRetirements<P> {
             if injected_arm_panic {
                 panic!("injected ONE X2 draw callback registration panic");
             }
-            pass.on_submitted_work_done(move || {
-                completed_generation.store(generation, Ordering::Release);
-            });
+            if completion.is_none() {
+                pass.on_submitted_work_done(move || {
+                    completed_generation.store(generation, Ordering::Release);
+                });
+            }
         }));
         if let Err(panic_payload) = armed {
             // Registration may have partially succeeded. The offered payload
@@ -389,7 +429,15 @@ impl<P> DrawRetirements<P> {
                 .pending
                 .pop_front()
                 .expect("ONE X2 draw retirement count came from this queue");
-            if item.completed_generation.load(Ordering::Acquire) == item.generation {
+            let ready = match item.ready() {
+                Ok(ready) => ready,
+                Err(error) => {
+                    self.pending.push_front(item);
+                    self.quarantine_all();
+                    return Err(error);
+                }
+            };
+            if ready {
                 drop(item.payload.take());
                 item.completed_generation.store(0, Ordering::Relaxed);
                 self.free_signals.push(item.completed_generation);
@@ -430,6 +478,7 @@ impl<P> DrawRetirements<P> {
         self.pending.push_back(Retiring {
             completed_generation,
             generation: permit.consume(),
+            completion: None,
             payload: Some(payload),
         });
     }
@@ -467,7 +516,7 @@ impl<P> Drop for DrawRetirements<P> {
                     .pending
                     .pop_front()
                     .expect("draw teardown count came from this queue");
-                if item.completed_generation.load(Ordering::Acquire) == item.generation {
+                if item.ready().unwrap_or(false) {
                     self.pending.push_back(item);
                 } else {
                     // This command buffer might never have been submitted.
@@ -606,6 +655,46 @@ mod tests {
             drop(retirements);
             assert!(matches!(answer.try_recv(), Err(mpsc::TryRecvError::Empty)));
         }
+    }
+
+    #[test]
+    fn source_marker_ignores_queue_callback_generations() {
+        let (dropped, answer) = mpsc::channel();
+        let mut retirements = DrawRetirements::injected(1);
+        let permit = retirements.reserve().unwrap();
+        retirements.arm_injected(permit, installed(1, &dropped));
+        let marker = CompletionStatus::pending_for_test();
+        retirements.pending[0].completion = Some(marker.clone());
+        retirements.prove_for_test(0);
+        assert_eq!(retirements.poll().unwrap(), 0);
+        assert_eq!(retirements.reserve().err(), Some(DrawRetirementError::Full));
+        assert!(answer.try_recv().is_err());
+        marker.finish_for_test(Ok(()));
+        assert_eq!(retirements.poll().unwrap(), 1);
+        assert_eq!(answer.try_recv().unwrap(), 1);
+        assert_eq!(retirements.poll().unwrap(), 0);
+        assert!(retirements.reserve().is_ok());
+    }
+
+    #[test]
+    fn source_marker_failure_keeps_the_underlying_error_and_quarantines_owner() {
+        let (dropped, answer) = mpsc::channel();
+        let mut retirements = DrawRetirements::injected(1);
+        let permit = retirements.reserve().unwrap();
+        retirements.arm_injected(permit, installed(1, &dropped));
+        let marker = CompletionStatus::pending_for_test();
+        retirements.pending[0].completion = Some(marker.clone());
+        marker.finish_for_test(Err("source completion mapping failed".into()));
+        assert_eq!(
+            retirements.poll().unwrap_err().to_string(),
+            "source completion mapping failed"
+        );
+        assert_eq!(
+            retirements.reserve().err(),
+            Some(DrawRetirementError::Quarantined)
+        );
+        drop(retirements);
+        assert!(answer.try_recv().is_err());
     }
 
     #[test]

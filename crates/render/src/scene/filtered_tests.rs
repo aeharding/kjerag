@@ -32,20 +32,29 @@ fn reported_filtered_worker_drains_without_shell() {
         forced: scene.forced.get(),
         readout: scene.readout.get(),
     };
-    let (first, second) = loop {
+    let sources = loop {
         // Decode preparation only. Do not admit a source through progress().
         if let Next::Stopped(error) = scene.pump_inner(Instant::now()) {
             panic!("actor input stopped: {error}");
         }
         if let Some(show) = scene.show.as_ref()
-            && let (Some(first), Some(second)) = (show.view(held), show.prepared_view(held, 0))
+            && let Some(first) = show.view(held)
         {
-            break (first, second);
+            let sources = std::iter::once(first)
+                .chain((0..6).filter_map(|ahead| show.prepared_view(held, ahead)))
+                .collect::<Vec<_>>();
+            if sources.len() == 7 {
+                break sources;
+            }
         }
         assert!(Instant::now() < deadline, "actor input did not decode");
         std::thread::sleep(Duration::from_millis(1));
     };
-    assert_eq!(second.frames.index, first.frames.index + 1);
+    assert!(
+        sources
+            .windows(2)
+            .all(|pair| pair[1].frames.index == pair[0].frames.index + 1)
+    );
     let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
     pipeline.prepare(
         &scene.primitive(framing.camera),
@@ -55,27 +64,19 @@ fn reported_filtered_worker_drains_without_shell() {
     );
     let capture = scene.primitive(framing.camera).filtered_capture.unwrap();
     let blocked = capture.pause_stitch_for_test();
-    assert!(
-        capture
-            .try_submit(
-                first.frames.clone(),
-                super::filtered::filtered_source_reframe(&first, Sampling::default())
-            )
-            .unwrap()
-    );
-    assert!(
-        capture
-            .try_submit(
-                second.frames.clone(),
-                super::filtered::filtered_source_reframe(&second, Sampling::default())
-            )
-            .unwrap(),
-        "successor admission still requires the first source's shell handoff"
-    );
-    assert_eq!(
-        capture.accepted_stamp().unwrap(),
-        Some(second.frames.stamp())
-    );
+    for source in &sources[..4] {
+        assert!(
+            capture
+                .try_submit(
+                    source.frames.clone(),
+                    super::filtered::filtered_source_reframe(source, Sampling::default())
+                )
+                .unwrap(),
+            "decoded work still needs a GPU lifetime slot or shell handoff"
+        );
+    }
+    let last = sources[3].frames.stamp();
+    assert_eq!(capture.accepted_stamp().unwrap(), Some(last.clone()));
     drop(blocked);
     while !capture.work_idle_for_test().unwrap() {
         assert!(
@@ -85,13 +86,36 @@ fn reported_filtered_worker_drains_without_shell() {
         // No Scene progress, renderer callback or test-side device polling.
         std::thread::sleep(Duration::from_millis(1));
     }
-    assert_eq!(
-        capture.accepted_stamp().unwrap(),
-        Some(second.frames.stamp())
-    );
+    assert_eq!(capture.accepted_stamp().unwrap(), Some(last));
     assert!(capture.installed_stamp().unwrap().is_none());
     assert!(scene.displayed_frame_stamp().is_none());
     capture.assert_unpublished_history_for_test();
+    // Complete the real seven-source startup without a shell event, draw or
+    // test-side device poll. Once CPU recording goes idle, the temporal worker
+    // must still drive and prove its output completion before installation.
+    for source in &sources[4..] {
+        assert!(
+            capture
+                .try_submit(
+                    source.frames.clone(),
+                    super::filtered::filtered_source_reframe(source, Sampling::default())
+                )
+                .unwrap()
+        );
+    }
+    let first = sources[0].frames.stamp();
+    let output = loop {
+        if let Some(output) = capture.install_due(&first).unwrap() {
+            break output;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "temporal output completion needed shell progress or test-side GPU polling"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert_eq!(output.frame(), &first);
+    assert!(scene.displayed_frame_stamp().is_none());
     capture.fail_for_test("actor regression terminal cleanup", false);
     capture.assert_history_released_for_test();
 }
@@ -192,6 +216,10 @@ fn reported_filtered_correction_fields() {
     let line = std::env::var("KJERAG_REPORTED_SEAM_VIEW").expect("review needs a full view line");
     let (path, view) = crate::Framing::read_line(&line).expect("invalid review view line");
     assert_eq!(view.horizon, Horizon::Locked);
+    // The reported 2256x1504 player fills this aspect when its controls hide.
+    // A 16:9 screenshot misses the slightly rearward wide-view corners and
+    // would incorrectly qualify a renderer that falls back in the real app.
+    let aspect = 1.5;
     std::fs::create_dir(&output).expect("review output must be a new directory");
     for arm in [
         "current",
@@ -265,7 +293,8 @@ fn reported_filtered_correction_fields() {
                 &rgba,
             );
         }
-        let shot = capture_shown(&scene, &mut pipeline, &device, &queue, view.camera);
+        let shot =
+            capture_shown_at_aspect(&scene, &mut pipeline, &device, &queue, view.camera, aspect);
         assert_eq!(shot.index, stamp.index());
         assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&stamp));
         super::tests::write_review_ppm_sized(
@@ -286,7 +315,7 @@ fn reported_filtered_correction_fields() {
             coordinate_bytes(coordinates),
         )
         .unwrap();
-        let reframe = pipeline.resident_reframe(&primitive, &shown, 16.0 / 9.0);
+        let reframe = pipeline.resident_reframe(&primitive, &shown, aspect);
         std::fs::write(
             output.join(format!("frame-{:010}.reframe.bin", stamp.index())),
             reframe.bytes(),
@@ -306,13 +335,29 @@ fn reported_filtered_correction_fields() {
         assert_eq!(reference.frame(), &stamp);
         let reference_pixels =
             capture_correction_draw(&reference, &device, &queue, shot.width, shot.height);
-        assert!(
-            shot.rgba
-                .chunks_exact(4)
-                .zip(reference_pixels.chunks_exact(4))
-                .all(|(cached, reference)| cached[3] == reference[3]),
-            "view cache changed picture coverage"
+        // Screenshot targets flatten onto opaque black. Their alpha cannot
+        // distinguish a legitimate black picture pixel from an uncovered ray.
+        let coverage = [&normal, &reference].map(|draw| {
+            capture_correction_draw_with_clear(
+                draw,
+                &device,
+                &queue,
+                shot.width,
+                shot.height,
+                wgpu::Color::TRANSPARENT,
+            )
+        });
+        let mut added = 0;
+        let mut removed = 0;
+        for (candidate, original) in coverage[0].chunks_exact(4).zip(coverage[1].chunks_exact(4)) {
+            added += usize::from(candidate[3] > original[3]);
+            removed += usize::from(candidate[3] < original[3]);
+        }
+        eprintln!(
+            "view-coverage: source={} added={added} removed={removed}",
+            stamp.index()
         );
+        assert_eq!(removed, 0, "candidate removed original picture coverage");
         super::tests::write_review_ppm_sized(
             &output.join("uncached-view"),
             stamp.index(),
@@ -374,6 +419,28 @@ fn capture_correction_draw(
     width: u32,
     height: u32,
 ) -> Vec<u8> {
+    capture_correction_draw_with_clear(draw, device, queue, width, height, wgpu::Color::BLACK)
+}
+
+fn capture_correction_draw_with_clear(
+    draw: &PreparedCorrectionDraw,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    clear: wgpu::Color,
+) -> Vec<u8> {
+    capture_draw_with_clear(|pass| draw.draw(pass), device, queue, width, height, clear)
+}
+
+fn capture_draw_with_clear(
+    draw: impl FnOnce(&mut wgpu::RenderPass<'_>),
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    clear: wgpu::Color,
+) -> Vec<u8> {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("filtered Scene temporal-off diagnostic target"),
         size: wgpu::Extent3d {
@@ -398,13 +465,13 @@ fn capture_correction_draw(
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    load: wgpu::LoadOp::Clear(clear),
                     store: wgpu::StoreOp::Store,
                 },
             })],
             ..Default::default()
         });
-        draw.draw(&mut pass);
+        draw(&mut pass);
     }
     let read = super::panorama_review::PendingReadback::encode(device, &mut encoder, &texture);
     let submission = queue.submit([encoder.finish()]);
@@ -1196,6 +1263,17 @@ fn capture_shown(
     queue: &wgpu::Queue,
     camera: Camera,
 ) -> capture::Shot {
+    capture_shown_at_aspect(scene, pipeline, device, queue, camera, 16.0 / 9.0)
+}
+
+fn capture_shown_at_aspect(
+    scene: &Scene,
+    pipeline: &mut ScenePipeline,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    camera: Camera,
+    aspect: f32,
+) -> capture::Shot {
     let (send, receive) = std::sync::mpsc::sync_channel(1);
     scene.capture(Request {
         width: 1280,
@@ -1205,7 +1283,7 @@ fn capture_shown(
     });
     let deadline = Instant::now() + DEADLINE;
     loop {
-        pipeline.prepare(&scene.primitive(camera), device, queue, 16.0 / 9.0);
+        pipeline.prepare(&scene.primitive(camera), device, queue, aspect);
         if let Ok(shot) = receive.try_recv() {
             return shot.unwrap();
         }

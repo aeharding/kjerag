@@ -4,7 +4,7 @@
 //! nonblocking. The existing stitch worker owns ordered panorama preparation;
 //! one capture-local temporal worker owns the seven-source stream and its GPU
 //! completion polling. A stitch actor drains the source queue independently of
-//! shell messages; executing and queued work share one two-source bound.
+//! shell messages. CPU work admission is separate from GPU lifetime slots.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -28,6 +28,7 @@ use crate::{Fallible, Reframe, Size};
 use super::temporal_worker::{TemporalEpoch, TemporalJob, TemporalWorker};
 
 const READY_CAPACITY: usize = 4;
+const SOURCE_CAPACITY: usize = READY_CAPACITY;
 const FINISH_OUTPUT_CAPACITY: usize = 3;
 
 /// Quarter-field review candidate. Retain the whole 2:1 sphere while rounding
@@ -63,8 +64,8 @@ enum TemporalPending {
 
 struct State {
     session: Option<Arc<FilteredSession>>,
-    // One executing source and one successor may be admitted. The stitch
-    // worker's FIFO continues without a handoff through the shell between them.
+    // Queued decoded work reserves output capacity, not a GPU lifetime slot.
+    // The worker acquires that slot only when it begins the source transaction.
     stitch_pending: VecDeque<Pending>,
     queued: VecDeque<Work>,
     worker_running: bool,
@@ -80,17 +81,16 @@ struct State {
     failure: Option<String>,
     due_waiter: Option<(FrameStamp, ReadyWake)>,
     progress_wake: Option<ReadyWake>,
-    retirement_full: bool,
 }
 
 impl State {
     fn new() -> Self {
         Self {
             session: None,
-            stitch_pending: VecDeque::with_capacity(2),
-            queued: VecDeque::with_capacity(2),
+            stitch_pending: VecDeque::with_capacity(SOURCE_CAPACITY),
+            queued: VecDeque::with_capacity(SOURCE_CAPACITY),
             worker_running: false,
-            temporal_pending: VecDeque::with_capacity(2),
+            temporal_pending: VecDeque::with_capacity(SOURCE_CAPACITY),
             accepted: None,
             accepted_sources: 0,
             expected: VecDeque::new(),
@@ -102,7 +102,6 @@ impl State {
             failure: None,
             due_waiter: None,
             progress_wake: None,
-            retirement_full: false,
         }
     }
 }
@@ -112,7 +111,6 @@ struct FilteredSource {
     reframe: Reframe,
     stamp: FrameStamp,
     size: Size,
-    permit: DrawPermit,
 }
 
 enum Work {
@@ -170,13 +168,6 @@ impl FilteredCaptureFacade {
         Ok(())
     }
 
-    /// Only this refusal needs a nonblocking device-poll retry when all
-    /// executors are idle. Worker/channel/FIFO fullness uses progress wakes.
-    pub(crate) fn source_retirement_full(&self) -> Fallible<bool> {
-        let state = self.state()?;
-        self.ensure_healthy(&state)?;
-        Ok(state.retirement_full)
-    }
     /// Construct the CPU owner. GPU resources remain lazy until [`Self::attach`].
     pub(crate) fn new(
         profile: Arc<ResidentCameraProfile>,
@@ -320,8 +311,8 @@ impl FilteredCaptureFacade {
     /// Admit one contiguous decoded source without waiting for worker or GPU.
     pub(crate) fn try_submit(&self, frames: Arc<Frames>, reframe: Reframe) -> Fallible<bool> {
         // Ordinary backpressure is a CPU queue decision. In particular, mouse
-        // events must not poll the graphics device or reserve a GPU lifetime
-        // merely to rediscover that both source slots are already occupied.
+        // events never poll the graphics device or reserve GPU lifetimes.
+        // The actor acquires those only when queued work begins execution.
         {
             let state = self.state()?;
             self.ensure_healthy(&state)?;
@@ -338,22 +329,9 @@ impl FilteredCaptureFacade {
         // temporal representation. Do not maintain a second coefficient table.
         let reframe = reframe.with_samples(frames.samples);
         let session = self.attached_session()?;
-        if let Err(error) = session.resident.retirements.poll() {
-            self.inner.fail_worker(&error.to_string());
-            return Err(error);
-        }
-        let permit = match session.resident.retirements.reserve() {
-            Ok(permit) => permit,
-            Err(DrawRetirementError::Full) => {
-                self.state()?.retirement_full = true;
-                return Ok(false);
-            }
-            Err(error) => return Err(error.into()),
-        };
         let kick = {
             let mut state = self.state()?;
             self.ensure_healthy(&state)?;
-            state.retirement_full = false;
             if state.finished || state.finish_requested {
                 return Err("filtered capture received a source after finish".into());
             }
@@ -383,7 +361,6 @@ impl FilteredCaptureFacade {
                     reframe,
                     stamp,
                     size: Size::new(self.inner.field_size[0], self.inner.field_size[1]),
-                    permit,
                 })));
             !std::mem::replace(&mut state.worker_running, true)
         };
@@ -495,6 +472,9 @@ impl FilteredCaptureFacade {
             )
             .into());
         }
+        if !front.completion().ready()? {
+            return Ok(None);
+        }
         let output = state
             .ready
             .pop_front()
@@ -542,14 +522,17 @@ impl FilteredCaptureFacade {
             .installed
             .as_ref()
             .is_some_and(|output| output.frame() == stamp)
-            || state
-                .ready
-                .front()
-                .is_some_and(|output| output.frame() == stamp)
         {
             return Ok(false);
         }
         if let Some(front) = state.ready.front() {
+            if front.frame() == stamp {
+                if front.completion().ready()? {
+                    return Ok(false);
+                }
+                state.due_waiter = Some((stamp.clone(), wake.clone()));
+                return Ok(true);
+            }
             return Err(format!(
                 "filtered output frame {} precedes requested frame {}",
                 front.frame().index(),
@@ -709,6 +692,25 @@ impl FilteredCaptureInner {
         self.state
             .lock()
             .map_err(|_| "filtered capture state is poisoned".into())
+    }
+
+    /// GPU completion wakes the exact waiter even if both CPU workers have
+    /// become idle. It does not install or select the finished picture.
+    pub(super) fn output_completed(&self) -> Fallible<()> {
+        let (wake, progress) = {
+            let mut state = self.state()?;
+            (
+                state.due_waiter.take().map(|(_, wake)| wake),
+                state.progress_wake.clone(),
+            )
+        };
+        if let Some(wake) = wake {
+            wake.notify();
+        }
+        if let Some(progress) = progress {
+            progress.notify();
+        }
+        Ok(())
     }
 
     fn ensure_stitch_source(&self, stamp: &FrameStamp) -> Fallible<()> {
@@ -971,7 +973,6 @@ fn record_failure(state: &mut State, message: &str) -> (Option<ReadyWake>, bool)
     state.worker_running = false;
     state.temporal_pending.clear();
     state.ready.clear();
-    state.retirement_full = false;
     let report = state.failure.is_none();
     if report {
         state.failure = Some(message.to_owned());
@@ -1004,13 +1005,16 @@ pub(super) fn service_filtered(job: FilteredJob) -> Fallible<()> {
                 owner.ensure_stitch_source(&job.stamp)?;
                 let started = native_lifecycle_probe_enabled().then(std::time::Instant::now);
                 native_lifecycle_event("filtered-worker-start", &job.stamp, None);
+                let Some(permit) = reserve_source_permit(&session)? else {
+                    return Ok(());
+                };
                 let panorama = prepare_correction_input(
                     &session.resident,
                     job.frames,
                     job.reframe,
                     &job.stamp,
                     job.size,
-                    job.permit,
+                    permit,
                 )?;
                 if let Some(started) = started {
                     // This ends at panorama submission, not GPU completion.
@@ -1047,6 +1051,25 @@ pub(super) fn service_filtered(job: FilteredJob) -> Fallible<()> {
         }
     }
     Ok(())
+}
+
+/// CPU admission does not consume either GPU lifetime slot. Only the actor
+/// waits for source-snapshot retirement, with no UI mutex held or GPU fence
+/// wait. Canceling the epoch interrupts this wait before another import.
+fn reserve_source_permit(session: &FilteredSession) -> Fallible<Option<DrawPermit>> {
+    loop {
+        if session.epoch.is_canceled() {
+            return Ok(None);
+        }
+        session.resident.retirements.poll()?;
+        match session.resident.retirements.reserve() {
+            Ok(permit) => return Ok(Some(permit)),
+            Err(DrawRetirementError::Full) => {
+                std::thread::park_timeout(std::time::Duration::from_micros(100));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 fn source_output_capacity(accepted_sources: usize) -> usize {
@@ -1097,7 +1120,7 @@ fn outstanding_source_count(state: &State) -> usize {
 }
 
 fn source_admission_available(state: &State) -> bool {
-    outstanding_source_count(state) < 2
+    outstanding_source_count(state) < SOURCE_CAPACITY
         && state.ready.len()
             + reserved_output_capacity(state)
             + source_output_capacity(state.accepted_sources)
@@ -1150,7 +1173,7 @@ mod stage_tests {
     }
 
     #[test]
-    fn stitch_and_temporal_stages_share_one_two_source_bound() {
+    fn stitch_and_temporal_stages_share_the_bounded_cpu_work_capacity() {
         let first = stamp(0, None);
         let second = stamp(1, Some(&first));
         let mut state = State::new();
@@ -1165,6 +1188,18 @@ mod stage_tests {
         });
         assert_eq!(outstanding_source_count(&state), 2);
         assert_eq!(reserved_output_capacity(&state), 2);
+        assert!(source_admission_available(&state));
+        let third = stamp(2, state.accepted.as_ref());
+        let fourth = stamp(3, Some(&third));
+        for stamp in [third, fourth] {
+            state.stitch_pending.push_back(Pending::Source {
+                stamp,
+                previous: None,
+                output_capacity: 1,
+            });
+        }
+        assert_eq!(outstanding_source_count(&state), SOURCE_CAPACITY);
+        assert_eq!(reserved_output_capacity(&state), READY_CAPACITY);
         assert!(!source_admission_available(&state));
     }
 
@@ -1188,6 +1223,16 @@ mod stage_tests {
             output_capacity: 0,
         });
         assert_eq!(outstanding_source_count(&state), 2);
+        assert!(source_admission_available(&state));
+        for index in 2..SOURCE_CAPACITY as u64 {
+            state.accepted_sources += 1;
+            state.stitch_pending.push_back(Pending::Source {
+                stamp: stamp(index, None),
+                previous: None,
+                output_capacity: 0,
+            });
+        }
+        assert_eq!(outstanding_source_count(&state), SOURCE_CAPACITY);
         assert!(!source_admission_available(&state));
     }
 

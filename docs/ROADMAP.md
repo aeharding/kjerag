@@ -412,8 +412,226 @@ change installed code or add qualification claims.
   rendered sequences at the reported X4 view and ONE X2 riser view are
   byte-identical to their retained parent captures; first frames inspected.
   No new kernel entries and postflight pressure averages zero in those runs.
-  Clean-package performance, sandbox/UI and owner gates remain pending.
-  No installed fix.
+  Clean source `635e9b04` has all eight CI jobs passing. At2256x1504 its
+  60Hz local pan keeps29.95source advances/s without growing lag, worst25.2ms;
+  its NAS stationary-view repeat also keeps up. Neither is a general fix:
+  the300Hz pan reaches only213.9redraws/s and19.4source advances/s, with14.1s
+  delay. Separate app-path UI suites pass43X4 and44ONE X2 checks, with the
+  documented service/fixture skips and inspected captures. It is installed as
+  an interim test package, retaining68591c10rollback. The final actual-installed
+  NAS60Hz pan FAILS: roughly20source advances/s, delay grows to10.91s, despite
+  no audio underruns or new kernel entries. Its strict capacity parser also
+  rejects a skipped screen source, separately from the genuine cadence failure.
+  One successful cached range does not establish robust playback. No merge,
+  owner acceptance, hitch-free verdict or complete A/V-sync fix.
+
+  Retired branch `perf/curved-view-cell-hints` evaluated a renderer follow-on. A static
+  indexed screen grid supplies only native cell search hints. The exact pixel
+  ray must pass the existing watertight cell test; a missed hint uses the
+  complete original search. No picture, lens UV, alpha or temporal field is
+  interpolated from this grid, and no source work or cadence is removed. This
+  unqualified candidate was not installed. Its clean SDK actual-player checks
+  failed: NAS60Hz pan reached18.6s delay, local60Hz pan reached588ms, and
+  local300Hz pan reached only193.2redraws/s,15.3source advances/s and20.1s delay.
+  Conditions were not paired, so these do not establish causally slower shader
+  performance. They do establish no useful fix. The extra draw code is removed;
+  the corrected transparent coverage diagnostic remains. Evidence and source
+  stay in Git and scratch, not a selectable production path.
+  Device-hidden workspace gates pass1,632tests, with53ignored. Three separately
+  bounded31-source Scene comparisons pass: the reported X4 wide view, ONE X2
+  wide view and ONE X2 riser. The riser is byte-identical; X4 differs by at most
+  two RGB8 codes. The X2 wide view additionally fills one reference coverage
+  hole, with a49-code difference there, and one other three-code difference.
+  Transparent-target checks report zero removed coverage in all three cases.
+  This replaces the earlier opaque-black alpha check, which could not measure
+  coverage. First rendered frames inspected; no owner quality acceptance or
+  smoothness result. All three rendered runs have no new kernel entries.
+
+  Removing PIS's storage-dependent zero barrier fails its existing adapter
+  qualification by one terminal bit and is rejected before packaging. The
+  barrier and all arithmetic qualification remain unchanged. Retired branch
+  `perf/exact-power-two-division` evaluated an exact integer exponent
+  shortcut for normal values divided by normal powers of two, only when the
+  result stays normal. Subnormal/overflow cases retain the full divider.
+  Its 841,492 adapter divisions pass bit-exact checks, but native full-size
+  300Hz playback reaches only193.9redraws/s,18.2source advances/s and9.46s
+  accumulating delay. This does not establish a useful fix. The shortcut and
+  trial-only test expansion are removed before packaging.
+
+  Branch `refactor/filtered-work-admission` separates bounded CPU work from GPU
+  lifetime reservations: four decoded sources may queue, while only two GPU
+  lifetimes remain in flight. Only the worker polls/reserves those slots, not
+  the UI; its cancellation-aware wait holds no Scene/state lock. The existing
+  four-output reservation and exact source/history law remain unchanged.
+  Sixteen targeted CPU tests pass. The actual September decoder/GPU test admits
+  and completes all four sources without further shell events or test-side
+  GPU polling. Native2256x1504 local60Hz pan maintains29.96source advances/s,
+  worst27.1ms lateness and no audio gaps. The300Hz pan still FAILS:
+  212.3redraws/s,13.3source advances/s and13.95s accumulating delay.
+  Neither run has new kernel entries. This structural change is uninstalled
+  and does not establish a reliable playback fix or the240capacity target.
+
+  A source-rate stitched-cube prototype evaluated producing one
+  completed corrected image per source and reprojecting that immutable texture
+  during view redraws, instead of repeating native map/lens fusion per pixel.
+  It uses the existing corrected rectilinear mesh draw for six faces and keeps
+  every source's stitching, color and temporal history. It adds RGB8
+  quantization and texture resampling, with2560px faces for3840px lens inputs
+  and1920px faces for2880px inputs. Separate31-source prototype comparisons
+  completed on the reported X4 wide view and ONE X2 riser. First frames were
+  inspected, and the X4 moving comparison was sent to the owner. Six-face GPU
+  intervals average10.76ms on X4 and6.46ms on ONE X2, with maxima22.04/11.72ms;
+  these isolated intervals do not establish actual-player capacity. Neither
+  run has new kernel entries; sampled memory-pressure averages are nonzero.
+  The integrated native300Hz pan FAILS:152.71redraws/s,9.96source advances/s,
+  20.45s accumulating delay and53.74ms maximum draw interval. No new kernel
+  entries were logged. The prototype and its live integration are removed,
+  with source/binary receipts retained in scratch. No owner acceptance or
+  packaging is claimed.
+
+  A subsequent prototype evaluated caching only lens coordinates and the native chart
+  in six512px float32 faces, during the existing source-preparation encoder.
+  Curved drawing interpolates this geometry while retaining full-resolution
+  source sampling, alpha, photometric and temporal correction. It adds no
+  submission/wait and leaves rectilinear drawing unchanged, but adds50.3MB
+  GPU memory per retained source and a disclosed interpolation tradeoff.
+  Producer/combined shader CPU checks and31 real September sources pass, with
+  no lost coverage or new kernel entries. Pixels differ (maximum93RGB8codes),
+  and no owner quality acceptance is claimed. Native300Hz pan FAILS:
+  177.92redraws/s,15.50source advances/s and12.61s accumulating lateness.
+  The prototype is removed; source and both binaries are retained in scratch.
+
+  The worker's five intermediate queue-prefix waits also wait for unrelated
+  view submissions. Removing those CPU round trips preserves the six bounded
+  command chunks, GPU ordering and final validity ownership. With the coordinate
+  prototype still present, local300Hz pan improves source cadence to28.87/s and
+  worst872ms lateness, but achieves only112.54redraws/s with48.04ms maximum draw
+  interval. This is not the capacity target or a reliable playback fix. Local
+  60Hz pan maintains29.92source advances/s with33.3ms worst lateness; NAS60Hz
+  pan still falls to roughly25source advances/s and4.46s lateness. The NAS
+  strict capacity parser rejects an omitted completed screen update, which is
+  owner-authorized; the independent cadence failure remains. No new kernel
+  entries. A packet-only NAS read sustains roughly35source frames/s.
+  Cube-free continuation passes full device-hidden CPU gates (1,629 tests,
+  53 ignored). A following decoder-wake guard avoids arming input-ready wakes
+  when source admission is full; six targeted CPU tests and Clippy pass.
+  Its actual NAS60Hz pan still FAILS at24.4-25.6source advances/s and4.354s
+  worst lateness. Source import averages0.362ms and map-valid preparation
+  22.34ms. The mean gap between panorama submission and the next worker source
+  is16.27ms; this is not a sole-cause verdict. No new kernel entries.
+
+  The next unqualified change removes the temporal worker's per-output shared
+  queue-prefix wait. A private four-byte completion marker follows each final
+  output submission; no image bytes are read. The executor records ordered
+  successors while polling a bounded completion monitor, including while
+  CPU-idle. Exact FIFO-front completion still gates installation, startup and
+  seek acknowledgement. This changes scheduling, not image/source/history laws.
+  The real-decoder no-shell regression now covers seven-source startup and GPU
+  output completion. Build and runtime qualification are pending. No installed
+  change, package qualification, owner retest, merge or release yet.
+
+  The per-output completion change passes its real seven-source no-shell
+  regression (no new kernel entries), but NAS60Hz pan still FAILS:25-27source
+  advances/s,3.635s worst lateness. Local control maintains29.92source advances/s
+  and27.4ms worst lateness, with61.21redraws/s and26.81ms maximum draw interval.
+  The high local progress count follows the harness's1,000Hz mouse input,
+  not a proven decoder-wake loop. App dispatch previously reran the scheduler
+  for every UI message. Restricting it to media/worker `SceneReady` events
+  passes full device-hidden CPU gates (1,631 tests,53 ignored), but NAS60Hz
+  still FAILS after initially maintaining30fps:27.6-29.6/s later and988.7ms
+  accumulating lateness. Neither result establishes smoothness or240capacity.
+
+  Retrying six-face RGB8 source materialization after removing shared-prefix
+  CPU waits still FAILS NAS60Hz pan:20.58 source advances/s,9.63s accumulating
+  lateness and94.75ms maximum draw interval, with memory pressure. That cache
+  is removed and its source/binaries retained in recovery artifacts. Direct
+  corrected-source drawing is restored. No cache image tradeoff was accepted.
+  Neither the restored candidate nor installed635 is a playback fix.
+
+  Exact-cue dual-lens Reader controls without stitching/rendering decode900
+  pairs at37.5/s from NAS and70.6/s from its local copy. Both exceed29.97fps
+  in those bounded runs; neither proves input-jitter immunity. No new kernel
+  entries or memory pressure. An existing seven-source timestamp regression
+  isolates warm map work at6.76-11.14ms (including stage-submission gaps),
+  source snapshot preparation at5.81-9.52ms and temporal output at1.43-2.44ms.
+  These are diagnostic intervals, not a native-player capacity verdict.
+
+  The next unqualified renderer candidate rasterizes a subdivided sphere to
+  locate native cells on front-facing curved views. Fragment sampling still
+  uses the original exact cell test and full fallback; no RGB cache or reduced
+  picture resolution is selected. Rear/ball views retain the original path.
+  Source/history/color behavior stays unchanged. CPU shader validation passes;
+  coverage, moving comparison and actual-player capacity remain pending.
+
+  The first sphere-rasterizer revision FAILS pixel inspection with severe
+  overlapping geometry. Its alpha-only coverage test reports no holes but
+  cannot detect overwritten opaque pixels. NAS runtime also fails and is
+  rejected; no new kernel entries or pressure. The next revision removes
+  negative perspective-w folding, projects rear vertices to a finite rim and
+  rejects rear fragments before picture sampling. It is rebuilding, not a fix.
+
+  The corrected broad phase passes31-source coverage and pixel inspection,
+  differing by at most3RGB8codes, but still FAILS native NAS60Hz pan:
+  17.4-19.6source advances/s,6.126s accumulating lateness. It is replaced,
+  not kept as a selected alternate. The next candidate follows native triangle
+  positions/packed coordinates with four edge subdivisions and lets hardware
+  interpolate them on front-facing curved views, replacing fragment ray
+  intersections. This is an explicit subpixel sampling/projection approximation;
+  the previous broad-phase quality result does not qualify it. Full-resolution
+  originals, source/history cadence, alpha/color and residual laws remain.
+  Its moving-image and actual-player qualification are pending.
+
+  The first native-mesh31-source comparison passes coverage at16:9 and differs
+  by at most6RGB8codes, but NAS60Hz still fails. Inspection exposes a selection
+  error: the actual fullscreen1.5aspect after controls hide has slightly
+  rearward corners at166.23deg, disabling the front-only fast path. The runtime
+  result therefore does not isolate native-mesh performance. The replacement
+  clips hidden cells outside the visible cone before the curved projection
+  singularity, with a native-cell safety margin, covering both header-visible
+  and full-window states. The real-source comparison now captures1.5aspect.
+  Final moving coverage/quality and real-player capacity remain pending; no
+  build is installed and no new quality tradeoff is accepted.
+
+  Corrected full-window native-mesh images pass31-source coverage and differ
+  by at most8RGB8codes, but actual playback still FAILS: local pan falls to
+  about16source advances/s and14.23s worst lateness; NAS pan is worse and
+  eventually underruns sound. There are no new kernel errors or memory pressure.
+  Neither storage nor renderer selection alone explains the failure. The next
+  architectural correction ties source-snapshot retirement to a unique mapped
+  submission marker, not a shared queue callback that can attach to concurrently
+  submitted display work. CPU tests cover pending-proof refusal and raw-error
+  quarantine. GPU/actual-player qualification remain due. No install or merge.
+
+  Source-specific retirement passes the real seven-source no-shell decoder/GPU
+  regression. The native local-copy2256x1504 player now maintains30source
+  advances/s during ordinary playback and29.94/s under60Hz pan, without
+  accumulating lateness or audio underruns. The previous local mesh-only pan
+  managed about16/s and14.23s lateness. Uncapped local pan maintains30.00
+  consecutive source advances/s with155.06completed redraws/s; callback
+  p99/max27.33/32.78ms. This still FAILS240/4.17ms capacity. Network pan still
+  FAILS at roughly3.6-6source advances/s despite a contemporaneous decoder-only
+  control reaching34.2paired frames/s. Do not claim the input architecture is
+  fixed or blame network bandwidth alone. ONE X2's31-source riser comparison
+  is byte-identical to its uncached reference, with no removed coverage.
+  Workspace CPU gates and both-camera moving coverage pass. Native X4 UI
+  qualification passes 55 checks with zero failures;
+  all eight CI jobs pass on committed head `dd908324`. After trying the frozen
+  native preview, the owner reports "Performance looks much improved" and,
+  when asked to check the moving picture/seam and audio sync, "Good enough".
+  This accepts that preview for the next delivery step, not network playback,
+  the 240 fps capacity target or arbitrary-camera coverage. Its parked periodic-color
+  optimization is preserved but excluded from the commit. Clean committed-source
+  SDK/Flatpak verification subsequently passes 43 X4 and 44 ONE X2 UI checks,
+  zero failures, with the documented isolated-service/fixture skips. The real
+  exported bundle passes executable, metadata and license authentication in a
+  separate device-hidden import. The clean package is now installed, retaining
+  the 635 rollback; origin, permissions and shared runtimes are unchanged.
+  Actual-installed local 2256x1504 pan maintains 29.94 consecutive sources/s,
+  worst 45.1 ms lateness, zero audio underruns and no new kernel entries. Clean
+  package NAS pan still reaches 6.05 s growing delay, and 300 Hz local pan reaches
+  only 129.31 redraws/s with 29.44 sources/s and 236.9 ms worst lateness. These current
+  failures do not erase the native preview win or satisfy 240 fps capacity. No merge
+  or release. Exact identities and qualifications are in MERGE_READINESS.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes
@@ -784,7 +1002,34 @@ change installed code or add qualification claims.
 
 ## Delivery next steps
 
-### Current private installation, September 29
+### Current private installation, September 30
+
+Source `dd908324` is installed as an interim test Flatpak after separate clean
+SDK app-path suites pass 43 X4 and 44 ONE X2 checks, zero failures, and the actual
+bundle passes a private payload import/audit. It brings the source-specific
+completion and finite curved-mesh changes above, not the parked periodic-color
+edits from the owner-accepted native preview. The actual installed local X4 pan
+holds recorded source cadence without growing delay or audio underruns.
+Network-backed pan and the 240 fps capacity target still fail. Executable, OSTree,
+permissions, origin and unchanged shared runtimes are authenticated; source 635
+is retained for rollback. No merge or release. Exact identities and qualification
+limits are in [MERGE_READINESS.md](MERGE_READINESS.md).
+
+### Previous private installation, September 29
+
+Source `635e9b04` was installed. It adds bounded compressed read-ahead,
+source-owned native endpoint caching and a capture actor draining admitted
+sources to the earlier independent-audio/redraw-independent design. The clean
+SDK archive excludes parked color edits and the unaccepted clock-hold prototype.
+Both app-path camera suites pass43X4 and44ONE X2 checks, zero failures, with
+documented sandbox skips. Executable and OSTree identity are authenticated;
+origin, permissions and shared runtimes remain unchanged. The68591c10bundle
+is retained for rollback. The actual-installed NAS moving-view check still
+falls behind at60Hz; this is an interim test build, not the promised reliable
+playback fix. Owner acceptance and merge remain due. Exact identities and
+qualification limits are in [MERGE_READINESS.md](MERGE_READINESS.md).
+
+### Earlier September 29 private installation
 
 Exact source `68591c10` adds the independent audio producer and redraw-independent
 filtered playback described above. It changes no stitching/color arithmetic.

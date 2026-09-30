@@ -15,6 +15,7 @@ use super::HorizontalBoundary;
 use super::color::{GpuColorConversion, MatrixCoefficients};
 use super::settings::Provider;
 use super::stream::{FilteredPanorama, Stream};
+use crate::gpu_completion::SubmissionCompletion;
 
 const SOURCES: usize = 7;
 
@@ -46,6 +47,10 @@ impl CorrectionFrame {
 
     pub(crate) fn filtered_texture(&self) -> &wgpu::Texture {
         self.filtered.texture()
+    }
+
+    pub(crate) fn completion(&self) -> &SubmissionCompletion {
+        self.filtered.completion()
     }
 }
 
