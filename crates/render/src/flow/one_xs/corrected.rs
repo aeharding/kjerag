@@ -138,7 +138,7 @@ impl CorrectionSequence {
     }
 }
 
-/// Completed temporal correction and its exact original source/map/colour.
+/// Submitted temporal correction and its exact original source/map/colour.
 pub(crate) struct CorrectedFrame {
     display: DisplaySource,
     correction: CorrectionFrame,
@@ -147,6 +147,10 @@ pub(crate) struct CorrectedFrame {
 impl CorrectedFrame {
     pub(crate) fn frame(&self) -> &FrameStamp {
         self.correction.frame()
+    }
+
+    pub(super) fn completion(&self) -> &crate::gpu_completion::SubmissionCompletion {
+        self.correction.completion()
     }
 
     /// Read the immutable map and color ratios sampled by this exact output.

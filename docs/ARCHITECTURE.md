@@ -114,6 +114,11 @@ The final view is one render pass, but source preparation is not. Source-rate
 GPU work precedes publication, and its completed result is reused across view
 redraws. A 29.970 fps source does not imply 240 distinct source pictures.
 
+The unqualified `refactor/filtered-work-admission` branch changes admission and
+GPU continuation scheduling, not picture sampling. Its RGB and coordinate-cube
+experiments failed actual-player qualification and are removed. Source-stamped
+native endpoint caching and the existing full-resolution display path remain.
+
 The worker and facade live in
 [`filtered_capture.rs`](../crates/render/src/flow/one_xs/filtered_capture.rs),
 [`resident_worker.rs`](../crates/render/src/flow/one_xs/resident_worker.rs),
@@ -125,20 +130,25 @@ the latest due completed picture, not the source-processing queues.
 
 The filtered stitch executor owns a capture actor with a bounded ordered work
 queue, rather than one shared-executor channel message per source. Executing
-stitch, queued stitch and temporal work still share the existing two-source
-limit and four-output reservation bound. An admitted successor continues
+stitch, queued stitch and temporal work share a four-source CPU admission
+limit and the four-output reservation bound. GPU lifetime slots are separately
+bounded at two and acquired by the worker only when a source begins execution.
+Queued decoded frames do not consume these slots. An admitted successor continues
 without another shell handoff. Actor exit and admission use the same short
 state lock, so the successor either belongs to the running actor or kicks its
 replacement. Queue payloads hold no back-reference to their capture owner.
-Busy-source refusal happens before any graphics-device poll or GPU-lifetime
-reservation; mouse events do not repeatedly poll just to discover backpressure.
+Source admission never polls the graphics device or reserves GPU lifetimes.
+The worker drives nonblocking retirement polls and checks epoch cancellation
+while waiting for a slot, with no Scene/state lock held.
 The shell checks that CPU admission capacity before constructing another source
 projection; the final admission still rechecks it under the same state lock.
 Seek and terminal failure discard unexecuted queue payloads, while submitted
 work keeps its existing GPU-retirement ownership.
 
 The resident map path remains GPU-owned. After capture-session construction,
-ordinary live processing maps only the four-byte final validity word to the CPU.
+ordinary live processing maps the four-byte final validity word and a private
+four-byte temporal-output completion marker. The marker's contents are never
+read: its buffer mapping proves the final output submission's completion.
 It does not read back solver belts, sparse terminals, full maps, source images,
 or temporal output. The first lazy resident-session construction does run
 target-device arithmetic probes with bulk readbacks and waits. Tests and
@@ -178,18 +188,6 @@ change. Temporal-input panorama evaluation is unchanged. The uncached draw
 remains a test-only same-owner reference. Separate GPU compilation can change
 floating-point rounding, so this optimization requires rendered comparison,
 not an assumed pixel-identity claim.
-
-The unqualified curved-view follow-on replaces the screen-filling triangle
-with a static indexed 128 by 128 screen grid. Vertex interpolation provides
-native cell search hints only. Each pixel still reconstructs its exact body
-ray, uses the unchanged watertight cell intersection and samples the original
-full-resolution lens planes, alpha, fusion and temporal correction. A missed
-hint returns to the complete native search, including at chart cuts and poles.
-The grid neither interpolates lens coordinates nor changes source cadence.
-Its immutable 196,608-byte index buffer is retained by the target-format draw
-pipeline. It adds no source pass, queue submission, readback or temporal work.
-This candidate is not in the installed `635e9b04` package; rendered and
-actual-player performance qualification remain required.
 
 [`panorama.rs`](../crates/render/src/direct_type2/panorama.rs) distinguishes:
 
@@ -301,6 +299,10 @@ UI retains publication authority. For the selected filtered path,
 `Scene::progress` handles source admission, completed-output installation and
 clock transitions on decoder/worker notifications and absolute media deadlines.
 It consumes sources in order even when the compositor withholds redraws.
+On the unqualified branch the app dispatches source progression only from
+`SceneReady`, which represents these notifications/deadlines. Mouse movement
+and unrelated UI messages no longer rerun the source scheduler. Play, pause,
+seek and step publish their own coalesced wake.
 
 Source processing never skips camera inputs. With the owner's approval,
 obsolete completed screen updates may be omitted while the playback owner
@@ -313,11 +315,14 @@ scanout. Filtered playback reports source advances and progress pumps, not
 physical presentation rates.
 
 Admission and ready queues are bounded. Backpressure may block a worker handoff,
-never the UI thread. Only completed outputs enter the ready queue. The currently
+never the UI thread. Submitted outputs may enter the bounded ready queue, but
+the exact FIFO-front completion proof gates installation and acknowledgement.
+Only completed pictures become displayable. The currently
 shown frame remains independently drawable while a successor computes, a seek
 lands, a renderer retries, or an older epoch drains.
 
-The filtered route overlaps at most two source stages within an epoch and
+The filtered route admits at most four CPU source jobs within an epoch, keeps
+at most two source GPU lifetimes in flight, and
 reserves up to four ready corrected frames plus one installed frame. Player
 may prepare six real successors, including while paused for startup or seek.
 One temporal executor and its capacity-one channel are shared across restarts;
@@ -342,20 +347,86 @@ the temporal tail.
 Coalesced progress notifications also cover startup operations that produce no
 temporal output, shared executor capacity across seek epochs, and ready-FIFO
 space released by logical installation. A preparation-specific decoder wait
-supports paused startup and detects delivery racing registration. Only proven
-source-retirement backpressure adds an event-owner poll deadline; a paused,
-complete pipeline has no periodic playback timer. Renderer attachment supplies
+supports paused startup and detects delivery racing registration. GPU lifetime
+backpressure is worker-owned and adds no UI poll deadline; a paused, complete
+pipeline has no periodic playback timer. Renderer attachment supplies
 the authenticated GPU context once, but renderer preparation no longer submits
 filtered sources or installs completed outputs. Other paths retain their
 existing redraw-driven behavior.
 
-The worker uses completion callbacks plus nonblocking device polls. Resident
-L1 keeps its six chunks and five prefix-completion waits on the worker; these
-waits use callback receive timeouts, not blocking GPU fence polls. Renderer
+The worker uses completion callbacks plus nonblocking device polls. On the
+unqualified branch, resident L1 keeps its six command chunks but no longer
+waits for the shared queue prefix between them. Same-queue ordering and dispatch
+barriers preserve dependencies; the exact lease advances to the last submission
+and retains its source until final validity proves completion. Renderer
 retirement also polls without blocking. A blocking GPU wait in steady-state
 playback can hold pinned wgpu's fence read lock while another thread needs
 the write lock to submit work. Constructor arithmetic qualification remains
 the explicit startup exception described above.
+
+Temporal filtering likewise records the next ordered source without waiting
+for each output's queue prefix. Each output owns a unique completion marker,
+cleared in its final encoder and mapped after that submission. Since the marker
+is never reused, unrelated later submissions cannot extend its last-use proof.
+The sole temporal executor polls pending outputs even when its input channel is
+idle; completion wakes Scene but never installs a picture. At four pending
+markers the executor stops receiving jobs until GPU progress, and a startup
+batch can produce four, bounding this monitor to seven markers across seeks.
+Monitor entries have weak capture owners, not retained epoch histories.
+Device/map errors retain the underlying error and use terminal worker cleanup.
+This scheduling change is unqualified, not an established playback fix.
+
+The source snapshot encoder now uses the same private submission-marker proof
+for imported-source retirement. Pinned wgpu attaches a render-pass work-done
+callback to the newest queue submission when deferred callbacks are registered;
+a concurrent display submit can conservatively extend that boundary. The
+snapshot marker's last use instead belongs only to its compound command buffer,
+including its later lens copies. Retention still precedes source sampling;
+mapping errors quarantine uncertain owners and preserve the underlying error.
+Other generic draw paths retain their conservative callback generations.
+The real seven-source decoder/GPU regression completes without a shell pump.
+Short local2256x1504 player runs now maintain full source cadence during idle
+playback,60Hz pan and uncapped pan. Network-backed pan still fails, and capacity
+is155completed redraws/s with32.78ms maximum callback interval, not240/4.17ms.
+This is a scoped local result, not a general playback or release verdict.
+
+The six-face source-picture cache was retried after removing shared-prefix
+CPU waits. It still failed NAS60Hz playback:20.58 source advances/s,9.63s
+accumulating lateness and94.75ms maximum draw interval, with memory pressure.
+It is removed, not a selectable production path. The restored candidate draws
+the corrected source directly using its lens samples, map and temporal field.
+The failed cache source and binaries remain in gitignored recovery artifacts;
+no quantization/resampling tradeoff from that cache was accepted or installed.
+
+The sphere broad-phase attempt also failed playback, despite its corrected
+31-source images differing by at most3RGB8 codes from the reference. It is
+replaced by an unqualified native-triangle rasterization candidate for finite
+curved screens. Four subdivisions per native edge
+follow the original triangle diagonal, positions and packed lens coordinates.
+Hardware interpolation replaces per-pixel ray intersection on those views.
+This approximates curved projection between subdivision vertices and can alter
+subpixel detail/temporal coordinates; its moving-image quality is not accepted.
+Original lens planes remain full resolution, with the same source history,
+alpha map, photometric matching and temporal residual law. Ball views and
+diagnostic uncached draws retain the original complete ray renderer. The static
+index buffer is pipeline-owned, not a per-source picture cache.
+
+The initial front-hemisphere guard passed the 16:9 diagnostic but disabled the
+fast path in the actual 2256x1504 player after controls hid. At166.23deg its
+full-window corners look slightly rearward. That NAS run still failed; it did
+not qualify the intended renderer. The replacement projects a finite curved
+view with a hidden-cell clipping rim halfway between the visible corner and
+the projection singularity. Admission leaves a whole native cell outside the
+visible cone before that rim; narrow-margin/ball views retain the ray path.
+The real-source moving comparison now uses the actual full-window1.5aspect,
+not a16:9 screenshot that misses this selection boundary. Its coverage,
+moving-image acceptance remains pending.
+
+The corrected full-window mesh captures31ordered sources with no removed
+coverage and at most8RGB8codes difference from the ray reference. It still fails
+real-player runs before the source-specific retirement correction: NAS and local
+storage both accumulate large video lateness. The later local results above
+do not erase the unresolved network failure or establish image acceptance.
 
 The local iced renderer prepares the Scene before surface acquisition. If no
 exact resident draw can be reserved, it keeps the previous complete surface

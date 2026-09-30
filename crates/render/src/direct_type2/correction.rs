@@ -12,7 +12,7 @@ use crate::{Fallible, MAX_LENSES, Planes, Reframe};
 
 use super::{DirectType2Pipeline, vertex_cached_draw_wgsl_with_fusion_mode};
 
-mod curved_view;
+mod curved_mesh;
 
 const LOW_CURRENT_BINDING: u32 = 6;
 const LOW_FILTERED_BINDING: u32 = 7;
@@ -79,11 +79,13 @@ pub(crate) struct CorrectionPipeline {
     output_format: wgpu::TextureFormat,
     pipeline: wgpu::RenderPipeline,
     mesh_pipeline: wgpu::RenderPipeline,
+    curved_mesh_pipeline: wgpu::RenderPipeline,
+    curved_mesh: curved_mesh::Grid,
+    curved_mesh_enabled: bool,
     picture_layout: wgpu::BindGroupLayout,
     source_sampler: wgpu::Sampler,
     low_sampler: wgpu::Sampler,
     fusion: bool,
-    curved_grid: Option<curved_view::Grid>,
 }
 
 /// One immutable view/source/correction binding.
@@ -97,6 +99,7 @@ pub(crate) struct CorrectionPictureBinding {
     _uniforms: wgpu::Buffer,
     _coordinates: wgpu::Buffer,
     rectilinear: bool,
+    curved_mesh: bool,
 }
 
 impl CorrectionPipeline {
@@ -206,19 +209,24 @@ impl CorrectionPipeline {
                 cache: None,
             })
         };
-        let pipeline = create_pipeline(
-            "corrected curved view",
-            if cached { "curved_vs" } else { "vs" },
-            if cached {
-                "corrected_curved_fs"
-            } else {
-                "corrected_fs"
-            },
-        );
+        let pipeline = create_pipeline("ONE X2 corrected direct view", "vs", "corrected_fs");
         let mesh_pipeline = create_pipeline(
             "ONE X2 corrected native sphere rasterization",
             "corrected_mesh_vs",
             "corrected_mesh_fs",
+        );
+        let curved_mesh_pipeline = create_pipeline(
+            "corrected curved-view sphere rasterization",
+            if cached {
+                "corrected_curved_mesh_vs"
+            } else {
+                "corrected_mesh_vs"
+            },
+            if cached {
+                "corrected_curved_mesh_fs"
+            } else {
+                "corrected_mesh_fs"
+            },
         );
         let low_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("periodic half-resolution temporal correction"),
@@ -234,11 +242,13 @@ impl CorrectionPipeline {
             output_format,
             pipeline,
             mesh_pipeline,
+            curved_mesh_pipeline,
+            curved_mesh: curved_mesh::Grid::new(device),
+            curved_mesh_enabled: cached,
             picture_layout,
             source_sampler: direct.sampler.clone(),
             low_sampler,
             fusion,
-            curved_grid: cached.then(|| curved_view::Grid::new(device)),
         })
     }
 
@@ -379,6 +389,7 @@ impl CorrectionPipeline {
             _uniforms: uniforms,
             _coordinates: coordinates.uniform.clone(),
             rectilinear: reframe.is_rectilinear(),
+            curved_mesh: self.curved_mesh_enabled && reframe.is_rasterizable_curved(),
         })
     }
 
@@ -396,6 +407,8 @@ impl CorrectionPipeline {
         );
         pass.set_pipeline(if picture.rectilinear {
             &self.mesh_pipeline
+        } else if picture.curved_mesh {
+            &self.curved_mesh_pipeline
         } else {
             &self.pipeline
         });
@@ -406,8 +419,8 @@ impl CorrectionPipeline {
         }
         if picture.rectilinear {
             pass.draw(0..(100 * 50 * 6), 0..1);
-        } else if let Some(grid) = &self.curved_grid {
-            grid.draw(pass);
+        } else if picture.curved_mesh {
+            self.curved_mesh.draw(pass);
         } else {
             pass.draw(0..3, 0..1);
         }
@@ -495,7 +508,7 @@ fn shader_source(fusion: bool, hardware_fusion: bool) -> String {
     format!(
         "{}\n{CORRECTION_WGSL}\n{}",
         vertex_cached_draw_wgsl_with_fusion_mode(fusion, hardware_fusion),
-        curved_view::shader_source(),
+        curved_mesh::shader_source()
     )
 }
 

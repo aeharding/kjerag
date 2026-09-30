@@ -1138,18 +1138,17 @@ impl<K, P: GpuResidentLevelTwoPost> GpuL2BridgeOutput<K, P> {
             pass.dispatch_workgroups(L1_PATCHES.div_ceil(64) as u32, 2, 1);
         }
         if bridge.context.is_worker_thread() {
-            for (chunk, command) in dispatch
-                .pipeline
-                .encode_worker_chunks(encoder, &resources, dispatch.stage.level())
-                .into_iter()
-                .enumerate()
+            // Same-queue ordering and dispatch barriers already preserve every
+            // dependency. Waiting for each prefix also waits for unrelated UI
+            // draws, repeatedly serializing source progress with presentation.
+            // Keep the bounded command chunks and exact lease, but submit the
+            // continuation without a CPU completion round trip. Only final
+            // validity acknowledges the source's complete transaction.
+            for command in
+                dispatch
+                    .pipeline
+                    .encode_worker_chunks(encoder, &resources, dispatch.stage.level())
             {
-                if chunk != 0 {
-                    self._prepared
-                        .belts
-                        .lease
-                        .await_worker_queue_prefix(&bridge.context)?;
-                }
                 self._prepared
                     .belts
                     .lease

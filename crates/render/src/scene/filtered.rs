@@ -2,13 +2,17 @@
 
 use super::*;
 
-fn filtered_progress_deadline(now: Instant, due: Option<Instant>, retirement_full: bool) -> Next {
-    if retirement_full {
-        Next::At(due.map_or(now + DRAW_RETIREMENT_RETRY, |due| {
-            due.min(now + DRAW_RETIREMENT_RETRY)
-        }))
-    } else {
-        due.map_or(Next::Never, Next::At)
+fn filtered_progress_deadline(due: Option<Instant>) -> Next {
+    due.map_or(Next::Never, Next::At)
+}
+
+fn wait_for_source_decode(player: &Player, wants_source: bool, wake: &ReadyWake) {
+    // An arrival racing an earlier Empty intentionally wakes immediately.
+    // That is useful only if this consumer can admit more decoded work.
+    // Otherwise worker capacity/completion, not decoder readiness, is the
+    // event that can advance the pipeline.
+    if wants_source && wake.listening() {
+        let _ = player.wait_for_prepared_decode(std::task::Waker::from(Arc::new(wake.clone())));
     }
 }
 
@@ -91,12 +95,12 @@ impl Scene {
                 return Ok(next);
             }
             if !capture.is_attached()? {
-                self.wait_for_filtered_decode();
+                self.wait_for_filtered_decode()?;
                 return Ok(Next::Never);
             }
 
             let Some(current) = show.view(held) else {
-                self.wait_for_filtered_decode();
+                self.wait_for_filtered_decode()?;
                 return Ok(Next::Never);
             };
             let sources = std::iter::once(current.clone())
@@ -136,12 +140,8 @@ impl Scene {
                     self.filtered_display.keep(&complete);
                 }
             } else {
-                self.wait_for_filtered_decode();
-                return Ok(filtered_progress_deadline(
-                    now,
-                    None,
-                    capture.source_retirement_full()?,
-                ));
+                self.wait_for_filtered_decode()?;
+                return Ok(Next::Never);
             }
 
             // A completed frame may be logically consumed without submitting
@@ -153,15 +153,11 @@ impl Scene {
             };
             let replaying = show.replay.borrow().is_some();
             if !replaying && due.is_none_or(|due| due > now) {
-                self.wait_for_filtered_decode();
-                return Ok(filtered_progress_deadline(
-                    now,
-                    due,
-                    capture.source_retirement_full()?,
-                ));
+                self.wait_for_filtered_decode()?;
+                return Ok(filtered_progress_deadline(due));
             }
             if was_ready && self.frame_stamp() == before && !replaying {
-                self.wait_for_filtered_decode();
+                self.wait_for_filtered_decode()?;
                 return Ok(Next::Never);
             }
         }
@@ -169,15 +165,14 @@ impl Scene {
         Ok(Next::Never)
     }
 
-    fn wait_for_filtered_decode(&self) {
-        if self.ready_wake.listening()
-            && let Some(show) = self.show.as_ref()
+    fn wait_for_filtered_decode(&self) -> Fallible<()> {
+        if let Some(show) = self.show.as_ref()
+            && let Some(capture) = show.filtered.as_ref()
             && let Source::Live(player) = &show.playing.borrow().source
         {
-            let _ = player.wait_for_prepared_decode(std::task::Waker::from(Arc::new(
-                self.ready_wake.clone(),
-            )));
+            wait_for_source_decode(player, capture.wants_source()?, &self.ready_wake);
         }
+        Ok(())
     }
 }
 
@@ -376,29 +371,44 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn paused_complete_pipeline_has_no_progress_timer() {
-        assert_eq!(
-            filtered_progress_deadline(Instant::now(), None, false),
-            Next::Never
+    fn full_source_queue_does_not_requeue_a_racing_decoder_arrival() {
+        let timing =
+            kjerag_media::Timing::new(ffmpeg_next::Rational::new(30_000, 1001), 100).unwrap();
+        let (mut player, decoder) = Player::controlled_for_test(
+            timing,
+            Size {
+                width: 3840,
+                height: 3840,
+            },
         );
+        assert!(
+            player.set_presentation_policy(kjerag_media::PresentationPolicy::SequentialRealtime)
+        );
+        assert!(player.pump(Instant::now()).unwrap().is_none());
+        let wake = ReadyWake::default();
+        let mut listener = wake.listen();
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(listener.poll_ready(&mut context).is_pending());
+        // Delivery races the last Empty, before the consumer arms its wait.
+        // EOF uses the same arrival channel without constructing fake pixels.
+        decoder.end();
+        wait_for_source_decode(&player, false, &wake);
+        assert!(listener.poll_ready(&mut context).is_pending());
+        // Releasing source capacity must still observe that pending arrival.
+        wait_for_source_decode(&player, true, &wake);
+        assert!(listener.poll_ready(&mut context).is_ready());
     }
 
     #[test]
-    fn media_deadline_is_absolute_and_only_retirement_full_adds_a_poll() {
+    fn paused_complete_pipeline_has_no_progress_timer() {
+        assert_eq!(filtered_progress_deadline(None), Next::Never);
+    }
+
+    #[test]
+    fn media_deadline_is_absolute_without_a_ui_gpu_retry_timer() {
         let now = Instant::now();
         let due = now + Duration::from_millis(33);
-        assert_eq!(
-            filtered_progress_deadline(now, Some(due), false),
-            Next::At(due)
-        );
-        assert_eq!(
-            filtered_progress_deadline(now, Some(due), true),
-            Next::At(now + DRAW_RETIREMENT_RETRY)
-        );
-        assert_eq!(
-            filtered_progress_deadline(now, None, true),
-            Next::At(now + DRAW_RETIREMENT_RETRY)
-        );
+        assert_eq!(filtered_progress_deadline(Some(due)), Next::At(due));
     }
 
     #[test]
