@@ -1088,6 +1088,48 @@ arithmetic. This diagnostic is not a speed or capacity qualification, and its
 temporary bypass has been removed. Details and limits are in
 [the network-input follow-up](research/network-file-buffering-20260930.md).
 
+The next unqualified branch candidate replaces competing live audio/video
+demuxers with one container reader routing separately bounded compressed packet
+queues. Audio decoding/refill remains independent. Video compressed retention
+increases from 64 to 128 MiB (still 512 packets) to pass the measured 67 MiB
+interleave gap without holding decoder surfaces. Seeks clear both queues and
+gate pre-target audio in the same transaction; causal video history is preserved.
+The device-hidden media suite passes 165 tests, four ignored, plus all-target
+media Clippy. Real MOV/AAC packet/seek comparisons and decoded PCM against the
+audio-only reference pass. Initial native full-size NAS pan holds approximately
+30 source advances/s, with 39.6 ms worst lateness and no audio underruns across
+the 40-second moving-view cohort. No new kernel entries appeared; postflight
+memory-pressure averages are small but nonzero. This is one working-tree result
+including parked owner color edits, not clean SDK qualification, an arbitrary
+network guarantee, 240 fps capacity or owner acceptance. Real seek and historical
+audio-gap controls, both-camera qualification and delivery remain due. The
+installed Flatpak is unchanged.
+
+That first single-reader seek control still has a later failure: about 2.04
+seconds of lag and 266 audio underruns, despite quicker individual seeks. It is
+not ready to install. The April interleave region passes through the full player
+without audio gaps. The next candidate removes the custom AVIO/byte cache and
+uses normal FFmpeg-owned input. Its 155 device-hidden media tests pass, with four
+ignored and the ten retired cache-only tests removed. Runtime qualification is
+pending; no reliable network or capacity result is claimed.
+
+The standard-input native follow-on completes those three seeks in about 1.23,
+1.43 and 0.82 seconds and holds later source cadence without audio gaps or
+growing delay. Another 40-second NAS pan holds 29.95 consecutive sources/s with
+46.1 ms worst picture lateness and no underruns. ONE X2 paired-file playback and
+the April historical audio-gap region also hold cadence without audio underruns.
+No new kernel entries appear and postflight pressure averages are zero. Actual
+before/after pictures are inspected. These previews include parked owner color
+edits and do not qualify a clean package, instant seeks, all networks or 240 fps.
+Complete workspace/SDK/UI qualification and owner retest remain due; installed
+code is unchanged.
+
+Final device-hidden workspace gates pass 1,648 tests, 53 ignored and no failures,
+plus formatting, full Clippy, vendor warnings, source-list and naming checks.
+This includes the raw-filename admission guard and all packet fanout tests, with
+unavailable-device returns counted separately from hardware qualification.
+Clean SDK/UI, slow-compositor continuity and packaged NAS checks remain due.
+
 ### Previous source-completion private installation, September 30
 
 Source `dd908324` was installed as an interim test Flatpak after separate clean

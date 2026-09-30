@@ -211,3 +211,108 @@ and `runtime/native-nas-unprocessed-pan-01` under
 `scratch/playback-independent-20260927/`, with separate health directories.
 `unprocessed-control.patch` records the temporary source change; its binary SHA
 is `5d3d17b7b53f5a222071be9a2c193c8b83a216305aa5d4a86f3ff7f6bbb26645`.
+
+## Request-sized range experiment rejected
+
+A further native prototype replaced fixed cache pages with request-sized byte
+windows and used direct AVIO reads for audio. Its small-read CPU regression
+improved, but the same processing-disabled NAS control still failed: later
+21.6 to 24.4 source frames/s, with delay growing to 11.78 seconds. Audio had
+no underruns; the player exited normally and no new kernel entries appeared.
+Postflight memory-pressure averages were small but nonzero. This was not an
+improvement to ship. The prototype is removed, with its patch and executable
+retained in ignored scratch. The installed package remains unchanged.
+
+Private receipts: `runtime/native-nas-unprocessed-ranges-01`,
+`rejected-request-ranges.patch` and `kjerag-unprocessed-ranges-rejected` below
+`scratch/playback-independent-20260927/`.
+
+## Single container reader candidate
+
+The next candidate removes the second live demuxer and its AVIO cursor, rather
+than changing cache sizes again. One actor owns each container and routes
+compressed video and audio into separately bounded queues. Audio decoding,
+resampling, its producer and device ring remain independent of video delivery.
+Video input may retain 128 MiB or 512 packets, increased from 64 MiB to pass
+the measured 67 MiB interleave gap without holding VA surfaces. Audio retains
+its existing 256 KiB/128-packet bound. Either full queue backpressures reading;
+neither discards playback inputs. One packet of byte-limit overshoot remains.
+
+Only the video consumer repositions the container. The seek transaction clears
+both queues and sets the audio target before reading resumes. An earlier causal
+video replay discards only pre-target audio packets, not camera inputs. Audio
+seek flushes its decoder and adjusts that target gate without moving the video
+cursor. Epoch invalidation releases an audio consumer blocked on an empty queue
+within its bounded wait, without joining backend IO or flushing AAC as EOF.
+The first version retains custom IO installed before inspection.
+
+The device-hidden media suite reports 165 passes, four ignored and no failures;
+Clippy passes for all media targets. New tests cover a 67 MiB interleave gap,
+queue bounds, cancellation during blocked IO, consumer teardown, backward seeks
+and causal replay. Real synthetic MOV/AAC tests preserve packet bytes/metadata
+through forward/backward seeks and match decoded PCM against the audio-only
+reference. These are CPU checks, not proof of real-player NAS smoothness or the
+historical April capture's audio continuity. Actual player qualification remains
+pending; no new package is installed and no owner acceptance is claimed.
+
+That first native single-reader version holds 29.95 consecutive source advances/s
+through a 40-second, 2256x1504 NAS pan, with 39.6 ms worst picture lateness and no
+audio underruns. Draw completion-spacing p99/max is 30.65/31.67 ms at requested
+60 Hz, not a 240 fps or hitch-free qualification. A subsequent seek test lands
+the three targets in approximately 1.15, 1.42 and 0.54 seconds, but a later
+reading burst still causes 2.04 seconds of lag and 266 audio underruns. That
+failure prevents declaring the candidate a reliable network fix. The same
+player passes the April 4.9 to 8.2-second audio-gap region with zero underruns,
+approximately 30 sources/s and 47.0 ms worst picture lateness. No new kernel
+entries appear. The pan's postflight pressure averages are small but nonzero;
+the seek and April controls finish with zero pressure averages.
+
+The follow-on removes the custom AVIO/byte-cache layer altogether, using normal
+FFmpeg-owned input from inspection through close. No two-reader cache is needed
+by the single-reader architecture. The removed cache code/tests remain in Git;
+the failed native control binary is retained as `kjerag-single-demux-cache-control`
+(SHA256 `4805b9488db18d87e2caa28032861a9a5ba0699bd8b9ffd4a034c8bd6430202a`).
+The new device-hidden media suite passes 155 tests, four ignored, with the ten
+retired cache-only tests removed. Runtime qualification remains pending.
+
+Private receipts: `runtime/native-nas-single-demux-pan-01`,
+`runtime/native-nas-single-demux-seeks-01`, and
+`runtime/native-april-single-demux-interleave-01` under
+`scratch/playback-independent-20260927/`, each with a separate health directory.
+
+The standard-FFmpeg follow-on completes the same three pasted seeks in about
+1.23, 1.43 and 0.82 seconds, then holds source cadence without growing delay or
+audio underruns through the previously failed region. Worst picture lateness
+remains 43.2 ms. A different 40-second NAS pan starting at 1381.413 seconds also
+holds 29.95 consecutive source advances/s, zero underruns and 46.1 ms worst
+lateness; completion-spacing p99/max is 30.61/37.08 ms at requested 60 Hz.
+ONE X2's paired-file pan holds source cadence, zero underruns and 58.1 ms worst
+lateness. The standard-input April player also passes the historical audio-gap
+region, zero underruns and 41.6 ms worst picture lateness. All four controls exit
+normally with no new kernel entries and zero postflight pressure averages;
+actual before/after pictures are inspected. These working-tree previews retain
+the two parked owner color edits, not clean SDK qualification. Seeks still take
+roughly a second, so this is not an instant-seek or universal network guarantee.
+Neither requested 60 Hz nor these measurements establish 240 fps capacity.
+
+Private receipts: `runtime/native-nas-standard-demux-seeks-01`,
+`runtime/native-nas-standard-demux-later-pan-01`,
+`runtime/native-x2-standard-demux-pan-01` and
+`runtime/native-april-standard-demux-interleave-01` below the same evidence root.
+
+Before packaging, source review finds that ffmpeg-next's convenience opener
+unwraps filename UTF-8 conversion. A new CPU fixture reproduces a panic through
+actual capture admission on a valid non-UTF-8 Linux filename. The final opener
+calls the same normal FFmpeg open/inspection functions with the filesystem's
+raw filename bytes, retaining FFmpeg-owned IO and RAII format cleanup. It adds
+no custom IO callback/cache. Regression coverage also requires embedded NULs
+to return the original conversion error instead of panicking. The native
+controls above precede this filename-boundary guard; clean-package tests must
+exercise the final source.
+
+The final device-hidden workspace passes 1,648 tests with 53 ignored and no
+failures, including the new filename and zero-byte audio-count cases. Formatting,
+full workspace Clippy, vendor warnings, naming, source-list and whitespace gates
+pass. Unavailable hardware/media paths are included in those CPU counts, not
+additional GPU qualification. The clean SDK, both-camera UI, slow-compositor
+continuity, bundle authentication and real packaged NAS controls remain due.

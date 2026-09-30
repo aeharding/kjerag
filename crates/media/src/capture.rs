@@ -1,15 +1,40 @@
 //! Capture discovery and pre-decoder video metadata.
 
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::ptr;
 
 use ffmpeg_next as ff;
 
 use super::{Fallible, Samples, Size, read_only};
 
+/// Normal FFmpeg-owned IO, accepting the filesystem's actual filename bytes.
+/// The Rust convenience opener unwraps UTF-8 and NUL conversion; do neither.
+/// This creates no custom AVIO context, callbacks, cursor or file-byte cache.
+pub(super) fn open_input(path: &Path) -> Fallible<ff::format::context::Input> {
+    let name = CString::new(path.as_os_str().as_bytes())?;
+    let mut context = ptr::null_mut();
+    let result = unsafe {
+        ff::ffi::avformat_open_input(&mut context, name.as_ptr(), ptr::null(), ptr::null_mut())
+    };
+    if result < 0 {
+        return Err(ff::Error::from(result).into());
+    }
+    // Successful open transfers the sole format/IO owner to this RAII value.
+    // It closes on inspection failure too, before any caller receives it.
+    let input = unsafe { ff::format::context::Input::wrap(context) };
+    let result = unsafe { ff::ffi::avformat_find_stream_info(context, ptr::null_mut()) };
+    if result < 0 {
+        return Err(ff::Error::from(result).into());
+    }
+    Ok(input)
+}
+
 /// A container opened and looked at, before any decoder exists.
 pub(super) struct Opened {
     pub(super) path: PathBuf,
-    pub(super) input: super::file_input::Input,
+    pub(super) input: ff::format::context::Input,
     /// One per video stream, in container order.
     pub(super) videos: Vec<Video>,
     pub(super) time_base: ff::Rational,
@@ -152,7 +177,7 @@ impl Opened {
     }
 
     pub(super) fn new(path: &Path) -> Fallible<Self> {
-        let mut input = super::file_input::Input::open(path)?;
+        let mut input = open_input(path)?;
         let videos: Vec<Video> = input
             .streams()
             // The cover an Osmo attaches to its container is not a lens, and
@@ -196,9 +221,9 @@ impl Opened {
             return Err("video streams disagree about their time base".into());
         }
         let start = starts.first().copied().unwrap_or(0);
-        // The pictures, and nothing else. The sound of this file is read on a
-        // demuxer of its own (issue #97), and leaving it wanted here would
-        // have this one seeking across the file for packets nobody takes.
+        // Capture inspection and synchronous Walk initially want only video.
+        // Live Reader enables its selected audio stream before handing this
+        // same container to the compressed packet actor.
         let wanted: Vec<usize> = videos.iter().map(|video| video.stream).collect();
         read_only(&mut input, &wanted);
         Ok(Self {
@@ -302,6 +327,32 @@ fn partner(path: &Path, first: &Opened, alongside: &[PathBuf]) -> Option<Opened>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normal_input_preserves_non_utf8_filesystem_paths() {
+        use std::os::unix::ffi::OsStringExt;
+        let fixture = crate::capture_fixture::FixtureDir::new();
+        let original = fixture.write("byte-path.mov", Size::new(32, 16), 8, 0);
+        let path = original
+            .parent()
+            .unwrap()
+            .join(std::ffi::OsString::from_vec(b"capture-\xff.insv".to_vec()));
+        std::fs::rename(original, &path).unwrap();
+        let opened = Opened::new(&path).unwrap();
+        assert_eq!(opened.path, path);
+        assert_eq!(opened.videos.len(), 1);
+        assert_eq!(opened.videos[0].frames, 8);
+    }
+
+    #[test]
+    fn a_filename_nul_is_the_raw_conversion_error_not_a_panic() {
+        let path = Path::new("capture\0.insv");
+        let expected = CString::new(path.as_os_str().as_bytes()).unwrap_err();
+        assert_eq!(
+            open_input(path).err().unwrap().to_string(),
+            expected.to_string()
+        );
+    }
 
     fn parameters(
         format: ff::ffi::AVPixelFormat,

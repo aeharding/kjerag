@@ -173,7 +173,7 @@ impl Plane {
 pub struct Walk {
     /// One demuxer per file: two only for a capture written one lens per
     /// file, and they share a frame grid exactly (docs/research 1).
-    inputs: Vec<super::file_input::Input>,
+    inputs: Vec<ff::format::context::Input>,
     decoders: Vec<ff::decoder::Video>,
     /// `(file, stream)` per lane, in lens order.
     lanes: Vec<(usize, usize)>,
@@ -246,7 +246,7 @@ enum WalkStep {
     End,
 }
 
-fn seek_inputs(inputs: &mut [super::file_input::Input], to: f64) -> Fallible<()> {
+fn seek_inputs(inputs: &mut [ff::format::context::Input], to: f64) -> Fallible<()> {
     let target = (to * 1e6) as i64;
     for input in inputs {
         input.seek(target, ..target)?;
