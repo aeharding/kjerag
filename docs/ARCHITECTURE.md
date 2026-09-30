@@ -503,9 +503,11 @@ input bursts; it cannot make sustained slow input or GPU work run at realtime.
 Live audio and video demuxers share one underlying file handle through
 [`file_input.rs`](../crates/media/src/file_input.rs), not one demux timeline.
 Each has its own AVIO position and stream-discard selection. A serialized,
-16 MiB byte cache reads aligned 1 MiB blocks and retains the sixteen most
-recently used blocks. This coalesces small network reads and lets audio/video
-reuse bytes without retaining more decoded surfaces or PCM. Independent seeks
+16 MiB byte cache retains 256 aligned 64 KiB pages. Small requests fetch one
+page; large requests batch adjacent missing pages up to 1 MiB and stop before
+an already-cached page. This avoids fetching megabytes of video padding for
+sparse audio reads while retaining batching for video. Audio/video reuse bytes
+without retaining more decoded surfaces or PCM. Independent seeks
 do not reposition the other cursor or clear its packet queue. The cache lock
 is confined to the demux workers, never the UI or sound-device callback.
 Closing leaves the one file alive until both demuxers finish any pending I/O.

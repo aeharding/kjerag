@@ -677,6 +677,19 @@ change installed code or add qualification claims.
   No new kernel entries or postflight pressure in these corrected runs. This is
   a steady-playback input improvement, not a hitch-free or 240 fps verdict.
   Owner network retesting, startup spikes and capacity remain open. No merge.
+  The owner subsequently rejects network performance: "seek takes forever and
+  there's still tons of hitches". This is not startup-only acceptance. A new
+  installed-player reproduction requests actual forward/backward/copied-view
+  seeks and observes 4.1 and 3.5 seconds before the destination enters a draw;
+  returning to the already-read region takes approximately 0.6 seconds. A
+  diagnostic trace locates read amplification: small sparse audio requests
+  fetch whole 1 MiB blocks, often rereading video bytes. A longer trace reads
+  approximately 2.2 GiB for 1.1 GiB of unique blocks. The cache now retains
+  64 KiB pages within the same 16 MiB limit, coalescing large video requests up
+  to 1 MiB without rereading cached intervals. A failing-before CPU regression
+  exercises sparse shared reads; packet/timestamp/seek behavior remains under
+  the existing actual-demux regressions. Runtime qualification is pending;
+  the installed package is unchanged. This is not a hitch or seek fix verdict.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes
@@ -1061,6 +1074,9 @@ ONE X2 playback reaches recorded cadence without growing delay or audio gaps.
 The `dd908324` rollback is retained. Origin, permissions and shared runtimes
 are unchanged. This is not a hitch-free, 240 fps, owner-accepted, merge or release
 verdict. Exact identities and limits are in [MERGE_READINESS.md](MERGE_READINESS.md).
+
+The owner has since rejected this build's network seeking and ongoing hitches.
+The request-sized byte-cache follow-up above is not installed or accepted yet.
 
 ### Previous source-completion private installation, September 30
 

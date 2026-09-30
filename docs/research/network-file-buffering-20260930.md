@@ -119,3 +119,53 @@ capacity remain open; no merge or release.
 Package identities and qualification limits are in
 [MERGE_READINESS](../MERGE_READINESS.md). Initial native receipts from the unsafe
 constructor are historical diagnostics, not qualification of the corrected code.
+
+## Owner rejection and request-sized shared reads
+
+The owner reports that seeking takes too long and playback still hitches.
+Short steady-state cohorts above do not override that report. The installed
+`591cf695` player is not an accepted network fix.
+
+An installed-player follow-up observes three real pasted-view seeks, each
+acknowledged by the application's `goto` handler. Request-to-destination-draw
+times are approximately 4.1 seconds at 1681.413, 3.5 seconds at 600.413, and
+0.6 seconds back at 1281.413. These are application draw receipts, not scanout
+times. The process exits normally, but the outer compositor times out with a
+leftover clipboard provider; this is diagnostic evidence, not a passed runtime
+qualification. Two earlier attempts have invalid seek injection and are not
+seek measurements. All three postflight checks have no new kernel entries.
+
+A diagnostic `pread64` wrapper records unchanged actual file reads. In the
+longer first run it observes approximately 2.2 GiB read for 1.1 GiB of unique
+1 MiB blocks. In the valid seek run the audio reader fetches approximately
+599 MiB and video approximately 734 MiB. Typical full-block reads take tens of
+milliseconds, with individual reads over 300 ms. Some stderr records interleave
+with production probes; reducers exclude malformed records. The wrapper and
+UI probes add overhead, so these are causal diagnostics, not uninstrumented
+performance qualifications or sole-cause claims.
+
+The cache fetch size was wrong for sparse audio: its 32 KiB AVIO request forced
+a complete 1 MiB read, bringing in video bytes that may be evicted before the
+video cursor reaches them. Raising the memory limit does not remove this read
+amplification. The follow-up retains the same 16 MiB byte limit but divides it
+into 256 pages of 64 KiB. A small request fetches one page; large requests batch
+adjacent missing pages up to 1 MiB, stopping before a cached interval. Both
+cursors still share the same file, and no timeline, packet budget, source cadence,
+decode/GPU retention or stitching/color arithmetic changes.
+
+The sparse-read CPU regression fails before the change, retaining 16 MiB after
+only seventeen 32 KiB requests spread across the file, rather than at most
+1.1 MiB. It also proves that both cursors' later use of those intervals comes
+from the retained bytes. Additional cases exercise batched reads across cached
+overlaps, the read-size cap and a short backend tail. Existing independent
+real-demux/packet-worker tests continue to compare bytes and metadata through
+seeks. Native/SDK runtime qualification and owner retest remain due.
+
+The device-hidden workspace passes 1,648 tests, 53 ignored, plus full formatting,
+workspace Clippy, vendored warning, naming, source-list and whitespace gates.
+Unavailable GPU/media returns are included, not hardware qualification. This
+does not yet establish real NAS seeking or smoothness.
+
+Private receipts: `scratch/playback-independent-20260927/runtime/installed-nas-seek-hitches-01`
+through `-03`, with separate health directories. The first failing CPU case was
+run before changing production cache code.

@@ -41,6 +41,91 @@ fn cached_reads_preserve_bytes_boundaries_and_memory_bound() {
 }
 
 #[test]
+fn sparse_small_reads_keep_shared_bytes_without_fetching_whole_megabytes() {
+    let (_fixture, path, bytes) = bytes_file();
+    let source = SharedFile::open(&path).unwrap();
+    let mut audio = vec![0; 32 * 1024];
+    // Audio packets can be spread across megabytes of video. Its independent
+    // cursor must not consume the entire byte budget fetching unused padding.
+    for index in 0..17 {
+        let at = index * 1024 * 1024 + 123;
+        let count = source.read_at(&mut audio, at as u64).unwrap();
+        assert_eq!(count, audio.len());
+        assert_eq!(&audio[..], &bytes[at..at + count]);
+    }
+    let retained = source
+        .blocks
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, data)| data.len())
+        .sum::<usize>();
+    assert!(
+        retained <= 17 * 64 * 1024,
+        "small reads fetched {retained} bytes"
+    );
+
+    // Removing backend bytes makes another filesystem read observable. The
+    // later video cursor must still find each already-fetched audio interval.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+    for index in 0..17 {
+        let at = index * 1024 * 1024 + 123;
+        let count = source.read_at(&mut audio, at as u64).unwrap();
+        assert_eq!(count, audio.len(), "shared bytes evicted at {at}");
+        assert_eq!(&audio[..], &bytes[at..at + count]);
+    }
+}
+
+#[test]
+fn large_reads_batch_missing_pages_and_stop_before_cached_bytes() {
+    let (_fixture, path, bytes) = bytes_file();
+    let source = SharedFile::open(&path).unwrap();
+    let mut small = [0; 16];
+    source.read_at(&mut small, (4 * BLOCK) as u64).unwrap();
+    let mut large = vec![0; 10 * BLOCK];
+    let count = source.read_at(&mut large, 0).unwrap();
+    assert_eq!(count, 4 * BLOCK);
+    assert_eq!(&large[..count], &bytes[..count]);
+    assert_eq!(source.blocks.lock().unwrap().len(), 5);
+    let count = source.read_at(&mut large, (4 * BLOCK) as u64).unwrap();
+    assert_eq!(count, BLOCK);
+    assert_eq!(&large[..count], &bytes[4 * BLOCK..5 * BLOCK]);
+    let count = source.read_at(&mut large, (5 * BLOCK) as u64).unwrap();
+    assert_eq!(count, large.len());
+    assert_eq!(&large[..count], &bytes[5 * BLOCK..15 * BLOCK]);
+    assert_eq!(source.blocks.lock().unwrap().len(), 15);
+
+    let mut huge = vec![0; (READ_BLOCKS + 2) * BLOCK];
+    let at = 17 * BLOCK + 123;
+    let count = source.read_at(&mut huge, at as u64).unwrap();
+    assert_eq!(count, READ_BLOCKS * BLOCK - 123);
+    assert_eq!(&huge[..count], &bytes[at..at + count]);
+}
+
+#[test]
+fn cached_short_backend_read_returns_eof_beyond_its_actual_tail() {
+    let (_fixture, path, bytes) = bytes_file();
+    let source = SharedFile::open(&path).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(19)
+        .unwrap();
+    let mut output = [0; 64];
+    assert_eq!(source.read_at(&mut output, 0).unwrap(), 19);
+    assert_eq!(&output[..19], &bytes[..19]);
+    assert_eq!(source.read_at(&mut output, 10).unwrap(), 9);
+    assert_eq!(&output[..9], &bytes[10..19]);
+    assert_eq!(source.read_at(&mut output, 20).unwrap(), 0);
+}
+
+#[test]
 fn independent_cursors_seek_without_moving_the_other_or_reopening_the_file() {
     let (_fixture, path, bytes) = bytes_file();
     let source = SharedFile::open(&path).unwrap();

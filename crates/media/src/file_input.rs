@@ -19,8 +19,9 @@ use ffmpeg_next as ff;
 
 use crate::Fallible;
 
-const BLOCK: usize = 1024 * 1024;
-const BLOCKS: usize = 16;
+const BLOCK: usize = 64 * 1024;
+const BLOCKS: usize = 256;
+const READ_BLOCKS: usize = 16;
 const AVIO_BUFFER: usize = 32 * 1024;
 
 pub(crate) struct SharedFile {
@@ -57,37 +58,54 @@ impl SharedFile {
             .blocks
             .lock()
             .map_err(|_| io::Error::other("input byte cache is poisoned"))?;
-        let bytes = if let Some(index) = blocks.iter().position(|(offset, _)| *offset == start) {
-            blocks
+        if let Some(index) = blocks.iter().position(|(offset, _)| *offset == start) {
+            let bytes = blocks
                 .remove(index)
                 .ok_or_else(|| io::Error::other("input cache entry disappeared"))?
-                .1
-        } else {
-            if blocks.len() == BLOCKS {
-                blocks.pop_front();
+                .1;
+            let count = target.len().min(bytes.len().saturating_sub(within));
+            if count != 0 {
+                target[..count].copy_from_slice(&bytes[within..within + count]);
             }
-            let length = (self.size - start).min(BLOCK as u64) as usize;
-            let mut bytes = vec![0; length];
-            let mut filled = 0;
-            while filled < length {
-                match self
-                    .file
-                    .read_at(&mut bytes[filled..], start + filled as u64)
-                {
-                    Ok(0) => break,
-                    Ok(count) => filled += count,
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(error) => return Err(error),
-                }
+            blocks.push_back((start, bytes));
+            return Ok(count);
+        }
+
+        // Sparse audio requests need one small page, not a megabyte of video
+        // padding. Large video requests still coalesce adjacent missing pages
+        // in one read. Never fetch again across an already-cached interval.
+        let wanted = target.len().saturating_add(within).div_ceil(BLOCK);
+        let pages = (1..wanted.min(READ_BLOCKS))
+            .find(|page| {
+                let next = start + (*page * BLOCK) as u64;
+                blocks.iter().any(|(offset, _)| *offset == next)
+            })
+            .unwrap_or(wanted.min(READ_BLOCKS));
+        while blocks.len() + pages > BLOCKS {
+            blocks.pop_front();
+        }
+        let length = (self.size - start).min((pages * BLOCK) as u64) as usize;
+        let mut bytes = vec![0; length];
+        let mut filled = 0;
+        while filled < length {
+            match self
+                .file
+                .read_at(&mut bytes[filled..], start + filled as u64)
+            {
+                Ok(0) => break,
+                Ok(count) => filled += count,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
             }
-            bytes.truncate(filled);
-            bytes
-        };
+        }
+        bytes.truncate(filled);
         let count = target.len().min(bytes.len().saturating_sub(within));
         if count != 0 {
             target[..count].copy_from_slice(&bytes[within..within + count]);
         }
-        blocks.push_back((start, bytes));
+        for (page, data) in bytes.chunks(BLOCK).enumerate() {
+            blocks.push_back((start + (page * BLOCK) as u64, data.to_vec()));
+        }
         Ok(count)
     }
 }
