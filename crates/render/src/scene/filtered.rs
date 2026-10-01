@@ -168,7 +168,11 @@ impl Scene {
                 self.wait_for_filtered_decode()?;
                 return Ok(filtered_progress_deadline(due));
             }
-            if was_ready && self.frame_stamp() == before && !replaying {
+            let waiting_start = show.replay.borrow().is_some_and(|replay| {
+                self.frame_stamp()
+                    .is_some_and(|stamp| replay.landed(stamp.index()))
+            });
+            if was_ready && self.frame_stamp() == before && (!replaying || waiting_start) {
                 self.wait_for_filtered_decode()?;
                 return Ok(filtered_progress_deadline(buffer_deadline));
             }

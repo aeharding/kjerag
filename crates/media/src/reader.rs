@@ -36,7 +36,7 @@ use ffmpeg_next as ff;
 use super::audio::AudioEpoch;
 use super::audio_worker::{AudioControl, AudioWorker};
 use super::capture::{Opened, agreed_samples};
-use super::packet_input::{Limits, PacketInput};
+use super::packet_input::{Limits, PacketInput, ReadAhead};
 use super::pairing::{Alignment, alignment};
 use super::sound::Sound;
 use super::track::{AudioSpec, Track};
@@ -509,6 +509,24 @@ impl Reader {
 
     pub(crate) fn audio_control(&self) -> Option<AudioControl> {
         self.track.as_ref().map(AudioWorker::control)
+    }
+
+    pub(crate) fn read_ahead(&self) -> Vec<ReadAhead> {
+        self.sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| {
+                source.input.read_ahead(
+                    self.lanes
+                        .iter()
+                        .filter(|lane| lane.source == index)
+                        .map(|lane| lane.stream)
+                        .collect(),
+                    source.time_base,
+                    source.start,
+                )
+            })
+            .collect()
     }
 
     /// The sample rate of the capture's audio stream, or `None` for one with

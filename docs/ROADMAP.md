@@ -1106,6 +1106,24 @@ averages; both normal controls have zero averages. These receipts do not include
 completed cgroup memory-event accounting or physical scanout proof. Remaining
 both-camera and package gates are not waived.
 
+The next uninstalled revision adds recovery-only compressed-input high water
+across each required lens/file, using their existing normalized container
+clocks. It waits for one second of packet lead, with EOF and existing audio/video
+cache bounds as escape conditions, without increasing decoded/GPU retention.
+Startup and exact-seek autoplay instead prime two completion-proven pictures
+and sound before starting the clock; they do not use that input threshold.
+Paused exact landings remain immediate once their requested picture completes.
+Seven new CPU cases cover real blocked packet delivery through Player recovery,
+separate lens clocks, wake/cancel, seek invalidation, errors and unattainable
+lead. The media gate passes 181 tests with four ignored. Full Clippy, vendor,
+format, name/source and 28 portable harness checks pass. The device-hidden full
+workspace passes 1,683 tests, with 53 ignored and no failures, including
+unavailable-device returns and the parked color variation, not clean-source
+hardware coverage. Actual-player qualification remains pending. No installed app,
+stitch/color arithmetic, source cadence or history changes. The startup-delay
+and sustained slow-input behavior still require measurement, not acceptance
+from these CPU checks.
+
 ### Pre-window startup delay, September 30
 
 October 1 clarification: the owner wants the normal transparent/blurred window

@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
+use std::task::Waker;
 use std::time::Duration;
 
 use ffmpeg_next as ff;
@@ -93,13 +94,102 @@ struct State {
     seek: Option<i64>,
     seek_result: Option<Result<(), String>>,
     audio: AudioQueue,
+    refill_wait: Option<Waker>,
 }
 
-#[derive(Default)]
 struct Shared {
     state: Mutex<State>,
     changed: Condvar,
     audio: Option<AudioTimeline>,
+    limits: Limits,
+}
+
+impl State {
+    fn full(&self, limits: Limits) -> bool {
+        self.bytes >= limits.bytes
+            || self.packets.len() >= limits.packets
+            || (self.audio.active
+                && (self.audio.bytes >= Limits::AUDIO.bytes
+                    || self.audio.packets.len() >= Limits::AUDIO.packets))
+    }
+}
+
+impl Shared {
+    fn wake_refill(&self) {
+        let wake = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .refill_wait
+            .take();
+        if let Some(wake) = wake {
+            wake.wake();
+        }
+    }
+}
+
+/// Read-only compressed-input readiness, without ownership of container close
+/// or seek. Required lenses are checked on this file's normalized timeline.
+pub(crate) struct ReadAhead {
+    shared: Arc<Shared>,
+    streams: Vec<usize>,
+    time_base: ff::Rational,
+    start: i64,
+}
+
+impl ReadAhead {
+    pub(crate) fn buffered_or_wait(&self, through: Duration, wake: Waker) -> Fallible<bool> {
+        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(error) = state.failure.as_ref().or_else(|| {
+            state
+                .terminal
+                .as_ref()
+                .and_then(|result| result.as_ref().err())
+        }) {
+            return Err(error.clone().into());
+        }
+        // EOF and either consumer's byte/count bound can prevent more input.
+        // Never wait for a lead the existing bounded cache cannot attain.
+        let ready = state.stopped
+            || state.terminal.is_some()
+            || state.full(self.shared.limits)
+            || self.streams.iter().all(|stream| {
+                state
+                    .packets
+                    .iter()
+                    .filter(|packet| packet.stream() == *stream)
+                    .any(|packet| {
+                        packet.dts().or(packet.pts()).is_some_and(|at| {
+                            crate::media_time(
+                                at.saturating_add(packet.duration().max(0)),
+                                self.start,
+                                self.time_base,
+                            ) >= through
+                        })
+                    })
+            });
+        // Observation and registration share the producer lock, so a packet
+        // cannot land in the gap and strand a held Player. Waking and dropping
+        // replaced executor state happen after releasing that lock.
+        let previous = state.refill_wait.take();
+        if !ready {
+            state.refill_wait = Some(wake);
+        }
+        drop(state);
+        drop(previous);
+        Ok(ready)
+    }
+
+    pub(crate) fn cancel(&self) {
+        let previous = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .refill_wait
+            .take();
+        drop(previous);
+    }
 }
 
 // The primary reader owns container seeking and shutdown. An audio reader is
@@ -107,6 +197,20 @@ struct Shared {
 pub(crate) struct PacketInput(Arc<Shared>, bool);
 
 impl PacketInput {
+    pub(crate) fn read_ahead(
+        &self,
+        streams: Vec<usize>,
+        time_base: ff::Rational,
+        start: i64,
+    ) -> ReadAhead {
+        ReadAhead {
+            shared: self.0.clone(),
+            streams,
+            time_base,
+            start,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn new(input: Input, limits: Limits) -> Fallible<Self> {
         Self::spawn(input, limits)
@@ -148,7 +252,9 @@ impl PacketInput {
         assert!(limits.bytes > 0 && limits.packets > 0);
         let shared = Arc::new(Shared {
             audio,
-            ..Shared::default()
+            limits,
+            state: Mutex::default(),
+            changed: Condvar::default(),
         });
         let running = shared.clone();
         std::thread::Builder::new()
@@ -168,6 +274,8 @@ impl PacketInput {
                     state.failure = Some(error.clone());
                     state.seek_result = Some(Err(error));
                     running.changed.notify_all();
+                    drop(state);
+                    running.wake_refill();
                 }
             })?;
         Ok(Self(shared, false))
@@ -284,6 +392,8 @@ impl Drop for PacketInput {
             state.audio.packets.clear();
             state.audio.bytes = 0;
             self.0.changed.notify_all();
+            drop(state);
+            self.0.wake_refill();
             return;
         }
         state.stopped = true;
@@ -292,6 +402,8 @@ impl Drop for PacketInput {
         state.audio.packets.clear();
         state.audio.bytes = 0;
         self.0.changed.notify_all();
+        drop(state);
+        self.0.wake_refill();
         // A filesystem read can still be in flight. Its worker owns the input
         // until that operation returns; destruction never waits for the disk.
     }
@@ -302,13 +414,7 @@ fn run(mut input: impl Demux, shared: &Shared, limits: Limits) {
         let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
         while !state.stopped
             && state.seek.is_none()
-            && (!state.started
-                || state.terminal.is_some()
-                || state.bytes >= limits.bytes
-                || state.packets.len() >= limits.packets
-                || (state.audio.active
-                    && (state.audio.bytes >= Limits::AUDIO.bytes
-                        || state.audio.packets.len() >= Limits::AUDIO.packets)))
+            && (!state.started || state.terminal.is_some() || state.full(limits))
         {
             state = shared
                 .changed
@@ -355,8 +461,10 @@ fn run(mut input: impl Demux, shared: &Shared, limits: Limits) {
             }
         }
         shared.changed.notify_all();
+        drop(state);
+        shared.wake_refill();
     }
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

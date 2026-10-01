@@ -561,6 +561,15 @@ intent from a temporary stopped common clock after missing picture or sound.
 It retains the held PTS, ordered source processing and estimator history;
 explicit pause or seek supersedes recovery. Restart requires completion-proven
 successor pictures and sound at that PTS, with no impossible lead at EOF.
+The follow-on also observes compressed-input lead across every required lens
+and file, using each source's normalized clock. Recovery alone waits for one
+second of packet lead; EOF or either consumer's existing byte/count limit
+permits an earlier restart. It adds no decoded/GPU retention or UI input wait.
+Observation and one-shot wake registration share the producer lock, with wakes
+outside it; pause and seek cancel the old wait. Exact startup/seek autoplay
+instead primes two completion-proven successors and sound before starting the
+clock. It does not use the recovery-only input threshold, and a paused landing
+still needs only its requested picture. These scheduling choices are unqualified.
 Consumed PCM history supports restart without manufacturing samples or changing
 ordinary drift correction. This is not a normal-playback clock adjustment or a
 throughput fix. The owner permits it only if real tests establish improved

@@ -1,8 +1,209 @@
 use super::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::task::Wake;
 use std::time::{Duration, Instant};
 
 const WAIT: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+struct Counter(AtomicUsize);
+
+impl Wake for Counter {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl Counter {
+    fn wait(&self) {
+        let deadline = Instant::now() + WAIT;
+        while self.0.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "refill notification was lost");
+            std::thread::yield_now();
+        }
+    }
+}
+
+/// A real packet consumer whose demuxer blocks with less than one second read.
+/// Player tests use this observer without constructing decoded/GPU surfaces.
+pub(crate) fn blocked_read_ahead() -> (PacketInput, ReadAhead, Sender<()>, Receiver<()>) {
+    let (source, control) = source(200, 1, Some(6));
+    let mut input = PacketInput::spawn(source, Limits::VIDEO).unwrap();
+    input.read().unwrap().unwrap();
+    control.entered.recv_timeout(WAIT).unwrap();
+    let observer = input.read_ahead(vec![0], ff::Rational(1, 30), 0);
+    (input, observer, control.release, control.dropped)
+}
+
+#[test]
+fn refill_wait_wakes_on_actual_packet_arrival_without_consuming_input() {
+    let (mut input, observer, release, dropped) = blocked_read_ahead();
+    let wake = Arc::new(Counter::default());
+    assert!(
+        !observer
+            .buffered_or_wait(Duration::from_secs(1), Waker::from(wake.clone()))
+            .unwrap()
+    );
+    assert_eq!(wake.0.load(Ordering::SeqCst), 0);
+    release.send(()).unwrap();
+    wait_for(&input.0, |state| state.terminal.is_some());
+    wake.wait();
+    assert_eq!(wake.0.load(Ordering::SeqCst), 1);
+    assert!(
+        observer
+            .buffered_or_wait(Duration::from_secs(1), Waker::noop().clone())
+            .unwrap()
+    );
+    for at in 1..200 {
+        assert_eq!(input.read().unwrap().unwrap().pts(), Some(at));
+    }
+    drop(input);
+    dropped.recv_timeout(WAIT).unwrap();
+}
+
+#[test]
+fn refill_checks_every_lens_and_normalizes_the_files_own_clock() {
+    let (input, observer, release, dropped) = blocked_read_ahead();
+    let mut observer = observer;
+    observer.streams = vec![0, 2];
+    observer.start = 900;
+    let packet = |stream, at| {
+        let mut packet = ff::Packet::copy(&[1]);
+        packet.set_stream(stream);
+        packet.set_dts(Some(at));
+        packet.set_pts(Some(at + 3));
+        packet.set_duration(1);
+        packet
+    };
+    {
+        let mut state = input.0.state.lock().unwrap();
+        state.packets.clear();
+        state.bytes = 2;
+        state.packets.extend([packet(0, 929), packet(2, 905)]);
+    }
+    assert!(
+        !observer
+            .buffered_or_wait(Duration::from_secs(1), Waker::noop().clone())
+            .unwrap(),
+        "one prepared lens cannot stand in for its partner"
+    );
+    input
+        .0
+        .state
+        .lock()
+        .unwrap()
+        .packets
+        .push_back(packet(2, 929));
+    assert!(
+        observer
+            .buffered_or_wait(Duration::from_secs(1), Waker::noop().clone())
+            .unwrap()
+    );
+    assert!(
+        !observer
+            .buffered_or_wait(Duration::from_secs(2), Waker::noop().clone())
+            .unwrap()
+    );
+    observer.cancel();
+    drop(input);
+    release.send(()).unwrap();
+    dropped.recv_timeout(WAIT).unwrap();
+}
+
+#[test]
+fn refill_does_not_wait_past_eof_or_existing_video_and_audio_bounds() {
+    let (input, observer, release, dropped) = blocked_read_ahead();
+    for bound in 0..5 {
+        let mut state = input.0.state.lock().unwrap();
+        state.bytes = 0;
+        state.packets.clear();
+        state.audio = AudioQueue::default();
+        state.terminal = None;
+        match bound {
+            0 => state.bytes = Limits::VIDEO.bytes,
+            1 => state
+                .packets
+                .extend((0..Limits::VIDEO.packets).map(|_| ff::Packet::empty())),
+            2 => {
+                state.audio.active = true;
+                state.audio.bytes = Limits::AUDIO.bytes;
+            }
+            3 => {
+                state.audio.active = true;
+                state
+                    .audio
+                    .packets
+                    .extend((0..Limits::AUDIO.packets).map(|_| ff::Packet::empty()));
+            }
+            _ => state.terminal = Some(Ok(())),
+        }
+        drop(state);
+        assert!(
+            observer
+                .buffered_or_wait(Duration::from_secs(100), Waker::noop().clone())
+                .unwrap()
+        );
+    }
+    drop(input);
+    release.send(()).unwrap();
+    dropped.recv_timeout(WAIT).unwrap();
+}
+
+#[test]
+fn seek_revokes_previous_input_lead_and_cancel_removes_its_wake() {
+    let (source, control) = source(200, 1, Some(0));
+    let mut input = PacketInput::spawn(source, Limits::VIDEO).unwrap();
+    let observer = input.read_ahead(vec![0], ff::Rational(1, 30), 0);
+    input.seek(70).unwrap();
+    wait_for(&input.0, |state| state.terminal.is_some());
+    assert!(
+        observer
+            .buffered_or_wait(Duration::from_secs(4), Waker::noop().clone())
+            .unwrap()
+    );
+    input.seek(0).unwrap();
+    control.entered.recv_timeout(WAIT).unwrap();
+    let wake = Arc::new(Counter::default());
+    assert!(
+        !observer
+            .buffered_or_wait(Duration::from_secs(1), Waker::from(wake.clone()))
+            .unwrap()
+    );
+    observer.cancel();
+    control.release.send(()).unwrap();
+    wait_for(&input.0, |state| state.terminal.is_some());
+    assert_eq!(wake.0.load(Ordering::SeqCst), 0);
+    drop(input);
+    control.dropped.recv_timeout(WAIT).unwrap();
+}
+
+#[test]
+fn input_close_wakes_refill_and_underlying_failure_is_not_hidden_by_a_full_cache() {
+    let (input, observer, release, dropped) = blocked_read_ahead();
+    let wake = Arc::new(Counter::default());
+    assert!(
+        !observer
+            .buffered_or_wait(Duration::from_secs(1), Waker::from(wake.clone()))
+            .unwrap()
+    );
+    {
+        let mut state = input.0.state.lock().unwrap();
+        state.bytes = Limits::VIDEO.bytes;
+        state.terminal = Some(Err("fixture input failed".into()));
+    }
+    assert_eq!(
+        observer
+            .buffered_or_wait(Duration::ZERO, Waker::noop().clone())
+            .unwrap_err()
+            .to_string(),
+        "fixture input failed"
+    );
+    drop(input);
+    assert_eq!(wake.0.load(Ordering::SeqCst), 1);
+    release.send(()).unwrap();
+    dropped.recv_timeout(WAIT).unwrap();
+}
 
 fn wait_for(shared: &Shared, predicate: impl Fn(&State) -> bool) {
     let deadline = Instant::now() + WAIT;

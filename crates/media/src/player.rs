@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 use super::audio::{Audio, AudioEpoch, Beat, Reading};
 use super::audio_worker::AudioControl;
 use super::decode_arrival::{self, Arrival, Delivery};
+use super::packet_input::ReadAhead;
 use super::sound::Sound;
 use super::{Accuracy, Cue, Fallible, Frames, Read, Reader, Size, Timing};
 
@@ -50,6 +51,11 @@ const PREPARED_AHEAD_MAX: usize = 6;
 /// pair on screen, the two peeked and the three the renderer retains, the
 /// engine holds 10 of the 20 surfaces in a decoder's pool.
 const LOOKAHEAD: usize = 2;
+
+/// Recovery-only compressed-input high water. This scheduling choice does not
+/// delay ordinary play or retain additional decoded/GPU pictures. Existing
+/// packet limits and EOF permit an earlier restart when the lead is impossible.
+const REFILL_LEAD: Duration = Duration::from_secs(1);
 
 /// What playback values when presenting decoded frames.
 ///
@@ -193,6 +199,7 @@ pub struct Player {
     /// could not open a speaker is worse than one that plays it silently.
     sound: Option<Sound>,
     audio_control: Option<AudioControl>,
+    read_ahead: Vec<ReadAhead>,
     timing: Timing,
     size: Size,
     lenses: usize,
@@ -352,6 +359,7 @@ impl Player {
                 presenter: Presenter::new(timing.interval(), Arc::new(Beat::default())),
                 sound: None,
                 audio_control: None,
+                read_ahead: Vec::new(),
                 timing,
                 size,
                 lenses: 2,
@@ -410,6 +418,7 @@ impl Player {
         }
         let (sender, notes, decode_arrival) = decode_arrival::channel(QUEUED);
         let audio_control = reader.audio_control();
+        let read_ahead = reader.read_ahead();
         if let Some(control) = &audio_control {
             control.failure_wake(Waker::from(decode_arrival.clone()));
         }
@@ -429,6 +438,7 @@ impl Player {
             presenter: Presenter::new(timing.interval(), beat),
             sound,
             audio_control,
+            read_ahead,
             timing,
             size,
             lenses,
@@ -711,8 +721,9 @@ impl Player {
 
     /// Hold picture and sound together during an actual source shortage.
     /// This leaves play intent, every source queue and estimator history intact.
-    /// One missed source interval triggers the hold; two completed successors
-    /// provide a bounded lead before resuming. The finished tail needs no lead.
+    /// One missed source interval triggers the hold. Restart needs two completed
+    /// pictures, sound, and a recovery-only compressed-input lead, without
+    /// increasing decoded/GPU retention. The finished tail needs no lead.
     pub fn coordinate_buffering(
         &mut self,
         now: Instant,
@@ -742,9 +753,19 @@ impl Player {
                 interval * 2
             };
             let audio_ready = self.audio_control.as_ref().map_or(Ok(true), |control| {
-                control.buffered_or_wait(position, lead, wake)
+                control.buffered_or_wait(position, lead, wake.clone())
             })?;
-            if covers_position && (finished || ready_successors >= 2) && audio_ready {
+            let mut input_ready = true;
+            if !finished {
+                for input in &self.read_ahead {
+                    input_ready &= input.buffered_or_wait(position + REFILL_LEAD, wake.clone())?;
+                }
+            }
+            if covers_position && (finished || ready_successors >= 2) && audio_ready && input_ready
+            {
+                for input in &self.read_ahead {
+                    input.cancel();
+                }
                 self.presenter.clock.resume_buffered(now);
                 eprintln!("buffer: resumed at {:.3} s", position.as_secs_f64());
             }
@@ -769,6 +790,29 @@ impl Player {
             return Ok(None);
         }
         Ok(deadline)
+    }
+
+    /// Startup/seek preparation, before the common clock starts. No recovery
+    /// high-water wait is added here: only the same small completed-picture and
+    /// sound lead used by the actual presentation path is required.
+    pub fn prepared_playback_ready(
+        &self,
+        ready_successors: usize,
+        finished: bool,
+        wake: Waker,
+    ) -> Fallible<bool> {
+        let audio_ready = self.audio_control.as_ref().map_or(Ok(true), |control| {
+            control.buffered_or_wait(
+                self.presenter.clock.reading.position,
+                if finished {
+                    Duration::ZERO
+                } else {
+                    self.presenter.interval * 2
+                },
+                wake,
+            )
+        })?;
+        Ok((finished || ready_successors >= 2) && audio_ready)
     }
 
     /// A held clock still permits logical source promotion up to its fixed PTS.
@@ -833,6 +877,9 @@ impl Player {
     }
 
     pub fn play(&mut self) {
+        for input in &self.read_ahead {
+            input.cancel();
+        }
         if let Some(control) = &self.audio_control {
             control.cancel_buffer_wait();
         }
@@ -840,6 +887,9 @@ impl Player {
     }
 
     pub fn pause(&mut self, now: Instant) {
+        for input in &self.read_ahead {
+            input.cancel();
+        }
         self.cancel_decode_wait();
         if let Some(control) = &self.audio_control {
             control.cancel_buffer_wait();
@@ -1023,6 +1073,9 @@ impl Player {
     /// thread can be blocked handing over a frame, and every millisecond it
     /// waits is a millisecond of the old position still playing.
     fn hush(&self) -> Option<AudioEpoch> {
+        for input in &self.read_ahead {
+            input.cancel();
+        }
         self.audio_control
             .as_ref()
             .map(AudioControl::invalidate)
@@ -1626,6 +1679,93 @@ mod tests {
     use crate::Size;
 
     const NTSC: Duration = Duration::from_nanos(33_366_666);
+
+    #[test]
+    fn recovery_waits_for_real_compressed_input_even_with_completed_picture_lead() {
+        let (input, observer, release, dropped) = crate::packet_input::tests::blocked_read_ahead();
+        let mut bench = Bench::new();
+        bench.player.read_ahead = vec![observer];
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        bench.player.pump(start).unwrap();
+        let late = start + NTSC * 3;
+        bench
+            .player
+            .coordinate_buffering(late, true, 0, false, Waker::noop().clone())
+            .unwrap();
+        assert!(bench.player.is_buffering());
+        for index in 1..=3 {
+            bench.decoded(0, index);
+            bench.player.pump(late).unwrap();
+        }
+        let wake = Arc::new(WakeCount::default());
+        bench
+            .player
+            .coordinate_buffering(late, true, 2, false, Waker::from(wake.clone()))
+            .unwrap();
+        assert!(
+            bench.player.is_buffering(),
+            "two GPU pictures must not resume short input again"
+        );
+        let held = bench.player.position(late);
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while wake.0.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        // A notification may arrive before the target packet. Re-registering
+        // the same real readiness gate must neither resume early nor lose wake.
+        while bench.player.is_buffering() {
+            bench
+                .player
+                .coordinate_buffering(late, true, 2, false, Waker::from(wake.clone()))
+                .unwrap();
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        assert_eq!(bench.player.position(late), held);
+        assert_eq!(bench.player.position(late + NTSC), held + NTSC);
+        assert_eq!(bench.player.stats().dropped, 0);
+        drop(input);
+        dropped.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn preparation_waits_for_two_completed_pictures_but_not_input_high_water() {
+        let (input, observer, release, dropped) = crate::packet_input::tests::blocked_read_ahead();
+        let mut bench = Bench::new();
+        bench.player.read_ahead = vec![observer];
+        assert!(
+            !bench
+                .player
+                .prepared_playback_ready(1, false, Waker::noop().clone())
+                .unwrap()
+        );
+        assert!(
+            bench
+                .player
+                .prepared_playback_ready(2, false, Waker::noop().clone())
+                .unwrap()
+        );
+        assert!(
+            bench
+                .player
+                .prepared_playback_ready(0, true, Waker::noop().clone())
+                .unwrap()
+        );
+        assert!(!bench.player.is_playing());
+        assert!(!bench.player.is_buffering());
+        drop(input);
+        release.send(()).unwrap();
+        dropped.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
 
     #[test]
     fn normal_playback_never_holds_or_reanchors_the_clock() {
@@ -2807,6 +2947,7 @@ mod tests {
                     ),
                     sound: None,
                     audio_control: None,
+                    read_ahead: Vec::new(),
                     timing,
                     size: Size::new(3840, 3840),
                     lenses: 2,
