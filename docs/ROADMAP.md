@@ -1067,14 +1067,26 @@ pane throughout opening, not black followed by transparency followed by video.
 The branch now uses the existing window/fullscreen backdrop in both preparation
 and playback; fullscreen's existing black surround remains unchanged. The CLI/
 FIFO regression additionally compares the opening pane with the closed window's
-pane. This follow-up is not yet qualified or installed; current source remains
-`5aaf97a7` below.
+pane. Clean source `6dbbf16b` is now qualified and installed. All eight exact-source
+CI jobs pass; SDK app-path suites pass 49 X4 and 50 ONE X2 checks, zero failures,
+with existing fixture/service skips. The actual-installed startup suite passes
+all six checks. Motion and startup captures are inspected. No new kernel entries
+or scoped memory-limit/OOM events appear. X4 postflight pressure has zero avg10
+but nonzero longer averages; X2 and installed startup averages are zero. Origin,
+permissions and recorded shared runtimes remain unchanged; the authenticated
+preceding `5aaf97a7` bundle is retained. Headless checks verify the normal pane,
+not desktop blur. The owner's reopen retest remains the merge gate.
 
-The owner rejects the installed "Opening video..." welcome screen and requests
+October 1 playback report: footage can enter persistent stuttering after pause/
+resume or seeking, or apparently at random, until another pause/resume or seek.
+This is separate from opening styling and remains unlocalized under issue #186.
+No throughput or functional UI result above establishes that it is fixed.
+
+Previously, the owner rejected the installed "Opening video..." welcome screen and requested
 the normal window with a first picture or blank video area immediately. The
 branch now shows a blank black player during initial preparation, with no logo,
 message or open button. The no-file welcome screen and failed-replacement
-preservation are unchanged. Clean source `5aaf97a7` is now installed. All eight
+preservation are unchanged. Clean source `5aaf97a7` was installed. All eight
 exact-source CI jobs pass; separate SDK app-path suites pass 48 X4 and 49 ONE X2
 checks, zero failures, with existing fixture/service skips. The actual-installed
 CLI/FIFO startup check also passes all five checks, including blank picture and

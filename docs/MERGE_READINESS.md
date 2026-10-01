@@ -54,10 +54,53 @@ The actual exported bundle passes a separate device-hidden private import:
 its commit, executable, metadata and license match the archived source/build.
 The local test bundle is unsigned, not a release-signature qualification.
 
-## Current blank-player private test package, September 30
+## Current transparent-pane private test package, October 1
+
+Source `6dbbf16bd4b3f971d0f6b8361b6e194f87752c2c`, draft
+[PR #242](https://github.com/aeharding/kjerag/pull/242), is installed. The owner
+clarified that opening should use the normal transparent/blurred COSMIC pane,
+not black followed by that pane and then video. The pending-open container now
+uses the same backdrop as playback. No loading logo/text, new readiness state,
+timing rule, stitching/color arithmetic or cadence change is added. Existing
+fullscreen black surround and no-file welcome behavior remain unchanged.
+
+- Installed OSTree: `91aea32a8d44dd6f1b693c04e4c01d9667301b849903d106a3e24d2d70d433b9`.
+- Executable SHA256: `22fa1498e12724b75bf5f65de41206b9b7c5daff31baac452e9ad728f1658f2c`.
+- Bundle SHA256: `7f9219784df5c77d7b8dbbaad6b5625003787353aee90d660b5c08a64b99e5fb`.
+
+All eight CI jobs pass on this implementation. Bounded device-hidden local gates
+pass 1,656 workspace tests, 53 ignored, full lint/format/vendor/source/name checks,
+23 harness CPU tests and five parser startup tests. Local tests include the two
+preserved parked color edits and unavailable-device returns, not clean-source
+GPU coverage. The offline SDK archive excludes those edits. Separate app-path
+suites pass 49 X4 and 50 ONE X2 checks, zero failures, with existing fixture/service
+skips. Executables are authenticated and both motion captures per camera are
+inspected; the shader/Rust-twin helper remains native. A separate device-hidden
+private import authenticates the exported bundle. It is an unsigned local test,
+not release-signature qualification.
+
+Native and actual-installed CLI/FIFO suites each pass all six checks, including
+nonblack blank pixels, matching ordinary pane, responsive Close and canceled
+publication. Startup captures are inspected. Both camera suites and startup runs
+exit normally with no new kernel entries or scoped memory-limit/OOM events.
+X4 postflight pressure avg10 is zero but avg60/avg300 are nonzero; X2 and installed
+startup postflight averages are zero. Headless captures verify the ordinary pane,
+not the desktop compositor's blur. Installation uses no dependency/related-ref/
+pull updates. Origin, permissions and recorded shared runtimes remain unchanged;
+the authenticated preceding `5aaf97a7` bundle is retained below. The owner's reopen
+retest remains the merge gate. The new persistent pause/resume/seek stutter report
+is unlocalized and is not fixed by this styling change. No latency, hitch-free,
+240 fps, merge or release verdict is claimed.
+
+Package: `scratch/flatpak-delivery-6dbbf16b/`. Camera receipts:
+`scratch/playback-independent-20260927/packaging/qualification-ui-6dbbf16b/`.
+Actual-installed startup: `runtime/transparent-player-installed-01`.
+
+## Preceding blank-player private test package, September 30
 
 Source `5aaf97a7e921ff02cf2dd51b5bddda8b9c260070`, draft
-[PR #242](https://github.com/aeharding/kjerag/pull/242), is installed. The owner
+[PR #242](https://github.com/aeharding/kjerag/pull/242), was installed and is now
+retained for rollback. The owner
 requested a blank player instead of the "Opening video..." welcome screen.
 The normal header and black video area now paint while initial preparation is
 pending, without a logo, loading text or open button. No-file launch and Close

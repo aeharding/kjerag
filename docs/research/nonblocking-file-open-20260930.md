@@ -176,10 +176,10 @@ installed blank capture is inspected. Both camera suites and these startup
 checks exit normally, with no new kernel entries or scoped memory-limit/OOM
 events, and zero postflight pressure averages.
 
-That qualified `5aaf97a7` package is now installed. Origin, permissions and
+That qualified `5aaf97a7` package was installed and is now retained. Origin, permissions and
 recorded shared runtime identities are unchanged; the authenticated preceding
 `5ecc9946` bundle is retained for rollback. Exact identities are recorded in
-[MERGE_READINESS.md](../MERGE_READINESS.md#current-blank-player-private-test-package-september-30).
+[MERGE_READINESS.md](../MERGE_READINESS.md#preceding-blank-player-private-test-package-september-30).
 Package: `scratch/flatpak-delivery-5aaf97a7/`; camera receipts:
 `scratch/playback-independent-20260927/packaging/qualification-ui-5aaf97a7/`.
 The owner's close-and-reopen startup retest remains the merge gate. No merge,
@@ -206,4 +206,29 @@ workspace/lint/format/vendor/source/name gates pass. Native real-window receipt
 `runtime/transparent-player-native-01` passes all six checks, including matching
 opening/closed panes. The actual screenshot is inspected. Normal exit, no new
 kernel entries or scoped memory-limit/OOM events, zero postflight pressure
-averages. New package delivery remains pending; installed source is `5aaf97a7`.
+averages.
+
+All eight CI jobs pass on exact implementation
+`6dbbf16bd4b3f971d0f6b8361b6e194f87752c2c`. The clean offline SDK archive excludes
+the parked color edits. Separate authenticated app-path suites pass 49 X4 and
+50 ONE X2 checks, zero failures, with the existing fixture/service skips and
+native rather than clean-SDK shader-twin helper. Both motion captures per camera
+and opening pixels are inspected. Both suites exit normally, with no new kernel
+entries or scoped memory-limit/OOM events. X4 postflight pressure avg10 is zero;
+avg60/avg300 are 0.05/0.03. X2 postflight averages are zero. A private device-hidden
+import authenticates the exported bundle's commit, executable, metadata and
+license. This is an unsigned local test package, not signature qualification.
+
+The package is installed with unchanged origin, permissions and recorded shared
+runtimes, using no dependency/related-ref/pull updates. The authenticated previous
+`5aaf97a7` bundle is retained for rollback. Actual-installed
+`runtime/transparent-player-installed-01` passes all six CLI/FIFO checks; its
+opening capture is inspected. Normal exit, no new kernel entries or scoped
+memory-limit/OOM events, zero postflight pressure averages. Headless cage checks
+the normal pane and does not measure desktop blur. Exact package identities are
+in [MERGE_READINESS.md](../MERGE_READINESS.md#current-transparent-pane-private-test-package-october-1).
+Package: `scratch/flatpak-delivery-6dbbf16b/`; camera receipts:
+`packaging/qualification-ui-6dbbf16b/` in the same workflow. Owner startup retest
+remains the merge gate. The subsequently reported persistent pause/resume/seek
+stuttering is separate and unlocalized. No latency, hitch-free or capacity
+verdict, merge or release is claimed.

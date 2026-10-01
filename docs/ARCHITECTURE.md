@@ -64,12 +64,13 @@ Close and a newer file choice revoke publication without joining a blocked
 read. Obsolete results are released without waiting for their UI messages.
 Failed opens preserve the old picture and view. CLI/pasted framing travels
 with the request and is applied only after that same file opens successfully.
-The clean `5aaf97a7` blank-player test Flatpak is installed. Both camera UI
-suites and the actual-installed blocked-open check pass;
-the owner's startup retest remains pending. This does not qualify instant
-first-picture preparation or the remaining presentation/capacity requirements.
-The owner subsequently requests that same transparent pane from initial opening
-through the first picture. That follow-up is on the branch, not yet installed.
+The clean `6dbbf16b` transparent-pane test Flatpak is installed. Both camera UI
+suites and all six actual-installed blocked-open checks pass; the owner's
+startup retest remains pending. Headless verification checks the ordinary pane,
+not the desktop compositor's blur. This does not qualify instant first-picture
+preparation or the remaining presentation/capacity requirements. The owner also
+reports persistent intermittent stuttering after pause/resume or seeking,
+cleared by another pause/resume or seek; its cause is not yet established.
 
 An eligible selected capture constructs one immutable `ResidentCameraProfile`
 from the parsed calibration before GPU state or sequential playback is selected.
