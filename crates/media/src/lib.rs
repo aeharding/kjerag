@@ -9,7 +9,7 @@
 //!   card, and the arithmetic that keeps it on the picture's clock. No ffmpeg
 //!   and no device in it, so `cargo test` covers all of it.
 //! - [`track`] is the file's own sound: one AAC stream decoded and resampled
-//!   into that ring, on its own demuxer and producer thread. [`sound`] is the
+//!   into that ring, on its own packet consumer and producer thread. [`sound`] is the
 //!   device it goes out of.
 //! - [`reader`] drives the capture's video streams and hands out [`Frames`]:
 //!   the same capture instant from both lenses, after normalizing each file's

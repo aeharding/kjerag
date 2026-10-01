@@ -38,6 +38,50 @@ impl FixtureDir {
         }
     }
 
+    /// A software-only MOV with real AAC packets for queue/decoder tests.
+    pub(crate) fn write_audio(&self, name: &str) -> PathBuf {
+        assert_eq!(
+            Path::new(name).file_name(),
+            Some(std::ffi::OsStr::new(name))
+        );
+        let path = self.path.join(name);
+        let generated = std::process::Command::new("ffmpeg")
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=size=32x16:rate=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
+                "-t",
+                "3",
+                "-c:v",
+                "mpeg4",
+                "-threads",
+                "1",
+                "-g",
+                "1",
+                "-c:a",
+                "aac",
+                "-f",
+                "mov",
+            ])
+            .arg(&path)
+            .output()
+            .expect("generate synthetic audio/video input");
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        path
+    }
+
     /// Write one all-intra MPEG-4 video stream in a MOV container.
     pub(crate) fn write(&self, name: &str, size: Size, frames: usize, start: i64) -> PathBuf {
         assert_eq!(

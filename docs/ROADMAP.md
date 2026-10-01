@@ -632,6 +632,64 @@ change installed code or add qualification claims.
   only 129.31 redraws/s with 29.44 sources/s and 236.9 ms worst lateness. These current
   failures do not erase the native preview win or satisfy 240 fps capacity. No merge
   or release. Exact identities and qualifications are in MERGE_READINESS.
+
+  September 30 network follow-up isolates an input contribution: the installed
+  package falls behind with normal NAS audio/video; removing only its private
+  sound access holds source cadence; restoring sound fails again. Keeping sound
+  active but redirecting only its input to the authenticated local counterpart
+  also holds cadence. This supports sharing file bytes below the independent
+  demuxers, not muting sound or combining the two timelines. The branch adds one
+  file handle and a bounded 16 MiB byte cache with independent AVIO cursors.
+  Initial native NAS pan holds approximately 30 sources/s after startup, with
+  no audio underruns or growing delay at both 1281.413 and 1381.413 seconds.
+  Startup still hitches, reaching 701.5 and 1231.0 ms worst lateness respectively;
+  the later run temporarily processes 36 sources/s while catching up. There are
+  no new kernel entries or memory pressure. All 1,644 workspace tests pass,
+  with 53 ignored, plus Clippy, formatting, vendored warnings and source-list
+  checks. Six byte-cache regressions include actual independent audio/video
+  packet workers and raw callback errors. Clean-source sandbox qualification
+  and installation remain due.
+  This is not yet an accepted network fix or 240 fps qualification.
+
+  The first clean `2e4466a8` package also holds NAS cadence after startup,
+  but its X4 UI suite crashes inside libavformat on a pasted reopen. Installation
+  is held. MOV retains per-stream pointers to its original AVIO context; the
+  post-inspection context replacement is unsafe and removed. Capture inspection
+  now opens on its final custom IO, shared by Reader and synchronous Walk.
+  Requalification of this corrected ownership path is required before delivery.
+  Corrected ownership passes all 1,645 workspace CPU tests, 53 ignored, and
+  the remaining CPU gates. The new allocation-churn regression repeats open,
+  seek and close 32 times with other AVIO contexts alive. Native NAS playback
+  again reaches 30 sources/s with no audio gaps or new kernel entries, but
+  startup reaches 1844.2 ms worst lateness and catches up before steady playback;
+  its whole-run cadence parser fails. Clean SDK/UI qualification remains due.
+  Exact corrected source `591cf695` subsequently passes the clean SDK build,
+  43 X4 and 44 ONE X2 app-path UI checks, zero failures, including the reopen
+  that crashed the first candidate. All eight CI jobs pass. The exported bundle
+  passes private payload authentication. Normal-audio SDK NAS checks settle at
+  30 sources/s at both 1281.413 and 1481.413 seconds, without audio gaps or growing
+  delay after startup. The first reaches 1238.9 ms worst lateness; the later
+  reaches only 36.9 ms. The package is installed with origin, permissions and
+  shared runtimes unchanged; the authenticated `dd908324` rollback is retained.
+  Actual-installed NAS playback also settles at 30 sources/s, zero audio gaps,
+  but startup reaches 2284.5 ms and its whole-run cadence parser fails. The
+  installed ONE X2 riser smoke reaches 30 sources/s, worst 39.8 ms and zero gaps.
+  No new kernel entries or postflight pressure in these corrected runs. This is
+  a steady-playback input improvement, not a hitch-free or 240 fps verdict.
+  Owner network retesting, startup spikes and capacity remain open. No merge.
+  The owner subsequently rejects network performance: "seek takes forever and
+  there's still tons of hitches". This is not startup-only acceptance. A new
+  installed-player reproduction requests actual forward/backward/copied-view
+  seeks and observes 4.1 and 3.5 seconds before the destination enters a draw;
+  returning to the already-read region takes approximately 0.6 seconds. A
+  diagnostic trace locates read amplification: small sparse audio requests
+  fetch whole 1 MiB blocks, often rereading video bytes. A longer trace reads
+  approximately 2.2 GiB for 1.1 GiB of unique blocks. The cache now retains
+  64 KiB pages within the same 16 MiB limit, coalescing large video requests up
+  to 1 MiB without rereading cached intervals. A failing-before CPU regression
+  exercises sparse shared reads; packet/timestamp/seek behavior remains under
+  the existing actual-demux regressions. Runtime qualification is pending;
+  the installed package is unchanged. This is not a hitch or seek fix verdict.
 - **File-chooser failures, issue
   [#141](https://github.com/aeharding/kjerag/issues/141):** the real FileOpen
   task reproduces a silent missing-session-bus failure. The branch routes
@@ -1004,7 +1062,108 @@ change installed code or add qualification claims.
 
 ### Current private installation, September 30
 
-Source `dd908324` is installed as an interim test Flatpak after separate clean
+Exact source `78075a42` from draft
+[PR #241](https://github.com/aeharding/kjerag/pull/241) is installed. It replaces
+the competing live audio/video demuxers and custom byte cache with one normal
+FFmpeg input per container, routing bounded compressed queues to video and
+audio consumers. Stitching/color arithmetic and ordered source processing are
+unchanged. The clean SDK archive excludes the two preserved parked color edits.
+All eight exact-source CI jobs pass. Its separately run app-path UI suites pass
+43 X4 and 44 ONE X2 checks, zero failures, with existing fixture/service skips;
+all motion captures are inspected. The actual exported bundle is authenticated.
+
+Packaged NAS forward/backward seeks take about 1.36, 1.36 and 0.75 seconds, then
+playback holds recorded cadence through the previously failed region, zero
+audio underruns and no growing delay. Worst picture lateness remains 42.4 ms.
+A local 1 Hz redraw/recovery check preserves source processing and audio, then
+returns to a current picture at 60 Hz. Neither test is a hitch-free or 240 fps
+capacity verdict. No new kernel entries appear; UI and recovery postflight
+pressure averages are zero, while the NAS seek postflight avg60 is 0.02.
+Installation preserves origin, permissions and all recorded shared runtime
+identities; both `591cf695` and `dd908324` rollback bundles are authenticated and
+retained. The actual installed 2256x1504, 60 Hz NAS pan holds 29.95 consecutive
+sources/s, zero audio underruns and 41.2 ms worst lateness without growing delay.
+It exits normally with no new kernel entries or postflight pressure averages.
+Display timing is still uneven: steady sourced-picture dwell p99/max is
+48.12/51.00 ms. Owner retest and the 240 fps/tail requirements remain open.
+No merge or release is claimed. [MERGE_READINESS.md](MERGE_READINESS.md) records
+the package identities and qualification limits.
+
+### Rejected byte-cache build and diagnostics, September 30
+
+Exact source `591cf695` was installed from draft
+[PR #241](https://github.com/aeharding/kjerag/pull/241). It shares one bounded
+file-byte cache beneath independent audio/video demuxers, created before capture
+inspection. It includes the prior source-completion/native-mesh work, excluding
+the two parked color edits. Both clean-source SDK camera suites, all eight CI
+jobs and the actual bundle audit pass. Normal-audio NAS playback now reaches
+30 sources/s after startup in the tested regions; installed startup still
+reaches 2.3 seconds of picture lateness before catching up. Actual installed
+ONE X2 playback reaches recorded cadence without growing delay or audio gaps.
+The `dd908324` rollback is retained. Origin, permissions and shared runtimes
+are unchanged. This is not a hitch-free, 240 fps, owner-accepted, merge or release
+verdict. Exact identities and limits are in [MERGE_READINESS.md](MERGE_READINESS.md).
+
+The owner has since rejected this build's network seeking and ongoing hitches.
+The request-sized byte-cache follow-up above is not installed or accepted yet.
+Its clean SDK long NAS pan still accumulates 4.45 seconds of delay, whereas
+the same local-file control holds source cadence with worst 38.8 ms lateness.
+The owner's requested processing-disabled control also fails over NAS: both
+lenses and audio remain active, but the raw fisheye display has no seam solver,
+color matching, temporal filter or projection. It runs around 25 to 27 fps and
+accumulates 6.53 seconds of delay. The defect therefore does not require those
+processing stages; investigate input/demux/decode waits before changing stitch
+arithmetic. This diagnostic is not a speed or capacity qualification, and its
+temporary bypass has been removed. Details and limits are in
+[the network-input follow-up](research/network-file-buffering-20260930.md).
+
+The next unqualified branch candidate replaces competing live audio/video
+demuxers with one container reader routing separately bounded compressed packet
+queues. Audio decoding/refill remains independent. Video compressed retention
+increases from 64 to 128 MiB (still 512 packets) to pass the measured 67 MiB
+interleave gap without holding decoder surfaces. Seeks clear both queues and
+gate pre-target audio in the same transaction; causal video history is preserved.
+The device-hidden media suite passes 165 tests, four ignored, plus all-target
+media Clippy. Real MOV/AAC packet/seek comparisons and decoded PCM against the
+audio-only reference pass. Initial native full-size NAS pan holds approximately
+30 source advances/s, with 39.6 ms worst lateness and no audio underruns across
+the 40-second moving-view cohort. No new kernel entries appeared; postflight
+memory-pressure averages are small but nonzero. This is one working-tree result
+including parked owner color edits, not clean SDK qualification, an arbitrary
+network guarantee, 240 fps capacity or owner acceptance. Real seek and historical
+audio-gap controls, both-camera qualification and delivery remain due. The
+installed Flatpak is unchanged.
+
+That first single-reader seek control still has a later failure: about 2.04
+seconds of lag and 266 audio underruns, despite quicker individual seeks. It is
+not ready to install. The April interleave region passes through the full player
+without audio gaps. The next candidate removes the custom AVIO/byte cache and
+uses normal FFmpeg-owned input. Its 155 device-hidden media tests pass, with four
+ignored and the ten retired cache-only tests removed. Runtime qualification is
+pending; no reliable network or capacity result is claimed.
+
+The standard-input native follow-on completes those three seeks in about 1.23,
+1.43 and 0.82 seconds and holds later source cadence without audio gaps or
+growing delay. Another 40-second NAS pan holds 29.95 consecutive sources/s with
+46.1 ms worst picture lateness and no underruns. ONE X2 paired-file playback and
+the April historical audio-gap region also hold cadence without audio underruns.
+No new kernel entries appear and postflight pressure averages are zero. Actual
+before/after pictures are inspected. These previews include parked owner color
+edits and do not qualify a clean package, instant seeks, all networks or 240 fps.
+Complete workspace/SDK/UI qualification and owner retest remain due; installed
+code is unchanged.
+
+Final device-hidden workspace gates pass 1,648 tests, 53 ignored and no failures,
+plus formatting, full Clippy, vendor warnings, source-list and naming checks.
+This includes the raw-filename admission guard and all packet fanout tests, with
+unavailable-device returns counted separately from hardware qualification.
+That local gate includes the two parked color files, not the clean archived
+source. The later exact-source CI, SDK/UI, slow-compositor and packaged NAS
+qualification is recorded in the current installation checkpoint above.
+
+### Previous source-completion private installation, September 30
+
+Source `dd908324` was installed as an interim test Flatpak after separate clean
 SDK app-path suites pass 43 X4 and 44 ONE X2 checks, zero failures, and the actual
 bundle passes a private payload import/audit. It brings the source-specific
 completion and finite curved-mesh changes above, not the parked periodic-color

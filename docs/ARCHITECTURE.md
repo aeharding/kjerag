@@ -474,31 +474,54 @@ error. The existing Reader admission and color-metadata rules are the common
 policy. Demux seek targets remain unchanged; frame-origin normalization happens
 at delivery, after decode.
 
-Audio has its own demuxer and decoder in
-[`track.rs`](../crates/media/src/track.rs), and an independent producer in
-[`audio_worker.rs`](../crates/media/src/audio_worker.rs). Ring capacity paces
-refill; a full video delivery channel cannot stop it. The producer parks at
+The single-reader path gives audio its own packet queue and
+decoder in [`track.rs`](../crates/media/src/track.rs), and retains the independent
+producer in [`audio_worker.rs`](../crates/media/src/audio_worker.rs). Ring capacity paces
+refill. Compressed read-ahead, not decoder surfaces, absorbs camera interleave
+gaps; reaching its bound still backpressures both consumers. The producer parks at
 audio EOF until a seek or shutdown. Video decode waits for audio-seek
 acknowledgment, but the UI and device callback never join the producer or wait
 for its I/O. Player observes the producer's underlying errors independently
 of the video delivery channel and stops it when the capture closes.
 
-Live Reader and Track input now passes through
+Live Reader and Track input passes through
 [`packet_input.rs`](../crates/media/src/packet_input.rs). A sole worker owns
-each libavformat demuxer and reads compressed packets independently of decoder
-surface delivery and PCM ring capacity. Video queues stop at 64 MiB or 512
+each file's libavformat demuxer and routes compressed packets to separate audio
+and video consumers. There is no second live audio demuxer or competing file
+cursor. Video queues stop at 128 MiB or 512
 packets per file; audio stops at 256 KiB or 128 packets. Byte accounting permits
 one packet of overshoot because its size is known only after the read. These
 are compressed-input limits, not added decoded/GPU frame retention. Walk
 instruments retain their synchronous reference input.
 
-Input remains idle until the first read or seek. A seek empties the compressed
-queue and invalidates an in-flight read before the same demuxer repositions;
+Input remains idle until the first read or seek. Audio attaches before reading.
+A video seek empties both compressed
+queues and invalidates an in-flight read before the same demuxer repositions;
 the decoder waits for acknowledgment. Closing signals the reader without
 joining a possibly blocked filesystem call. The worker owns the input until
 that read returns. Packet bytes, order, stream identity, timestamps, seek
 targets, EOF and raw errors remain unchanged. This read-ahead stage absorbs
 input bursts; it cannot make sustained slow input or GPU work run at realtime.
+
+The audio target gate is set in that seek transaction, before input resumes.
+An earlier video replay discards only pre-target audio packets, leaving source
+processing ordered. Audio seek flushes its decoder and adjusts the gate without
+repositioning video. Audio epoch invalidation interrupts an empty-queue wait
+within 50 ms, without joining backend IO or treating cancellation as AAC EOF.
+
+The follow-on candidate removes the custom file handle, AVIO callbacks and
+16 MiB byte cache. The capture opener passes raw filesystem filename bytes,
+without the convenience wrapper's UTF-8 unwrap. FFmpeg owns normal container IO from inspection
+through close; there is no context substitution or second cursor. Closing
+leaves that input alive until its sole reader finishes pending IO. Reader and
+offline Walk share capture inspection, while Walk retains synchronous packet
+delivery. This simpler input candidate still needs clean-package qualification.
+CPU regressions compare packet bytes, timestamps, positions and flags with normal
+FFmpeg reads, including routed audio/video consumers with repeated seeks.
+Removed cache code/tests remain in Git history and the failed native control's
+binary is retained in scratch. CPU AAC output matches the audio-only decoder reference.
+That synthetic audio/video fixture uses the `ffmpeg` executable, installed
+explicitly in both architecture CI jobs; no footage or sound device is required.
 
 A seek invalidates audio writes under the ring lock before returning to the
 UI. That authorization travels with the video seek command and the audio
