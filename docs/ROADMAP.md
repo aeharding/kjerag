@@ -1062,6 +1062,14 @@ change installed code or add qualification claims.
 
 ### Pre-window startup delay, September 30
 
+October 1 clarification: the owner wants the normal transparent/blurred window
+pane throughout opening, not black followed by transparency followed by video.
+The branch now uses the existing window/fullscreen backdrop in both preparation
+and playback; fullscreen's existing black surround remains unchanged. The CLI/
+FIFO regression additionally compares the opening pane with the closed window's
+pane. This follow-up is not yet qualified or installed; current source remains
+`5aaf97a7` below.
+
 The owner rejects the installed "Opening video..." welcome screen and requests
 the normal window with a first picture or blank video area immediately. The
 branch now shows a blank black player during initial preparation, with no logo,

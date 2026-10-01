@@ -38,7 +38,7 @@ def visible_picture(path: Path, header_rows: int, control_rows: int, *, blank: b
     if len(picture) != picture_size:
         return False
     if blank:
-        return picture == bytes(picture_size)
+        return picture[:3] != bytes(3) and picture == picture[:3] * (len(picture) // 3)
     return picture != picture[:3] * (len(picture) // 3)
 
 

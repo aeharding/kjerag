@@ -771,7 +771,7 @@ visible_picture() {
 	python3 "$root/scripts/check-ui-picture.py" "$1" "$HEADER_BAND" "$CONTROL_BAND"
 }
 
-# The opening pane is deliberately black, not a welcome or loading screen.
+# The opening pane is empty but not black, not a welcome or loading screen.
 # Validate the capture first so a missing/truncated image cannot count as blank.
 blank_picture() {
 	python3 "$root/scripts/check-ui-picture.py" "$1" "$HEADER_BAND" "$CONTROL_BAND" --blank
@@ -2475,6 +2475,13 @@ pane_rgb() {
 		-f rawvideo -pix_fmt rgb24 - 2>>"$log" | od -An -tu1 | tr -s ' ' | sed 's/^ //;s/ $//'
 }
 
+same_pane() {
+	local first second
+	first=$(pane_rgb "$1") || return 1
+	second=$(pane_rgb "$2") || return 1
+	[ -n "$first" ] && [ "$first" = "$second" ]
+}
+
 # mirror_rgb <file> <left|right>: one of two patches at places the middle of
 # the window reflects onto each other.
 mirror_rgb() {
@@ -3241,9 +3248,6 @@ blocked_open_is_closed() {
 blocked_open() {
 	printf '\n-- window startup with blocked filesystem IO\n'
 	local fifo=$session/blocked-open.360 closed after
-	# Only the normal header paints above the black video area. Its pixels
-	# prove the window exists without requiring a logo in the picture.
-	local NONBLACK_PERCENT=1
 	mkfifo "$fifo" || die "could not create the blocked-open fixture"
 	boot blocked-open "$fifo" time=40 yaw=50 pitch=20 fov=60 lock=1
 	if ! await_paint blocked-opening 5; then
@@ -3272,6 +3276,12 @@ blocked_open() {
 			"the opening view never returned to the welcome view" "log: $log"
 	fi
 	closed=$(grab blocked-closed)
+	if same_pane "$session/blocked-opening.ppm" "$closed"; then
+		pass "opening uses the same window backdrop as the closed player"
+	else
+		fail "opening uses the same window backdrop as the closed player" \
+			"$session/blocked-opening.ppm" "$closed" "log: $log"
+	fi
 	# The still-blocked worker owns the read until this writer arrives. The
 	# non-seekable FIFO is refused by the unchanged .360 format rule.
 	if timeout 5 bash -c ': > "$1"' bash "$fifo"; then

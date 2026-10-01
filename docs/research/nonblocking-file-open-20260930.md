@@ -184,3 +184,26 @@ Package: `scratch/flatpak-delivery-5aaf97a7/`; camera receipts:
 `scratch/playback-independent-20260927/packaging/qualification-ui-5aaf97a7/`.
 The owner's close-and-reopen startup retest remains the merge gate. No merge,
 release, first-picture timing, general hitch-free or capacity pass is claimed.
+
+## Transparent pane clarification, October 1
+
+The owner reports black, then the transparent/blurred pane, then video, and
+clarifies that the desired initial background is the transparent/blurred pane,
+not black held longer. The actual-installed `5aaf97a7` blocked-opening capture
+shows the black first stage; its packaged `open-backdrop.ppm` shows the existing
+normal pane before the first picture. This is the reported styling mismatch,
+not a new source/stitching latency diagnosis.
+
+The pending-open container now uses the same existing `backdrop(fullscreen)`
+as the Scene container. Window loading stays on the normal COSMIC pane, allowing
+the compositor's ordinary blur; fullscreen's established black surround remains
+unchanged. No first-picture shortcut, new state flag, timing rule or engine
+arithmetic is added. The real CLI/FIFO check rejects black/invalid/textured
+opening captures and compares the opening pane with the closed player's pane.
+The earlier actual-installed black capture fails the new assertion as expected.
+All 23 harness CPU tests and five parser startup tests pass; bounded device-hidden
+workspace/lint/format/vendor/source/name gates pass. Native real-window receipt
+`runtime/transparent-player-native-01` passes all six checks, including matching
+opening/closed panes. The actual screenshot is inspected. Normal exit, no new
+kernel entries or scoped memory-limit/OOM events, zero postflight pressure
+averages. New package delivery remains pending; installed source is `5aaf97a7`.

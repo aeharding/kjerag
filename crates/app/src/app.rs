@@ -892,7 +892,7 @@ impl cosmic::Application for App {
             None if self.opener.is_pending() => widget::container(widget::space::vertical())
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .class(backdrop(true))
+                .class(backdrop(self.fullscreen))
                 .into(),
             None => self.welcome(),
         };

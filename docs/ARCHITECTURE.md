@@ -55,9 +55,9 @@ The shell prepares file opens on one background worker, with one replaceable
 queued choice. `Scene::prepare_with` reads the same complete calibration and
 motion track into a Send-only `PreparedScene`, retaining the inspected Reader.
 Packet input remains idle during that preparation. UI initialization returns
-without waiting for capture IO. While the first file is preparing, the normal
-window shows a blank black video area, not a welcome or loading screen. With
-an existing video, that picture remains until the replacement is ready.
+without waiting for capture IO. While the first file is preparing, the window
+shows its normal transparent pane, not a black, welcome or loading screen.
+With an existing video, that picture remains until the replacement is ready.
 The UI starts Player/sound and constructs Scene only when the
 still-current result arrives. No Scene or UI cells cross that thread boundary.
 Close and a newer file choice revoke publication without joining a blocked
@@ -68,6 +68,8 @@ The clean `5aaf97a7` blank-player test Flatpak is installed. Both camera UI
 suites and the actual-installed blocked-open check pass;
 the owner's startup retest remains pending. This does not qualify instant
 first-picture preparation or the remaining presentation/capacity requirements.
+The owner subsequently requests that same transparent pane from initial opening
+through the first picture. That follow-up is on the branch, not yet installed.
 
 An eligible selected capture constructs one immutable `ResidentCameraProfile`
 from the parsed calibration before GPU state or sequential playback is selected.
