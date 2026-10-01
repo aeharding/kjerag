@@ -1178,6 +1178,21 @@ New clean runtime/package qualification remains due. This does not establish the
 cause or resolution of the owner's spontaneous network stutter. Installation,
 merge, the 240-capacity verdict and owner acceptance remain withheld.
 
+Exact correction `9cae1bed` now has a clean offline SDK package excluding the
+parked colors. Repeating the changing-view network test gives two picture-hold
+entries rather than the preceding 15-entry observation. The first resumes;
+the second occurs after the pan and remains held when the test quits. This
+does not meet a zero-unnecessary-hold gate. Its strict 24-second pan cohort
+has 3,059 completed sourced view renders, about 127.46/s, with 716 consecutive
+source changes, about 29.83/s. Regular reports show roughly 30 source/s,
+27.0 ms worst lateness and no counted audio underruns. The actual app cgroup's
+CPU quota records no throttling during this run; it cannot explain away that
+capacity result. Both app-scope memory-event snapshots have no limit/OOM events,
+and shutdown is normal with no new kernel entries. Postflight pressure has
+zero avg10/300 but avg60 .01. This is a bounded diagnostic improvement, not
+resolution of the spontaneous owner symptom, moving acceptance or 240 capacity.
+The installed app remains unchanged and delivery is still withheld.
+
 ### Pre-window startup delay, September 30
 
 October 1 clarification: the owner wants the normal transparent/blurred window
