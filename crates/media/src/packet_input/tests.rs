@@ -286,16 +286,91 @@ fn audio_reads_past_the_camera_sized_interleave_without_video_delivery() {
 }
 
 #[test]
-fn audio_packet_bounds_backpressure_without_discarding_either_stream() {
-    let (mut source, control) = source(800, 3000, None);
+fn audio_read_ahead_uses_unused_video_budget_without_growing_total_cache() {
+    let (mut source, control) = source(700, 1, Some(300));
     source.audio_every = Some(2);
     let mut video = PacketInput::spawn_routed(source, Limits::VIDEO, Some(timeline())).unwrap();
     let mut audio = video.audio_reader().unwrap();
     assert_eq!(video.read().unwrap().unwrap().pts(), Some(0));
-    wait_for(&video.0, |state| state.audio.bytes >= Limits::AUDIO.bytes);
+
+    // The old 128-audio-packet guard stopped this sole reader at packet 256,
+    // leaving almost the entire video budget unused. Both consumers are now
+    // idle, so reaching the blocked read proves actual producer read-ahead.
+    control.entered.recv_timeout(WAIT).unwrap();
+    {
+        let state = video.0.state.lock().unwrap();
+        assert_eq!(state.audio.packets.len(), 150);
+        assert_eq!(state.packets.len(), 149);
+        assert_eq!(state.audio.bytes + state.bytes, 299);
+    }
+    control.release.send(()).unwrap();
+    let packet_limit = Limits::VIDEO.packets + Limits::AUDIO.packets;
+    wait_for(&video.0, |state| {
+        state.packets.len() + state.audio.packets.len() == packet_limit
+    });
+    {
+        let state = video.0.state.lock().unwrap();
+        assert_eq!(state.bytes + state.audio.bytes, packet_limit);
+    }
+    // Sharing space must not discard, reorder or rewrite either stream.
+    for at in 1..700 {
+        let packet = if at % 2 == 0 {
+            video.read().unwrap().unwrap()
+        } else {
+            audio.read().unwrap().unwrap()
+        };
+        assert_eq!(packet.pts(), Some(at));
+        assert_eq!(packet.stream(), (at % 2) as usize);
+        assert_eq!(packet.data(), Some([at as u8].as_slice()));
+    }
+    assert!(audio.read().unwrap().is_none());
+    assert!(video.read().unwrap().is_none());
+    drop(video);
+    control.dropped.recv_timeout(WAIT).unwrap();
+}
+
+#[test]
+fn dropping_audio_restores_video_budget_without_discarding_borrowed_packets() {
+    let (source, control) = source(800, 1, Some(641));
+    let mut video = PacketInput::spawn_routed(source, Limits::VIDEO, Some(timeline())).unwrap();
+    let audio = video.audio_reader().unwrap();
+    assert_eq!(video.read().unwrap().unwrap().pts(), Some(0));
+    wait_for(&video.0, |state| {
+        state.packets.len() == Limits::VIDEO.packets + Limits::AUDIO.packets
+    });
+    drop(audio);
+    for at in 1..=128 {
+        assert_eq!(video.read().unwrap().unwrap().pts(), Some(at));
+    }
+    assert_eq!(video.0.state.lock().unwrap().packets.len(), 512);
+    assert!(control.entered.try_recv().is_err());
+    assert_eq!(video.read().unwrap().unwrap().pts(), Some(129));
+    control.entered.recv_timeout(WAIT).unwrap();
+    assert_eq!(video.0.state.lock().unwrap().packets.len(), 511);
+    drop(video);
+    control.release.send(()).unwrap();
+    control.dropped.recv_timeout(WAIT).unwrap();
+}
+
+#[test]
+fn shared_byte_budget_backpressures_without_discarding_either_stream() {
+    let (mut source, control) = source(800, 3000, None);
+    source.audio_every = Some(2);
+    let limits = Limits {
+        bytes: 16 * 1024,
+        packets: 512,
+    };
+    let mut video = PacketInput::spawn_routed(source, limits, Some(timeline())).unwrap();
+    let mut audio = video.audio_reader().unwrap();
+    assert_eq!(video.read().unwrap().unwrap().pts(), Some(0));
+    wait_for(&video.0, |state| state.full(limits));
     let state = video.0.state.lock().unwrap();
-    assert!(state.audio.bytes < Limits::AUDIO.bytes + 3000);
-    assert!(state.audio.packets.len() <= Limits::AUDIO.packets);
+    let bytes = state.bytes + state.audio.bytes;
+    assert!(bytes >= limits.bytes + Limits::AUDIO.bytes);
+    assert!(bytes < limits.bytes + Limits::AUDIO.bytes + 3000);
+    assert!(
+        state.packets.len() + state.audio.packets.len() < limits.packets + Limits::AUDIO.packets
+    );
     drop(state);
     for at in (1..800).step_by(2) {
         assert_eq!(audio.read().unwrap().unwrap().pts(), Some(at));
@@ -311,17 +386,18 @@ fn audio_packet_bounds_backpressure_without_discarding_either_stream() {
 
 #[test]
 fn zero_byte_audio_packets_still_obey_the_count_bound() {
-    let (mut source, control) = source(400, 0, None);
+    let (mut source, control) = source(800, 0, None);
     source.audio_every = Some(2);
     let mut video = PacketInput::spawn_routed(source, Limits::VIDEO, Some(timeline())).unwrap();
     let audio = video.audio_reader().unwrap();
     video.read().unwrap().unwrap();
     wait_for(&video.0, |state| {
-        state.audio.packets.len() == Limits::AUDIO.packets
+        state.packets.len() + state.audio.packets.len()
+            == Limits::VIDEO.packets + Limits::AUDIO.packets
     });
     assert_eq!(video.0.state.lock().unwrap().audio.bytes, 0);
     drop(audio);
-    for at in (2..400).step_by(2) {
+    for at in (2..800).step_by(2) {
         assert_eq!(video.read().unwrap().unwrap().pts(), Some(at));
     }
     assert!(video.read().unwrap().is_none());
