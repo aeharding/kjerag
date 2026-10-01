@@ -1198,7 +1198,9 @@ fn qualification_fixture() -> (BlurredBelts, LensPair<Vec<u8>>) {
     )
 }
 
-const SHADER: &str = r#"
+const SHADER: &str = concat!(
+    include_str!("f32_div.wgsl"),
+    r#"
 const RETAINED_ROWS = 1080u;
 const RETAINED_COLS = 60u;
 const RETAINED_PIXELS = RETAINED_ROWS * RETAINED_COLS;
@@ -1295,90 +1297,6 @@ fn add_rn(a: f32, b: f32) -> f32 {
 
 fn fma_rn(a: f32, b: f32, c: f32) -> f32 {
     return materialize(fma(a, b, c));
-}
-
-// WGSL permits implementation-defined division precision. The CPU model
-// requires correctly-rounded binary32, so form quotient bits with the same
-// 24-step restoring division used by the qualified GPU PIS kernel.
-fn div_f32_bits(a: u32, b: u32) -> u32 {
-    let sign = (a ^ b) & 0x80000000u;
-    let a_abs = a & 0x7fffffffu;
-    let b_abs = b & 0x7fffffffu;
-    let a_exp = a_abs >> 23u;
-    let b_exp = b_abs >> 23u;
-    let a_frac = a_abs & 0x007fffffu;
-    let b_frac = b_abs & 0x007fffffu;
-
-    if a_exp == 0xffu && a_frac != 0u { return a | 0x00400000u; }
-    if b_exp == 0xffu && b_frac != 0u { return b | 0x00400000u; }
-    if (a_abs == 0u && b_abs == 0u) || (a_exp == 0xffu && b_exp == 0xffu) {
-        return 0xffc00000u;
-    }
-    if b_abs == 0u || a_exp == 0xffu { return sign | 0x7f800000u; }
-    if a_abs == 0u || b_exp == 0xffu { return sign; }
-
-    var ma = a_frac;
-    var mb = b_frac;
-    var ea = i32(a_exp) - 127;
-    var eb = i32(b_exp) - 127;
-    if a_exp == 0u {
-        let top = 31u - countLeadingZeros(a_frac);
-        ma = a_frac << (23u - top);
-        ea = i32(top) - 149;
-    } else {
-        ma |= 0x00800000u;
-    }
-    if b_exp == 0u {
-        let top = 31u - countLeadingZeros(b_frac);
-        mb = b_frac << (23u - top);
-        eb = i32(top) - 149;
-    } else {
-        mb |= 0x00800000u;
-    }
-
-    var remainder = ma;
-    var quotient_exponent = ea - eb;
-    if remainder < mb {
-        remainder <<= 1u;
-        quotient_exponent -= 1;
-    }
-    var quotient = 0u;
-    for (var step = 0u; step < 24u; step++) {
-        let bit = 23u - step;
-        if remainder >= mb {
-            remainder -= mb;
-            quotient |= 1u << bit;
-        }
-        if step != 23u { remainder <<= 1u; }
-    }
-
-    if quotient_exponent >= -126 {
-        let twice_remainder = remainder << 1u;
-        if twice_remainder > mb || (twice_remainder == mb && (quotient & 1u) != 0u) {
-            quotient += 1u;
-        }
-        if quotient == 0x01000000u {
-            quotient = 0x00800000u;
-            quotient_exponent += 1;
-        }
-        if quotient_exponent > 127 { return sign | 0x7f800000u; }
-        return sign | (u32(quotient_exponent + 127) << 23u) | (quotient & 0x007fffffu);
-    }
-
-    let shift = u32(-126 - quotient_exponent);
-    if shift >= 25u { return sign; }
-    var subnormal = quotient >> shift;
-    let mask = (1u << shift) - 1u;
-    let low = quotient & mask;
-    let half = 1u << (shift - 1u);
-    if low > half || (low == half && (remainder != 0u || (subnormal & 1u) != 0u)) {
-        subnormal += 1u;
-    }
-    return sign | subnormal;
-}
-
-fn div_rn(a: f32, b: f32) -> f32 {
-    return bitcast<f32>(div_f32_bits(bitcast<u32>(a), bitcast<u32>(b)));
 }
 
 struct Stage {
@@ -1701,7 +1619,8 @@ fn prepare_l1_aux(@builtin(global_invocation_id) id: vec3<u32>) {
         block_mask[id.x] = select(0u, 255u, nonzero >= 7u);
     }
 }
-"#;
+"#,
+);
 
 #[cfg(test)]
 mod tests {
@@ -1718,6 +1637,25 @@ mod tests {
     use crate::flow::one_xs::pis::{CostMode, DescentAdmission, Flow, HintGrid, InitialGrid};
     use crate::flow::one_xs::scalar::PairSolveStage;
     use crate::flow::one_xs_belt::{RetainedBaseMaps, SourceImage, sample_source_belts};
+
+    #[test]
+    fn production_shader_uses_shared_exact_divider() {
+        use wgpu::naga::valid::{Capabilities, ValidationFlags, Validator};
+
+        assert!(SHADER.starts_with(include_str!("f32_div.wgsl")));
+        let module = wgpu::naga::front::wgsl::parse_str(SHADER).unwrap();
+        Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module)
+            .unwrap();
+        assert_eq!(
+            module
+                .functions
+                .iter()
+                .filter(|(_, function)| function.name.as_deref() == Some("div_rn"))
+                .count(),
+            1
+        );
+    }
     use crate::flow::one_xs_belt_gpu::resident_frame_gpu::GpuResidentCapture;
     use crate::flow::one_xs_belt_gpu::{
         GpuSolverBeltPipeline, SourceTextures, resident_qualification_fixture,

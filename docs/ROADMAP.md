@@ -1235,6 +1235,17 @@ or scanout proof. This is evidence of a shared severe throughput failure and
 scoped recovery behavior, not a deployable performance or spontaneous-stutter
 fix. Further input-stall and both-camera package gates remain due. No install.
 
+A separate performance branch reuses the existing exact corrected-hardware
+binary32 divider in two live GPU frontends, replacing duplicate 24-step
+implementations. No source cadence, thresholds, color or resource ownership
+changes. Its device-hidden workspace passes 1,694 tests with 53 ignored; both
+actual-adapter constructors pass. X4's reported September 23 view and the
+ONE X2 riser each retain byte-identical captured pictures and correction data
+over 31 ordered sources against the preceding native implementation. First
+shown pictures are inspected. These native tests include parked color edits;
+clean SDK and actual-player performance qualification remain due. This does
+not establish a speedup or resolve the spontaneous stutter. No installation.
+
 ### Pre-window startup delay, September 30
 
 October 1 clarification: the owner wants the normal transparent/blurred window
