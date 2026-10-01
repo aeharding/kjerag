@@ -1060,10 +1060,92 @@ change installed code or add qualification claims.
 
 ## Delivery next steps
 
-### Current private installation, September 30
+### Pre-window startup delay, September 30
+
+October 1 clarification: the owner wants the normal transparent/blurred window
+pane throughout opening, not black followed by transparency followed by video.
+The branch now uses the existing window/fullscreen backdrop in both preparation
+and playback; fullscreen's existing black surround remains unchanged. The CLI/
+FIFO regression additionally compares the opening pane with the closed window's
+pane. Clean source `6dbbf16b` is now qualified and installed. All eight exact-source
+CI jobs pass; SDK app-path suites pass 49 X4 and 50 ONE X2 checks, zero failures,
+with existing fixture/service skips. The actual-installed startup suite passes
+all six checks. Motion and startup captures are inspected. No new kernel entries
+or scoped memory-limit/OOM events appear. X4 postflight pressure has zero avg10
+but nonzero longer averages; X2 and installed startup averages are zero. Origin,
+permissions and recorded shared runtimes remain unchanged; the authenticated
+preceding `5aaf97a7` bundle is retained. Headless checks verify the normal pane,
+not desktop blur. The owner's reopen retest remains the merge gate.
+
+October 1 playback report: footage can enter persistent stuttering after pause/
+resume or seeking, or apparently at random, until another pause/resume or seek.
+This is separate from opening styling and remains unlocalized under issue #186.
+No throughput or functional UI result above establishes that it is fixed.
+
+Previously, the owner rejected the installed "Opening video..." welcome screen and requested
+the normal window with a first picture or blank video area immediately. The
+branch now shows a blank black player during initial preparation, with no logo,
+message or open button. The no-file welcome screen and failed-replacement
+preservation are unchanged. Clean source `5aaf97a7` was installed. All eight
+exact-source CI jobs pass; separate SDK app-path suites pass 48 X4 and 49 ONE X2
+checks, zero failures, with existing fixture/service skips. The actual-installed
+CLI/FIFO startup check also passes all five checks, including blank picture and
+responsive Close. Motion and startup captures are inspected. No new kernel
+entries or scoped memory-limit/OOM events; postflight pressure averages are zero.
+Origin, permissions and recorded shared runtimes are unchanged; authenticated
+`5ecc9946` rollback is retained. The owner's startup retest remains the merge
+gate. No new first-picture latency, all-camera, hitch-free or capacity claim.
+
+After reporting the installed single-reader build as "better", the owner
+identifies a remaining opening delay specifically before the window appears.
+The unchanged installed `78075a42` NAS trace places the first surface render
+attempt 4.81 seconds after app exec. UI-thread startup includes a 2.76-second
+roughly 36 MB motion-track read and a 0.17-second ISO read, while decode has
+already started video read-ahead. This is a confirmed synchronous startup
+contribution, not proof of a stitching bottleneck, cold-cache latency or a
+paired causal result about the concurrent reads.
+
+Branch `fix/nonblocking-file-open`, stacked on PR #241, moves complete file
+inspection/calibration to one background worker with one replaceable pending
+choice. The shell returns from initialization without waiting; the existing
+welcome view shows opening status. Decode/audio start only after preparation.
+Ordered source processing, horizon integration, stitching/color arithmetic
+and first-picture readiness remain unchanged. Closing/replacing a choice
+invalidates stale results; failed opens preserve the current picture and view.
+The device-hidden workspace passes 1,656 tests with 53 ignored, including
+unavailable-device returns and the two preserved parked color edits rather
+than clean-source hardware coverage. Full lint/format/source/name and CPU
+harness gates pass. The real CLI/FIFO regression fails pre-window paint in the
+installed baseline and passes five native checks, including responsive Close
+and canceled-result preservation. Normal native NAS opening attempts its first
+surface draw at 0.758 seconds, before the large metadata read; recorded cadence
+and zero underruns follow. Both video pictures are inspected. Native and
+installed runtimes differ, so this is not a matched package-speed comparison.
+No new kernel entries appear; native NAS postflight memory pressure is nonzero.
+All eight CI jobs pass on implementation `5ecc9946`. The clean SDK app-path
+suites pass 48 X4 and 49 ONE X2 checks, zero failures, including the five
+blocked-open checks. Existing fixture/service skips remain; the native shader
+twin helper is not a clean SDK shader test. All motion captures are inspected.
+The actual exported bundle is authenticated and installed, preserving origin,
+permissions and shared runtimes, with authenticated `78075a42` rollback retained.
+Packaged NAS first surface preparation occurs 0.777 seconds after app exec,
+before the large metadata read, which now runs on the opening worker. This is
+not cold-cache or click-to-window latency, nor first-video-picture readiness.
+The final actual-installed NAS run restores the exact reported CLI view and
+subsequently reports 30 source advances/s and zero audio underruns; worst
+reported picture lateness remains 131.0 ms. It exits normally. Both UI suites
+and the packaged/installed NAS runs have no new kernel entries and zero
+postflight memory-pressure averages. The owner's startup retest remains the
+merge gate; no hitch-free, all-camera or 240 fps verdict is claimed.
+The [startup record](research/nonblocking-file-open-20260930.md)
+retains exact scope, negative cleanup and invalid first-assertion details;
+private evidence remains in `scratch/playback-independent-20260927/`.
+
+### Preceding single-reader private installation, September 30
 
 Exact source `78075a42` from draft
-[PR #241](https://github.com/aeharding/kjerag/pull/241) is installed. It replaces
+[PR #241](https://github.com/aeharding/kjerag/pull/241) was installed and is now
+retained for rollback beneath the startup change above. It replaces
 the competing live audio/video demuxers and custom byte cache with one normal
 FFmpeg input per container, routing bounded compressed queues to video and
 audio consumers. Stitching/color arithmetic and ordered source processing are

@@ -58,12 +58,15 @@ use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic::widget::{self, Slider, icon};
 use cosmic::{Application, ApplicationExt, Element, action, cosmic_theme, executor, font, theme};
 use kjerag_render::capture_set::{self, Missing};
-use kjerag_render::{Accuracy, Framing, Horizon, Nudge, Request, Scene, Stall, Stats};
+use kjerag_render::{
+    Accuracy, Framing, Horizon, Nudge, PreparedScene, Request, Scene, Stall, Stats,
+};
 
 use crate::config::{AppTheme, CONFIG_VERSION, Config, ConfigState, Stored};
 use crate::dnd::Dropped;
 use crate::fail::{Alert, Failure};
 use crate::key_bind::{Action, JUMP, key_binds};
+use crate::opening::{OpenRequest, Opener};
 use crate::shot::{Destination, Done};
 use crate::{menu, shot, strings};
 
@@ -176,6 +179,9 @@ pub enum Message {
     FileClearRecents,
     FileClose,
     FileLoad(PathBuf),
+    /// Background preparation finished. Only the still-current request can
+    /// attach sound, install its Scene, or change the window's view.
+    FilePrepared(u64),
     FileOpen,
     /// The chooser could not open or return its selection. Cancellation is
     /// handled before this message; this carries the backend's own error.
@@ -275,6 +281,7 @@ pub struct App {
     core: Core,
     /// The file on screen, if there is one.
     open: Option<Open>,
+    opener: Opener<PreparedScene>,
     /// What the window is saying about a failure, and the only way anything in
     /// this app says one (`crate::fail`, issue #124).
     alert: Alert,
@@ -459,6 +466,7 @@ impl cosmic::Application for App {
         let mut app = App {
             core,
             open: None,
+            opener: Opener::new(Scene::prepare_with),
             alert: Alert::default(),
             stored: flags.stored,
             key_binds: key_binds(),
@@ -482,15 +490,16 @@ impl cosmic::Application for App {
         };
 
         let task = match flags.input {
-            Some(path) => app.update(Message::FileLoad(path)),
+            Some(path) => app.begin_open(OpenRequest {
+                path,
+                alongside: Vec::new(),
+                framing: flags.at,
+                pasted: false,
+            }),
             None => app.retitle(),
         };
-        // A view named on the command line lands with no toast. Nothing was
-        // pasted and nobody needs telling what they just typed; the window
-        // opening at that view is the answer.
-        if let Some(at) = flags.at {
-            app.place(at);
-        }
+        // A command-line view travels with its file request and lands without
+        // a paste toast only after that exact preparation succeeds.
         (app, task)
     }
 
@@ -570,11 +579,14 @@ impl cosmic::Application for App {
                 self.stored.write_state();
             }
             Message::FileClose => {
+                self.opener.cancel();
                 self.open = None;
+                self.dragging = None;
                 self.show_controls(now);
                 return self.retitle();
             }
             Message::FileLoad(path) => return self.opened(&path, &[], now),
+            Message::FilePrepared(id) => return self.prepared(id, now),
             Message::FilesPicked(picked) => {
                 let Some((first, alongside)) = picked.split_first() else {
                     return Task::none();
@@ -846,7 +858,7 @@ impl cosmic::Application for App {
             &self.stored.state,
             &self.key_binds,
             menu::MenuState {
-                has_file: self.open.is_some(),
+                has_file: self.open.is_some() || self.opener.is_pending(),
                 can_transport,
                 can_go_to_view: true,
                 horizon_locked,
@@ -877,6 +889,11 @@ impl cosmic::Application for App {
     fn view(&self) -> Element<'_, Self::Message> {
         let shown = match &self.open {
             Some(open) => self.playing(open),
+            None if self.opener.is_pending() => widget::container(widget::space::vertical())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .class(backdrop(self.fullscreen))
+                .into(),
             None => self.welcome(),
         };
         // A layer over the picture rather than a row beside it, so the toast
@@ -1002,13 +1019,67 @@ impl App {
     /// Open what the pilot pointed at, and then say the one thing about it
     /// that cannot be seen.
     fn opened(&mut self, path: &Path, alongside: &[PathBuf], now: Instant) -> Task<Message> {
-        self.load_with(path, alongside);
         self.show_controls(now);
-        let retitle = self.retitle();
-        let Some(said) = self.advice(path) else {
-            return retitle;
+        self.begin_open(OpenRequest {
+            path: path.to_owned(),
+            alongside: alongside.to_vec(),
+            framing: None,
+            pasted: false,
+        })
+    }
+
+    fn begin_open(&mut self, request: OpenRequest) -> Task<Message> {
+        let path = request.path.clone();
+        self.opener.cancel();
+        match self.opener.request(request) {
+            Ok(ready) => Task::perform(ready, |id| action::app(Message::FilePrepared(id))),
+            Err(error) => {
+                self.alert.raise(Failure::Open(path, error));
+                Task::none()
+            }
+        }
+    }
+
+    /// Install only the current background result. Failures preserve the
+    /// existing video, camera, horizon preference and recent-file list.
+    fn prepared(&mut self, id: u64, now: Instant) -> Task<Message> {
+        let Some((request, result)) = self.opener.take(id) else {
+            return Task::none();
         };
-        Task::batch([retitle, self.toast(said.to_owned())])
+        match result.and_then(PreparedScene::start) {
+            Ok(scene) => {
+                self.alert.close();
+                self.say_handover(&scene);
+                self.open = Some(Open {
+                    path: request.path.clone(),
+                    duration: scene.duration(),
+                    position: Duration::ZERO,
+                    scene,
+                });
+                self.dragging = None;
+                self.stored.state.remember(&request.path);
+                self.stored.write_state();
+                self.hold_horizon();
+                self.hold_flow();
+                self.hold_sound();
+                if let Some(framing) = request.framing {
+                    self.place(framing);
+                }
+                self.show_controls(now);
+                let mut tasks = vec![self.retitle()];
+                if let Some(said) = self.advice(&request.path) {
+                    tasks.push(self.toast(said.to_owned()));
+                }
+                if request.pasted {
+                    tasks.push(self.toast(strings::WENT_TO_VIEW.to_owned()));
+                }
+                Task::batch(tasks)
+            }
+            Err(error) => {
+                self.alert.raise(Failure::Open(request.path, error));
+                Task::none()
+            }
+        }
     }
 
     /// What to tell the pilot about a capture that came in half, or `None`,
@@ -1040,50 +1111,6 @@ impl App {
             Missing::Unreadable => Some(strings::CAPTURE_PICK_BOTH),
             Missing::NotBeside(_) if document(path) => Some(strings::CAPTURE_PICK_BOTH),
             Missing::NotBeside(_) => Some(strings::CAPTURE_HALF),
-        }
-    }
-
-    /// Opens a file, or says why it did not in an alert over whatever the
-    /// window was already showing. cosmic-player only logs
-    /// (`src/video.rs:63`), which leaves the pilot staring at an unchanged
-    /// window; a player with exactly one job should say when it cannot do it.
-    ///
-    /// A failed open takes nothing away (owner's call, 2026-08-01): the video
-    /// that was playing carries on playing behind the alert, because a file
-    /// that would not open is not a reason to stop the one that did.
-    ///
-    /// Returns whether this attempt opened a new video, not whether a video
-    /// (possibly the previous one) remains open.
-    fn load(&mut self, path: &Path) -> bool {
-        self.load_with(path, &[])
-    }
-
-    /// The same, told about the other files the pilot picked alongside this
-    /// one: inside a sandbox that is where a capture written one lens per
-    /// file finds its other half, because the chooser hands over a document
-    /// with nothing beside it (issue #123).
-    fn load_with(&mut self, path: &Path, alongside: &[PathBuf]) -> bool {
-        match Scene::open_with(path, alongside) {
-            Ok(scene) => {
-                self.alert.close();
-                self.say_handover(&scene);
-                self.open = Some(Open {
-                    path: path.to_path_buf(),
-                    duration: scene.duration(),
-                    position: Duration::ZERO,
-                    scene,
-                });
-                self.stored.state.remember(path);
-                self.stored.write_state();
-                self.hold_horizon();
-                self.hold_flow();
-                self.hold_sound();
-                true
-            }
-            Err(e) => {
-                self.alert.raise(Failure::Open(path.to_path_buf(), e));
-                false
-            }
         }
     }
 
@@ -1365,18 +1392,16 @@ impl App {
             Goto::Nothing => Task::none(),
             Goto::Elsewhere(file) => self.toast(strings::view_is_from(&file)),
             Goto::Here(framing) => {
+                self.opener.cancel();
                 self.place(framing);
                 self.toast(strings::WENT_TO_VIEW.to_owned())
             }
-            Goto::Open(file, framing) => {
-                let loaded = self.load(&file);
-                let titled = self.retitle();
-                if !loaded {
-                    return titled;
-                }
-                self.place(framing);
-                Task::batch([titled, self.toast(strings::WENT_TO_VIEW.to_owned())])
-            }
+            Goto::Open(file, framing) => self.begin_open(OpenRequest {
+                path: file,
+                alongside: Vec::new(),
+                framing: Some(framing),
+                pasted: true,
+            }),
         }
     }
 
@@ -1922,6 +1947,26 @@ fn applied_optical_flow(saved: bool, available: bool) -> bool {
 mod tests {
     use super::*;
 
+    fn prepared_message(task: Task<Message>) -> Message {
+        use cosmic::iced::futures::StreamExt;
+        use cosmic::iced::runtime;
+        let mut stream = runtime::task::into_stream(task).expect("open should produce a task");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    match stream.next().await.expect("open should produce a message") {
+                        runtime::Action::Output(cosmic::Action::App(message)) => message,
+                        _ => panic!("unexpected file-preparation action"),
+                    }
+                })
+                .await
+                .expect("file preparation did not return")
+            })
+    }
+
     /// App initialization may read COSMIC settings. Keep shell-message tests
     /// away from the desktop and from real settings, without mutating the
     /// parallel test runner's environment.
@@ -2095,7 +2140,9 @@ mod tests {
             u8::from(!original_lock)
         );
         // With no old video, failure must not apply the view either.
-        let _task = app.update(Message::PastedView(Some(bad_view.clone())));
+        let task = app.update(Message::PastedView(Some(bad_view.clone())));
+        assert!(!app.alert.is_up());
+        let _task = app.update(prepared_message(task));
         assert!(app.open.is_none());
         assert!(app.alert.is_up());
         assert!(lines(&app.toasts).is_empty());
@@ -2111,7 +2158,8 @@ mod tests {
         let scene = &app.open.as_ref().unwrap().scene;
         let camera = scene.viewpoint().camera();
         let horizon = scene.horizon();
-        let _task = app.update(Message::PastedView(Some(bad_view)));
+        let task = app.update(Message::PastedView(Some(bad_view)));
+        let _task = app.update(prepared_message(task));
         let open = app.open.as_ref().unwrap();
         // Apply any queued camera change through the widget's real redraw
         // handler. The blank scene never submits rendering work.
@@ -2129,6 +2177,93 @@ mod tests {
         assert_eq!(app.stored.config.horizon_lock, original_lock);
         assert!(lines(&app.toasts).is_empty());
         assert!(app.alert.is_up());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn command_line_open_returns_before_preparation_and_failed_view_is_not_applied() {
+        if isolated_app_test(
+            "command_line_open_returns_before_preparation_and_failed_view_is_not_applied",
+        )
+        .is_some()
+        {
+            return;
+        }
+        let stored = Stored::default();
+        let original_lock = stored.config.horizon_lock;
+        let (_, framing) = Framing::read_line(&format!(
+            "/proc/self/kjerag-no-video.360 time=40 yaw=50 pitch=20 fov=60 lock={}",
+            u8::from(!original_lock)
+        ))
+        .unwrap();
+        let (mut app, task) = App::init(
+            Core::default(),
+            Flags {
+                stored,
+                input: Some("/proc/self/kjerag-no-video.360".into()),
+                at: Some(framing),
+            },
+        );
+        assert!(app.opener.is_pending());
+        assert!(app.open.is_none());
+        assert!(!app.alert.is_up());
+        assert_eq!(app.stored.config.horizon_lock, original_lock);
+        let _task = app.update(prepared_message(task));
+        assert!(!app.opener.is_pending());
+        assert!(app.open.is_none());
+        assert!(app.alert.is_up());
+        assert_eq!(app.stored.config.horizon_lock, original_lock);
+        assert!(app.stored.state.recent_files.is_empty());
+        assert!(lines(&app.toasts).is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn file_close_discards_a_delayed_open_error() {
+        if isolated_app_test("file_close_discards_a_delayed_open_error").is_some() {
+            return;
+        }
+        let (mut app, _task) = App::init(
+            Core::default(),
+            Flags {
+                stored: Stored::default(),
+                input: None,
+                at: None,
+            },
+        );
+        let task = app.update(Message::FileLoad("/proc/self/kjerag-no-video.360".into()));
+        let _task = app.update(Message::FileClose);
+        assert!(!app.opener.is_pending());
+        let _task = app.update(prepared_message(task));
+        assert!(app.open.is_none());
+        assert!(!app.alert.is_up());
+        assert!(app.stored.state.recent_files.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn newer_file_choice_rejects_the_old_ready_message() {
+        if isolated_app_test("newer_file_choice_rejects_the_old_ready_message").is_some() {
+            return;
+        }
+        let (mut app, _task) = App::init(
+            Core::default(),
+            Flags {
+                stored: Stored::default(),
+                input: None,
+                at: None,
+            },
+        );
+        let first = app.update(Message::FileLoad("/proc/self/first.360".into()));
+        let latest = app.update(Message::FilesPicked(vec!["/proc/self/latest.360".into()]));
+        let _task = app.update(prepared_message(first));
+        assert!(app.opener.is_pending());
+        assert!(!app.alert.is_up());
+        let _task = app.update(prepared_message(latest));
+        assert!(!app.opener.is_pending());
+        assert!(app.alert.is_up());
+        assert!(app.open.is_none());
+        assert!(app.stored.state.recent_files.is_empty());
     }
 
     /// The stock COSMIC template inserts its named header before its named

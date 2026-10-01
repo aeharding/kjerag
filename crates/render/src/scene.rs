@@ -1258,8 +1258,8 @@ impl Scene {
         }
     }
 
-    /// Opens a file and starts playing it. Returns as soon as the container
-    /// is parsed; the first frames arrive on the decode thread.
+    /// Opens a file and starts playing it. File inspection and calibration are
+    /// synchronous; the shell instead uses [`Self::prepare_with`] off-thread.
     pub fn open(path: &Path) -> Fallible<Self> {
         Self::open_with(path, &[])
     }
@@ -1270,8 +1270,15 @@ impl Scene {
     /// with nothing beside it, and then the pilot's own second pick is the
     /// only place it can come from (issue #123).
     pub fn open_with(path: &Path, alongside: &[PathBuf]) -> Fallible<Self> {
+        Self::prepare_with(path, alongside)?.start()
+    }
+
+    /// Inspect the files and integrate the complete motion track without
+    /// creating UI state, starting decode/read-ahead, or opening a sound device.
+    /// The returned owner can cross threads; Scene itself cannot.
+    pub fn prepare_with(path: &Path, alongside: &[PathBuf]) -> Fallible<PreparedScene> {
         ours(path)?;
-        Self::open_live(Player::open_with(path, alongside)?)
+        PreparedScene::from_reader(Reader::open_with(path, alongside)?)
     }
 
     /// Opens an already authenticated two-file capture for live playback in
@@ -1279,25 +1286,11 @@ impl Scene {
     /// neither media layer rediscovers or reopens a mutable sibling name.
     pub fn open_pair(first: &Path, second: &Path) -> Fallible<Self> {
         ours(first)?;
-        Self::open_live(Player::open_pair(first, second)?)
+        PreparedScene::from_reader(Reader::open_pair(first, second)?)?.start()
     }
 
-    fn open_live(mut player: Player) -> Fallible<Self> {
+    fn open_live(mut player: Player, calibrated: Calibrated) -> Fallible<Self> {
         let files: Arc<[PathBuf]> = player.paths().into();
-        // The trailer is the capture's rather than the picked file's, and on a
-        // camera that writes one lens per file only lens 0 carries one
-        // (`kjerag_meta::pair`). The pilot picks whichever half his file
-        // manager listed first, and a `_10_` document has no trailer and
-        // nothing beside it to borrow one from, so reading it from the file
-        // the reader put first is the difference between a capture that opens
-        // either way round and one that opens only if it was picked in the
-        // camera's own order (issue #123).
-        let calibrated = calibrated(
-            &files[0],
-            player.size(),
-            player.lenses(),
-            Some(player.timing().fps() as f32),
-        )?;
         let selected_stitch = calibrated.one_xs.is_some();
         let selected_playback = one_xs_playback_selected(ONE_XS_PLAYBACK_ENABLED, selected_stitch);
         println!(
@@ -2746,6 +2739,35 @@ struct Calibrated {
     held: Arc<Motion>,
     one_xs: Option<ResidentCaptureFacade>,
     filtered: Option<FilteredCaptureFacade>,
+}
+
+/// File-derived state ready to become a live Scene on the UI thread. It owns
+/// the inspected Reader, not a path to reopen, and the complete calibration.
+/// Packet input stays idle while metadata is read, so video read-ahead cannot
+/// compete with startup's motion-track read on a network filesystem.
+pub struct PreparedScene {
+    reader: Reader,
+    calibrated: Calibrated,
+}
+
+impl PreparedScene {
+    fn from_reader(reader: Reader) -> Fallible<Self> {
+        // Per-lens captures keep their trailer with lens 0, even when lens 1
+        // was the picked file or both were supplied through the portal.
+        let files = reader.paths();
+        let calibrated = calibrated(
+            &files[0],
+            reader.size(),
+            reader.lenses(),
+            Some(reader.timing().fps() as f32),
+        )?;
+        Ok(Self { reader, calibrated })
+    }
+
+    /// Attach sound and start the existing live path on the caller's thread.
+    pub fn start(self) -> Fallible<Scene> {
+        Scene::open_live(Player::from_reader(self.reader)?, self.calibrated)
+    }
 }
 
 /// What the shell hands the renderer for one frame.

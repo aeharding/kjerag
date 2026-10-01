@@ -54,10 +54,157 @@ The actual exported bundle passes a separate device-hidden private import:
 its commit, executable, metadata and license match the archived source/build.
 The local test bundle is unsigned, not a release-signature qualification.
 
-## Current private test package, September 30
+## Current transparent-pane private test package, October 1
+
+Source `6dbbf16bd4b3f971d0f6b8361b6e194f87752c2c`, draft
+[PR #242](https://github.com/aeharding/kjerag/pull/242), is installed. The owner
+clarified that opening should use the normal transparent/blurred COSMIC pane,
+not black followed by that pane and then video. The pending-open container now
+uses the same backdrop as playback. No loading logo/text, new readiness state,
+timing rule, stitching/color arithmetic or cadence change is added. Existing
+fullscreen black surround and no-file welcome behavior remain unchanged.
+
+- Installed OSTree: `91aea32a8d44dd6f1b693c04e4c01d9667301b849903d106a3e24d2d70d433b9`.
+- Executable SHA256: `22fa1498e12724b75bf5f65de41206b9b7c5daff31baac452e9ad728f1658f2c`.
+- Bundle SHA256: `7f9219784df5c77d7b8dbbaad6b5625003787353aee90d660b5c08a64b99e5fb`.
+
+All eight CI jobs pass on this implementation. Bounded device-hidden local gates
+pass 1,656 workspace tests, 53 ignored, full lint/format/vendor/source/name checks,
+23 harness CPU tests and five parser startup tests. Local tests include the two
+preserved parked color edits and unavailable-device returns, not clean-source
+GPU coverage. The offline SDK archive excludes those edits. Separate app-path
+suites pass 49 X4 and 50 ONE X2 checks, zero failures, with existing fixture/service
+skips. Executables are authenticated and both motion captures per camera are
+inspected; the shader/Rust-twin helper remains native. A separate device-hidden
+private import authenticates the exported bundle. It is an unsigned local test,
+not release-signature qualification.
+
+Native and actual-installed CLI/FIFO suites each pass all six checks, including
+nonblack blank pixels, matching ordinary pane, responsive Close and canceled
+publication. Startup captures are inspected. Both camera suites and startup runs
+exit normally with no new kernel entries or scoped memory-limit/OOM events.
+X4 postflight pressure avg10 is zero but avg60/avg300 are nonzero; X2 and installed
+startup postflight averages are zero. Headless captures verify the ordinary pane,
+not the desktop compositor's blur. Installation uses no dependency/related-ref/
+pull updates. Origin, permissions and recorded shared runtimes remain unchanged;
+the authenticated preceding `5aaf97a7` bundle is retained below. The owner's reopen
+retest remains the merge gate. The new persistent pause/resume/seek stutter report
+is unlocalized and is not fixed by this styling change. No latency, hitch-free,
+240 fps, merge or release verdict is claimed.
+
+Package: `scratch/flatpak-delivery-6dbbf16b/`. Camera receipts:
+`scratch/playback-independent-20260927/packaging/qualification-ui-6dbbf16b/`.
+Actual-installed startup: `runtime/transparent-player-installed-01`.
+
+## Preceding blank-player private test package, September 30
+
+Source `5aaf97a7e921ff02cf2dd51b5bddda8b9c260070`, draft
+[PR #242](https://github.com/aeharding/kjerag/pull/242), was installed and is now
+retained for rollback. The owner
+requested a blank player instead of the "Opening video..." welcome screen.
+The normal header and black video area now paint while initial preparation is
+pending, without a logo, loading text or open button. No-file launch and Close
+retain the welcome view; replacement failure retains the old video. Complete
+preparation and stitching/color/source behavior are unchanged.
+
+- Installed OSTree: `729f579ca04705465c67b3c2f29ada6480e65cd146d32bc3c35a45426febf265`.
+- Executable SHA256: `2feb7837af2cf3c1ef2785c6558dd6fb0946985c5046a2f608ef912bd84e27b9`.
+- Bundle SHA256: `506acd934ca8471acfa3ee3ec108ed1ce79c4ba7b7d93fe836899f554e1fe2c2`.
+
+All eight CI jobs pass on this exact implementation. Bounded device-hidden local
+gates pass 1,656 workspace tests, 53 ignored, plus full lint/format/vendor/source/
+name checks, 22 harness CPU tests and five startup parser tests. The local tree
+includes the two preserved parked color edits and unavailable-device returns,
+not clean-source GPU coverage. The offline clean SDK archive excludes those
+edits. Separate app-path UI suites pass 48 X4 and 49 ONE X2 checks, zero failures,
+with the existing isolated sound/portal, exact-view, import-fault and cross-mount
+fixture skips. Launched executables are authenticated. Both motion captures per
+camera and the startup capture are inspected. The shader/Rust-twin helper is
+native, not a clean SDK shader test. The exported bundle passes a separate
+device-hidden private import and executable/metadata/license audit. This local
+test bundle is unsigned, not release-signature qualification.
+
+The real CLI/FIFO check passes all five checks in native and actual-installed
+modes, including blank pixels, responsive Close and canceled-result preservation.
+Those runs and both camera suites exit normally, with no new kernel entries or
+scoped memory-limit/OOM events, and zero postflight pressure averages. Installation
+uses no dependency/related-ref/pull updates. Origin, permissions and recorded
+shared runtimes remain unchanged; the authenticated preceding `5ecc9946` bundle
+below is retained for rollback. The owner's reopen retest remains the merge gate.
+No new first-picture/window timing, general hitch-free or capacity verdict is
+claimed. No merge or release.
+
+Package: `scratch/flatpak-delivery-5aaf97a7/`. UI receipts:
+`scratch/playback-independent-20260927/packaging/qualification-ui-5aaf97a7/`.
+Actual-installed startup: `runtime/blank-player-installed-01` in that workflow.
+Details are in the [startup record](research/nonblocking-file-open-20260930.md).
+
+## Preceding nonblocking-open private test package, September 30
+
+Source `5ecc99466442cc5c61e577709f60c7ffc2e9fd80`, draft
+[PR #242](https://github.com/aeharding/kjerag/pull/242), was installed and is now
+retained for rollback. It is stacked on
+PR #241. Complete capture inspection, calibration and orientation preparation
+move off the UI thread. One worker and one replaceable queued request retain
+the inspected Reader. Decode/audio start only after preparation. Close or a
+new choice revokes stale publication without joining a blocked filesystem call.
+CLI/pasted views follow their exact request; failed opens retain the old picture
+and view. No stitching/color arithmetic, source cadence or horizon shortcut is
+included. A blocked active filesystem call can still delay the next queued
+file, but does not block the window.
+
+- Installed OSTree: `4a39f4ddae092d45290cdad09b6ef0a1b69a39897e69546c5c46dc165787c7c1`.
+- Executable SHA256: `db649245cd11824bdcdc5ac1d6b8a6339980bdb6fc4c504eb905ad4901eefc79`.
+- Bundle SHA256: `a6f4d7e837b4871c30e753411b9c6214cf20d5865346648fc7f5932d9973de1e`.
+
+All eight CI jobs pass on this implementation source. The device-hidden local
+workspace passes 1,656 tests, 53 ignored, plus lint/format/source/name and CPU
+harness checks. It includes unavailable-device returns and the two preserved
+parked color files, not clean-source or GPU qualification. The clean SDK archive
+excludes those files. Separate app-path suites pass 48 X4 and 49 ONE X2 checks,
+zero failures, including five real CLI/FIFO blocked-open checks. Existing
+isolated sound/portal, explicit-view, sandbox import-fault and cross-mount fixture
+skips remain. Launched executables are authenticated; both motion captures per
+camera are inspected. The shader/Rust-twin helper is native, not a clean SDK
+shader test. Both suites have no new kernel entries or scoped memory-limit/OOM
+events, and zero postflight pressure averages. The exported bundle passes a
+device-hidden private import and executable/metadata/license audit. This local
+test bundle is unsigned, not a release-signature qualification.
+
+The packaged NAS trace attempts its first surface preparation 0.777 seconds
+after app exec, before the 35,927,360-byte motion read. That read now takes place
+on the opening worker. The preceding installed trace took 4.811 seconds to first
+surface preparation while metadata blocked the UI thread. These are buffered
+trace observations, not authenticated cold-cache or click-to-window latency,
+and do not time the first video picture. Later packaged playback holds recorded
+cadence, zero audio underruns and 46.8 ms worst reported picture lateness.
+Both pictures are inspected; normal exit, no new kernel entries or postflight
+pressure averages.
+
+Installation uses no dependency, related-ref or pull updates. Origin,
+permissions and recorded shared runtime identities remain unchanged. The
+authenticated `78075a42` bundle below is retained for rollback. A final
+actual-installed run, with no app-path substitution, restores the reported NAS
+CLI view at 1281.413 seconds, yaw -136.14, pitch -19.43, fov 166.23, lock 1.
+Subsequent intervals report 30 source advances/s, zero underruns and no growing
+delay; worst reported picture lateness is 131.0 ms. The process exits normally
+with no new kernel entries or postflight pressure averages. Both pictures are
+inspected. These are functional opening/playback checks, not an all-file,
+hitch-free, display-tail or 240 fps capacity pass. The owner's startup retest
+remains the merge gate. No merge or release is claimed.
+
+Package: `scratch/flatpak-delivery-5ecc9946/`. UI receipts:
+`scratch/playback-independent-20260927/packaging/qualification-ui-5ecc9946/`.
+Packaged/installed NAS receipts: `sdk-startup-nas-trace-02` and
+`installed-startup-reported-view-01` under that workflow's `runtime/`, each with
+a separate health directory. Full reproduction and scope are in the
+[startup record](research/nonblocking-file-open-20260930.md).
+
+## Preceding single-reader private test package, September 30
 
 Source `78075a42d159aeb90c6864e299b5936fcefd4236`, draft
-[PR #241](https://github.com/aeharding/kjerag/pull/241), is installed. One normal
+[PR #241](https://github.com/aeharding/kjerag/pull/241), was installed and is now
+retained for rollback beneath the startup change above. One normal
 FFmpeg input per container routes bounded compressed queues to video and audio;
 the competing live file cursors, custom AVIO callbacks and byte cache are gone.
 Video retention is 128 MiB/512 packets to pass the measured 67 MiB camera

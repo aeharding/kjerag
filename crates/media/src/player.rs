@@ -369,9 +369,8 @@ impl Player {
         )
     }
 
-    /// Opens the file and starts decoding. Returns as soon as the container
-    /// is parsed: the first frame arrives on the thread, so a big file does
-    /// not hold the window shut.
+    /// Opens the file and starts decoding. Container inspection is synchronous;
+    /// an interactive caller should prepare a Reader away from its UI thread.
     pub fn open(path: &Path) -> Fallible<Self> {
         Self::open_with(path, &[])
     }
@@ -390,7 +389,9 @@ impl Player {
         Self::from_reader(Reader::open_pair(first, second)?)
     }
 
-    fn from_reader(reader: Reader) -> Fallible<Self> {
+    /// Starts decoding an already inspected capture. No file is reopened.
+    /// Sound-device creation stays on the caller's thread.
+    pub fn from_reader(reader: Reader) -> Fallible<Self> {
         let mut reader = reader.lookahead(LOOKAHEAD);
         let (timing, size) = (reader.timing(), reader.size());
         let (lenses, files) = (reader.lenses(), reader.paths());

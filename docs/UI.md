@@ -124,6 +124,16 @@ flattens onto that, so a JPEG of a ball view has a black room and no alpha in
 it anywhere (JPEG has no channel for one).
 
 **A pane with no frame in it is all room**, and gets the same two treatments.
+When launching a file, the window appears before capture preparation completes.
+The owner requested a plain empty player, not an "Opening video..." screen
+(September 30), then clarified that it should use the normal transparent/blurred
+pane from the start, with no intermediate black stage (October 1). While that
+first file is preparing, its video area uses the same window/fullscreen backdrop
+as playback, with no welcome logo, loading label or open button. The normal
+header remains usable, including Close. Launching without a file still shows
+the welcome view.
+Replacing an existing video preserves its picture until the new file succeeds.
+
 Between opening a file and its first decoded frame there is nothing to point a
 ray at, so every ray misses, the whole pane is written transparent, and what
 the pilot sees is the backdrop: the window's own pane, or black in fullscreen.

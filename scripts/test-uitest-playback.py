@@ -71,8 +71,11 @@ class VisiblePlaybackTest(unittest.TestCase):
             "said",
             "picture",
             "same_picture",
+            "blocked_open_is_closed",
             "moving_picture",
             "visible_picture",
+            "blank_picture",
+            "same_pane",
             "await_visible_playback",
             "playback_rate",
             "with_media",
@@ -408,6 +411,55 @@ exit 97
             31,
             f"stdout:\n{backdrop.stdout}\nstderr:\n{backdrop.stderr}",
         )
+
+    def test_blocked_open_close_requires_a_real_changed_capture(self) -> None:
+        for capture, expected in [
+            (self.video, 1),
+            (self.controls, 1),
+            (self.other, 0),
+            (self.artifact / "absent.ppm", 1),
+            (self.truncated, 1),
+        ]:
+            with self.subTest(capture=capture):
+                result = self.bash(f"""
+session={shlex.quote(str(self.artifact))}
+cp {shlex.quote(str(self.video))} "$session/blocked-opening.ppm"
+grab() {{ printf '%s\\n' {shlex.quote(str(capture))}; }}
+blocked_open_is_closed blocked-closed
+""")
+                self.assertEqual(result.returncode, expected, result.stderr)
+                if capture != self.truncated:
+                    self.assertEqual(result.stderr, "")
+        self.assert_shell("grab() { return 1; }; blocked_open_is_closed blocked-closed", 1)
+
+    def test_opening_pane_requires_valid_nonblack_blank_pixels_not_loading_content(self) -> None:
+        for capture, expected in [
+            (self.black, 1),
+            (self.flat, 0),
+            (self.bright, 0),
+            (self.video, 1),
+            (self.artifact / "absent.ppm", 1),
+            (self.truncated, 1),
+        ]:
+            with self.subTest(capture=capture):
+                self.assert_shell(f"blank_picture {shlex.quote(str(capture))}", expected)
+
+    def test_opening_pane_match_rejects_black_and_failed_measurements(self) -> None:
+        for first, second, expected in [
+            ("27 27 27", "27 27 27", 0),
+            ("0 0 0", "27 27 27", 1),
+            ("", "", 1),
+            ("27 27 27", "", 1),
+        ]:
+            with self.subTest(first=first, second=second):
+                self.assert_shell(f"""
+pane_rgb() {{
+    if [ "$1" = opening ]; then printf '%s' {shlex.quote(first)};
+    else printf '%s' {shlex.quote(second)}; fi
+}}
+same_pane opening closed
+""", expected)
+        self.assert_shell("pane_rgb() { return 1; }; same_pane opening closed", 1)
 
 
 if __name__ == "__main__":
