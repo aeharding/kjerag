@@ -721,7 +721,9 @@ impl Player {
 
     /// Hold picture and sound together during an actual source shortage.
     /// This leaves play intent, every source queue and estimator history intact.
-    /// One missed source interval triggers the hold. Restart needs two completed
+    /// A missed interval with unadmitted picture input, or missing sound,
+    /// triggers the hold. Already-admitted stitch work is not input starvation.
+    /// Restart needs two completed
     /// pictures, sound, and a recovery-only compressed-input lead, without
     /// increasing decoded/GPU retention. The finished tail needs no lead.
     pub fn coordinate_buffering(
@@ -729,6 +731,7 @@ impl Player {
         now: Instant,
         output_ready: bool,
         ready_successors: usize,
+        picture_input_missing: bool,
         finished: bool,
         wake: Waker,
     ) -> Fallible<Option<Instant>> {
@@ -781,7 +784,9 @@ impl Player {
         // Let its ordered catch-up consume that prefix before declaring a
         // picture shortage. This never hides missing sound or pending GPU work.
         let catchup_ready = output_ready && ready_successors > 0;
-        if (!covers_position && position >= missing_at && !catchup_ready) || !audio_ready {
+        if (!covers_position && position >= missing_at && !catchup_ready && picture_input_missing)
+            || !audio_ready
+        {
             self.presenter.clock.hold_for_buffer(now);
             eprintln!(
                 "buffer: waiting for {} at {:.3} s",
@@ -791,6 +796,11 @@ impl Player {
             if let Some(control) = &self.audio_control {
                 let _ = control.buffered_or_wait(position, interval * 2, wake)?;
             }
+            return Ok(None);
+        }
+        if !picture_input_missing && deadline.is_some_and(|deadline| deadline <= now) {
+            // A worker completion will wake the shell. An expired picture
+            // deadline must not spin timers while that admitted work finishes.
             return Ok(None);
         }
         Ok(deadline)
@@ -1701,7 +1711,7 @@ mod tests {
         let late = start + NTSC * 3;
         bench
             .player
-            .coordinate_buffering(late, true, 0, false, Waker::noop().clone())
+            .coordinate_buffering(late, true, 0, true, false, Waker::noop().clone())
             .unwrap();
         assert!(bench.player.is_buffering());
         for index in 1..=3 {
@@ -1711,7 +1721,7 @@ mod tests {
         let wake = Arc::new(WakeCount::default());
         bench
             .player
-            .coordinate_buffering(late, true, 2, false, Waker::from(wake.clone()))
+            .coordinate_buffering(late, true, 2, true, false, Waker::from(wake.clone()))
             .unwrap();
         assert!(
             bench.player.is_buffering(),
@@ -1729,7 +1739,7 @@ mod tests {
         while bench.player.is_buffering() {
             bench
                 .player
-                .coordinate_buffering(late, true, 2, false, Waker::from(wake.clone()))
+                .coordinate_buffering(late, true, 2, true, false, Waker::from(wake.clone()))
                 .unwrap();
             assert!(Instant::now() < deadline);
             thread::yield_now();
@@ -1790,7 +1800,7 @@ mod tests {
             assert_eq!(bench.player.pump(now).unwrap().unwrap().index, index);
             bench
                 .player
-                .coordinate_buffering(now, true, 0, false, Waker::noop().clone())
+                .coordinate_buffering(now, true, 0, true, false, Waker::noop().clone())
                 .unwrap();
             assert!(!bench.player.is_buffering());
             assert_eq!(
@@ -1828,6 +1838,7 @@ mod tests {
                     late,
                     true,
                     (4 - index) as usize,
+                    true,
                     false,
                     Waker::noop().clone(),
                 )
@@ -1841,6 +1852,41 @@ mod tests {
         }
         assert_eq!(bench.player.stats().presented, 5);
         assert_eq!(bench.player.stats().dropped, 0);
+    }
+
+    #[test]
+    fn admitted_picture_work_does_not_hold_or_spin_an_expired_deadline() {
+        for output_ready in [false, true] {
+            let mut bench = Bench::new();
+            assert!(
+                bench
+                    .player
+                    .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+            );
+            bench.player.play();
+            let start = Instant::now();
+            bench.decoded(0, 0);
+            bench.player.pump(start).unwrap();
+            let late = start + NTSC * 3;
+            assert_eq!(
+                bench
+                    .player
+                    .coordinate_buffering(
+                        late,
+                        output_ready,
+                        0,
+                        false,
+                        false,
+                        Waker::noop().clone(),
+                    )
+                    .unwrap(),
+                None,
+                "wait for the worker, not an already-expired timer"
+            );
+            assert!(!bench.player.is_buffering());
+            assert_eq!(bench.player.presenter.clock.reading.origin, Some(start));
+            assert_eq!(bench.player.position(late), late.duration_since(start));
+        }
     }
 
     #[test]
@@ -1861,13 +1907,13 @@ mod tests {
         bench.player.pump(late).unwrap();
         bench
             .player
-            .coordinate_buffering(late, true, 1, false, Waker::noop().clone())
+            .coordinate_buffering(late, true, 1, true, false, Waker::noop().clone())
             .unwrap();
         assert!(!bench.player.is_buffering());
         bench.player.pump(late).unwrap();
         bench
             .player
-            .coordinate_buffering(late, true, 0, false, Waker::noop().clone())
+            .coordinate_buffering(late, true, 0, true, false, Waker::noop().clone())
             .unwrap();
         assert!(bench.player.is_buffering());
         assert_eq!(bench.player.position(late), late.duration_since(start));
@@ -1891,7 +1937,7 @@ mod tests {
         assert!(bench.player.pump(late).unwrap().is_none());
         bench
             .player
-            .coordinate_buffering(late, true, 0, false, Waker::noop().clone())
+            .coordinate_buffering(late, true, 0, true, false, Waker::noop().clone())
             .unwrap();
         assert!(bench.player.is_buffering());
         assert!(
@@ -1925,7 +1971,7 @@ mod tests {
         assert!(!bench.player.buffered_frame_due());
         bench
             .player
-            .coordinate_buffering(later, true, 1, false, Waker::noop().clone())
+            .coordinate_buffering(later, true, 1, true, false, Waker::noop().clone())
             .unwrap();
         assert!(
             bench.player.is_buffering(),
@@ -1933,7 +1979,7 @@ mod tests {
         );
         bench
             .player
-            .coordinate_buffering(later, true, 2, false, Waker::noop().clone())
+            .coordinate_buffering(later, true, 2, true, false, Waker::noop().clone())
             .unwrap();
         assert!(!bench.player.is_buffering());
         assert_eq!(bench.player.position(later), held);
@@ -1957,7 +2003,7 @@ mod tests {
         assert_eq!(
             bench
                 .player
-                .coordinate_buffering(now, true, 0, false, Waker::noop().clone())
+                .coordinate_buffering(now, true, 0, true, false, Waker::noop().clone())
                 .unwrap(),
             Some(start + NTSC * 2)
         );
@@ -1981,7 +2027,7 @@ mod tests {
             let late = start + NTSC * 3;
             bench
                 .player
-                .coordinate_buffering(late, true, 0, false, Waker::noop().clone())
+                .coordinate_buffering(late, true, 0, true, false, Waker::noop().clone())
                 .unwrap();
             assert!(bench.player.is_buffering());
             if seek {
@@ -1993,7 +2039,7 @@ mod tests {
                 assert!(!bench.player.is_playing());
                 bench
                     .player
-                    .coordinate_buffering(late + NTSC, true, 4, true, Waker::noop().clone())
+                    .coordinate_buffering(late + NTSC, true, 4, true, true, Waker::noop().clone())
                     .unwrap();
                 assert!(
                     !bench.player.is_playing(),
@@ -2024,7 +2070,7 @@ mod tests {
         bench.player.presenter.clock.hold_for_buffer(late);
         bench
             .player
-            .coordinate_buffering(late + NTSC * 9, true, 0, true, Waker::noop().clone())
+            .coordinate_buffering(late + NTSC * 9, true, 0, true, true, Waker::noop().clone())
             .unwrap();
         assert!(!bench.player.is_buffering());
         assert_eq!(
@@ -2055,7 +2101,7 @@ mod tests {
         let position = bench.player.position(start);
         bench
             .player
-            .coordinate_buffering(start, true, 2, false, Waker::noop().clone())
+            .coordinate_buffering(start, true, 2, false, false, Waker::noop().clone())
             .unwrap();
         assert!(
             bench.player.is_buffering(),
@@ -2069,7 +2115,7 @@ mod tests {
         let later = start + Duration::from_secs(10);
         bench
             .player
-            .coordinate_buffering(later, true, 2, false, Waker::noop().clone())
+            .coordinate_buffering(later, true, 2, false, false, Waker::noop().clone())
             .unwrap();
         assert!(!bench.player.is_buffering());
         assert_eq!(bench.player.position(later), position);

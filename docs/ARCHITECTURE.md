@@ -563,7 +563,12 @@ explicit pause or seek supersedes recovery. Restart requires completion-proven
 successor pictures and sound at that PTS, with no impossible lead at EOF.
 An overdue logical owner is not a picture shortage while it has a completed
 successor: ordered catch-up consumes that ready prefix before considering a
-hold. Pending GPU work and missing sound do not gain this exemption.
+hold. Pending stitch work also does not stop the clock when that exact output's
+required real inputs are already admitted. The input check follows the selected
+seven-source window, exact decode epoch and queued clipped-tail finish. It is
+not completion proof or restart lead. Missing input or sound still permits a
+hold. An expired picture deadline sleeps on worker completion rather than
+spinning timers while admitted work finishes.
 The follow-on also observes compressed-input lead across every required lens
 and file, using each source's normalized clock. Recovery alone waits for one
 second of packet lead; EOF or either consumer's existing byte/count limit

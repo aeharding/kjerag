@@ -42,6 +42,89 @@ fn one_x2_filtered_completed_catchup_does_not_buffer() {
     assert_completed_catchup_does_not_buffer(Path::new(&path));
 }
 
+#[test]
+fn x4_filtered_admitted_work_does_not_pause_sound() {
+    let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
+        return;
+    };
+    assert_admitted_work_does_not_pause_sound(Path::new(&path));
+}
+
+#[test]
+fn one_x2_filtered_admitted_work_does_not_pause_sound() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    assert_admitted_work_does_not_pause_sound(Path::new(&path));
+}
+
+fn assert_admitted_work_does_not_pause_sound(path: &Path) {
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let mut scene = Scene::open(path).unwrap();
+    // The isolated GPU harness routes audio to its quiet sink. Muting here
+    // would bypass sound readiness and fail to exercise the live clock gate.
+    scene.set_muted(false);
+    scene.pause(Instant::now());
+    let first = super::tests::wait_for_new_scene_frame(&scene, None);
+    let camera = Camera::default();
+    let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    settle_filtered(&scene, &mut pipeline, &device, &queue, &first, camera, None);
+    let capture = scene
+        .show
+        .as_ref()
+        .unwrap()
+        .filtered
+        .as_ref()
+        .unwrap()
+        .clone();
+    let blocked = capture.pause_stitch_for_test();
+    scene.play();
+    let start = Instant::now();
+    assert!(!matches!(scene.progress(start), Next::Stopped(_)));
+    let playing = scene.frame_stamp().unwrap();
+    let position = scene.position(start);
+    let interval = scene.player(|player| player.timing().interval()).unwrap();
+    // Startup has emitted four pictures. Withhold the stitch actor, not file
+    // input, while the clock reaches one interval beyond the first new output.
+    let first_pending = first.index() + 4;
+    let steps = (first_pending + 1 - playing.index()) as u32;
+    let late = start + interval * steps + Duration::from_millis(5);
+    let before = scene.player(Player::stats).unwrap();
+    assert!(!matches!(scene.progress(late), Next::Stopped(_)));
+    let pending = scene.frame_stamp().unwrap();
+    let accepted = capture.accepted_stamp().unwrap().unwrap();
+    assert_eq!(pending.index(), first_pending);
+    assert!(pending.same_decode_epoch(&accepted));
+    assert!(accepted.index() >= pending.index() + 3);
+    assert_eq!(capture.ready_successors(&pending).unwrap(), 0);
+    assert!(capture.install_due(&pending).unwrap().is_none());
+    assert_eq!(scene.player(Player::is_buffering), Some(false));
+    assert_eq!(scene.position(late), position + late.duration_since(start));
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+    drop(blocked);
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        assert!(!matches!(scene.progress(late), Next::Stopped(_)));
+        assert_eq!(scene.player(Player::is_buffering), Some(false));
+        if scene.frame_stamp().is_some_and(|stamp| {
+            stamp.index() == playing.index() + steps as u64 && capture.acknowledged(&stamp).unwrap()
+        }) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "admitted work did not catch up");
+        device.poll(wgpu::PollType::Poll).unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let after = scene.player(Player::stats).unwrap();
+    assert_eq!(after.presented - before.presented, steps as u64);
+    assert_eq!(after.dropped, before.dropped);
+    assert_eq!(scene.position(late), position + late.duration_since(start));
+    let complete = scene.frame_stamp().unwrap();
+    assert!(playing.same_decode_epoch(&complete));
+    prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&complete));
+}
+
 fn assert_completed_catchup_does_not_buffer(path: &Path) {
     let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
     let mut scene = Scene::open(path).unwrap();
@@ -86,7 +169,8 @@ fn assert_completed_catchup_does_not_buffer(path: &Path) {
 fn assert_buffering_retains_history(path: &Path) {
     let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
     let mut scene = Scene::open(path).unwrap();
-    scene.set_muted(true);
+    // Use the harness's quiet sink, not the mute readiness exemption.
+    scene.set_muted(false);
     scene.pause(Instant::now());
     let first = super::tests::wait_for_new_scene_frame(&scene, None);
     let camera = Camera::default();
@@ -95,10 +179,18 @@ fn assert_buffering_retains_history(path: &Path) {
     scene.play();
     let start = Instant::now();
     assert!(!matches!(scene.progress(start), Next::Stopped(_)));
-    // A withheld event owner leaves multiple real source deadlines overdue.
-    // Re-enter through the actual Scene gate, not a separate clock model.
-    let resumed = start + Duration::from_millis(500);
+    // One second exceeds the real sound producer's 500 ms future lead.
+    // Admitted stitch delay alone no longer qualifies as input starvation.
+    // Re-enter through Scene, then prove missing sound was necessary to hold.
+    let resumed = start + Duration::from_secs(1);
     assert!(!matches!(scene.progress(resumed), Next::Stopped(_)));
+    let capture = scene.show.as_ref().unwrap().filtered.as_ref().unwrap();
+    let current = scene.frame_stamp().unwrap();
+    let current_ready = capture.acknowledged(&current).unwrap();
+    assert!(
+        capture.has_output_inputs(&current, current_ready).unwrap(),
+        "the recovery fixture must have its required picture inputs"
+    );
     assert_eq!(scene.player(Player::is_buffering), Some(true));
     assert!(scene.is_playing(), "buffering retains user play intent");
     let held = scene.position(resumed);

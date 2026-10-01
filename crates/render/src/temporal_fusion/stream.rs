@@ -22,8 +22,8 @@ use super::pyramid::gpu as pyramid_gpu;
 use super::settings::{EffParams, Provider};
 use crate::gpu_completion::SubmissionCompletion;
 
-const SOURCES: usize = 7;
-const CENTER: usize = 3;
+pub(crate) const SOURCES: usize = 7;
+pub(crate) const CENTER: usize = 3;
 const FULL_RESOLUTION_LEVELS: usize = 7;
 #[cfg(test)]
 const HALF_RESOLUTION_LEVELS: usize = 6;

@@ -1193,6 +1193,30 @@ zero avg10/300 but avg60 .01. This is a bounded diagnostic improvement, not
 resolution of the spontaneous owner symptom, moving acceptance or 240 capacity.
 The installed app remains unchanged and delivery is still withheld.
 
+A further real-pipeline regression reproduces an unnecessary clock hold with
+all three required future sources already admitted but the stitch actor
+deliberately blocked. This isolates admitted processing delay from missing
+camera input. The follow-up uses that exact source/epoch ownership and the
+existing seven-source stream's lookahead to exempt in-progress work from input
+buffering. Completed current pictures check their next output; queued finish
+owns the clipped EOF tail. Actual completion remains mandatory for display and
+restart, and missing sound always holds. Expired deadlines wait on worker
+completion rather than causing a timer loop. Media passes 184 tests with four
+ignored; the device-hidden workspace passes 1,692 tests with 53 ignored, plus
+the full lint/format/vendor/source/name and portable harness gates. These
+include unavailable-device returns and the parked color variation, not clean
+SDK hardware coverage. Separate real-Scene cases pass on both cameras with
+admitted stitch work delayed, without a common-clock hold. Both cameras also
+pass actual missing-sound hold/refill/restart checks with picture inputs
+already admitted, retaining the same source history. These fixtures enable
+sound through the quiet sink rather than using the mute readiness exemption.
+Three of the four runs log ALSA underrun/overrun warnings, so they do not
+qualify sound-device continuity. No new kernel entries appear; X4's recovery
+run has nonzero pressure averages, while the other three have zero averages.
+Clean SDK and actual-player qualification remain due. This does not establish
+the cause of the owner's spontaneous stutter or meet the 240-capacity
+requirement. Installation and merge remain withheld.
+
 ### Pre-window startup delay, September 30
 
 October 1 clarification: the owner wants the normal transparent/blurred window

@@ -134,6 +134,7 @@ impl Scene {
                     now,
                     output_ready,
                     capture.ready_successors(&current.frames.stamp())?,
+                    !capture.has_output_inputs(&current.frames.stamp(), output_ready)?,
                     capture.is_finished()?,
                     std::task::Waker::from(Arc::new(self.ready_wake.clone())),
                 )?,
