@@ -1217,6 +1217,24 @@ Clean SDK and actual-player qualification remain due. This does not establish
 the cause of the owner's spontaneous stutter or meet the 240-capacity
 requirement. Installation and merge remain withheld.
 
+Exact follow-up `c428658f` passes all eight CI jobs and builds an offline SDK
+package excluding parked colors. Its 2256x1504, nominal-250-Hz September 23 NAS
+pan fails throughput: 73.87 completed sourced views/s and 16.37 consecutive
+source advances/s. Picture lateness reaches 6.426 seconds. One actual missing-
+sound hold resumes at the same PTS; three counted audio underruns remain.
+A matching unchanged-installed control also fails, at 72.37 views/s and 16.50
+sources/s, accumulating 16.244 seconds of picture lag and hundreds of audio
+underruns per later interval. Live GPU samples report 98%/97% busy at 800 MHz
+for candidate/control, with temperatures around 62 C in the candidate. This
+does not isolate the reason for that clock or prove it is the sole cause.
+Both app CPU quotas record zero throttling and both memory-event snapshots
+record zero limit/OOM events. Both players exit normally with no new kernel
+entries. Candidate pressure avg60 is .03, with avg10/300 zero; the control's
+averages are zero. Both after pictures are inspected, not moving acceptance
+or scanout proof. This is evidence of a shared severe throughput failure and
+scoped recovery behavior, not a deployable performance or spontaneous-stutter
+fix. Further input-stall and both-camera package gates remain due. No install.
+
 ### Pre-window startup delay, September 30
 
 October 1 clarification: the owner wants the normal transparent/blurred window
