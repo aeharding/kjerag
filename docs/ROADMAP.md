@@ -1060,6 +1060,39 @@ change installed code or add qualification claims.
 
 ## Delivery next steps
 
+### Pre-window startup delay, September 30
+
+After reporting the installed single-reader build as "better", the owner
+identifies a remaining opening delay specifically before the window appears.
+The unchanged installed `78075a42` NAS trace places the first surface render
+attempt 4.81 seconds after app exec. UI-thread startup includes a 2.76-second
+roughly 36 MB motion-track read and a 0.17-second ISO read, while decode has
+already started video read-ahead. This is a confirmed synchronous startup
+contribution, not proof of a stitching bottleneck, cold-cache latency or a
+paired causal result about the concurrent reads.
+
+Branch `fix/nonblocking-file-open`, stacked on PR #241, moves complete file
+inspection/calibration to one background worker with one replaceable pending
+choice. The shell returns from initialization without waiting; the existing
+welcome view shows opening status. Decode/audio start only after preparation.
+Ordered source processing, horizon integration, stitching/color arithmetic
+and first-picture readiness remain unchanged. Closing/replacing a choice
+invalidates stale results; failed opens preserve the current picture and view.
+The device-hidden workspace passes 1,656 tests with 53 ignored, including
+unavailable-device returns and the two preserved parked color edits rather
+than clean-source hardware coverage. Full lint/format/source/name and CPU
+harness gates pass. The real CLI/FIFO regression fails pre-window paint in the
+installed baseline and passes five native checks, including responsive Close
+and canceled-result preservation. Normal native NAS opening attempts its first
+surface draw at 0.758 seconds, before the large metadata read; recorded cadence
+and zero underruns follow. Both video pictures are inspected. Native and
+installed runtimes differ, so this is not a matched package-speed comparison.
+No new kernel entries appear; native NAS postflight memory pressure is nonzero.
+Both clean package camera suites, delivery and owner retest remain pending.
+The installed Flatpak is unchanged. The [startup record](research/nonblocking-file-open-20260930.md)
+retains exact scope, negative cleanup and invalid first-assertion details;
+private evidence remains in `scratch/playback-independent-20260927/`.
+
 ### Current private installation, September 30
 
 Exact source `78075a42` from draft

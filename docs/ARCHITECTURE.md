@@ -51,6 +51,19 @@ not report directly to the pilot.
 
 ## Capture admission and camera selection
 
+The shell prepares file opens on one background worker, with one replaceable
+queued choice. `Scene::prepare_with` reads the same complete calibration and
+motion track into a Send-only `PreparedScene`, retaining the inspected Reader.
+Packet input remains idle during that preparation. UI initialization returns
+without waiting for filesystem IO; its existing welcome view says "Opening
+video...". The UI starts Player/sound and constructs Scene only when the
+still-current result arrives. No Scene or UI cells cross that thread boundary.
+Close and a newer file choice revoke publication without joining a blocked
+read. Obsolete results are released without waiting for their UI messages.
+Failed opens preserve the old picture and view. CLI/pasted framing travels
+with the request and is applied only after that same file opens successfully.
+This branch change is not yet package-qualified or owner-tested.
+
 An eligible selected capture constructs one immutable `ResidentCameraProfile`
 from the parsed calibration before GPU state or sequential playback is selected.
 Selection requires usable orientation, delivery of all calibrated lenses, and

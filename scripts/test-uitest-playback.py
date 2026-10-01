@@ -71,6 +71,7 @@ class VisiblePlaybackTest(unittest.TestCase):
             "said",
             "picture",
             "same_picture",
+            "blocked_open_is_closed",
             "moving_picture",
             "visible_picture",
             "await_visible_playback",
@@ -408,6 +409,26 @@ exit 97
             31,
             f"stdout:\n{backdrop.stdout}\nstderr:\n{backdrop.stderr}",
         )
+
+    def test_blocked_open_close_requires_a_real_changed_capture(self) -> None:
+        for capture, expected in [
+            (self.video, 1),
+            (self.controls, 1),
+            (self.other, 0),
+            (self.artifact / "absent.ppm", 1),
+            (self.truncated, 1),
+        ]:
+            with self.subTest(capture=capture):
+                result = self.bash(f"""
+session={shlex.quote(str(self.artifact))}
+cp {shlex.quote(str(self.video))} "$session/blocked-opening.ppm"
+grab() {{ printf '%s\\n' {shlex.quote(str(capture))}; }}
+blocked_open_is_closed blocked-closed
+""")
+                self.assertEqual(result.returncode, expected, result.stderr)
+                if capture != self.truncated:
+                    self.assertEqual(result.stderr, "")
+        self.assert_shell("grab() { return 1; }; blocked_open_is_closed blocked-closed", 1)
 
 
 if __name__ == "__main__":

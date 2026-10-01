@@ -33,6 +33,7 @@ pub const SUPPORT_URL: &str = "https://github.com/aeharding/kjerag/issues";
 
 /// The welcome view.
 pub const NOTHING_OPEN: &str = "No video open";
+pub const OPENING_VIDEO: &str = "Opening video...";
 pub const OPEN_BUTTON: &str = "Open video";
 
 /// The alert a file that would not open puts up, which is a stock dialog in
