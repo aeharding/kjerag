@@ -561,6 +561,9 @@ intent from a temporary stopped common clock after missing picture or sound.
 It retains the held PTS, ordered source processing and estimator history;
 explicit pause or seek supersedes recovery. Restart requires completion-proven
 successor pictures and sound at that PTS, with no impossible lead at EOF.
+An overdue logical owner is not a picture shortage while it has a completed
+successor: ordered catch-up consumes that ready prefix before considering a
+hold. Pending GPU work and missing sound do not gain this exemption.
 The follow-on also observes compressed-input lead across every required lens
 and file, using each source's normalized clock. Recovery alone waits for one
 second of packet lead; EOF or either consumer's existing byte/count limit

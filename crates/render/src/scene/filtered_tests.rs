@@ -26,6 +26,63 @@ fn one_x2_filtered_buffering_holds_time_and_retains_source_history() {
     assert_buffering_retains_history(Path::new(&path));
 }
 
+#[test]
+fn x4_filtered_completed_catchup_does_not_buffer() {
+    let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
+        return;
+    };
+    assert_completed_catchup_does_not_buffer(Path::new(&path));
+}
+
+#[test]
+fn one_x2_filtered_completed_catchup_does_not_buffer() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    assert_completed_catchup_does_not_buffer(Path::new(&path));
+}
+
+fn assert_completed_catchup_does_not_buffer(path: &Path) {
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let mut scene = Scene::open(path).unwrap();
+    scene.set_muted(true);
+    scene.pause(Instant::now());
+    let first = super::tests::wait_for_new_scene_frame(&scene, None);
+    let camera = Camera::default();
+    let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    settle_filtered(&scene, &mut pipeline, &device, &queue, &first, camera, None);
+    scene.play();
+    let start = Instant::now();
+    assert!(!matches!(scene.progress(start), Next::Stopped(_)));
+    let playing = scene.frame_stamp().unwrap();
+    let position = scene.position(start);
+    let interval = scene.player(|player| player.timing().interval()).unwrap();
+    let capture = scene.show.as_ref().unwrap().filtered.as_ref().unwrap();
+    // Complete three actual GPU outputs without running the shell scheduler.
+    // This models a late wake, not withheld decode or stitch work. In
+    // particular, queued-but-uncompleted results are not counted as ready.
+    let deadline = Instant::now() + DEADLINE;
+    while capture.ready_successors(&playing).unwrap() < 3 {
+        assert!(Instant::now() < deadline, "completed prefix did not fill");
+        device.poll(wgpu::PollType::Poll).unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let before = scene.player(Player::stats).unwrap();
+    let late = start + interval * 3 + Duration::from_millis(5);
+    assert!(!matches!(scene.progress(late), Next::Stopped(_)));
+    assert_eq!(scene.player(Player::is_buffering), Some(false));
+    assert_eq!(scene.position(late), position + late.duration_since(start));
+    let complete = scene.frame_stamp().unwrap();
+    assert_eq!(complete.index(), playing.index() + 3);
+    assert!(playing.same_decode_epoch(&complete));
+    let after = scene.player(Player::stats).unwrap();
+    assert_eq!(after.presented - before.presented, 3);
+    assert_eq!(after.dropped, before.dropped);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+    prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&complete));
+}
+
 fn assert_buffering_retains_history(path: &Path) {
     let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
     let mut scene = Scene::open(path).unwrap();

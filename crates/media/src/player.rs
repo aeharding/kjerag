@@ -777,7 +777,11 @@ impl Player {
             .audio_control
             .as_ref()
             .map_or(Ok(true), |control| control.has_sound_at(position))?;
-        if (!covers_position && position >= missing_at) || !audio_ready {
+        // The shell can wake late with several completed outputs waiting.
+        // Let its ordered catch-up consume that prefix before declaring a
+        // picture shortage. This never hides missing sound or pending GPU work.
+        let catchup_ready = output_ready && ready_successors > 0;
+        if (!covers_position && position >= missing_at && !catchup_ready) || !audio_ready {
             self.presenter.clock.hold_for_buffer(now);
             eprintln!(
                 "buffer: waiting for {} at {:.3} s",
@@ -1795,6 +1799,79 @@ mod tests {
             );
             assert_eq!(bench.player.position(now), NTSC * index as u32);
         }
+        assert_eq!(bench.player.stats().dropped, 0);
+    }
+
+    #[test]
+    fn late_scheduler_walks_completed_successors_without_buffering() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        bench.player.pump(start).unwrap();
+        // The shell wakes late, but the next four source results are already
+        // complete. Ordered logical catch-up is work, not an input shortage.
+        for index in 1..=4 {
+            bench.decoded(0, index);
+        }
+        let late = start + NTSC * 4 + Duration::from_millis(5);
+        for index in 1..=4 {
+            assert_eq!(bench.player.pump(late).unwrap().unwrap().index, index);
+            bench
+                .player
+                .coordinate_buffering(
+                    late,
+                    true,
+                    (4 - index) as usize,
+                    false,
+                    Waker::noop().clone(),
+                )
+                .unwrap();
+            assert!(
+                !bench.player.is_buffering(),
+                "completed source catch-up must not interrupt sound"
+            );
+            assert_eq!(bench.player.position(late), late.duration_since(start));
+            assert_eq!(bench.player.presenter.clock.reading.origin, Some(start));
+        }
+        assert_eq!(bench.player.stats().presented, 5);
+        assert_eq!(bench.player.stats().dropped, 0);
+    }
+
+    #[test]
+    fn completed_catchup_still_holds_when_its_ready_prefix_runs_out() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        bench.player.pump(start).unwrap();
+        bench.decoded(0, 1);
+        bench.decoded(0, 2);
+        let late = start + NTSC * 4 + Duration::from_millis(5);
+        bench.player.pump(late).unwrap();
+        bench
+            .player
+            .coordinate_buffering(late, true, 1, false, Waker::noop().clone())
+            .unwrap();
+        assert!(!bench.player.is_buffering());
+        bench.player.pump(late).unwrap();
+        bench
+            .player
+            .coordinate_buffering(late, true, 0, false, Waker::noop().clone())
+            .unwrap();
+        assert!(bench.player.is_buffering());
+        assert_eq!(bench.player.position(late), late.duration_since(start));
+        assert_eq!(bench.player.stats().presented, 3);
         assert_eq!(bench.player.stats().dropped, 0);
     }
 

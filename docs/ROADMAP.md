@@ -1150,6 +1150,34 @@ The exported bundle also passes a private device-hidden import/authentication
 of its commit, executable, metadata and license. That audit installs and runs
 nothing, and does not qualify signing of this private test package.
 
+Further changing-view qualification prevents treating that candidate as ready.
+At 2256x1504 with a nominal 250 Hz headless output and the September 23 NAS
+clip, with each app limited to four CPU cores by the test scope, `6f5b80d0`
+completes about 123 sourced view renders/s and enters recovery
+15 times, including before the pointer pan. Its unchanged installed baseline
+completes about 144 renders/s under the same requested load while retaining
+regular source cadence. Neither meets 240 renders/s in this capped test; this
+does not establish full-hardware capacity. These
+conservative GPU callback times do not isolate rendering-kernel cost. The
+candidate's repeated picture holds are not accepted as a performance solution.
+Both processes exit normally with no new kernel entries; the candidate has
+nonzero postflight memory-pressure averages, unlike the baseline.
+
+A separate failing CPU regression identifies an unnecessary-recovery case:
+a late shell wake can stop the common clock despite multiple completed
+successors already waiting. The follow-up permits ordered catch-up through
+that completion-proven prefix before declaring a picture shortage. Missing
+sound and exhausted or pending picture work still trigger actual recovery.
+Media coverage passes 183 tests, four ignored; the device-hidden workspace
+passes 1,687 tests, 53 ignored. Full workspace lint, formatting and portable
+harness checks pass. Both-camera actual-Scene catch-up regressions pass with
+real decode and GPU work, but both log sound-device underrun/overrun errors.
+They prove the tested clock/source ownership, not audio-device continuity;
+their native binaries also include the preserved parked color variation.
+New clean runtime/package qualification remains due. This does not establish the
+cause or resolution of the owner's spontaneous network stutter. Installation,
+merge, the 240-capacity verdict and owner acceptance remain withheld.
+
 ### Pre-window startup delay, September 30
 
 October 1 clarification: the owner wants the normal transparent/blurred window
