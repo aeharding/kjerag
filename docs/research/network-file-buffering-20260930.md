@@ -316,3 +316,53 @@ full workspace Clippy, vendor warnings, naming, source-list and whitespace gates
 pass. Unavailable hardware/media paths are included in those CPU counts, not
 additional GPU qualification. The clean SDK, both-camera UI, slow-compositor
 continuity, bundle authentication and real packaged NAS controls remain due.
+
+### Clean single-reader package qualification
+
+Exact source `78075a42` passes all eight CI jobs, including both architecture
+workspace gates. The local 1,648-pass gate above includes the two parked owner
+color files; it is not a clean-source count. The clean archived SDK package
+excludes both files and passes separately bounded full app-path UI suites:
+43 X4 and 44 ONE X2 checks, zero failures, with the existing isolated-service
+and fixture skips. Every launched executable is authenticated, both motion
+captures per camera are inspected, and postflight checks have no new kernel
+entries, scoped memory-limit/OOM events or pressure averages. The shader/Rust
+twin remains a native helper, not an archived SDK shader test.
+
+Its packaged NAS seek control completes the same three targets in about 1.36,
+1.36 and 0.75 seconds. Subsequent recorded-rate playback crosses the previously
+failed region with no audio underruns or accumulating lateness; worst picture
+lateness stays 42.4 ms. It exits normally, with no new kernel entries and small
+nonzero postflight pressure avg60 (0.02). These are ordinary buffered NAS reads,
+not an authenticated cold-cache comparison or a universal network guarantee.
+
+A separate local-file test slows the compositor to 1 Hz for eight seconds,
+then restores 60 Hz for eight seconds. Source progression remains approximately
+30/s throughout, with zero audio underruns, and the copied displayed view after
+restoration is current. It exits normally, with no new kernel entries or
+postflight pressure averages. This tests the supported X4 source-worker path;
+it does not establish audio independence beyond indefinitely stalled video.
+
+The actual exported bundle passes a private device-hidden import, verifying
+commit, executable, metadata and license. The unsigned test bundle is installed
+after those gates. Origin, permissions and all recorded shared runtime identities
+remain unchanged, and both previous authenticated rollback bundles are retained.
+
+The actual installed app, with no app-path substitution, holds 29.95 consecutive
+source advances/s during the reported 40-second, 2256x1504 requested-60-Hz NAS
+pan. It records zero audio underruns and 41.2 ms worst lateness without growing
+delay, normal exit, inspected output pixels, no new kernel entries and zero
+postflight pressure averages. It completes 62.40 redraws/s in the pan window,
+completion-spacing p99/max 29.76/30.78 ms. Steady source dwell p99/max is
+48.12/51.00 ms, so source presentation timing remains uneven even though no
+source indices are skipped in that cohort. The whole-run cadence reducer is
+false, including startup commits without sourced draws; the separate pan
+reducer passes its defined 60 Hz cohort. Neither retires the 240 fps target,
+the tail budget, arbitrary-network reliability or owner retest. No merge,
+release or general hitch-free verdict is claimed.
+
+Private package: `scratch/flatpak-delivery-78075a42/`. Runtime receipts:
+`runtime/sdk-single-demux-nas-seeks-01` and
+`runtime/sdk-single-demux-low-redraw-01`, each with a separate health directory.
+Actual installed receipt: `runtime/installed-single-demux-nas-pan-01`, with a
+separate health directory.

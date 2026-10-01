@@ -474,7 +474,7 @@ error. The existing Reader admission and color-metadata rules are the common
 policy. Demux seek targets remain unchanged; frame-origin normalization happens
 at delivery, after decode.
 
-The unqualified single-reader branch gives audio its own packet queue and
+The single-reader path gives audio its own packet queue and
 decoder in [`track.rs`](../crates/media/src/track.rs), and retains the independent
 producer in [`audio_worker.rs`](../crates/media/src/audio_worker.rs). Ring capacity paces
 refill. Compressed read-ahead, not decoder surfaces, absorbs camera interleave

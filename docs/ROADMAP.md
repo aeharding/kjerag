@@ -1062,7 +1062,36 @@ change installed code or add qualification claims.
 
 ### Current private installation, September 30
 
-Exact source `591cf695` is installed from draft
+Exact source `78075a42` from draft
+[PR #241](https://github.com/aeharding/kjerag/pull/241) is installed. It replaces
+the competing live audio/video demuxers and custom byte cache with one normal
+FFmpeg input per container, routing bounded compressed queues to video and
+audio consumers. Stitching/color arithmetic and ordered source processing are
+unchanged. The clean SDK archive excludes the two preserved parked color edits.
+All eight exact-source CI jobs pass. Its separately run app-path UI suites pass
+43 X4 and 44 ONE X2 checks, zero failures, with existing fixture/service skips;
+all motion captures are inspected. The actual exported bundle is authenticated.
+
+Packaged NAS forward/backward seeks take about 1.36, 1.36 and 0.75 seconds, then
+playback holds recorded cadence through the previously failed region, zero
+audio underruns and no growing delay. Worst picture lateness remains 42.4 ms.
+A local 1 Hz redraw/recovery check preserves source processing and audio, then
+returns to a current picture at 60 Hz. Neither test is a hitch-free or 240 fps
+capacity verdict. No new kernel entries appear; UI and recovery postflight
+pressure averages are zero, while the NAS seek postflight avg60 is 0.02.
+Installation preserves origin, permissions and all recorded shared runtime
+identities; both `591cf695` and `dd908324` rollback bundles are authenticated and
+retained. The actual installed 2256x1504, 60 Hz NAS pan holds 29.95 consecutive
+sources/s, zero audio underruns and 41.2 ms worst lateness without growing delay.
+It exits normally with no new kernel entries or postflight pressure averages.
+Display timing is still uneven: steady sourced-picture dwell p99/max is
+48.12/51.00 ms. Owner retest and the 240 fps/tail requirements remain open.
+No merge or release is claimed. [MERGE_READINESS.md](MERGE_READINESS.md) records
+the package identities and qualification limits.
+
+### Rejected byte-cache build and diagnostics, September 30
+
+Exact source `591cf695` was installed from draft
 [PR #241](https://github.com/aeharding/kjerag/pull/241). It shares one bounded
 file-byte cache beneath independent audio/video demuxers, created before capture
 inspection. It includes the prior source-completion/native-mesh work, excluding
@@ -1128,7 +1157,9 @@ Final device-hidden workspace gates pass 1,648 tests, 53 ignored and no failures
 plus formatting, full Clippy, vendor warnings, source-list and naming checks.
 This includes the raw-filename admission guard and all packet fanout tests, with
 unavailable-device returns counted separately from hardware qualification.
-Clean SDK/UI, slow-compositor continuity and packaged NAS checks remain due.
+That local gate includes the two parked color files, not the clean archived
+source. The later exact-source CI, SDK/UI, slow-compositor and packaged NAS
+qualification is recorded in the current installation checkpoint above.
 
 ### Previous source-completion private installation, September 30
 

@@ -56,8 +56,68 @@ The local test bundle is unsigned, not a release-signature qualification.
 
 ## Current private test package, September 30
 
+Source `78075a42d159aeb90c6864e299b5936fcefd4236`, draft
+[PR #241](https://github.com/aeharding/kjerag/pull/241), is installed. One normal
+FFmpeg input per container routes bounded compressed queues to video and audio;
+the competing live file cursors, custom AVIO callbacks and byte cache are gone.
+Video retention is 128 MiB/512 packets to pass the measured 67 MiB camera
+interleave; audio retains its 256 KiB/128-packet bound. Either full queue
+backpressures the reader, so audio independence is finite. Source processing,
+stitching/color arithmetic, PCM and clock policy are unchanged.
+
+- Installed OSTree: `854dc120fcb3a7a564ced1fa10b4ef77fbc523ad8a0e86d0431e4382d97d6ed6`.
+- Executable SHA256: `96a5004ab350245c53c812ebe1616fedbb22008adb586dafe7e745916bc843d5`.
+- Bundle SHA256: `8adc3c2671f85834cd6e36b39c0c4e64c007a7c215a9cf10ed89c319fe2dc57e`.
+
+All eight CI jobs pass on this source. The local device-hidden workspace gate
+passes 1,648 tests with 53 ignored, plus full lint/format/vendor/source/name
+checks; it includes the two parked owner color files and unavailable-device
+returns, not clean-source or hardware qualification. Those files are preserved
+and excluded from the committed source and package. Separate clean SDK app-path
+suites pass 43 X4 and 44 ONE X2 checks, zero failures, with existing isolated
+sound/portal, explicit-view, import-fault and cross-mount fixture skips. Each
+launched candidate executable is authenticated. Both motion captures per camera
+are inspected. The shader/Rust-twin helper is native, not a clean SDK shader
+test. Both suites have no new kernel entries or scoped memory-limit/OOM events,
+and zero postflight pressure averages. The exported bundle passes a separate
+device-hidden private import and executable/metadata/license audit. It is a
+local unsigned test bundle, not a release-signature qualification.
+
+The packaged reported NAS clip completes forward/backward seeks in approximately
+1.36, 1.36 and 0.75 seconds, then holds source cadence through the previously
+failed region, zero underruns and no growing delay; worst lateness remains
+42.4 ms. There are no new kernel entries; postflight pressure avg60 is 0.02,
+not entirely pressure-free. A separate local 1 Hz/60 Hz redraw-recovery check
+retains approximately 30 source advances/s and zero audio underruns, returns to
+a current displayed source after restoration, and exits normally with no new
+kernel entries or postflight pressure averages. This verifies the selected X4
+path, not indefinite audio progress with stalled video or generic-camera coverage.
+
+Installation disables dependency/related-ref/pull updates. Origin, permissions
+and all recorded shared runtime identities remain unchanged. Authenticated
+`591cf695` and `dd908324` bundles are retained for rollback. Actual installed
+playback, with no app-path substitution, holds 29.95 consecutive sources/s
+during the reported 40-second, 2256x1504 requested-60-Hz NAS pan. It records zero
+audio underruns and 41.2 ms worst lateness without growing delay, and exits
+normally with no new kernel entries or postflight pressure averages. Pictures
+are inspected. It completes 62.40 redraws/s within the pan window; completion
+spacing p99/max is 29.76/30.78 ms. Steady sourced-picture dwell p99/max is
+48.12/51.00 ms, so display timing remains uneven. The whole-run cadence reducer
+is false, including startup commits without sourced draws; the separate pan
+capacity reducer is true for its defined 60 Hz cohort, not 240 fps capacity.
+Owner retest remains the merge gate. No merge, release, instant seeks, general
+hitch-free fix or 240 fps capacity pass is claimed.
+Package: `scratch/flatpak-delivery-78075a42/`; private runtime receipts:
+`sdk-single-demux-nas-seeks-01` and `sdk-single-demux-low-redraw-01` below
+`scratch/playback-independent-20260927/runtime/`; actual installed evidence is
+`installed-single-demux-nas-pan-01`, with a separate health directory.
+Full input/rejected-control
+details are in the [network input record](research/network-file-buffering-20260930.md).
+
+## Rejected byte-cache private test package, September 30
+
 Source `591cf695c5a1142732d4b60fd8e9cbeec1d2b0c8`, draft
-[PR #241](https://github.com/aeharding/kjerag/pull/241), is installed. Audio and
+[PR #241](https://github.com/aeharding/kjerag/pull/241), was installed. Audio and
 video keep independent demux timelines over one bounded shared file-byte cache.
 Custom IO exists before capture inspection. The first `2e4466a8` candidate's
 post-inspection AVIO replacement was unsafe; its X4 pasted-reopen crash rejected
