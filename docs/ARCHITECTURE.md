@@ -556,6 +556,16 @@ Filtered video promotion and source admission use the playback event owner
 described above. Generic and resident-spatial video paths still use the shader
 redraw path; the independent audio producer is shared by all live Readers.
 
+The uninstalled `fix/network-stall-recovery` prototype distinguishes user play
+intent from a temporary stopped common clock after missing picture or sound.
+It retains the held PTS, ordered source processing and estimator history;
+explicit pause or seek supersedes recovery. Restart requires completion-proven
+successor pictures and sound at that PTS, with no impossible lead at EOF.
+Consumed PCM history supports restart without manufacturing samples or changing
+ordinary drift correction. This is not a normal-playback clock adjustment or a
+throughput fix. The owner permits it only if real tests establish improved
+stall recovery and no unnecessary holds; runtime qualification remains due.
+
 The gyro clock is distinct. Frame orientation uses the camera timestamp from
 the exposure track, not nominal container PTS. Trailer tick units depend on
 `is_raw_gyro`: qualified X4 Air data uses microseconds and ONE X2 uses

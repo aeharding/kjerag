@@ -31,6 +31,17 @@ const READY_CAPACITY: usize = 4;
 const SOURCE_CAPACITY: usize = READY_CAPACITY;
 const FINISH_OUTPUT_CAPACITY: usize = 3;
 
+fn completed_prefix(readiness: impl IntoIterator<Item = Fallible<bool>>) -> Fallible<usize> {
+    let mut completed = 0;
+    for ready in readiness {
+        if !ready? {
+            break;
+        }
+        completed += 1;
+    }
+    Ok(completed)
+}
+
 /// Quarter-field review candidate. Retain the whole 2:1 sphere while rounding
 /// raster height down to a complete motion block footprint. Source planes,
 /// map/colour cadence and the direct viewport stay at their original sizes.
@@ -495,6 +506,21 @@ impl FilteredCaptureFacade {
             .installed
             .as_ref()
             .map(|output| output.frame().clone()))
+    }
+
+    /// Completed contiguous successors of the exact installed owner. Pending
+    /// source work is not playback lead, and another epoch cannot count.
+    pub(crate) fn ready_successors(&self, stamp: &FrameStamp) -> Fallible<usize> {
+        let state = self.state()?;
+        self.ensure_healthy(&state)?;
+        if state
+            .installed
+            .as_ref()
+            .is_none_or(|output| output.frame() != stamp)
+        {
+            return Ok(0);
+        }
+        completed_prefix(state.ready.iter().map(|output| output.completion().ready()))
     }
 
     /// Preserve the last complete picture for a terminal-error screenshot.
@@ -1131,6 +1157,39 @@ fn source_admission_available(state: &State) -> bool {
 mod stage_tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn recovery_lead_counts_only_the_completed_fifo_prefix() {
+        use crate::gpu_completion::CompletionStatus;
+        let statuses: Vec<_> = (0..4)
+            .map(|_| CompletionStatus::pending_for_test())
+            .collect();
+        let count = || completed_prefix(statuses.iter().map(CompletionStatus::ready)).unwrap();
+        assert_eq!(count(), 0, "queued work is not completed playback lead");
+        statuses[2].finish_for_test(Ok(()));
+        assert_eq!(
+            count(),
+            0,
+            "a later completion cannot skip an unfinished predecessor"
+        );
+        statuses[0].finish_for_test(Ok(()));
+        assert_eq!(count(), 1);
+        statuses[1].finish_for_test(Ok(()));
+        assert_eq!(count(), 3);
+        statuses[3].finish_for_test(Ok(()));
+        assert_eq!(count(), 4);
+    }
+
+    #[test]
+    fn recovery_lead_preserves_the_raw_completion_error() {
+        use crate::gpu_completion::CompletionStatus;
+        let failed = CompletionStatus::pending_for_test();
+        failed.finish_for_test(Err("exact recovery completion failure".into()));
+        assert_eq!(
+            completed_prefix([failed.ready()]).unwrap_err().to_string(),
+            "exact recovery completion failure"
+        );
+    }
 
     fn stamp(index: u64, previous: Option<&FrameStamp>) -> FrameStamp {
         FrameStamp::for_test(index, Duration::from_millis(index), previous)

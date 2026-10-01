@@ -1060,6 +1060,32 @@ change installed code or add qualification claims.
 
 ## Delivery next steps
 
+### Conditional network-stall recovery, October 1
+
+The owner reports stuttering across network footage, including spontaneous
+onset at 23.190 seconds in the September 23 `_003` clip. A natural installed
+pause/resume/seek sequence did not reproduce sustained bad recovery. A separate
+temporary demux slowdown through the installed app does: after reads recover,
+picture and sound remain seconds late until manual pause/resume clears the bad
+state. This is a related clock-recovery reproduction, not proof of the sole
+cause of every owner-reported stutter.
+
+The owner conditionally permits automatic recovery only if it removes the
+stutters and does not act as an always-on workaround. Branch
+`fix/network-stall-recovery` adapts the earlier unshipped clock-hold/PCM-history
+prototype to the current single-reader architecture. It resumes only with
+completion-proven picture lead, not merely queued GPU outputs. Media CPU tests
+pass 174 cases with four ignored, including two simulated minutes without a
+normal-playback hold or clock reset. Real network A/B, audio restart, both camera
+UI and package gates remain due. The bounded device-hidden workspace passes
+1,676 tests, 53 ignored, with no failures; unavailable-device returns and the
+two parked color edits are included, not clean-source GPU qualification.
+Full lint/format/vendor/name/source and portable harness checks pass.
+Repeated pauses or unnecessary normal-playback
+holds do not qualify. The installed `6dbbf16b` app is unchanged; no fix, merge,
+performance-capacity or all-camera verdict is claimed. Private evidence:
+`scratch/resume-stutter-20261001/`.
+
 ### Pre-window startup delay, September 30
 
 October 1 clarification: the owner wants the normal transparent/blurred window
