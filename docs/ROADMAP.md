@@ -1088,15 +1088,30 @@ surface draw at 0.758 seconds, before the large metadata read; recorded cadence
 and zero underruns follow. Both video pictures are inspected. Native and
 installed runtimes differ, so this is not a matched package-speed comparison.
 No new kernel entries appear; native NAS postflight memory pressure is nonzero.
-Both clean package camera suites, delivery and owner retest remain pending.
-The installed Flatpak is unchanged. The [startup record](research/nonblocking-file-open-20260930.md)
+All eight CI jobs pass on implementation `5ecc9946`. The clean SDK app-path
+suites pass 48 X4 and 49 ONE X2 checks, zero failures, including the five
+blocked-open checks. Existing fixture/service skips remain; the native shader
+twin helper is not a clean SDK shader test. All motion captures are inspected.
+The actual exported bundle is authenticated and installed, preserving origin,
+permissions and shared runtimes, with authenticated `78075a42` rollback retained.
+Packaged NAS first surface preparation occurs 0.777 seconds after app exec,
+before the large metadata read, which now runs on the opening worker. This is
+not cold-cache or click-to-window latency, nor first-video-picture readiness.
+The final actual-installed NAS run restores the exact reported CLI view and
+subsequently reports 30 source advances/s and zero audio underruns; worst
+reported picture lateness remains 131.0 ms. It exits normally. Both UI suites
+and the packaged/installed NAS runs have no new kernel entries and zero
+postflight memory-pressure averages. The owner's startup retest remains the
+merge gate; no hitch-free, all-camera or 240 fps verdict is claimed.
+The [startup record](research/nonblocking-file-open-20260930.md)
 retains exact scope, negative cleanup and invalid first-assertion details;
 private evidence remains in `scratch/playback-independent-20260927/`.
 
-### Current private installation, September 30
+### Preceding single-reader private installation, September 30
 
 Exact source `78075a42` from draft
-[PR #241](https://github.com/aeharding/kjerag/pull/241) is installed. It replaces
+[PR #241](https://github.com/aeharding/kjerag/pull/241) was installed and is now
+retained for rollback beneath the startup change above. It replaces
 the competing live audio/video demuxers and custom byte cache with one normal
 FFmpeg input per container, routing bounded compressed queues to video and
 audio consumers. Stitching/color arithmetic and ordered source processing are

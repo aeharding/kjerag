@@ -82,3 +82,58 @@ first-picture preparation, hitch-free playback, Studio parity or capacity.
 Clean Flatpak qualification, both camera suites and owner retest remain pending.
 The installed package is still `78075a42` at this checkpoint. The two parked
 owner color edits are unchanged and remain outside the committed candidate.
+
+## Clean package qualification and installed delivery
+
+Implementation source `5ecc99466442cc5c61e577709f60c7ffc2e9fd80` passes all eight
+CI jobs, including x86_64 and ARM workspace gates. The bounded device-hidden
+local workspace passes 1,656 tests, 53 ignored, plus Clippy/format/source/name
+and CPU harness checks. That local tree includes the two preserved parked color
+edits and unavailable-device returns; it is not clean-source GPU coverage.
+
+The offline clean SDK archive excludes those parked edits. Separate app-path
+UI suites pass 48 X4 and 49 ONE X2 checks, zero failures, including all five
+blocked-open checks through the packaged shell. Existing isolated sound/portal,
+explicit CLI-view, sandbox import-fault and cross-mount fixture skips remain.
+Each launched candidate executable is authenticated. Both motion captures per
+camera are inspected. The shader/Rust-twin helper remains native, not a clean
+SDK shader test. No new kernel entries or scoped memory-limit/OOM events occur;
+postflight pressure averages are zero. The actual exported bundle passes a
+separate device-hidden private import and executable/metadata/license audit.
+It is an unsigned local test bundle, not release-signature qualification.
+
+In packaged NAS trace `runtime/sdk-startup-nas-trace-02`, first surface
+preparation occurs 0.776549 seconds after app exec, before the bulk motion read
+starts. That 35,927,360-byte read takes 1.433059 seconds on the opening worker,
+not the UI thread. Later playback holds recorded cadence with zero audio
+underruns and 46.8 ms worst reported picture lateness. Both pictures are
+inspected. It exits normally, with no new kernel entries and zero postflight
+pressure averages. This uses the same Flatpak runtime as the preceding installed
+trace, but remains buffered trace evidence, not authenticated cold-cache or
+click-to-window latency, first-picture readiness or a general throughput result.
+The first packaged attempt stopped before app launch because its preflight
+expected a superseded installed identity; its failed receipt is retained.
+
+The qualified package is now installed from that exact source:
+
+- OSTree: `4a39f4ddae092d45290cdad09b6ef0a1b69a39897e69546c5c46dc165787c7c1`.
+- Executable SHA256: `db649245cd11824bdcdc5ac1d6b8a6339980bdb6fc4c504eb905ad4901eefc79`.
+- Bundle SHA256: `a6f4d7e837b4871c30e753411b9c6214cf20d5865346648fc7f5932d9973de1e`.
+
+Installation disables dependency/related-ref/pull updates. Origin, permissions
+and all recorded shared runtime identities are unchanged. The authenticated
+preceding `78075a42` bundle is retained for rollback. The final actual-installed
+`runtime/installed-startup-reported-view-01` run uses no app-path substitution.
+Its launched executable and OSTree identity match above, and its `goto:` receipt
+restores the exact reported NAS view: time 1281.413, yaw -136.14, pitch -19.43,
+fov 166.23, lock 1. Subsequent intervals report 30 source advances/s, zero audio
+underruns and no growing delay; worst reported picture lateness is 131.0 ms.
+It exits normally, with no new kernel entries or postflight pressure averages.
+Both moving pictures are inspected. That playback does not establish hitch-free
+presentation or the 240 fps capacity target.
+
+Private package: `scratch/flatpak-delivery-5ecc9946/`; camera UI receipts:
+`scratch/playback-independent-20260927/packaging/qualification-ui-5ecc9946/`.
+The owner's close-and-reopen startup retest remains the merge gate for draft
+[PR #242](https://github.com/aeharding/kjerag/pull/242), stacked on PR #241.
+No merge or release is claimed.
