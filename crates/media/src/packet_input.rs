@@ -102,6 +102,24 @@ struct Shared {
     audio: Option<AudioTimeline>,
 }
 
+impl State {
+    fn full(&self, limits: Limits) -> bool {
+        let mut bytes = self.bytes;
+        let mut packets = self.packets.len();
+        let mut budget = limits;
+        if self.audio.active {
+            // One demuxer feeds both consumers. A small audio queue must not
+            // stop video read-ahead while most of the compressed cache is free.
+            // Share the existing total, without growing the combined hard cap.
+            bytes = bytes.saturating_add(self.audio.bytes);
+            packets = packets.saturating_add(self.audio.packets.len());
+            budget.bytes = budget.bytes.saturating_add(Limits::AUDIO.bytes);
+            budget.packets = budget.packets.saturating_add(Limits::AUDIO.packets);
+        }
+        bytes >= budget.bytes || packets >= budget.packets
+    }
+}
+
 // The primary reader owns container seeking and shutdown. An audio reader is
 // a second bounded packet consumer, never another demuxer or file cursor.
 pub(crate) struct PacketInput(Arc<Shared>, bool);
@@ -302,13 +320,7 @@ fn run(mut input: impl Demux, shared: &Shared, limits: Limits) {
         let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
         while !state.stopped
             && state.seek.is_none()
-            && (!state.started
-                || state.terminal.is_some()
-                || state.bytes >= limits.bytes
-                || state.packets.len() >= limits.packets
-                || (state.audio.active
-                    && (state.audio.bytes >= Limits::AUDIO.bytes
-                        || state.audio.packets.len() >= Limits::AUDIO.packets)))
+            && (!state.started || state.terminal.is_some() || state.full(limits))
         {
             state = shared
                 .changed

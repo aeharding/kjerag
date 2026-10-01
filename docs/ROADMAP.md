@@ -1060,6 +1060,34 @@ change installed code or add qualification claims.
 
 ## Delivery next steps
 
+### Shared compressed-cache budget, October 1
+
+The owner reports intermittent persistent stuttering across network footage,
+including spontaneous onset at 23.190 seconds in the September 23 `_003` clip.
+The natural installed pause/resume/seek check did not reproduce that state;
+temporary demux slowdown did reproduce bad post-shortage recovery. The separate
+automatic-pause prototype remains unqualified and is not included here.
+
+Branch `fix/shared-compressed-cache` keeps the installed `6dbbf16b` runtime and
+lets audio/video use their existing combined compressed-cache budget instead
+of stopping the sole reader when either small partition fills. A packet-order
+audit of the reported clip reaches the old 128-audio-packet cap with about
+60 MB retained despite roughly 128 MB of combined budget. A static shared-budget
+model extends source lead from about 2.72 to 5.99 seconds without raising the
+total cap. That is not runtime cache-state measurement or proof of the owner's
+spontaneous stutter cause. A failing-before regression on the installed runtime's
+packet worker confirms read-ahead stops with video capacity unused. The
+candidate preserves packet contents and order, source cadence, decoded/GPU
+retention, rendering, stitching/color arithmetic and ordinary clock behavior.
+Closing audio restores video-only limits without discarding borrowed packets.
+Full format/lint/vendor/name/source and 28 portable harness checks pass. The
+bounded device-hidden workspace passes 1,658 tests with 53 ignored, including
+unavailable-device returns and the parked color variation, not clean-source
+GPU coverage. The 160 media passes include real MOV packet/seek and AAC PCM
+comparisons. Actual-player network qualification remains pending; the installed
+app is unchanged. No stutter fix, performance or delivery verdict is claimed.
+Private packet metadata and receipts: `scratch/playback-packet-audit-20261001/`.
+
 ### Pre-window startup delay, September 30
 
 October 1 clarification: the owner wants the normal transparent/blurred window

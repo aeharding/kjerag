@@ -509,11 +509,15 @@ Live Reader and Track input passes through
 [`packet_input.rs`](../crates/media/src/packet_input.rs). A sole worker owns
 each file's libavformat demuxer and routes compressed packets to separate audio
 and video consumers. There is no second live audio demuxer or competing file
-cursor. Video queues stop at 128 MiB or 512
-packets per file; audio stops at 256 KiB or 128 packets. Byte accounting permits
-one packet of overshoot because its size is known only after the read. These
-are compressed-input limits, not added decoded/GPU frame retention. Walk
-instruments retain their synchronous reference input.
+cursor. The uninstalled shared-cache branch lets those consumers share their
+existing combined budget: 128 MiB plus 256 KiB, or 640 packets per file. Neither
+lane stops the sole reader merely by exhausting its old partition while the
+combined cache has room. Video without an attached audio consumer retains its
+128 MiB/512-packet limits; closing audio does not discard already buffered
+video. Byte accounting permits one packet of overshoot because its size is
+known only after the read. These are compressed-input limits, not added
+decoded/GPU frame retention. Walk instruments retain their synchronous
+reference input. The installed player still uses the separate lane caps.
 
 Input remains idle until the first read or seek. Audio attaches before reading.
 A video seek empties both compressed
