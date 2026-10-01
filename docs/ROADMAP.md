@@ -1086,6 +1086,26 @@ holds do not qualify. The installed `6dbbf16b` app is unchanged; no fix, merge,
 performance-capacity or all-camera verdict is claimed. Private evidence:
 `scratch/resume-stutter-20261001/`.
 
+Exact prototype source `1d34630b` now has all eight CI checks passing and a
+clean offline SDK package, excluding the parked color edits. The installed
+baseline and candidate each replay the reported September 23 clip through
+23 seconds without reproducing the owner's sustained bad state. Under the
+same controlled transient input slowdown, the candidate recovers before manual
+pause/resume, with reported worst lateness bounded at 68.3 ms and zero reported
+audio underruns; the baseline previously accumulated seconds of lag and hundreds
+of underruns. This is a scoped recovery improvement, not a general stutter fix.
+The candidate logs 25 hold/resume pairs, including one startup hold and repeated
+holds during prolonged slow input. A separate normal network control also holds
+once at 0.145 seconds, then maintains source cadence with no further holds.
+It therefore does not meet the zero-unnecessary-hold/repeated-pause qualification
+gate and remains uninstalled. Startup priming and input-refill readiness need
+attention before delivery, without reducing stitching cadence or history.
+All three completed player runs exit normally with no new kernel entries.
+Transient-candidate postflight memory pressure has zero avg10 but nonzero longer
+averages; both normal controls have zero averages. These receipts do not include
+completed cgroup memory-event accounting or physical scanout proof. Remaining
+both-camera and package gates are not waived.
+
 ### Pre-window startup delay, September 30
 
 October 1 clarification: the owner wants the normal transparent/blurred window
