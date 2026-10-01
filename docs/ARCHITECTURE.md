@@ -64,11 +64,10 @@ Close and a newer file choice revoke publication without joining a blocked
 read. Obsolete results are released without waiting for their UI messages.
 Failed opens preserve the old picture and view. CLI/pasted framing travels
 with the request and is applied only after that same file opens successfully.
-The clean `5ecc9946` test Flatpak passes both camera UI suites and is installed;
+The clean `5aaf97a7` blank-player test Flatpak is installed. Both camera UI
+suites and the actual-installed blocked-open check pass;
 the owner's startup retest remains pending. This does not qualify instant
 first-picture preparation or the remaining presentation/capacity requirements.
-The owner's subsequent blank-player request removes the opening message on
-this branch; that UI follow-up is not yet installed or GPU-qualified.
 
 An eligible selected capture constructs one immutable `ResidentCameraProfile`
 from the parsed calibration before GPU state or sequential playback is selected.

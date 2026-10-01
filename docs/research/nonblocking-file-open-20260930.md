@@ -147,7 +147,7 @@ video area while its first open request is pending, with no logo, status text
 or open button. When replacing a video, the old picture remains until successful
 replacement. No-file launch and Close still show the ordinary welcome screen.
 Preparation, calibration, source admission and first-picture readiness are
-unchanged; this does not shorten the measured backend/window initialization.
+unchanged. This follow-up makes no new window-latency claim.
 
 The real blocked-open regression now requires valid black picture pixels rather
 than the app icon, then verifies responsive Close and canceled-result behavior.
@@ -157,6 +157,30 @@ opening screen fails that new blank-picture assertion as expected. The bounded
 device-hidden workspace again passes 1,656 tests, 53 ignored, plus full Clippy,
 formatting, vendor-warning, source-list and naming checks. Unavailable-device
 returns are not GPU coverage; the two parked color edits remain excluded from
-the committed change. The native
-and packaged follow-up are not yet UI-qualified or installed. Installed source
-remains `5ecc9946`; the owner's active playback is left untouched.
+the committed change.
+
+All eight CI jobs pass on exact implementation source
+`5aaf97a7e921ff02cf2dd51b5bddda8b9c260070`. The clean offline SDK archive excludes
+the parked edits. Separate app-path suites pass 48 X4 and 49 ONE X2 checks, zero
+failures, with the existing fixture/service skips described above. The launched
+executables are authenticated; both motion captures per camera and the blank
+startup capture are inspected. The shader/Rust-twin helper remains native, not
+a clean SDK shader test. The exported bundle passes the separate device-hidden
+private import and executable/metadata/license audit. This is an unsigned test
+bundle, not release-signature qualification.
+
+Native `runtime/blank-player-native-01` and actual-installed
+`runtime/blank-player-installed-01` each pass all five real CLI/FIFO checks,
+including blank pixels, responsive Close and canceled-result behavior. The
+installed blank capture is inspected. Both camera suites and these startup
+checks exit normally, with no new kernel entries or scoped memory-limit/OOM
+events, and zero postflight pressure averages.
+
+That qualified `5aaf97a7` package is now installed. Origin, permissions and
+recorded shared runtime identities are unchanged; the authenticated preceding
+`5ecc9946` bundle is retained for rollback. Exact identities are recorded in
+[MERGE_READINESS.md](../MERGE_READINESS.md#current-blank-player-private-test-package-september-30).
+Package: `scratch/flatpak-delivery-5aaf97a7/`; camera receipts:
+`scratch/playback-independent-20260927/packaging/qualification-ui-5aaf97a7/`.
+The owner's close-and-reopen startup retest remains the merge gate. No merge,
+release, first-picture timing, general hitch-free or capacity pass is claimed.

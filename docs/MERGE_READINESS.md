@@ -54,10 +54,53 @@ The actual exported bundle passes a separate device-hidden private import:
 its commit, executable, metadata and license match the archived source/build.
 The local test bundle is unsigned, not a release-signature qualification.
 
-## Current nonblocking-open private test package, September 30
+## Current blank-player private test package, September 30
+
+Source `5aaf97a7e921ff02cf2dd51b5bddda8b9c260070`, draft
+[PR #242](https://github.com/aeharding/kjerag/pull/242), is installed. The owner
+requested a blank player instead of the "Opening video..." welcome screen.
+The normal header and black video area now paint while initial preparation is
+pending, without a logo, loading text or open button. No-file launch and Close
+retain the welcome view; replacement failure retains the old video. Complete
+preparation and stitching/color/source behavior are unchanged.
+
+- Installed OSTree: `729f579ca04705465c67b3c2f29ada6480e65cd146d32bc3c35a45426febf265`.
+- Executable SHA256: `2feb7837af2cf3c1ef2785c6558dd6fb0946985c5046a2f608ef912bd84e27b9`.
+- Bundle SHA256: `506acd934ca8471acfa3ee3ec108ed1ce79c4ba7b7d93fe836899f554e1fe2c2`.
+
+All eight CI jobs pass on this exact implementation. Bounded device-hidden local
+gates pass 1,656 workspace tests, 53 ignored, plus full lint/format/vendor/source/
+name checks, 22 harness CPU tests and five startup parser tests. The local tree
+includes the two preserved parked color edits and unavailable-device returns,
+not clean-source GPU coverage. The offline clean SDK archive excludes those
+edits. Separate app-path UI suites pass 48 X4 and 49 ONE X2 checks, zero failures,
+with the existing isolated sound/portal, exact-view, import-fault and cross-mount
+fixture skips. Launched executables are authenticated. Both motion captures per
+camera and the startup capture are inspected. The shader/Rust-twin helper is
+native, not a clean SDK shader test. The exported bundle passes a separate
+device-hidden private import and executable/metadata/license audit. This local
+test bundle is unsigned, not release-signature qualification.
+
+The real CLI/FIFO check passes all five checks in native and actual-installed
+modes, including blank pixels, responsive Close and canceled-result preservation.
+Those runs and both camera suites exit normally, with no new kernel entries or
+scoped memory-limit/OOM events, and zero postflight pressure averages. Installation
+uses no dependency/related-ref/pull updates. Origin, permissions and recorded
+shared runtimes remain unchanged; the authenticated preceding `5ecc9946` bundle
+below is retained for rollback. The owner's reopen retest remains the merge gate.
+No new first-picture/window timing, general hitch-free or capacity verdict is
+claimed. No merge or release.
+
+Package: `scratch/flatpak-delivery-5aaf97a7/`. UI receipts:
+`scratch/playback-independent-20260927/packaging/qualification-ui-5aaf97a7/`.
+Actual-installed startup: `runtime/blank-player-installed-01` in that workflow.
+Details are in the [startup record](research/nonblocking-file-open-20260930.md).
+
+## Preceding nonblocking-open private test package, September 30
 
 Source `5ecc99466442cc5c61e577709f60c7ffc2e9fd80`, draft
-[PR #242](https://github.com/aeharding/kjerag/pull/242), is installed, stacked on
+[PR #242](https://github.com/aeharding/kjerag/pull/242), was installed and is now
+retained for rollback. It is stacked on
 PR #241. Complete capture inspection, calibration and orientation preparation
 move off the UI thread. One worker and one replaceable queued request retain
 the inspected Reader. Decode/audio start only after preparation. Close or a

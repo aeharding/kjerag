@@ -1066,8 +1066,15 @@ The owner rejects the installed "Opening video..." welcome screen and requests
 the normal window with a first picture or blank video area immediately. The
 branch now shows a blank black player during initial preparation, with no logo,
 message or open button. The no-file welcome screen and failed-replacement
-preservation are unchanged. This small UI follow-up still needs branch-player
-and package verification; the installed source remains `5ecc9946` below.
+preservation are unchanged. Clean source `5aaf97a7` is now installed. All eight
+exact-source CI jobs pass; separate SDK app-path suites pass 48 X4 and 49 ONE X2
+checks, zero failures, with existing fixture/service skips. The actual-installed
+CLI/FIFO startup check also passes all five checks, including blank picture and
+responsive Close. Motion and startup captures are inspected. No new kernel
+entries or scoped memory-limit/OOM events; postflight pressure averages are zero.
+Origin, permissions and recorded shared runtimes are unchanged; authenticated
+`5ecc9946` rollback is retained. The owner's startup retest remains the merge
+gate. No new first-picture latency, all-camera, hitch-free or capacity claim.
 
 After reporting the installed single-reader build as "better", the owner
 identifies a remaining opening delay specifically before the window appears.
