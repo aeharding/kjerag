@@ -137,3 +137,26 @@ Private package: `scratch/flatpak-delivery-5ecc9946/`; camera UI receipts:
 The owner's close-and-reopen startup retest remains the merge gate for draft
 [PR #242](https://github.com/aeharding/kjerag/pull/242), stacked on PR #241.
 No merge or release is claimed.
+
+## Owner-requested blank player follow-up
+
+The owner rejects the "Opening video..." welcome screen and explicitly permits
+a blank player while the file loads. The existing real FIFO capture reproduces
+that unwanted screen. The shell now renders the normal header and a plain black
+video area while its first open request is pending, with no logo, status text
+or open button. When replacing a video, the old picture remains until successful
+replacement. No-file launch and Close still show the ordinary welcome screen.
+Preparation, calibration, source admission and first-picture readiness are
+unchanged; this does not shorten the measured backend/window initialization.
+
+The real blocked-open regression now requires valid black picture pixels rather
+than the app icon, then verifies responsive Close and canceled-result behavior.
+Its CPU check rejects missing/truncated captures and nonblank loading content;
+all 22 harness tests and five startup parser tests pass. The earlier captured
+opening screen fails that new blank-picture assertion as expected. The bounded
+device-hidden workspace again passes 1,656 tests, 53 ignored, plus full Clippy,
+formatting, vendor-warning, source-list and naming checks. Unavailable-device
+returns are not GPU coverage; the two parked color edits remain excluded from
+the committed change. The native
+and packaged follow-up are not yet UI-qualified or installed. Installed source
+remains `5ecc9946`; the owner's active playback is left untouched.

@@ -889,6 +889,11 @@ impl cosmic::Application for App {
     fn view(&self) -> Element<'_, Self::Message> {
         let shown = match &self.open {
             Some(open) => self.playing(open),
+            None if self.opener.is_pending() => widget::container(widget::space::vertical())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .class(backdrop(true))
+                .into(),
             None => self.welcome(),
         };
         // A layer over the picture rather than a row beside it, so the toast
@@ -1506,11 +1511,7 @@ impl App {
             .align_x(Alignment::Center)
             .spacing(8)
             .push(icon::from_svg_bytes(APP_ICON).icon().size(128))
-            .push(widget::text::body(if self.opener.is_pending() {
-                strings::OPENING_VIDEO
-            } else {
-                strings::NOTHING_OPEN
-            }));
+            .push(widget::text::body(strings::NOTHING_OPEN));
         widget::column::with_capacity(4)
             .align_x(Alignment::Center)
             .spacing(24)

@@ -12,7 +12,7 @@ from pathlib import Path
 import sys
 
 
-def visible_picture(path: Path, header_rows: int, control_rows: int) -> bool:
+def visible_picture(path: Path, header_rows: int, control_rows: int, *, blank: bool = False) -> bool:
     # grim emits a binary P6 image with this three-line header. Reject other
     # layouts rather than having this check and uitest.sh's picture() disagree.
     with path.open("rb") as capture:
@@ -35,15 +35,20 @@ def visible_picture(path: Path, header_rows: int, control_rows: int) -> bool:
         capture.seek(payload_start + header_rows * width * 3)
         picture_size = (height - header_rows - control_rows) * width * 3
         picture = capture.read(picture_size)
-    return len(picture) == picture_size and picture != picture[:3] * (len(picture) // 3)
+    if len(picture) != picture_size:
+        return False
+    if blank:
+        return picture == bytes(picture_size)
+    return picture != picture[:3] * (len(picture) // 3)
 
 
 def main() -> int:
-    if len(sys.argv) != 4:
-        print("usage: check-ui-picture.py capture.ppm header_rows control_rows", file=sys.stderr)
+    blank = len(sys.argv) == 5 and sys.argv[4] == "--blank"
+    if len(sys.argv) != 4 and not blank:
+        print("usage: check-ui-picture.py capture.ppm header_rows control_rows [--blank]", file=sys.stderr)
         return 2
     try:
-        visible = visible_picture(Path(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]))
+        visible = visible_picture(Path(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]), blank=blank)
     except (OSError, ValueError):
         return 1
     return 0 if visible else 1

@@ -74,6 +74,7 @@ class VisiblePlaybackTest(unittest.TestCase):
             "blocked_open_is_closed",
             "moving_picture",
             "visible_picture",
+            "blank_picture",
             "await_visible_playback",
             "playback_rate",
             "with_media",
@@ -429,6 +430,18 @@ blocked_open_is_closed blocked-closed
                 if capture != self.truncated:
                     self.assertEqual(result.stderr, "")
         self.assert_shell("grab() { return 1; }; blocked_open_is_closed blocked-closed", 1)
+
+    def test_opening_pane_requires_valid_black_pixels_not_missing_or_loading_content(self) -> None:
+        for capture, expected in [
+            (self.black, 0),
+            (self.flat, 1),
+            (self.bright, 1),
+            (self.video, 1),
+            (self.artifact / "absent.ppm", 1),
+            (self.truncated, 1),
+        ]:
+            with self.subTest(capture=capture):
+                self.assert_shell(f"blank_picture {shlex.quote(str(capture))}", expected)
 
 
 if __name__ == "__main__":

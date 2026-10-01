@@ -1062,6 +1062,13 @@ change installed code or add qualification claims.
 
 ### Pre-window startup delay, September 30
 
+The owner rejects the installed "Opening video..." welcome screen and requests
+the normal window with a first picture or blank video area immediately. The
+branch now shows a blank black player during initial preparation, with no logo,
+message or open button. The no-file welcome screen and failed-replacement
+preservation are unchanged. This small UI follow-up still needs branch-player
+and package verification; the installed source remains `5ecc9946` below.
+
 After reporting the installed single-reader build as "better", the owner
 identifies a remaining opening delay specifically before the window appears.
 The unchanged installed `78075a42` NAS trace places the first surface render
