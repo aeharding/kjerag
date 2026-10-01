@@ -1124,6 +1124,32 @@ stitch/color arithmetic, source cadence or history changes. The startup-delay
 and sustained slow-input behavior still require measurement, not acceptance
 from these CPU checks.
 
+Exact follow-up `6f5b80d0` passes all eight CI checks and has a clean offline
+SDK package. Its natural September 23 network run has zero buffering entries,
+including startup, with regular 30 source advances/s, 54.5 ms worst reported
+lateness and no audio underruns. The spontaneous owner-reported bad state is
+still not reproduced. Under the same controlled slowdown, it reduces hold/
+resume pairs from 25 to four, with no startup hold, and restores regular source
+cadence before manual intervention. Reported worst lateness is 49.3 ms and
+audio underruns remain zero, but the intentional pauses still interrupt sound.
+That is a scoped recovery improvement, not a hitch-free verdict or acceptance
+of repeated pauses under slow input. Both actual-camera Scene recovery/history
+regressions pass separately with no new kernel entries or pressure averages.
+The clean app-path suites pass 49 X4 and 50 ONE X2 checks, separately, with the
+existing isolated-service and fixture skips. Both cameras' motion captures
+are inspected. Neither suite has new kernel entries, postflight pressure
+averages or scoped memory-limit/OOM events. The native shader-twin helper is
+separate from clean SDK shader provenance.
+All inspected network runs exit normally with no new kernel entries and zero
+postflight pressure averages, but those wrappers lack completed scoped memory
+event receipts. The natural trace still fails full integrity at startup/quit;
+its trimmed source cadence is diagnostic, not physical scanout proof. Captured
+pictures are inspected, not a moving owner review. Installed `6dbbf16b` remains
+unchanged; audible restart behavior and owner acceptance are still pending.
+The exported bundle also passes a private device-hidden import/authentication
+of its commit, executable, metadata and license. That audit installs and runs
+nothing, and does not qualify signing of this private test package.
+
 ### Pre-window startup delay, September 30
 
 October 1 clarification: the owner wants the normal transparent/blurred window
