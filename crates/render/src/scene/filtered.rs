@@ -127,7 +127,20 @@ impl Scene {
                 let _ = capture.try_finish()?;
             }
 
-            if let Some(picture) = capture.install_due(&current.frames.stamp())? {
+            let picture = capture.install_due(&current.frames.stamp())?;
+            let output_ready = picture.is_some();
+            let buffer_deadline = match &mut show.playing.borrow_mut().source {
+                Source::Live(player) => player.coordinate_buffering(
+                    now,
+                    output_ready,
+                    capture.ready_successors(&current.frames.stamp())?,
+                    !capture.has_output_inputs(&current.frames.stamp(), output_ready)?,
+                    capture.is_finished()?,
+                    std::task::Waker::from(Arc::new(self.ready_wake.clone())),
+                )?,
+                Source::Stepped(_) => None,
+            };
+            if let Some(picture) = picture {
                 let target = show
                     .replay
                     .borrow()
@@ -141,24 +154,28 @@ impl Scene {
                 }
             } else {
                 self.wait_for_filtered_decode()?;
-                return Ok(Next::Never);
+                return Ok(filtered_progress_deadline(buffer_deadline));
             }
 
             // A completed frame may be logically consumed without submitting
             // an obsolete screen update. Every real source still traverses
             // the exact source, map, color and temporal transactions.
-            let due = match &show.playing.borrow().source {
-                Source::Live(player) => player.next_due(),
-                Source::Stepped(_) => None,
+            let (due, buffered_due) = match &show.playing.borrow().source {
+                Source::Live(player) => (player.next_due(), player.buffered_frame_due()),
+                Source::Stepped(_) => (None, false),
             };
             let replaying = show.replay.borrow().is_some();
-            if !replaying && due.is_none_or(|due| due > now) {
+            if !replaying && !buffered_due && due.is_none_or(|due| due > now) {
                 self.wait_for_filtered_decode()?;
                 return Ok(filtered_progress_deadline(due));
             }
-            if was_ready && self.frame_stamp() == before && !replaying {
+            let waiting_start = show.replay.borrow().is_some_and(|replay| {
+                self.frame_stamp()
+                    .is_some_and(|stamp| replay.landed(stamp.index()))
+            });
+            if was_ready && self.frame_stamp() == before && (!replaying || waiting_start) {
                 self.wait_for_filtered_decode()?;
-                return Ok(Next::Never);
+                return Ok(filtered_progress_deadline(buffer_deadline));
             }
         }
         self.ready_wake.notify();

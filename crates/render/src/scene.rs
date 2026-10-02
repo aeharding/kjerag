@@ -1774,6 +1774,34 @@ impl Scene {
                     .is_some_and(|replay| replay.landed(frame.index))
             })
         {
+            // The first exact picture can finish before its successors. Keep
+            // autoplay held until a small completion-proven lead exists, rather
+            // than starting the clock and immediately invoking stall recovery.
+            // An explicit paused landing needs only its requested picture.
+            let prepared = (|| -> Fallible<bool> {
+                if show.replay.borrow().is_some_and(|replay| replay.playing)
+                    && let Some(filtered) = &show.filtered
+                    && let Some(frame) = frames.as_ref()
+                {
+                    return player.prepared_playback_ready(
+                        filtered.ready_successors(&frame.stamp())?,
+                        filtered.is_finished()?,
+                        std::task::Waker::from(Arc::new(self.ready_wake.clone())),
+                    );
+                }
+                Ok(true)
+            })();
+            match prepared {
+                Ok(false) => return Next::Never,
+                Ok(true) => {}
+                Err(error) => {
+                    retire_replay(&show.replay);
+                    self.stalled.fail_now(&error);
+                    player.pause(now);
+                    self.fail_terminal_shutter_without_display();
+                    return self.stalled.take().map_or(Next::Never, Next::Stopped);
+                }
+            }
             // Decoder landing is not completion. Retire the exposed seek only
             // after the exact target source has its exact capture-owned map.
             if show

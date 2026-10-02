@@ -31,6 +31,17 @@ const READY_CAPACITY: usize = 4;
 const SOURCE_CAPACITY: usize = READY_CAPACITY;
 const FINISH_OUTPUT_CAPACITY: usize = 3;
 
+fn completed_prefix(readiness: impl IntoIterator<Item = Fallible<bool>>) -> Fallible<usize> {
+    let mut completed = 0;
+    for ready in readiness {
+        if !ready? {
+            break;
+        }
+        completed += 1;
+    }
+    Ok(completed)
+}
+
 /// Quarter-field review candidate. Retain the whole 2:1 sphere while rounding
 /// raster height down to a complete motion block footprint. Source planes,
 /// map/colour cadence and the direct viewport stay at their original sizes.
@@ -435,6 +446,19 @@ impl FilteredCaptureFacade {
         Ok(state.accepted.clone())
     }
 
+    /// All real inputs for the pending output are admitted, not necessarily
+    /// processed. This is not completion proof or restart lead. If the current
+    /// output is complete, the missing work is its next source instead.
+    pub(crate) fn has_output_inputs(
+        &self,
+        stamp: &FrameStamp,
+        current_ready: bool,
+    ) -> Fallible<bool> {
+        let state = self.state()?;
+        self.ensure_healthy(&state)?;
+        Ok(output_inputs_admitted(&state, stamp, current_ready))
+    }
+
     pub(crate) fn acknowledged(&self, stamp: &FrameStamp) -> Fallible<bool> {
         let state = self.state()?;
         self.ensure_healthy(&state)?;
@@ -495,6 +519,21 @@ impl FilteredCaptureFacade {
             .installed
             .as_ref()
             .map(|output| output.frame().clone()))
+    }
+
+    /// Completed contiguous successors of the exact installed owner. Pending
+    /// source work is not playback lead, and another epoch cannot count.
+    pub(crate) fn ready_successors(&self, stamp: &FrameStamp) -> Fallible<usize> {
+        let state = self.state()?;
+        self.ensure_healthy(&state)?;
+        if state
+            .installed
+            .as_ref()
+            .is_none_or(|output| output.frame() != stamp)
+        {
+            return Ok(0);
+        }
+        completed_prefix(state.ready.iter().map(|output| output.completion().ready()))
     }
 
     /// Preserve the last complete picture for a terminal-error screenshot.
@@ -1080,6 +1119,26 @@ fn source_output_capacity(accepted_sources: usize) -> usize {
     }
 }
 
+fn output_inputs_admitted(state: &State, stamp: &FrameStamp, current_ready: bool) -> bool {
+    use crate::temporal_fusion::stream::{CENTER, SOURCES};
+    if state.accepted_sources < SOURCES {
+        return false;
+    }
+    let Some(last) = state.accepted.as_ref() else {
+        return false;
+    };
+    if !last.same_decode_epoch(stamp) {
+        return false;
+    }
+    let Some(ahead) = last.index().checked_sub(stamp.index()) else {
+        return false;
+    };
+    // A queued finish owns the complete, clipped EOF window. Ordinary work
+    // needs the actual seven-source stream's three future sources, plus one
+    // when it is the successor of an already-complete current output.
+    state.finish_requested || ahead >= CENTER as u64 + u64::from(current_ready)
+}
+
 fn temporal_output_capacity(pending: &VecDeque<TemporalPending>) -> usize {
     pending
         .iter()
@@ -1131,6 +1190,83 @@ fn source_admission_available(state: &State) -> bool {
 mod stage_tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn output_input_ownership_requires_startup_and_exact_future_sources() {
+        let first = stamp(10, None);
+        let current = stamp(13, Some(&first));
+        let mut state = State::new();
+        state.accepted_sources = 6;
+        state.accepted = Some(stamp(15, Some(&first)));
+        assert!(!output_inputs_admitted(&state, &first, false));
+        state.accepted_sources = 7;
+        state.accepted = Some(stamp(16, Some(&first)));
+        assert!(output_inputs_admitted(&state, &current, false));
+        assert!(!output_inputs_admitted(&state, &current, true));
+        assert!(
+            state.ready.is_empty(),
+            "input ownership is not GPU completion"
+        );
+        state.accepted_sources = 8;
+        state.accepted = Some(stamp(17, Some(&first)));
+        assert!(output_inputs_admitted(&state, &current, true));
+        let another_epoch = stamp(13, None);
+        assert!(!output_inputs_admitted(&state, &another_epoch, false));
+        state.accepted = Some(stamp(12, Some(&first)));
+        assert!(!output_inputs_admitted(&state, &current, false));
+    }
+
+    #[test]
+    fn admitted_finish_owns_the_clipped_tail_but_not_another_epoch_or_future() {
+        let first = stamp(10, None);
+        let current = stamp(15, Some(&first));
+        let mut state = State::new();
+        state.accepted_sources = 7;
+        state.accepted = Some(stamp(16, Some(&first)));
+        assert!(!output_inputs_admitted(&state, &current, false));
+        state.finish_requested = true;
+        assert!(output_inputs_admitted(&state, &current, false));
+        assert!(output_inputs_admitted(&state, &current, true));
+        assert!(!output_inputs_admitted(&state, &stamp(15, None), false));
+        assert!(!output_inputs_admitted(
+            &state,
+            &stamp(17, Some(&first)),
+            false
+        ));
+    }
+
+    #[test]
+    fn recovery_lead_counts_only_the_completed_fifo_prefix() {
+        use crate::gpu_completion::CompletionStatus;
+        let statuses: Vec<_> = (0..4)
+            .map(|_| CompletionStatus::pending_for_test())
+            .collect();
+        let count = || completed_prefix(statuses.iter().map(CompletionStatus::ready)).unwrap();
+        assert_eq!(count(), 0, "queued work is not completed playback lead");
+        statuses[2].finish_for_test(Ok(()));
+        assert_eq!(
+            count(),
+            0,
+            "a later completion cannot skip an unfinished predecessor"
+        );
+        statuses[0].finish_for_test(Ok(()));
+        assert_eq!(count(), 1);
+        statuses[1].finish_for_test(Ok(()));
+        assert_eq!(count(), 3);
+        statuses[3].finish_for_test(Ok(()));
+        assert_eq!(count(), 4);
+    }
+
+    #[test]
+    fn recovery_lead_preserves_the_raw_completion_error() {
+        use crate::gpu_completion::CompletionStatus;
+        let failed = CompletionStatus::pending_for_test();
+        failed.finish_for_test(Err("exact recovery completion failure".into()));
+        assert_eq!(
+            completed_prefix([failed.ready()]).unwrap_err().to_string(),
+            "exact recovery completion failure"
+        );
+    }
 
     fn stamp(index: u64, previous: Option<&FrameStamp>) -> FrameStamp {
         FrameStamp::for_test(index, Duration::from_millis(index), previous)

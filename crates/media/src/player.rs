@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 use super::audio::{Audio, AudioEpoch, Beat, Reading};
 use super::audio_worker::AudioControl;
 use super::decode_arrival::{self, Arrival, Delivery};
+use super::packet_input::ReadAhead;
 use super::sound::Sound;
 use super::{Accuracy, Cue, Fallible, Frames, Read, Reader, Size, Timing};
 
@@ -51,6 +52,11 @@ const PREPARED_AHEAD_MAX: usize = 6;
 /// engine holds 10 of the 20 surfaces in a decoder's pool.
 const LOOKAHEAD: usize = 2;
 
+/// Recovery-only compressed-input high water. This scheduling choice does not
+/// delay ordinary play or retain additional decoded/GPU pictures. Existing
+/// packet limits and EOF permit an earlier restart when the lead is impossible.
+const REFILL_LEAD: Duration = Duration::from_secs(1);
+
 /// What playback values when presenting decoded frames.
 ///
 /// This is explicit because the two useful answers have different promises:
@@ -66,9 +72,9 @@ pub enum PresentationPolicy {
     /// synchronous stage advances one frame at a time instead of continually
     /// trying to catch up.
     EveryFrame,
-    /// Present every frame in order without shifting the media/audio clock.
-    /// Used by the resident stitcher once it can keep pace. A late render can
-    /// catch up on following redraws; it cannot silently slow the sound clock.
+    /// Process every frame in order against one media/audio clock. Filtered
+    /// playback may hold that shared clock while refilling after a shortage.
+    /// Ordinary frame promotion never reanchors it.
     SequentialRealtime,
 }
 
@@ -193,6 +199,7 @@ pub struct Player {
     /// could not open a speaker is worse than one that plays it silently.
     sound: Option<Sound>,
     audio_control: Option<AudioControl>,
+    read_ahead: Vec<ReadAhead>,
     timing: Timing,
     size: Size,
     lenses: usize,
@@ -352,6 +359,7 @@ impl Player {
                 presenter: Presenter::new(timing.interval(), Arc::new(Beat::default())),
                 sound: None,
                 audio_control: None,
+                read_ahead: Vec::new(),
                 timing,
                 size,
                 lenses: 2,
@@ -410,6 +418,7 @@ impl Player {
         }
         let (sender, notes, decode_arrival) = decode_arrival::channel(QUEUED);
         let audio_control = reader.audio_control();
+        let read_ahead = reader.read_ahead();
         if let Some(control) = &audio_control {
             control.failure_wake(Waker::from(decode_arrival.clone()));
         }
@@ -429,6 +438,7 @@ impl Player {
             presenter: Presenter::new(timing.interval(), beat),
             sound,
             audio_control,
+            read_ahead,
             timing,
             size,
             lenses,
@@ -709,6 +719,129 @@ impl Player {
         self.presenter.next_due()
     }
 
+    /// Hold picture and sound together during an actual source shortage.
+    /// This leaves play intent, every source queue and estimator history intact.
+    /// A missed interval with unadmitted picture input, or missing sound,
+    /// triggers the hold. Already-admitted stitch work is not input starvation.
+    /// Restart needs two completed
+    /// pictures, sound, and a recovery-only compressed-input lead, without
+    /// increasing decoded/GPU retention. The finished tail needs no lead.
+    pub fn coordinate_buffering(
+        &mut self,
+        now: Instant,
+        output_ready: bool,
+        ready_successors: usize,
+        picture_input_missing: bool,
+        finished: bool,
+        wake: Waker,
+    ) -> Fallible<Option<Instant>> {
+        if self.presenter.policy != PresentationPolicy::SequentialRealtime
+            || !self.is_playing()
+            || !self.presenter.clock.is_anchored()
+            || self.is_seeking()
+            || self.replay_target.is_some()
+        {
+            return Ok(None);
+        }
+        let Some(current) = self.presenter.current.as_ref() else {
+            return Ok(None);
+        };
+        let interval = self.presenter.interval;
+        let position = self.position(now);
+        let covers_position = output_ready && position < current.timestamp + interval;
+        if self.presenter.clock.buffering {
+            let lead = if finished {
+                Duration::ZERO
+            } else {
+                interval * 2
+            };
+            let audio_ready = self.audio_control.as_ref().map_or(Ok(true), |control| {
+                control.buffered_or_wait(position, lead, wake.clone())
+            })?;
+            let mut input_ready = true;
+            if !finished {
+                for input in &self.read_ahead {
+                    input_ready &= input.buffered_or_wait(position + REFILL_LEAD, wake.clone())?;
+                }
+            }
+            if covers_position && (finished || ready_successors >= 2) && audio_ready && input_ready
+            {
+                for input in &self.read_ahead {
+                    input.cancel();
+                }
+                self.presenter.clock.resume_buffered(now);
+                eprintln!("buffer: resumed at {:.3} s", position.as_secs_f64());
+            }
+            return Ok(None);
+        }
+        let missing_at = current.timestamp + interval * if output_ready { 2 } else { 1 };
+        let deadline = self.presenter.clock.reaches(missing_at);
+        let audio_ready = self
+            .audio_control
+            .as_ref()
+            .map_or(Ok(true), |control| control.has_sound_at(position))?;
+        // The shell can wake late with several completed outputs waiting.
+        // Let its ordered catch-up consume that prefix before declaring a
+        // picture shortage. This never hides missing sound or pending GPU work.
+        let catchup_ready = output_ready && ready_successors > 0;
+        if (!covers_position && position >= missing_at && !catchup_ready && picture_input_missing)
+            || !audio_ready
+        {
+            self.presenter.clock.hold_for_buffer(now);
+            eprintln!(
+                "buffer: waiting for {} at {:.3} s",
+                if audio_ready { "picture" } else { "sound" },
+                position.as_secs_f64()
+            );
+            if let Some(control) = &self.audio_control {
+                let _ = control.buffered_or_wait(position, interval * 2, wake)?;
+            }
+            return Ok(None);
+        }
+        if !picture_input_missing && deadline.is_some_and(|deadline| deadline <= now) {
+            // A worker completion will wake the shell. An expired picture
+            // deadline must not spin timers while that admitted work finishes.
+            return Ok(None);
+        }
+        Ok(deadline)
+    }
+
+    /// Startup/seek preparation, before the common clock starts. No recovery
+    /// high-water wait is added here: only the same small completed-picture and
+    /// sound lead used by the actual presentation path is required.
+    pub fn prepared_playback_ready(
+        &self,
+        ready_successors: usize,
+        finished: bool,
+        wake: Waker,
+    ) -> Fallible<bool> {
+        let audio_ready = self.audio_control.as_ref().map_or(Ok(true), |control| {
+            control.buffered_or_wait(
+                self.presenter.clock.reading.position,
+                if finished {
+                    Duration::ZERO
+                } else {
+                    self.presenter.interval * 2
+                },
+                wake,
+            )
+        })?;
+        Ok((finished || ready_successors >= 2) && audio_ready)
+    }
+
+    /// A held clock still permits logical source promotion up to its fixed PTS.
+    /// The caller must continue the exact completion gate between promotions.
+    pub fn buffered_frame_due(&self) -> bool {
+        self.presenter.clock.buffering
+            && self.presenter.current.as_ref().is_some_and(|current| {
+                current.timestamp + self.presenter.interval <= self.presenter.clock.reading.position
+            })
+    }
+
+    pub fn is_buffering(&self) -> bool {
+        self.presenter.clock.buffering
+    }
+
     /// Sleep until the missing decoder delivery arrives, instead of polling
     /// an already expired presentation deadline. The caller must keep the
     /// waker's event subscription alive, and retain its ordinary deadline if
@@ -758,11 +891,23 @@ impl Player {
     }
 
     pub fn play(&mut self) {
+        for input in &self.read_ahead {
+            input.cancel();
+        }
+        if let Some(control) = &self.audio_control {
+            control.cancel_buffer_wait();
+        }
         self.presenter.clock.play();
     }
 
     pub fn pause(&mut self, now: Instant) {
+        for input in &self.read_ahead {
+            input.cancel();
+        }
         self.cancel_decode_wait();
+        if let Some(control) = &self.audio_control {
+            control.cancel_buffer_wait();
+        }
         self.presenter.clock.pause(now);
     }
 
@@ -942,6 +1087,9 @@ impl Player {
     /// thread can be blocked handing over a frame, and every millisecond it
     /// waits is a millisecond of the old position still playing.
     fn hush(&self) -> Option<AudioEpoch> {
+        for input in &self.read_ahead {
+            input.cancel();
+        }
         self.audio_control
             .as_ref()
             .map(AudioControl::invalidate)
@@ -1435,6 +1583,9 @@ impl Presenter {
 struct Clock {
     reading: Reading,
     beat: Arc<Beat>,
+    /// User play intent survives a temporary hold. Beat independently records
+    /// whether media time is currently advancing for the audio callback.
+    buffering: bool,
 }
 
 impl Clock {
@@ -1442,6 +1593,7 @@ impl Clock {
         Self {
             reading: Reading::default(),
             beat,
+            buffering: false,
         }
     }
 
@@ -1450,7 +1602,7 @@ impl Clock {
     }
 
     fn is_playing(&self) -> bool {
-        self.reading.playing
+        self.reading.playing || self.buffering
     }
 
     fn is_anchored(&self) -> bool {
@@ -1469,6 +1621,7 @@ impl Clock {
     }
 
     fn play(&mut self) {
+        self.buffering = false;
         self.moved(Reading {
             playing: true,
             origin: None,
@@ -1477,6 +1630,7 @@ impl Clock {
     }
 
     fn pause(&mut self, now: Instant) {
+        self.buffering = false;
         self.moved(Reading {
             playing: false,
             position: self.position(now),
@@ -1495,9 +1649,30 @@ impl Clock {
     /// Where the clock reads until the frame that was seeked to arrives.
     /// Unanchoring is what makes that frame anchor it, whenever it comes.
     fn seek(&mut self, to: Duration) {
+        let playing = self.is_playing();
+        self.buffering = false;
         self.moved(Reading {
+            playing,
             position: to,
             origin: None,
+        });
+    }
+
+    fn hold_for_buffer(&mut self, now: Instant) {
+        self.buffering = true;
+        self.moved(Reading {
+            playing: false,
+            position: self.position(now),
+            // Retain an anchor so ordered catch-up cannot claim a new PTS.
+            origin: Some(now),
+        });
+    }
+
+    fn resume_buffered(&mut self, now: Instant) {
+        self.buffering = false;
+        self.moved(Reading {
+            playing: true,
+            origin: Some(now),
             ..self.reading
         });
     }
@@ -1518,6 +1693,434 @@ mod tests {
     use crate::Size;
 
     const NTSC: Duration = Duration::from_nanos(33_366_666);
+
+    #[test]
+    fn recovery_waits_for_real_compressed_input_even_with_completed_picture_lead() {
+        let (input, observer, release, dropped) = crate::packet_input::tests::blocked_read_ahead();
+        let mut bench = Bench::new();
+        bench.player.read_ahead = vec![observer];
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        bench.player.pump(start).unwrap();
+        let late = start + NTSC * 3;
+        bench
+            .player
+            .coordinate_buffering(late, true, 0, true, false, Waker::noop().clone())
+            .unwrap();
+        assert!(bench.player.is_buffering());
+        for index in 1..=3 {
+            bench.decoded(0, index);
+            bench.player.pump(late).unwrap();
+        }
+        let wake = Arc::new(WakeCount::default());
+        bench
+            .player
+            .coordinate_buffering(late, true, 2, true, false, Waker::from(wake.clone()))
+            .unwrap();
+        assert!(
+            bench.player.is_buffering(),
+            "two GPU pictures must not resume short input again"
+        );
+        let held = bench.player.position(late);
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while wake.0.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        // A notification may arrive before the target packet. Re-registering
+        // the same real readiness gate must neither resume early nor lose wake.
+        while bench.player.is_buffering() {
+            bench
+                .player
+                .coordinate_buffering(late, true, 2, true, false, Waker::from(wake.clone()))
+                .unwrap();
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        assert_eq!(bench.player.position(late), held);
+        assert_eq!(bench.player.position(late + NTSC), held + NTSC);
+        assert_eq!(bench.player.stats().dropped, 0);
+        drop(input);
+        dropped.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn preparation_waits_for_two_completed_pictures_but_not_input_high_water() {
+        let (input, observer, release, dropped) = crate::packet_input::tests::blocked_read_ahead();
+        let mut bench = Bench::new();
+        bench.player.read_ahead = vec![observer];
+        assert!(
+            !bench
+                .player
+                .prepared_playback_ready(1, false, Waker::noop().clone())
+                .unwrap()
+        );
+        assert!(
+            bench
+                .player
+                .prepared_playback_ready(2, false, Waker::noop().clone())
+                .unwrap()
+        );
+        assert!(
+            bench
+                .player
+                .prepared_playback_ready(0, true, Waker::noop().clone())
+                .unwrap()
+        );
+        assert!(!bench.player.is_playing());
+        assert!(!bench.player.is_buffering());
+        drop(input);
+        release.send(()).unwrap();
+        dropped.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn normal_playback_never_holds_or_reanchors_the_clock() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        // Exercise two minutes of ordinary progression, including small
+        // delivery delays. Running out of ready successors alone is not a
+        // stall and must not turn normal playback into stop/start playback.
+        for index in 0..3_600 {
+            bench.decoded(0, index);
+            let now = start + NTSC * index as u32 + Duration::from_millis(5);
+            assert_eq!(bench.player.pump(now).unwrap().unwrap().index, index);
+            bench
+                .player
+                .coordinate_buffering(now, true, 0, true, false, Waker::noop().clone())
+                .unwrap();
+            assert!(!bench.player.is_buffering());
+            assert_eq!(
+                bench.player.presenter.clock.reading.origin,
+                Some(start + Duration::from_millis(5))
+            );
+            assert_eq!(bench.player.position(now), NTSC * index as u32);
+        }
+        assert_eq!(bench.player.stats().dropped, 0);
+    }
+
+    #[test]
+    fn late_scheduler_walks_completed_successors_without_buffering() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        bench.player.pump(start).unwrap();
+        // The shell wakes late, but the next four source results are already
+        // complete. Ordered logical catch-up is work, not an input shortage.
+        for index in 1..=4 {
+            bench.decoded(0, index);
+        }
+        let late = start + NTSC * 4 + Duration::from_millis(5);
+        for index in 1..=4 {
+            assert_eq!(bench.player.pump(late).unwrap().unwrap().index, index);
+            bench
+                .player
+                .coordinate_buffering(
+                    late,
+                    true,
+                    (4 - index) as usize,
+                    true,
+                    false,
+                    Waker::noop().clone(),
+                )
+                .unwrap();
+            assert!(
+                !bench.player.is_buffering(),
+                "completed source catch-up must not interrupt sound"
+            );
+            assert_eq!(bench.player.position(late), late.duration_since(start));
+            assert_eq!(bench.player.presenter.clock.reading.origin, Some(start));
+        }
+        assert_eq!(bench.player.stats().presented, 5);
+        assert_eq!(bench.player.stats().dropped, 0);
+    }
+
+    #[test]
+    fn admitted_picture_work_does_not_hold_or_spin_an_expired_deadline() {
+        for output_ready in [false, true] {
+            let mut bench = Bench::new();
+            assert!(
+                bench
+                    .player
+                    .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+            );
+            bench.player.play();
+            let start = Instant::now();
+            bench.decoded(0, 0);
+            bench.player.pump(start).unwrap();
+            let late = start + NTSC * 3;
+            assert_eq!(
+                bench
+                    .player
+                    .coordinate_buffering(
+                        late,
+                        output_ready,
+                        0,
+                        false,
+                        false,
+                        Waker::noop().clone(),
+                    )
+                    .unwrap(),
+                None,
+                "wait for the worker, not an already-expired timer"
+            );
+            assert!(!bench.player.is_buffering());
+            assert_eq!(bench.player.presenter.clock.reading.origin, Some(start));
+            assert_eq!(bench.player.position(late), late.duration_since(start));
+        }
+    }
+
+    #[test]
+    fn completed_catchup_still_holds_when_its_ready_prefix_runs_out() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        bench.player.pump(start).unwrap();
+        bench.decoded(0, 1);
+        bench.decoded(0, 2);
+        let late = start + NTSC * 4 + Duration::from_millis(5);
+        bench.player.pump(late).unwrap();
+        bench
+            .player
+            .coordinate_buffering(late, true, 1, true, false, Waker::noop().clone())
+            .unwrap();
+        assert!(!bench.player.is_buffering());
+        bench.player.pump(late).unwrap();
+        bench
+            .player
+            .coordinate_buffering(late, true, 0, true, false, Waker::noop().clone())
+            .unwrap();
+        assert!(bench.player.is_buffering());
+        assert_eq!(bench.player.position(late), late.duration_since(start));
+        assert_eq!(bench.player.stats().presented, 3);
+        assert_eq!(bench.player.stats().dropped, 0);
+    }
+
+    #[test]
+    fn buffering_holds_audio_time_but_walks_every_source_to_the_held_position() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        assert_eq!(bench.player.pump(start).unwrap().unwrap().index, 0);
+        let late = start + Duration::from_millis(100);
+        assert!(bench.player.pump(late).unwrap().is_none());
+        bench
+            .player
+            .coordinate_buffering(late, true, 0, true, false, Waker::noop().clone())
+            .unwrap();
+        assert!(bench.player.is_buffering());
+        assert!(
+            bench.player.is_playing(),
+            "a shortage must retain play intent"
+        );
+        let held = bench.player.position(late);
+        let later = late + Duration::from_secs(5);
+        assert_eq!(bench.player.position(later), held);
+        assert!(
+            bench
+                .player
+                .presenter
+                .clock
+                .beat
+                .read(Reading::default())
+                .running_at(later)
+                .is_none()
+        );
+        assert!(bench.player.next_due().is_none());
+
+        for index in 1..=2 {
+            bench.decoded(0, index);
+            assert_eq!(bench.player.pump(later).unwrap().unwrap().index, index);
+        }
+        assert_eq!(
+            bench.player.position(later),
+            held,
+            "catch-up cannot claim a different PTS"
+        );
+        assert!(!bench.player.buffered_frame_due());
+        bench
+            .player
+            .coordinate_buffering(later, true, 1, true, false, Waker::noop().clone())
+            .unwrap();
+        assert!(
+            bench.player.is_buffering(),
+            "one successor is not the chosen refill lead"
+        );
+        bench
+            .player
+            .coordinate_buffering(later, true, 2, true, false, Waker::noop().clone())
+            .unwrap();
+        assert!(!bench.player.is_buffering());
+        assert_eq!(bench.player.position(later), held);
+        assert_eq!(bench.player.position(later + NTSC), held + NTSC);
+        assert_eq!(bench.player.stats().dropped, 0);
+    }
+
+    #[test]
+    fn a_small_video_delay_does_not_reanchor_or_buffer() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        bench.player.pump(start).unwrap();
+        let now = start + NTSC + Duration::from_millis(5);
+        assert_eq!(
+            bench
+                .player
+                .coordinate_buffering(now, true, 0, true, false, Waker::noop().clone())
+                .unwrap(),
+            Some(start + NTSC * 2)
+        );
+        assert!(!bench.player.is_buffering());
+        assert_eq!(bench.player.position(now), now.duration_since(start));
+    }
+
+    #[test]
+    fn user_pause_and_seek_supersede_buffering() {
+        for seek in [false, true] {
+            let mut bench = Bench::new();
+            assert!(
+                bench
+                    .player
+                    .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+            );
+            bench.player.play();
+            let start = Instant::now();
+            bench.decoded(0, 0);
+            bench.player.pump(start).unwrap();
+            let late = start + NTSC * 3;
+            bench
+                .player
+                .coordinate_buffering(late, true, 0, true, false, Waker::noop().clone())
+                .unwrap();
+            assert!(bench.player.is_buffering());
+            if seek {
+                bench.player.seek(Cue::Index(90), Accuracy::Exact);
+                assert!(bench.player.is_playing());
+                assert!(bench.player.is_seeking());
+            } else {
+                bench.player.pause(late);
+                assert!(!bench.player.is_playing());
+                bench
+                    .player
+                    .coordinate_buffering(late + NTSC, true, 4, true, true, Waker::noop().clone())
+                    .unwrap();
+                assert!(
+                    !bench.player.is_playing(),
+                    "refill must not undo user pause"
+                );
+            }
+            assert!(!bench.player.is_buffering());
+        }
+    }
+
+    #[test]
+    fn buffering_finishes_a_short_tail_without_two_successors() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        bench.player.pump(start).unwrap();
+        let late = start + NTSC + Duration::from_millis(1);
+        bench.decoded(0, 1);
+        bench.player.pump(late).unwrap();
+        // A temporarily empty sound source can require a hold even when this
+        // final picture is already complete. Exercise the same clock state.
+        bench.player.presenter.clock.hold_for_buffer(late);
+        bench
+            .player
+            .coordinate_buffering(late + NTSC * 9, true, 0, true, true, Waker::noop().clone())
+            .unwrap();
+        assert!(!bench.player.is_buffering());
+        assert_eq!(
+            bench.player.position(late + NTSC * 9),
+            late.duration_since(start)
+        );
+    }
+
+    #[test]
+    fn completed_video_waits_for_audio_refill_at_the_same_held_pts() {
+        use crate::audio::Pipe;
+        use crate::audio_worker::tests as producer;
+        let pipe = Pipe::new(1000, 1, Duration::from_millis(500));
+        let epoch = pipe.epoch();
+        let (worker, _) = producer::fixture(pipe.clone());
+        producer::until(|| pipe.room() <= Duration::from_millis(100));
+        let mut bench = Bench::new();
+        bench.player.audio_control = Some(worker.control());
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 60);
+        bench.player.pump(start).unwrap();
+        let position = bench.player.position(start);
+        bench
+            .player
+            .coordinate_buffering(start, true, 2, false, false, Waker::noop().clone())
+            .unwrap();
+        assert!(
+            bench.player.is_buffering(),
+            "video readiness cannot hide missing sound"
+        );
+        assert_eq!(
+            bench.player.position(start + Duration::from_secs(10)),
+            position
+        );
+        producer::until(|| pipe.buffered_through(position, NTSC * 2));
+        let later = start + Duration::from_secs(10);
+        bench
+            .player
+            .coordinate_buffering(later, true, 2, false, false, Waker::noop().clone())
+            .unwrap();
+        assert!(!bench.player.is_buffering());
+        assert_eq!(bench.player.position(later), position);
+        assert!(pipe.is_current(&epoch));
+    }
 
     #[test]
     fn filtered_progress_report_does_not_claim_physical_present_or_redraw_rates() {
@@ -2467,6 +3070,7 @@ mod tests {
                     ),
                     sound: None,
                     audio_control: None,
+                    read_ahead: Vec::new(),
                     timing,
                     size: Size::new(3840, 3840),
                     lenses: 2,

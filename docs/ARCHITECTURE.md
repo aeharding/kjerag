@@ -556,6 +556,33 @@ Filtered video promotion and source admission use the playback event owner
 described above. Generic and resident-spatial video paths still use the shader
 redraw path; the independent audio producer is shared by all live Readers.
 
+The uninstalled `fix/network-stall-recovery` prototype distinguishes user play
+intent from a temporary stopped common clock after missing picture or sound.
+It retains the held PTS, ordered source processing and estimator history;
+explicit pause or seek supersedes recovery. Restart requires completion-proven
+successor pictures and sound at that PTS, with no impossible lead at EOF.
+An overdue logical owner is not a picture shortage while it has a completed
+successor: ordered catch-up consumes that ready prefix before considering a
+hold. Pending stitch work also does not stop the clock when that exact output's
+required real inputs are already admitted. The input check follows the selected
+seven-source window, exact decode epoch and queued clipped-tail finish. It is
+not completion proof or restart lead. Missing input or sound still permits a
+hold. An expired picture deadline sleeps on worker completion rather than
+spinning timers while admitted work finishes.
+The follow-on also observes compressed-input lead across every required lens
+and file, using each source's normalized clock. Recovery alone waits for one
+second of packet lead; EOF or either consumer's existing byte/count limit
+permits an earlier restart. It adds no decoded/GPU retention or UI input wait.
+Observation and one-shot wake registration share the producer lock, with wakes
+outside it; pause and seek cancel the old wait. Exact startup/seek autoplay
+instead primes two completion-proven successors and sound before starting the
+clock. It does not use the recovery-only input threshold, and a paused landing
+still needs only its requested picture. These scheduling choices are unqualified.
+Consumed PCM history supports restart without manufacturing samples or changing
+ordinary drift correction. This is not a normal-playback clock adjustment or a
+throughput fix. The owner permits it only if real tests establish improved
+stall recovery and no unnecessary holds; runtime qualification remains due.
+
 The gyro clock is distinct. Frame orientation uses the camera timestamp from
 the exposure track, not nominal container PTS. Trailer tick units depend on
 `is_raw_gyro`: qualified X4 Air data uses microseconds and ONE X2 uses

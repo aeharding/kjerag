@@ -10,6 +10,218 @@ use std::io::Write;
 
 const DEADLINE: Duration = Duration::from_secs(60);
 
+#[test]
+fn x4_filtered_buffering_holds_time_and_retains_source_history() {
+    let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
+        return;
+    };
+    assert_buffering_retains_history(Path::new(&path));
+}
+
+#[test]
+fn one_x2_filtered_buffering_holds_time_and_retains_source_history() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    assert_buffering_retains_history(Path::new(&path));
+}
+
+#[test]
+fn x4_filtered_completed_catchup_does_not_buffer() {
+    let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
+        return;
+    };
+    assert_completed_catchup_does_not_buffer(Path::new(&path));
+}
+
+#[test]
+fn one_x2_filtered_completed_catchup_does_not_buffer() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    assert_completed_catchup_does_not_buffer(Path::new(&path));
+}
+
+#[test]
+fn x4_filtered_admitted_work_does_not_pause_sound() {
+    let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
+        return;
+    };
+    assert_admitted_work_does_not_pause_sound(Path::new(&path));
+}
+
+#[test]
+fn one_x2_filtered_admitted_work_does_not_pause_sound() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    assert_admitted_work_does_not_pause_sound(Path::new(&path));
+}
+
+fn assert_admitted_work_does_not_pause_sound(path: &Path) {
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let mut scene = Scene::open(path).unwrap();
+    // The isolated GPU harness routes audio to its quiet sink. Muting here
+    // would bypass sound readiness and fail to exercise the live clock gate.
+    scene.set_muted(false);
+    scene.pause(Instant::now());
+    let first = super::tests::wait_for_new_scene_frame(&scene, None);
+    let camera = Camera::default();
+    let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    settle_filtered(&scene, &mut pipeline, &device, &queue, &first, camera, None);
+    let capture = scene
+        .show
+        .as_ref()
+        .unwrap()
+        .filtered
+        .as_ref()
+        .unwrap()
+        .clone();
+    let blocked = capture.pause_stitch_for_test();
+    scene.play();
+    let start = Instant::now();
+    assert!(!matches!(scene.progress(start), Next::Stopped(_)));
+    let playing = scene.frame_stamp().unwrap();
+    let position = scene.position(start);
+    let interval = scene.player(|player| player.timing().interval()).unwrap();
+    // Startup has emitted four pictures. Withhold the stitch actor, not file
+    // input, while the clock reaches one interval beyond the first new output.
+    let first_pending = first.index() + 4;
+    let steps = (first_pending + 1 - playing.index()) as u32;
+    let late = start + interval * steps + Duration::from_millis(5);
+    let before = scene.player(Player::stats).unwrap();
+    assert!(!matches!(scene.progress(late), Next::Stopped(_)));
+    let pending = scene.frame_stamp().unwrap();
+    let accepted = capture.accepted_stamp().unwrap().unwrap();
+    assert_eq!(pending.index(), first_pending);
+    assert!(pending.same_decode_epoch(&accepted));
+    assert!(accepted.index() >= pending.index() + 3);
+    assert_eq!(capture.ready_successors(&pending).unwrap(), 0);
+    assert!(capture.install_due(&pending).unwrap().is_none());
+    assert_eq!(scene.player(Player::is_buffering), Some(false));
+    assert_eq!(scene.position(late), position + late.duration_since(start));
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+    drop(blocked);
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        assert!(!matches!(scene.progress(late), Next::Stopped(_)));
+        assert_eq!(scene.player(Player::is_buffering), Some(false));
+        if scene.frame_stamp().is_some_and(|stamp| {
+            stamp.index() == playing.index() + steps as u64 && capture.acknowledged(&stamp).unwrap()
+        }) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "admitted work did not catch up");
+        device.poll(wgpu::PollType::Poll).unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let after = scene.player(Player::stats).unwrap();
+    assert_eq!(after.presented - before.presented, steps as u64);
+    assert_eq!(after.dropped, before.dropped);
+    assert_eq!(scene.position(late), position + late.duration_since(start));
+    let complete = scene.frame_stamp().unwrap();
+    assert!(playing.same_decode_epoch(&complete));
+    prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&complete));
+}
+
+fn assert_completed_catchup_does_not_buffer(path: &Path) {
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let mut scene = Scene::open(path).unwrap();
+    scene.set_muted(true);
+    scene.pause(Instant::now());
+    let first = super::tests::wait_for_new_scene_frame(&scene, None);
+    let camera = Camera::default();
+    let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    settle_filtered(&scene, &mut pipeline, &device, &queue, &first, camera, None);
+    scene.play();
+    let start = Instant::now();
+    assert!(!matches!(scene.progress(start), Next::Stopped(_)));
+    let playing = scene.frame_stamp().unwrap();
+    let position = scene.position(start);
+    let interval = scene.player(|player| player.timing().interval()).unwrap();
+    let capture = scene.show.as_ref().unwrap().filtered.as_ref().unwrap();
+    // Complete three actual GPU outputs without running the shell scheduler.
+    // This models a late wake, not withheld decode or stitch work. In
+    // particular, queued-but-uncompleted results are not counted as ready.
+    let deadline = Instant::now() + DEADLINE;
+    while capture.ready_successors(&playing).unwrap() < 3 {
+        assert!(Instant::now() < deadline, "completed prefix did not fill");
+        device.poll(wgpu::PollType::Poll).unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let before = scene.player(Player::stats).unwrap();
+    let late = start + interval * 3 + Duration::from_millis(5);
+    assert!(!matches!(scene.progress(late), Next::Stopped(_)));
+    assert_eq!(scene.player(Player::is_buffering), Some(false));
+    assert_eq!(scene.position(late), position + late.duration_since(start));
+    let complete = scene.frame_stamp().unwrap();
+    assert_eq!(complete.index(), playing.index() + 3);
+    assert!(playing.same_decode_epoch(&complete));
+    let after = scene.player(Player::stats).unwrap();
+    assert_eq!(after.presented - before.presented, 3);
+    assert_eq!(after.dropped, before.dropped);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+    prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&complete));
+}
+
+fn assert_buffering_retains_history(path: &Path) {
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let mut scene = Scene::open(path).unwrap();
+    // Use the harness's quiet sink, not the mute readiness exemption.
+    scene.set_muted(false);
+    scene.pause(Instant::now());
+    let first = super::tests::wait_for_new_scene_frame(&scene, None);
+    let camera = Camera::default();
+    let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    settle_filtered(&scene, &mut pipeline, &device, &queue, &first, camera, None);
+    scene.play();
+    let start = Instant::now();
+    assert!(!matches!(scene.progress(start), Next::Stopped(_)));
+    // One second exceeds the real sound producer's 500 ms future lead.
+    // Admitted stitch delay alone no longer qualifies as input starvation.
+    // Re-enter through Scene, then prove missing sound was necessary to hold.
+    let resumed = start + Duration::from_secs(1);
+    assert!(!matches!(scene.progress(resumed), Next::Stopped(_)));
+    let capture = scene.show.as_ref().unwrap().filtered.as_ref().unwrap();
+    let current = scene.frame_stamp().unwrap();
+    let current_ready = capture.acknowledged(&current).unwrap();
+    assert!(
+        capture.has_output_inputs(&current, current_ready).unwrap(),
+        "the recovery fixture must have its required picture inputs"
+    );
+    assert_eq!(scene.player(Player::is_buffering), Some(true));
+    assert!(scene.is_playing(), "buffering retains user play intent");
+    let held = scene.position(resumed);
+    assert_eq!(scene.position(resumed + Duration::from_secs(5)), held);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+    let deadline = Instant::now() + DEADLINE;
+    while scene.player(Player::is_buffering) == Some(true) {
+        if let Next::Stopped(error) = scene.progress(resumed) {
+            panic!("buffering stopped the capture: {error}");
+        }
+        assert_eq!(scene.position(resumed), held);
+        assert!(Instant::now() < deadline, "buffering could not refill");
+        device.poll(wgpu::PollType::Poll).unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let complete = scene.frame_stamp().unwrap();
+    assert!(
+        first.same_decode_epoch(&complete),
+        "buffering sought or restarted history"
+    );
+    assert!(complete.timestamp() <= held);
+    assert!(held < complete.timestamp() + scene.player(|p| p.timing().interval()).unwrap());
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+    prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&complete));
+    assert_eq!(
+        scene.position(resumed + Duration::from_millis(20)),
+        held + Duration::from_millis(20)
+    );
+}
+
 /// Actual decoder and both GPU workers, with no shell progress or redraw
 /// after admission. Holding the stitch worker makes the former single-source
 /// handshake refusal deterministic, rather than relying on thread timing.

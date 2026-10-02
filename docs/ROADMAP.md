@@ -1060,6 +1060,222 @@ change installed code or add qualification claims.
 
 ## Delivery next steps
 
+### Conditional network-stall recovery, October 1
+
+Latest exact-runtime review, `c428658f`: the owner also rejects the restored
+`6dbbf16b` build. Its actual Moab 2026/VID_20260923_081735_00_002.insv network
+path reproduces growing picture/sound lag and repeated audio underruns. The
+candidate's ordinary run is clean, but a repeated unchanged control is also
+clean, so that natural bracket does not establish a causal improvement.
+
+With a single four-second packet-delivery outage after twelve seconds, the
+installed control reports 462 then 436 audio underruns in successive intervals
+and 1.621 seconds worst picture lag. The retained buffering candidate instead
+holds picture and sound together once at fixed PTS, then recovers with zero
+counted underruns in every interval. An ordinary moving-view candidate run
+also holds once and recovers with zero counted underruns. Both waits are about
+1.8 seconds under this artificial outage: one second of compressed-media lead
+is not a one-second wall-clock wait guarantee. Packets, timestamps and source
+order remain unchanged. Quiet-sink accounting is not audible owner acceptance.
+
+Clean SDK package `c428658f` / executable `a2a0cdb2` / OSTree `43fd2f93`
+now passes 49 X4 and 50 ONE X2 app-path UI checks, zero failures, with existing
+service/fixture skips. Both motion-picture pairs are inspected. Both UI scopes
+have no memory-limit/OOM events, postflight pressure averages or new kernel
+entries. The native shader-twin helper remains separate from clean SDK
+arithmetic provenance. Actual bundle import authenticates commit, executable,
+metadata and license without installation, execution or signing qualification.
+These results supersede the corresponding remaining-gate statements below,
+not the earlier high-rate/240-capacity failure or spontaneous-stutter limits.
+
+The owner explicitly accepts a possible short already-queued audio repeat for
+this test build only. Qualified `c428658f` is now installed, with executable,
+metadata and the normal origin authenticated; the checksum-verified rollback
+is retained. However, actual-installed ordinary playback of the same network
+clip logs ten picture hold/resume pairs, with zero counted audio underruns.
+The run reaches only 29.91 media seconds in its roughly 48-second wall window.
+Replacing stutters with frequent buffer pauses is not an accepted solution.
+The player exits normally with no new kernel entries; pressure avg60 is .02,
+avg10/300 zero. The actual after picture is inspected. This latest run does
+not isolate network input from processing/admission delay. Owner branch retest
+and the underlying smooth-playback fix still precede any merge. The separate
+unpushed cache change is not part of this package or qualification. Evidence:
+`scratch/coordinated-buffering-20261001/STATUS.md` and the exact-package runtime,
+UI and payload-audit receipts it names.
+
+The owner reports stuttering across network footage, including spontaneous
+onset at 23.190 seconds in the September 23 `_003` clip. A natural installed
+pause/resume/seek sequence did not reproduce sustained bad recovery. A separate
+temporary demux slowdown through the installed app does: after reads recover,
+picture and sound remain seconds late until manual pause/resume clears the bad
+state. This is a related clock-recovery reproduction, not proof of the sole
+cause of every owner-reported stutter.
+
+The owner conditionally permits automatic recovery only if it removes the
+stutters and does not act as an always-on workaround. Branch
+`fix/network-stall-recovery` adapts the earlier unshipped clock-hold/PCM-history
+prototype to the current single-reader architecture. It resumes only with
+completion-proven picture lead, not merely queued GPU outputs. Media CPU tests
+pass 174 cases with four ignored, including two simulated minutes without a
+normal-playback hold or clock reset. Real network A/B, audio restart, both camera
+UI and package gates remain due. The bounded device-hidden workspace passes
+1,676 tests, 53 ignored, with no failures; unavailable-device returns and the
+two parked color edits are included, not clean-source GPU qualification.
+Full lint/format/vendor/name/source and portable harness checks pass.
+Repeated pauses or unnecessary normal-playback
+holds do not qualify. The installed `6dbbf16b` app is unchanged; no fix, merge,
+performance-capacity or all-camera verdict is claimed. Private evidence:
+`scratch/resume-stutter-20261001/`.
+
+Exact prototype source `1d34630b` now has all eight CI checks passing and a
+clean offline SDK package, excluding the parked color edits. The installed
+baseline and candidate each replay the reported September 23 clip through
+23 seconds without reproducing the owner's sustained bad state. Under the
+same controlled transient input slowdown, the candidate recovers before manual
+pause/resume, with reported worst lateness bounded at 68.3 ms and zero reported
+audio underruns; the baseline previously accumulated seconds of lag and hundreds
+of underruns. This is a scoped recovery improvement, not a general stutter fix.
+The candidate logs 25 hold/resume pairs, including one startup hold and repeated
+holds during prolonged slow input. A separate normal network control also holds
+once at 0.145 seconds, then maintains source cadence with no further holds.
+It therefore does not meet the zero-unnecessary-hold/repeated-pause qualification
+gate and remains uninstalled. Startup priming and input-refill readiness need
+attention before delivery, without reducing stitching cadence or history.
+All three completed player runs exit normally with no new kernel entries.
+Transient-candidate postflight memory pressure has zero avg10 but nonzero longer
+averages; both normal controls have zero averages. These receipts do not include
+completed cgroup memory-event accounting or physical scanout proof. Remaining
+both-camera and package gates are not waived.
+
+The next uninstalled revision adds recovery-only compressed-input high water
+across each required lens/file, using their existing normalized container
+clocks. It waits for one second of packet lead, with EOF and existing audio/video
+cache bounds as escape conditions, without increasing decoded/GPU retention.
+Startup and exact-seek autoplay instead prime two completion-proven pictures
+and sound before starting the clock; they do not use that input threshold.
+Paused exact landings remain immediate once their requested picture completes.
+Seven new CPU cases cover real blocked packet delivery through Player recovery,
+separate lens clocks, wake/cancel, seek invalidation, errors and unattainable
+lead. The media gate passes 181 tests with four ignored. Full Clippy, vendor,
+format, name/source and 28 portable harness checks pass. The device-hidden full
+workspace passes 1,683 tests, with 53 ignored and no failures, including
+unavailable-device returns and the parked color variation, not clean-source
+hardware coverage. Actual-player qualification remains pending. No installed app,
+stitch/color arithmetic, source cadence or history changes. The startup-delay
+and sustained slow-input behavior still require measurement, not acceptance
+from these CPU checks.
+
+Exact follow-up `6f5b80d0` passes all eight CI checks and has a clean offline
+SDK package. Its natural September 23 network run has zero buffering entries,
+including startup, with regular 30 source advances/s, 54.5 ms worst reported
+lateness and no audio underruns. The spontaneous owner-reported bad state is
+still not reproduced. Under the same controlled slowdown, it reduces hold/
+resume pairs from 25 to four, with no startup hold, and restores regular source
+cadence before manual intervention. Reported worst lateness is 49.3 ms and
+audio underruns remain zero, but the intentional pauses still interrupt sound.
+That is a scoped recovery improvement, not a hitch-free verdict or acceptance
+of repeated pauses under slow input. Both actual-camera Scene recovery/history
+regressions pass separately with no new kernel entries or pressure averages.
+The clean app-path suites pass 49 X4 and 50 ONE X2 checks, separately, with the
+existing isolated-service and fixture skips. Both cameras' motion captures
+are inspected. Neither suite has new kernel entries, postflight pressure
+averages or scoped memory-limit/OOM events. The native shader-twin helper is
+separate from clean SDK shader provenance.
+All inspected network runs exit normally with no new kernel entries and zero
+postflight pressure averages, but those wrappers lack completed scoped memory
+event receipts. The natural trace still fails full integrity at startup/quit;
+its trimmed source cadence is diagnostic, not physical scanout proof. Captured
+pictures are inspected, not a moving owner review. Installed `6dbbf16b` remains
+unchanged; audible restart behavior and owner acceptance are still pending.
+The exported bundle also passes a private device-hidden import/authentication
+of its commit, executable, metadata and license. That audit installs and runs
+nothing, and does not qualify signing of this private test package.
+
+Further changing-view qualification prevents treating that candidate as ready.
+At 2256x1504 with a nominal 250 Hz headless output and the September 23 NAS
+clip, with each app limited to four CPU cores by the test scope, `6f5b80d0`
+completes about 123 sourced view renders/s and enters recovery
+15 times, including before the pointer pan. Its unchanged installed baseline
+completes about 144 renders/s under the same requested load while retaining
+regular source cadence. Neither meets 240 renders/s in this capped test; this
+does not establish full-hardware capacity. These
+conservative GPU callback times do not isolate rendering-kernel cost. The
+candidate's repeated picture holds are not accepted as a performance solution.
+Both processes exit normally with no new kernel entries; the candidate has
+nonzero postflight memory-pressure averages, unlike the baseline.
+
+A separate failing CPU regression identifies an unnecessary-recovery case:
+a late shell wake can stop the common clock despite multiple completed
+successors already waiting. The follow-up permits ordered catch-up through
+that completion-proven prefix before declaring a picture shortage. Missing
+sound and exhausted or pending picture work still trigger actual recovery.
+Media coverage passes 183 tests, four ignored; the device-hidden workspace
+passes 1,687 tests, 53 ignored. Full workspace lint, formatting and portable
+harness checks pass. Both-camera actual-Scene catch-up regressions pass with
+real decode and GPU work, but both log sound-device underrun/overrun errors.
+They prove the tested clock/source ownership, not audio-device continuity;
+their native binaries also include the preserved parked color variation.
+New clean runtime/package qualification remains due. This does not establish the
+cause or resolution of the owner's spontaneous network stutter. Installation,
+merge, the 240-capacity verdict and owner acceptance remain withheld.
+
+Exact correction `9cae1bed` now has a clean offline SDK package excluding the
+parked colors. Repeating the changing-view network test gives two picture-hold
+entries rather than the preceding 15-entry observation. The first resumes;
+the second occurs after the pan and remains held when the test quits. This
+does not meet a zero-unnecessary-hold gate. Its strict 24-second pan cohort
+has 3,059 completed sourced view renders, about 127.46/s, with 716 consecutive
+source changes, about 29.83/s. Regular reports show roughly 30 source/s,
+27.0 ms worst lateness and no counted audio underruns. The actual app cgroup's
+CPU quota records no throttling during this run; it cannot explain away that
+capacity result. Both app-scope memory-event snapshots have no limit/OOM events,
+and shutdown is normal with no new kernel entries. Postflight pressure has
+zero avg10/300 but avg60 .01. This is a bounded diagnostic improvement, not
+resolution of the spontaneous owner symptom, moving acceptance or 240 capacity.
+The installed app remains unchanged and delivery is still withheld.
+
+A further real-pipeline regression reproduces an unnecessary clock hold with
+all three required future sources already admitted but the stitch actor
+deliberately blocked. This isolates admitted processing delay from missing
+camera input. The follow-up uses that exact source/epoch ownership and the
+existing seven-source stream's lookahead to exempt in-progress work from input
+buffering. Completed current pictures check their next output; queued finish
+owns the clipped EOF tail. Actual completion remains mandatory for display and
+restart, and missing sound always holds. Expired deadlines wait on worker
+completion rather than causing a timer loop. Media passes 184 tests with four
+ignored; the device-hidden workspace passes 1,692 tests with 53 ignored, plus
+the full lint/format/vendor/source/name and portable harness gates. These
+include unavailable-device returns and the parked color variation, not clean
+SDK hardware coverage. Separate real-Scene cases pass on both cameras with
+admitted stitch work delayed, without a common-clock hold. Both cameras also
+pass actual missing-sound hold/refill/restart checks with picture inputs
+already admitted, retaining the same source history. These fixtures enable
+sound through the quiet sink rather than using the mute readiness exemption.
+Three of the four runs log ALSA underrun/overrun warnings, so they do not
+qualify sound-device continuity. No new kernel entries appear; X4's recovery
+run has nonzero pressure averages, while the other three have zero averages.
+Clean SDK and actual-player qualification remain due. This does not establish
+the cause of the owner's spontaneous stutter or meet the 240-capacity
+requirement. Installation and merge remain withheld.
+
+Exact follow-up `c428658f` passes all eight CI jobs and builds an offline SDK
+package excluding parked colors. Its 2256x1504, nominal-250-Hz September 23 NAS
+pan fails throughput: 73.87 completed sourced views/s and 16.37 consecutive
+source advances/s. Picture lateness reaches 6.426 seconds. One actual missing-
+sound hold resumes at the same PTS; three counted audio underruns remain.
+A matching unchanged-installed control also fails, at 72.37 views/s and 16.50
+sources/s, accumulating 16.244 seconds of picture lag and hundreds of audio
+underruns per later interval. Live GPU samples report 98%/97% busy at 800 MHz
+for candidate/control, with temperatures around 62 C in the candidate. This
+does not isolate the reason for that clock or prove it is the sole cause.
+Both app CPU quotas record zero throttling and both memory-event snapshots
+record zero limit/OOM events. Both players exit normally with no new kernel
+entries. Candidate pressure avg60 is .03, with avg10/300 zero; the control's
+averages are zero. Both after pictures are inspected, not moving acceptance
+or scanout proof. This is evidence of a shared severe throughput failure and
+scoped recovery behavior, not a deployable performance or spontaneous-stutter
+fix. Further input-stall and both-camera package gates remain due. No install.
+
 ### Pre-window startup delay, September 30
 
 October 1 clarification: the owner wants the normal transparent/blurred window
