@@ -1179,8 +1179,20 @@ presentation at process exit; the seek run additionally crosses deliberate
 timeline discontinuities. These are scoped observations, not complete cadence,
 audible continuity, physical scanout or 240-capacity verdicts. The actual bundle
 payload is privately authenticated without installation or signing qualification.
-The autoplay-preparation tradeoff and owner branch retest remain due. Installed
-`c428658f` is unchanged; no merge, release or general stutter-fix claim.
+The owner now accepts the autoplay-preparation wait for this test build only.
+The exact qualified `65e00f72` package is installed as OSTree `0deeacde`, with
+executable `a3b56c4d`, unchanged runtime/permissions and origin `kjerag-origin`.
+The replaced `c428658f` bundle is retained for rollback. Owner branch retest
+remains required; no merge, release or general stutter-fix claim.
+The one actual-installed network smoke check exits normally, authenticates the
+running package and quiet output, and maintains approximately 30 source
+advances/s after startup with no buffer holds or counted audio underruns.
+There are no new kernel entries; memory pressure averages after the run are
+0.00 over 10 seconds and 0.02 over 60 seconds. Its simulated pause/resume keys
+leave the final picture paused, so it does not qualify resumed playback. The
+whole-run cadence verdict remains false, including frameless startup and the
+terminal incomplete presentation. Owner testing of ordinary pause/resume and
+seek remains required, not replaced by this scoped smoke check.
 
 The owner reports stuttering across network footage, including spontaneous
 onset at 23.190 seconds in the September 23 `_003` clip. A natural installed
