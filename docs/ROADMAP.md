@@ -1088,10 +1088,18 @@ metadata and license without installation, execution or signing qualification.
 These results supersede the corresponding remaining-gate statements below,
 not the earlier high-rate/240-capacity failure or spontaneous-stutter limits.
 
-The installed rollback remains unchanged. A possible short already-queued
-audio repeat on restart awaits explicit owner tradeoff approval; no answer is
-not approval. Owner branch retest still precedes merge. The separate unpushed
-cache change is not part of this package or qualification. Evidence:
+The owner explicitly accepts a possible short already-queued audio repeat for
+this test build only. Qualified `c428658f` is now installed, with executable,
+metadata and the normal origin authenticated; the checksum-verified rollback
+is retained. However, actual-installed ordinary playback of the same network
+clip logs ten picture hold/resume pairs, with zero counted audio underruns.
+The run reaches only 29.91 media seconds in its roughly 48-second wall window.
+Replacing stutters with frequent buffer pauses is not an accepted solution.
+The player exits normally with no new kernel entries; pressure avg60 is .02,
+avg10/300 zero. The actual after picture is inspected. This latest run does
+not isolate network input from processing/admission delay. Owner branch retest
+and the underlying smooth-playback fix still precede any merge. The separate
+unpushed cache change is not part of this package or qualification. Evidence:
 `scratch/coordinated-buffering-20261001/STATUS.md` and the exact-package runtime,
 UI and payload-audit receipts it names.
 
