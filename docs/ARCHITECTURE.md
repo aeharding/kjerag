@@ -622,8 +622,13 @@ with all required inputs admitted. The input classification still decides
 whether an expired timer should wait for worker completion. Restart gates,
 source processing, retention and arithmetic are unchanged. Real X4/ONE X2
 blocked-actor checks preserve the shown owner and resume in the same epoch.
-This does not make the underlying stitch work faster. Clean package checks and
-owner approval of conditional processing-stall pauses remain due.
+This does not make the underlying stitch work faster. Clean SDK source
+`37ca091b` passes both camera functional UI suites. A bounded network
+interruption through that uninstalled package holds the exact shown owner,
+resumes once, and records no counted audio underruns. It still has roughly
+47 ms post-resume picture intervals and is not a general smoothness verdict.
+Owner approval of conditional processing-stall pauses and branch retest remain
+due. The installed package is still `5e385619`.
 Consumed PCM history supports restart without manufacturing samples or changing
 ordinary drift correction. This is not a normal-playback clock adjustment or a
 throughput fix. The owner permits it only if real tests establish improved

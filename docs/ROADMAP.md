@@ -1264,9 +1264,18 @@ nonzero pressure averages. Its first restart second has 47–50 ms examples,
 not the earlier 82/63 ms pattern, so this unpaired run cannot establish general
 micro-stutter resolution. Stitching and color arithmetic, source cadence,
 restart lead and cache bounds are unchanged. The conditional processing pause
-is explicitly put to the owner before testing; approval, clean SDK packaging
-and actual-window qualification remain due. Installed source `5e385619` stays
-unchanged while that candidate is prepared. No merge or release.
+is explicitly put to the owner before testing. Clean SDK source `37ca091b`
+then builds successfully; its functional UI suites pass 49 X4 and 50 ONE X2
+checks with the disclosed sound-device, portal and fixture skips. All eight
+CI jobs pass on that runtime source after retrying an x86 dependency-setup
+failure. A bounded actual-window network interruption through the clean,
+uninstalled package holds shown source 488 through 39 redraws, resumes once
+and has no counted underruns. No new kernel entries, memory-limit events or
+CPU-quota throttling are recorded. Roughly 47 ms first-second picture intervals
+remain; the larger preceding 82/63 ms pattern is not reproduced. This unpaired
+run is not a universal micro-stutter, audible-continuity, scanout or capacity
+verdict. Explicit conditional-pause approval and owner branch retest remain
+due. Installed source `5e385619` stays unchanged. No merge or release.
 
 The owner reports stuttering across network footage, including spontaneous
 onset at 23.190 seconds in the September 23 `_003` clip. A natural installed
