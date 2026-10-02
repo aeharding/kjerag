@@ -1211,6 +1211,60 @@ averages are zero, and the final picture is inspected. The full cadence reducer
 still reports startup/terminal integrity issues. This is ordinary second-camera
 audio coverage, not a forced ONE X2 recovery or 240 fps capacity result.
 
+Draft [PR #246](https://github.com/aeharding/kjerag/pull/246) passes all eight
+CI jobs on `fb899398`; runtime code is unchanged from the qualified `a2ebccd4`
+package. Its separate 2256x1504 changing-view cohort maintains 29.900 consecutive
+source advances/s with no audio underruns, but reaches only 192.750 completed
+redraws/s. Completion spacing p99/max is 26.429/48.923 ms, not isolated shader
+time. The 240 fps and 4.17 ms requirements remain unmet. A source-snapshot
+interior-sampling trial passes exact two-camera plane comparisons but gives
+no useful actual-player improvement and is removed. The installed app is
+unchanged; owner clock-position decision and branch review remain due.
+
+The next native rendering candidate skips gamma-to-linear powers when the
+existing output predicate selects encoded color. The linear-output expression
+is unchanged. Local X4, 2256x1504 changing-view, full-source-rate brackets measure
+167.275 old / 248.624 candidate / 163.200 old completed redraws/s, with consecutive
+29.95-29.97 source advances/s and zero audio underruns. Candidate completion
+spacing p99/max remains 14.235/33.201 ms: this is a substantial capacity gain,
+not a full 4.17 ms or smoothness pass. A network candidate run reaches only
+6.975 source advances/s and cannot count toward the target despite its higher
+redraw count. Final captures are inspected; no GPU faults or memory pressure
+appear in the local bracket. The real Radeon GPU final-transfer regression
+matches 2,610 encoded/linear cases bit-for-bit; it isolates the transfer, not
+whole-scene output. ONE X2's separate native accepted-riser-view cohort reaches
+247.875 redraws/s with 29.975 consecutive sources/s, no audio underruns, and
+completion spacing p99/max 17.543/34.228 ms. Both native cohorts exceed 240/s
+on average, not the frame-time budget. Local device-hidden workspace gates pass
+formatting, all-target Clippy, 1,663 tests with 53 ignored, naming and source-list
+checks; those tests include the unchanged parked owner color edits and do not
+establish hardware coverage. CI, clean SDK packaging and branch review remain
+due. The installed Flatpak is unchanged.
+
+October 1 delivery update: exact-source `4eb97dbe` subsequently passed all
+eight CI jobs and clean SDK app-path UI checks (49 X4, 50 ONE X2, zero
+failures, with the existing skips). The owner approved the backward-time
+recovery tradeoff for this test installation only. The installed combined
+candidate was then rejected: actual network playback lagged and cut audio
+frequently. These functional UI and native capacity results did not qualify
+that use case. The retained `6dbbf16b` package has been restored, with its
+installed executable, commit, metadata and unchanged origin authenticated.
+The owner reports the same symptom on the restored build, so rollback is not
+a fix and the cause has not been isolated to the new cache, recovery or shader
+changes. PRs #245, #246 and #247 remain unaccepted drafts; no merge or release.
+Exact reported-network-path reproduction takes priority over more capacity
+optimization, and no replacement is to be presented as a stutter fix without
+that reproduction and owner retest.
+The restored installed build now also fails a quiet, bounded ordinary-playback
+check of the actual reported network file, without injected delays or manual
+pause/seek. By 48.15 seconds it reports 1.747 seconds worst picture lag,
+-1.578 seconds current audio offset and 468 audio underruns in that interval.
+The player exits normally; kernel logs and memory-pressure averages are clear,
+and the final footage capture was inspected. This establishes the failing
+restored real path, not its root cause, an audible comparison with the null
+sink, or a fix. The full cadence reducer still rejects integrity issues;
+its averages are not a smoothness pass.
+
 ### Pre-window startup delay, September 30
 
 October 1 clarification: the owner wants the normal transparent/blurred window
