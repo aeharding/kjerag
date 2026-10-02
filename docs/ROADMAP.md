@@ -1220,9 +1220,28 @@ pass. These native checks include the unchanged parked color variation, not
 clean SDK arithmetic qualification. The window now selects the actual last shown
 picture while buffering; camera/horizon controls and logical source processing
 remain live. Readiness thresholds, cache/surface bounds, history and source/color
-arithmetic are unchanged. These are focused native tests, not clean SDK delivery
-or proof of every post-resume micro-stutter. No new test build is installed and
-no owner acceptance is inferred. Recent-file inspection also confirms the
+arithmetic are unchanged. Clean SDK source `5e385619` then builds normally;
+its package passes 49 X4 and 50 ONE X2 functional UI checks with fixture/portal
+skips disclosed, no new kernel entries and no memory-limit events. All eight
+CI checks pass on that runtime source. The qualified test Flatpak is installed
+with the preceding `65e00f72` package retained and the update origin unchanged.
+An actual-installed eight-second forced network interruption now holds source
+447 through all 40 buffering redraws, where the earlier installed control
+advanced through sources 476, 477 and 478 during its hold. No counted underruns
+occur; later source progression reaches approximately 30/s. Those are separate
+unpaired runs, not physical scanout or audible verdicts. Crucially, the new run
+still shows 82 ms and 63 ms first-second picture dwells after clock restart.
+Stitch/map preparation at sources 468 and 469 takes 81.9 ms and 65.1 ms wall
+time in that interval. The actual cause inside that work/queue remains open;
+the full owner micro-stutter report is not fixed. A read-only CPU-counter repeat
+has no quota throttling, held source 488, and approximately 47 ms examples after
+restart, not the larger spike. It exits normally with no kernel entries or
+counted underruns, no memory-limit events and small nonzero pressure averages.
+The owner clarifies that the symptom occurs randomly, not at a particular
+timestamp. A copied view is therefore not a prerequisite for further diagnosis.
+Draft [#249](https://github.com/aeharding/kjerag/pull/249) contains the narrow
+shown-picture change; no owner acceptance, merge, release, general network
+smoothness or 240-capacity completion is inferred. Recent-file inspection confirms the
 original September 23 `_003` exists in the share's `SSD/` subfolder, not at the
 previously checked root path; the earlier whole-clip absence assumption is retired.
 
