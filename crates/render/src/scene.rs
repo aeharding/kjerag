@@ -2263,7 +2263,16 @@ impl Scene {
         ScenePrimitive {
             camera,
             view: if self.event_playback() {
-                self.filtered_display.get().map(|mut view| {
+                // Recovery still processes every source up to the held clock,
+                // but those catch-up steps must not look like playback has
+                // restarted. Keep the exact last shown picture until the
+                // common clock resumes, without blocking view controls.
+                let display = if self.player(Player::is_buffering) == Some(true) {
+                    self.shown.get()
+                } else {
+                    self.filtered_display.get()
+                };
+                display.map(|mut view| {
                     if let Some(show) = self.show.as_ref() {
                         view.held = show.view_for(view.frames.clone(), held).held;
                     }

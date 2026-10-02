@@ -596,6 +596,23 @@ pause/resume and seek checks. A forced four-second interruption still needs
 one approximately 1.13-second hold, not a guaranteed zero-to-one-second wait.
 This does not establish hitch-free playback or 240 capacity. The inherited
 recovery policy above is unchanged.
+The installed `fix/buffer-restart-runway` follow-up separates held-clock
+logical catch-up from physical picture selection. While Player is buffering,
+Scene's filtered primitive selects the exact last `Shown` picture rather than
+the latest logical completion. Mouse/horizon controls still apply to that
+picture, and source processing continues in order. When recovery ends, normal
+latest-due selection resumes. This changes no readiness threshold, source or
+color arithmetic, decoded/GPU retention or estimator history. A redraw-during-
+hold regression on the actual network X4 path fails before this change and
+passes after it on both X4 and ONE X2. The clean `5e385619` SDK package passes
+both camera UI suites and is installed. An actual-installed network interruption
+keeps the shown source fixed through every held-clock redraw. This qualifies
+that display boundary, not restart smoothness: 82 ms and 63 ms picture dwells
+still occur after restart in the same run. Their corresponding stitch/map
+preparation stages take 81.9 ms and 65.1 ms of wall time, not isolated GPU time.
+The underlying queue/work cost remains unresolved. A separate bounded repeat
+records no CPU quota throttling, but does not reproduce the larger dwells.
+Owner acceptance and the broader network playback requirements remain due.
 Consumed PCM history supports restart without manufacturing samples or changing
 ordinary drift correction. This is not a normal-playback clock adjustment or a
 throughput fix. The owner permits it only if real tests establish improved
