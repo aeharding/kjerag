@@ -365,6 +365,21 @@ resident result is installed and acknowledged. Pausing during startup cancels
 autoplay intent. EOF waits for admitted real inputs to drain before flushing
 the temporal tail.
 
+The uninstalled `fix/conditional-clock-reanchor` candidate adds recovery only
+after an observed empty source delivery, an actual dry audio underrun, and more
+than two source intervals of lag in both the completed picture and sound.
+Scene's exact installed `FrameStamp` authorizes it; pending GPU work, a copied
+frame index, user pause, seek, replay and EOF cannot. The common clock restarts
+at the next actual audio timestamp, never before that completed picture.
+Anchoring at the older picture failed an actual-player shortage test with
+repeated restarts and slow post-shortage recovery. Scene explicitly wakes
+progression for an already queued successor. One audio callback receipt
+authorizes at most one restart. Queues,
+decoder/audio epochs, source cadence and stitching/color history stay intact;
+there is no high-water refill wait. The reported media position can move back
+to the actual picture after a shortage. Actual-player smoothness and this
+user-visible recovery behavior remain unqualified, not an accepted tradeoff.
+
 Coalesced progress notifications also cover startup operations that produce no
 temporal output, shared executor capacity across seek epochs, and ready-FIFO
 space released by logical installation. A preparation-specific decoder wait

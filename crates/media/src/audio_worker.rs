@@ -4,6 +4,7 @@
 
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::Waker;
+use std::time::Duration;
 
 use crate::Fallible;
 use crate::audio::{AudioEpoch, Pipe};
@@ -146,6 +147,19 @@ impl Drop for AudioWorker {
 }
 
 impl AudioControl {
+    pub(crate) fn shortage_receipt(&self, due: Duration, lag: Duration) -> Option<(u64, Duration)> {
+        self.0.pipe.shortage_receipt(due, lag)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn controlled_for_test(pipe: Pipe) -> Self {
+        Self(Arc::new(Shared {
+            state: Mutex::new(State::default()),
+            changed: Condvar::new(),
+            pipe,
+        }))
+    }
+
     pub(crate) fn invalidate(&self) -> AudioEpoch {
         self.0.pipe.invalidate()
     }

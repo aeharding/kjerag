@@ -232,6 +232,18 @@ impl Pipe {
         self.locked().health
     }
 
+    /// A real underrun with no playable PCM and an expired write head. Muting,
+    /// a pending seek flush and ordinary empty startup are not this shortage.
+    pub(crate) fn shortage_receipt(&self, due: Duration, lag: Duration) -> Option<(u64, Duration)> {
+        let buffer = self.locked();
+        let audio_at = buffer.head_time();
+        (buffer.target(true) > 0.0
+            && buffer.frames == 0
+            && buffer.health.underruns > 0
+            && due.saturating_sub(audio_at) > lag)
+            .then_some((buffer.health.underruns, audio_at))
+    }
+
     /// How much more sound the ring would take. This is the pacing for the
     /// sound's own producer: it reads until
     /// the ring is nearly full and stops, so nothing it reads is ever
