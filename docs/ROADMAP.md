@@ -1160,6 +1160,28 @@ dependency-source and whitespace checks also pass. These CPU checks include
 the parked color variation and unavailable-device returns, not executed GPU
 coverage or clean-package qualification.
 
+Draft [#248](https://github.com/aeharding/kjerag/pull/248) now retains the clean
+offline SDK package from exact source `65e00f72`, excluding the parked colors.
+Its app-path suites pass 49 X4 and 50 ONE X2 checks, with existing service and
+fixture skips. The native shader twin remains separate from clean SDK shader
+provenance. All eight exact-source CI jobs pass, including both architectures.
+On the actual network `_002` path, ordinary playback and a real two-second
+pause/resume have no buffer holds or counted underruns. Three real clipboard
+seeks show their requested pictures in approximately .84/.55/1.73 seconds,
+then regular source cadence, zero holds and zero counted underruns. The same
+four-second input interruption causes one approximately 1.13-second hold,
+then regular playback and zero counted underruns. This exceeds the requested
+zero-to-one-second buffer goal; it is not reported as completion. All exit
+normally with no new kernel entries or pressure averages, quiet output verified
+and actual pictures inspected. Both UI scopes have no memory-limit/OOM events.
+Whole cadence analysis still rejects frameless startup and the last incomplete
+presentation at process exit; the seek run additionally crosses deliberate
+timeline discontinuities. These are scoped observations, not complete cadence,
+audible continuity, physical scanout or 240-capacity verdicts. The actual bundle
+payload is privately authenticated without installation or signing qualification.
+The autoplay-preparation tradeoff and owner branch retest remain due. Installed
+`c428658f` is unchanged; no merge, release or general stutter-fix claim.
+
 The owner reports stuttering across network footage, including spontaneous
 onset at 23.190 seconds in the September 23 `_003` clip. A natural installed
 pause/resume/seek sequence did not reproduce sustained bad recovery. A separate

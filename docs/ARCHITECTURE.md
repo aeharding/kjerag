@@ -588,7 +588,11 @@ bounded one-second compressed-input reserve before startup/seek autoplay. It
 reuses the existing per-file observer and EOF/cache-bound escape, adds no IO
 wait on the UI, and changes neither paused landing readiness nor ordinary
 clock progression. Slow input can delay autoplay preparation; that user-visible
-tradeoff and clean-package qualification remain pending. The installed
+tradeoff and owner retest remain pending. The clean `65e00f72` SDK package
+passes both cameras' functional app-path suites and scoped network playback,
+pause/resume and seek checks. A forced four-second interruption still needs
+one approximately 1.13-second hold, not a guaranteed zero-to-one-second wait.
+This does not establish hitch-free playback or 240 capacity. The installed
 `c428658f` policy above is unchanged.
 Consumed PCM history supports restart without manufacturing samples or changing
 ordinary drift correction. This is not a normal-playback clock adjustment or a
