@@ -13,6 +13,8 @@ use crate::{Fallible, MAX_LENSES, Planes, Reframe};
 use super::{DirectType2Pipeline, vertex_cached_draw_wgsl_with_fusion_mode};
 
 mod curved_mesh;
+#[cfg(test)]
+mod transfer_tests;
 
 const LOW_CURRENT_BINDING: u32 = 6;
 const LOW_FILTERED_BINDING: u32 = 7;
@@ -535,12 +537,16 @@ fn corrected_color(gamma_unquantized: vec3<f32>, body: vec3<f32>) -> vec4<f32> {
   let current = textureSample(correction_current, correction_sampler, uv).rgb;
   let filtered = textureSample(correction_filtered, correction_sampler, uv).rgb;
   let gamma = clamp(high + (filtered - current), vec3<f32>(0.0), vec3<f32>(1.0));
+  // COSMIC normally uses a non-sRGB surface. Do not evaluate three powers
+  // just to discard their result there. Keep the exact transfer for an sRGB
+  // surface and for screenshots that explicitly request linear output.
+  if !(reframe.linearize > 0.5) { return vec4<f32>(gamma, 1.0); }
   let linear = select(
     gamma / 12.92,
     pow((gamma + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)),
     gamma > vec3<f32>(0.04045),
   );
-  return vec4<f32>(select(gamma, linear, reframe.linearize > 0.5), 1.0);
+  return vec4<f32>(linear, 1.0);
 }
 
 @fragment

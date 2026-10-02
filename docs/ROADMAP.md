@@ -1211,6 +1211,36 @@ averages are zero, and the final picture is inspected. The full cadence reducer
 still reports startup/terminal integrity issues. This is ordinary second-camera
 audio coverage, not a forced ONE X2 recovery or 240 fps capacity result.
 
+Draft [PR #246](https://github.com/aeharding/kjerag/pull/246) passes all eight
+CI jobs on `fb899398`; runtime code is unchanged from the qualified `a2ebccd4`
+package. Its separate 2256x1504 changing-view cohort maintains 29.900 consecutive
+source advances/s with no audio underruns, but reaches only 192.750 completed
+redraws/s. Completion spacing p99/max is 26.429/48.923 ms, not isolated shader
+time. The 240 fps and 4.17 ms requirements remain unmet. A source-snapshot
+interior-sampling trial passes exact two-camera plane comparisons but gives
+no useful actual-player improvement and is removed. The installed app is
+unchanged; owner clock-position decision and branch review remain due.
+
+The next native rendering candidate skips gamma-to-linear powers when the
+existing output predicate selects encoded color. The linear-output expression
+is unchanged. Local X4, 2256x1504 changing-view, full-source-rate brackets measure
+167.275 old / 248.624 candidate / 163.200 old completed redraws/s, with consecutive
+29.95-29.97 source advances/s and zero audio underruns. Candidate completion
+spacing p99/max remains 14.235/33.201 ms: this is a substantial capacity gain,
+not a full 4.17 ms or smoothness pass. A network candidate run reaches only
+6.975 source advances/s and cannot count toward the target despite its higher
+redraw count. Final captures are inspected; no GPU faults or memory pressure
+appear in the local bracket. The real Radeon GPU final-transfer regression
+matches 2,610 encoded/linear cases bit-for-bit; it isolates the transfer, not
+whole-scene output. ONE X2's separate native accepted-riser-view cohort reaches
+247.875 redraws/s with 29.975 consecutive sources/s, no audio underruns, and
+completion spacing p99/max 17.543/34.228 ms. Both native cohorts exceed 240/s
+on average, not the frame-time budget. Local device-hidden workspace gates pass
+formatting, all-target Clippy, 1,663 tests with 53 ignored, naming and source-list
+checks; those tests include the unchanged parked owner color edits and do not
+establish hardware coverage. CI, clean SDK packaging and branch review remain
+due. The installed Flatpak is unchanged.
+
 ### Pre-window startup delay, September 30
 
 October 1 clarification: the owner wants the normal transparent/blurred window
