@@ -1178,6 +1178,39 @@ picture is inspected. This is one native recovery result, not a paired causal
 speed measurement, spontaneous SDK-network fix, accepted clock-position tradeoff
 or installable delivery. Clean SDK, normal network and both-camera gates follow.
 
+Exact source `a2ebccd4` now builds in the clean offline SDK, excluding the two
+parked color files. Its separate actual Flatpak-runtime controlled-shortage
+test also returns to 30 source advances/s with no new audio underruns in the
+last three reports, without manual recovery. The ordinary NAS control has
+initial trouble and 11 conditional restarts, then holds 29.8-30.0 source
+advances/s with zero new underruns for the remaining eight reports. Temporal
+inputs stay contiguous, 1,248/1,447 in the two runs. Both exit normally, with
+inspected final pictures, no new kernel entries or scoped memory-limit events,
+and zero postflight pressure averages. Full-run cadence still fails, including
+stall/startup dwell and shown-output integrity issues; this is not hitch-free
+or 240 fps qualification. Both-camera UI, exported-bundle authentication,
+owner acceptance of the backward time correction and branch review remain due.
+The installed `6dbbf16b` player is unchanged. The exact candidate's separate
+app-path suites now pass 49 X4 and 50 ONE X2 UI checks with zero failures,
+including playback, pause/resume, seeking and opening. The documented missing
+sound device, portal, exact-view and cross-filesystem pair-fixture skips remain;
+real sound is exercised separately by the runtime playback checks. Both motion
+captures per camera are inspected. Each suite has no new kernel entries or
+scoped memory-limit events and zero postflight pressure averages. The exported
+bundle independently passes private device-hidden commit, executable, metadata
+and license authentication. It is an unsigned local test package, not a release
+signature qualification. Owner review and the clock-position decision are still
+due; no merge, installation, hitch-free or capacity result is claimed.
+
+ONE X2's separate normal-audio SDK run at the accepted 212.512-second view
+also holds 29.8-30.01 source advances/s after startup, with no audio underruns
+or recovery triggers. Worst reported picture lateness is 50.2 ms. Its steady
+shown-source sequence is contiguous; dwell p99/max is 48.08/50.88 ms, not a
+hitch-free verdict. Exit and kernel/memory-event checks pass, postflight pressure
+averages are zero, and the final picture is inspected. The full cadence reducer
+still reports startup/terminal integrity issues. This is ordinary second-camera
+audio coverage, not a forced ONE X2 recovery or 240 fps capacity result.
+
 ### Pre-window startup delay, September 30
 
 October 1 clarification: the owner wants the normal transparent/blurred window

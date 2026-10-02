@@ -1480,9 +1480,9 @@ impl Presenter {
 ///
 /// `position` is where the last anchor put us and `origin` is when that
 /// happened, so playing position is `position + (now - origin)` and paused
-/// position is `position`. Anchoring happens on the frame that starts or
-/// resumes playback, never on every frame: a clock re-anchored per frame
-/// cannot measure its own drift, and drift is the thing worth measuring.
+/// position is `position`. Ordinary anchors name the frame that starts or
+/// resumes playback. Confirmed shortage recovery may restart at actual audio
+/// time, but healthy frames never re-anchor: that would hide their drift.
 ///
 /// Every move is published to a [`Beat`], because the sound follows this
 /// clock from the audio device's own thread (issue #13). Publishing rather
