@@ -509,11 +509,15 @@ Live Reader and Track input passes through
 [`packet_input.rs`](../crates/media/src/packet_input.rs). A sole worker owns
 each file's libavformat demuxer and routes compressed packets to separate audio
 and video consumers. There is no second live audio demuxer or competing file
-cursor. Video queues stop at 128 MiB or 512
-packets per file; audio stops at 256 KiB or 128 packets. Byte accounting permits
-one packet of overshoot because its size is known only after the read. These
-are compressed-input limits, not added decoded/GPU frame retention. Walk
-instruments retain their synchronous reference input.
+cursor. The uninstalled recovery branch lets those consumers share their
+existing combined budget: 128 MiB plus 256 KiB, or 640 packets per file. Neither
+lane stops the sole reader merely by exhausting its old partition while the
+combined cache has room. Video without an attached audio consumer retains its
+128 MiB/512-packet limits; closing audio does not discard already buffered
+video. Byte accounting permits one packet of overshoot because its size is
+known only after the read. These are compressed-input limits, not added
+decoded/GPU frame retention. Walk instruments retain their synchronous
+reference input. The installed player still uses the separate lane caps.
 
 Input remains idle until the first read or seek. Audio attaches before reading.
 A video seek empties both compressed
@@ -556,7 +560,7 @@ Filtered video promotion and source admission use the playback event owner
 described above. Generic and resident-spatial video paths still use the shader
 redraw path; the independent audio producer is shared by all live Readers.
 
-The uninstalled `fix/network-stall-recovery` prototype distinguishes user play
+The installed `c428658f` test build distinguishes user play
 intent from a temporary stopped common clock after missing picture or sound.
 It retains the held PTS, ordered source processing and estimator history;
 explicit pause or seek supersedes recovery. Restart requires completion-proven
@@ -571,13 +575,14 @@ hold. An expired picture deadline sleeps on worker completion rather than
 spinning timers while admitted work finishes.
 The follow-on also observes compressed-input lead across every required lens
 and file, using each source's normalized clock. Recovery alone waits for one
-second of packet lead; EOF or either consumer's existing byte/count limit
+second of packet lead; EOF or the compressed cache's byte/count limit
 permits an earlier restart. It adds no decoded/GPU retention or UI input wait.
 Observation and one-shot wake registration share the producer lock, with wakes
 outside it; pause and seek cancel the old wait. Exact startup/seek autoplay
 instead primes two completion-proven successors and sound before starting the
 clock. It does not use the recovery-only input threshold, and a paused landing
-still needs only its requested picture. These scheduling choices are unqualified.
+still needs only its requested picture. Test-package qualification does not
+establish reliable network playback or owner acceptance.
 Consumed PCM history supports restart without manufacturing samples or changing
 ordinary drift correction. This is not a normal-playback clock adjustment or a
 throughput fix. The owner permits it only if real tests establish improved
