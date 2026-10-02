@@ -1194,6 +1194,22 @@ whole-run cadence verdict remains false, including frameless startup and the
 terminal incomplete presentation. Owner testing of ordinary pause/resume and
 seek remains required, not replaced by this scoped smoke check.
 
+The owner still reports brief micro-stuttering after buffering ends in the
+installed `65e00f72` build. A retained exact-SDK run has 65–82 ms source dwells
+in the first second after restart, despite later 30-source/s reports. A
+three-completed-picture restart prototype respects the existing six decoded
+successors and three-future-source temporal window, without enlarging GPU or
+packet retention. Its device-hidden workspace passes 1,696 tests with 53
+ignored; all CPU gates pass. One native network interruption check recovers
+with no counted underruns but does not demonstrate a clear improvement over
+the current installed control. That prototype is not a confirmed fix or
+delivery candidate, and includes the preserved parked color variation.
+The more direct display-path finding is that actual installed redraws advance
+through catch-up pictures while the common clock remains held for buffering.
+That can expose slow recovery steps as if playback already restarted. A
+real-path redraw-during-hold regression and display freeze are next; no new
+test build is installed and no owner acceptance is inferred.
+
 The owner reports stuttering across network footage, including spontaneous
 onset at 23.190 seconds in the September 23 `_003` clip. A natural installed
 pause/resume/seek sequence did not reproduce sustained bad recovery. A separate

@@ -47,7 +47,7 @@ pub use decode::{DrmFrame, HwDevice, MissingDecoder, SwFrame, open_decoder};
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub use player::TestDecoder;
-pub use player::{Player, PresentationPolicy, Stats};
+pub use player::{CompletedPictures, Player, PresentationPolicy, Stats};
 pub use reader::{Accuracy, Cue, FrameStamp, Frames, Read, Reader, Timing};
 pub use walk::{Chroma, Pair, Plane, Walk};
 

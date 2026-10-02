@@ -1732,7 +1732,7 @@ impl Scene {
         // output can exist. Preparation drains decode, never presentation or
         // the audio clock, and must run before the unacknowledged-current gate.
         if show.filtered.is_some()
-            && let Err(error) = player.prepare_ahead(6)
+            && let Err(error) = player.prepare_ahead(Player::PREPARED_AHEAD_CAPACITY)
         {
             retire_replay(&show.replay);
             self.stalled.fail_now(&error);
@@ -1844,7 +1844,7 @@ impl Scene {
         // The initial call above had no current source. Once Player offers
         // one, make its prepared horizon available to this same render pass.
         if show.filtered.is_some()
-            && let Err(error) = player.prepare_ahead(6)
+            && let Err(error) = player.prepare_ahead(Player::PREPARED_AHEAD_CAPACITY)
         {
             retire_replay(&show.replay);
             self.stalled.fail_now(&error);
