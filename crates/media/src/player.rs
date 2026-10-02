@@ -57,15 +57,6 @@ const LOOKAHEAD: usize = 2;
 /// packet limits and EOF permit an earlier restart when the lead is impossible.
 const REFILL_LEAD: Duration = Duration::from_secs(1);
 
-/// Completion-proven pictures after the current owner, and the consumer's
-/// existing preparable successor capacity. Input packets or submitted GPU work do
-/// not count as ready pictures.
-#[derive(Clone, Copy, Debug)]
-pub struct CompletedPictures {
-    pub ready: usize,
-    pub capacity: usize,
-}
-
 /// What playback values when presenting decoded frames.
 ///
 /// This is explicit because the two useful answers have different promises:
@@ -354,9 +345,6 @@ impl Epochs {
 }
 
 impl Player {
-    /// Maximum explicitly prepared successor horizon, without presentation.
-    pub const PREPARED_AHEAD_CAPACITY: usize = PREPARED_AHEAD_MAX;
-
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn controlled_for_test(timing: Timing, size: Size) -> (Self, TestDecoder) {
@@ -735,16 +723,14 @@ impl Player {
     /// This leaves play intent, every source queue and estimator history intact.
     /// A missed interval with unadmitted picture input, or missing sound,
     /// triggers the hold. Already-admitted stitch work is not input starvation.
-    /// Restart fills the consumer's existing completed-picture capacity,
-    /// alongside sound and the compressed-input lead. It does not increase
-    /// decoded/GPU retention. At decoder EOF, retain the smaller two-picture
-    /// lead so clipped-tail publication can use the existing output capacity.
-    /// The finished tail needs no lead.
+    /// Restart needs two completed
+    /// pictures, sound, and a recovery-only compressed-input lead, without
+    /// increasing decoded/GPU retention. The finished tail needs no lead.
     pub fn coordinate_buffering(
         &mut self,
         now: Instant,
         output_ready: bool,
-        pictures: CompletedPictures,
+        ready_successors: usize,
         picture_input_missing: bool,
         finished: bool,
         wake: Waker,
@@ -764,15 +750,10 @@ impl Player {
         let position = self.position(now);
         let covers_position = output_ready && position < current.timestamp + interval;
         if self.presenter.clock.buffering {
-            let required = if self.is_input_exhausted() {
-                pictures.capacity.min(2)
-            } else {
-                pictures.capacity
-            };
             let lead = if finished {
                 Duration::ZERO
             } else {
-                interval.saturating_mul(u32::try_from(required).unwrap_or(u32::MAX))
+                interval * 2
             };
             let audio_ready = self.audio_control.as_ref().map_or(Ok(true), |control| {
                 control.buffered_or_wait(position, lead, wake.clone())
@@ -783,10 +764,7 @@ impl Player {
                     input_ready &= input.buffered_or_wait(position + REFILL_LEAD, wake.clone())?;
                 }
             }
-            if covers_position
-                && (finished || pictures.ready >= required)
-                && audio_ready
-                && input_ready
+            if covers_position && (finished || ready_successors >= 2) && audio_ready && input_ready
             {
                 for input in &self.read_ahead {
                     input.cancel();
@@ -805,7 +783,7 @@ impl Player {
         // The shell can wake late with several completed outputs waiting.
         // Let its ordered catch-up consume that prefix before declaring a
         // picture shortage. This never hides missing sound or pending GPU work.
-        let catchup_ready = output_ready && pictures.ready > 0;
+        let catchup_ready = output_ready && ready_successors > 0;
         if (!covers_position && position >= missing_at && !catchup_ready && picture_input_missing)
             || !audio_ready
         {
@@ -1727,65 +1705,6 @@ mod tests {
 
     const NTSC: Duration = Duration::from_nanos(33_366_666);
 
-    fn completed(ready: usize) -> CompletedPictures {
-        CompletedPictures { ready, capacity: 2 }
-    }
-
-    #[test]
-    fn recovery_fills_completed_picture_capacity_but_does_not_strand_the_eof_tail() {
-        for exhausted in [false, true] {
-            let mut bench = Bench::new();
-            assert!(
-                bench
-                    .player
-                    .set_presentation_policy(PresentationPolicy::SequentialRealtime)
-            );
-            bench.player.play();
-            let start = Instant::now();
-            bench.decoded(0, 0);
-            bench.player.pump(start).unwrap();
-            let late = start + NTSC * 3;
-            let pictures = |ready| CompletedPictures { ready, capacity: 3 };
-            bench
-                .player
-                .coordinate_buffering(late, true, pictures(0), true, false, Waker::noop().clone())
-                .unwrap();
-            assert!(bench.player.is_buffering());
-            for index in 1..=3 {
-                bench.decoded(0, index);
-                bench.player.pump(late).unwrap();
-            }
-            bench.player.ended = exhausted;
-            let held = bench.player.position(late);
-            let later = late + Duration::from_secs(5);
-            let required = if exhausted { 2 } else { 3 };
-            for ready in 0..=required {
-                bench
-                    .player
-                    .coordinate_buffering(
-                        later,
-                        true,
-                        pictures(ready),
-                        true,
-                        false,
-                        Waker::noop().clone(),
-                    )
-                    .unwrap();
-                assert_eq!(
-                    bench.player.is_buffering(),
-                    ready < required,
-                    "ready={ready}, decoder EOF={exhausted}"
-                );
-                assert_eq!(bench.player.position(later), held);
-                if ready < required {
-                    assert_eq!(bench.player.position(later + NTSC), held);
-                }
-            }
-            assert_eq!(bench.player.position(later + NTSC), held + NTSC);
-            assert_eq!(bench.player.stats().dropped, 0);
-        }
-    }
-
     #[test]
     fn recovery_waits_for_real_compressed_input_even_with_completed_picture_lead() {
         let (input, observer, release, dropped) = crate::packet_input::tests::blocked_read_ahead();
@@ -1803,7 +1722,7 @@ mod tests {
         let late = start + NTSC * 3;
         bench
             .player
-            .coordinate_buffering(late, true, completed(0), true, false, Waker::noop().clone())
+            .coordinate_buffering(late, true, 0, true, false, Waker::noop().clone())
             .unwrap();
         assert!(bench.player.is_buffering());
         for index in 1..=3 {
@@ -1813,14 +1732,7 @@ mod tests {
         let wake = Arc::new(WakeCount::default());
         bench
             .player
-            .coordinate_buffering(
-                late,
-                true,
-                completed(2),
-                true,
-                false,
-                Waker::from(wake.clone()),
-            )
+            .coordinate_buffering(late, true, 2, true, false, Waker::from(wake.clone()))
             .unwrap();
         assert!(
             bench.player.is_buffering(),
@@ -1838,14 +1750,7 @@ mod tests {
         while bench.player.is_buffering() {
             bench
                 .player
-                .coordinate_buffering(
-                    late,
-                    true,
-                    completed(2),
-                    true,
-                    false,
-                    Waker::from(wake.clone()),
-                )
+                .coordinate_buffering(late, true, 2, true, false, Waker::from(wake.clone()))
                 .unwrap();
             assert!(Instant::now() < deadline);
             thread::yield_now();
@@ -1925,7 +1830,7 @@ mod tests {
             assert_eq!(bench.player.pump(now).unwrap().unwrap().index, index);
             bench
                 .player
-                .coordinate_buffering(now, true, completed(0), true, false, Waker::noop().clone())
+                .coordinate_buffering(now, true, 0, true, false, Waker::noop().clone())
                 .unwrap();
             assert!(!bench.player.is_buffering());
             assert_eq!(
@@ -1962,7 +1867,7 @@ mod tests {
                 .coordinate_buffering(
                     late,
                     true,
-                    completed((4 - index) as usize),
+                    (4 - index) as usize,
                     true,
                     false,
                     Waker::noop().clone(),
@@ -1999,7 +1904,7 @@ mod tests {
                     .coordinate_buffering(
                         late,
                         output_ready,
-                        completed(0),
+                        0,
                         false,
                         false,
                         Waker::noop().clone(),
@@ -2032,13 +1937,13 @@ mod tests {
         bench.player.pump(late).unwrap();
         bench
             .player
-            .coordinate_buffering(late, true, completed(1), true, false, Waker::noop().clone())
+            .coordinate_buffering(late, true, 1, true, false, Waker::noop().clone())
             .unwrap();
         assert!(!bench.player.is_buffering());
         bench.player.pump(late).unwrap();
         bench
             .player
-            .coordinate_buffering(late, true, completed(0), true, false, Waker::noop().clone())
+            .coordinate_buffering(late, true, 0, true, false, Waker::noop().clone())
             .unwrap();
         assert!(bench.player.is_buffering());
         assert_eq!(bench.player.position(late), late.duration_since(start));
@@ -2062,7 +1967,7 @@ mod tests {
         assert!(bench.player.pump(late).unwrap().is_none());
         bench
             .player
-            .coordinate_buffering(late, true, completed(0), true, false, Waker::noop().clone())
+            .coordinate_buffering(late, true, 0, true, false, Waker::noop().clone())
             .unwrap();
         assert!(bench.player.is_buffering());
         assert!(
@@ -2096,14 +2001,7 @@ mod tests {
         assert!(!bench.player.buffered_frame_due());
         bench
             .player
-            .coordinate_buffering(
-                later,
-                true,
-                completed(1),
-                true,
-                false,
-                Waker::noop().clone(),
-            )
+            .coordinate_buffering(later, true, 1, true, false, Waker::noop().clone())
             .unwrap();
         assert!(
             bench.player.is_buffering(),
@@ -2111,14 +2009,7 @@ mod tests {
         );
         bench
             .player
-            .coordinate_buffering(
-                later,
-                true,
-                completed(2),
-                true,
-                false,
-                Waker::noop().clone(),
-            )
+            .coordinate_buffering(later, true, 2, true, false, Waker::noop().clone())
             .unwrap();
         assert!(!bench.player.is_buffering());
         assert_eq!(bench.player.position(later), held);
@@ -2142,7 +2033,7 @@ mod tests {
         assert_eq!(
             bench
                 .player
-                .coordinate_buffering(now, true, completed(0), true, false, Waker::noop().clone())
+                .coordinate_buffering(now, true, 0, true, false, Waker::noop().clone())
                 .unwrap(),
             Some(start + NTSC * 2)
         );
@@ -2166,7 +2057,7 @@ mod tests {
             let late = start + NTSC * 3;
             bench
                 .player
-                .coordinate_buffering(late, true, completed(0), true, false, Waker::noop().clone())
+                .coordinate_buffering(late, true, 0, true, false, Waker::noop().clone())
                 .unwrap();
             assert!(bench.player.is_buffering());
             if seek {
@@ -2178,14 +2069,7 @@ mod tests {
                 assert!(!bench.player.is_playing());
                 bench
                     .player
-                    .coordinate_buffering(
-                        late + NTSC,
-                        true,
-                        completed(4),
-                        true,
-                        true,
-                        Waker::noop().clone(),
-                    )
+                    .coordinate_buffering(late + NTSC, true, 4, true, true, Waker::noop().clone())
                     .unwrap();
                 assert!(
                     !bench.player.is_playing(),
@@ -2216,14 +2100,7 @@ mod tests {
         bench.player.presenter.clock.hold_for_buffer(late);
         bench
             .player
-            .coordinate_buffering(
-                late + NTSC * 9,
-                true,
-                completed(0),
-                true,
-                true,
-                Waker::noop().clone(),
-            )
+            .coordinate_buffering(late + NTSC * 9, true, 0, true, true, Waker::noop().clone())
             .unwrap();
         assert!(!bench.player.is_buffering());
         assert_eq!(
@@ -2254,14 +2131,7 @@ mod tests {
         let position = bench.player.position(start);
         bench
             .player
-            .coordinate_buffering(
-                start,
-                true,
-                completed(2),
-                false,
-                false,
-                Waker::noop().clone(),
-            )
+            .coordinate_buffering(start, true, 2, false, false, Waker::noop().clone())
             .unwrap();
         assert!(
             bench.player.is_buffering(),
@@ -2275,14 +2145,7 @@ mod tests {
         let later = start + Duration::from_secs(10);
         bench
             .player
-            .coordinate_buffering(
-                later,
-                true,
-                completed(2),
-                false,
-                false,
-                Waker::noop().clone(),
-            )
+            .coordinate_buffering(later, true, 2, false, false, Waker::noop().clone())
             .unwrap();
         assert!(!bench.player.is_buffering());
         assert_eq!(bench.player.position(later), position);

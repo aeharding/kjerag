@@ -1732,7 +1732,7 @@ impl Scene {
         // output can exist. Preparation drains decode, never presentation or
         // the audio clock, and must run before the unacknowledged-current gate.
         if show.filtered.is_some()
-            && let Err(error) = player.prepare_ahead(Player::PREPARED_AHEAD_CAPACITY)
+            && let Err(error) = player.prepare_ahead(6)
         {
             retire_replay(&show.replay);
             self.stalled.fail_now(&error);
@@ -1844,7 +1844,7 @@ impl Scene {
         // The initial call above had no current source. Once Player offers
         // one, make its prepared horizon available to this same render pass.
         if show.filtered.is_some()
-            && let Err(error) = player.prepare_ahead(Player::PREPARED_AHEAD_CAPACITY)
+            && let Err(error) = player.prepare_ahead(6)
         {
             retire_replay(&show.replay);
             self.stalled.fail_now(&error);
@@ -2263,7 +2263,16 @@ impl Scene {
         ScenePrimitive {
             camera,
             view: if self.event_playback() {
-                self.filtered_display.get().map(|mut view| {
+                // Recovery still processes every source up to the held clock,
+                // but those catch-up steps must not look like playback has
+                // restarted. Keep the exact last shown picture until the
+                // common clock resumes, without blocking view controls.
+                let display = if self.player(Player::is_buffering) == Some(true) {
+                    self.shown.get()
+                } else {
+                    self.filtered_display.get()
+                };
+                display.map(|mut view| {
                     if let Some(show) = self.show.as_ref() {
                         view.held = show.view_for(view.frames.clone(), held).held;
                     }

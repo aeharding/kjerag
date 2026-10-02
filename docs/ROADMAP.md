@@ -1204,11 +1204,27 @@ ignored; all CPU gates pass. One native network interruption check recovers
 with no counted underruns but does not demonstrate a clear improvement over
 the current installed control. That prototype is not a confirmed fix or
 delivery candidate, and includes the preserved parked color variation.
-The more direct display-path finding is that actual installed redraws advance
-through catch-up pictures while the common clock remains held for buffering.
-That can expose slow recovery steps as if playback already restarted. A
-real-path redraw-during-hold regression and display freeze are next; no new
-test build is installed and no owner acceptance is inferred.
+The unproven extra-picture prototype is removed, with its reference in branch
+history. The more direct display-path finding is that actual installed redraws
+advance through catch-up pictures while the common clock remains held for
+buffering. That can expose slow recovery steps as if playback already restarted.
+The existing real-Scene regression now redraws during every held step and
+checks the exact shown owner, then resumed presentation and retained source
+history. It fails before the fix on the owner's latest actual Moab `_002`
+network path, showing frame 3 instead of the held frame 0, and passes after the
+narrow display-selection fix. Both focused X4/ONE X2 GPU tests pass normally,
+with no new kernel entries or postflight memory pressure averages. The
+device-hidden full workspace reports 1,694 passes, 53 ignored, no failures;
+formatting, Clippy, vendor warnings, naming, source-list and harness CPU gates
+pass. These native checks include the unchanged parked color variation, not
+clean SDK arithmetic qualification. The window now selects the actual last shown
+picture while buffering; camera/horizon controls and logical source processing
+remain live. Readiness thresholds, cache/surface bounds, history and source/color
+arithmetic are unchanged. These are focused native tests, not clean SDK delivery
+or proof of every post-resume micro-stutter. No new test build is installed and
+no owner acceptance is inferred. Recent-file inspection also confirms the
+original September 23 `_003` exists in the share's `SSD/` subfolder, not at the
+previously checked root path; the earlier whole-clip absence assumption is retired.
 
 The owner reports stuttering across network footage, including spontaneous
 onset at 23.190 seconds in the September 23 `_003` clip. A natural installed

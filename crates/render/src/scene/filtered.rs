@@ -2,14 +2,6 @@
 
 use super::*;
 
-pub(super) fn restart_picture_capacity() -> usize {
-    // Each completed output needs CENTER real future inputs. A stopped
-    // consumer can prepare only the existing decoded successor horizon, even
-    // when the output FIFO has more room. Waiting beyond this would deadlock.
-    FilteredCaptureFacade::READY_CAPACITY
-        .min(Player::PREPARED_AHEAD_CAPACITY - crate::temporal_fusion::stream::CENTER)
-}
-
 fn filtered_progress_deadline(due: Option<Instant>) -> Next {
     due.map_or(Next::Never, Next::At)
 }
@@ -112,10 +104,7 @@ impl Scene {
                 return Ok(Next::Never);
             };
             let sources = std::iter::once(current.clone())
-                .chain(
-                    (0..Player::PREPARED_AHEAD_CAPACITY)
-                        .filter_map(|ahead| show.prepared_view(held, ahead)),
-                )
+                .chain((0..6).filter_map(|ahead| show.prepared_view(held, ahead)))
                 .collect::<Vec<_>>();
             for source in &sources {
                 let accepted = capture.accepted_stamp()?;
@@ -144,10 +133,7 @@ impl Scene {
                 Source::Live(player) => player.coordinate_buffering(
                     now,
                     output_ready,
-                    kjerag_media::CompletedPictures {
-                        ready: capture.ready_successors(&current.frames.stamp())?,
-                        capacity: restart_picture_capacity(),
-                    },
+                    capture.ready_successors(&current.frames.stamp())?,
                     !capture.has_output_inputs(&current.frames.stamp(), output_ready)?,
                     capture.is_finished()?,
                     std::task::Waker::from(Arc::new(self.ready_wake.clone())),

@@ -596,6 +596,16 @@ pause/resume and seek checks. A forced four-second interruption still needs
 one approximately 1.13-second hold, not a guaranteed zero-to-one-second wait.
 This does not establish hitch-free playback or 240 capacity. The inherited
 recovery policy above is unchanged.
+The uninstalled `fix/buffer-restart-runway` follow-up separates held-clock
+logical catch-up from physical picture selection. While Player is buffering,
+Scene's filtered primitive selects the exact last `Shown` picture rather than
+the latest logical completion. Mouse/horizon controls still apply to that
+picture, and source processing continues in order. When recovery ends, normal
+latest-due selection resumes. This changes no readiness threshold, source or
+color arithmetic, decoded/GPU retention or estimator history. A redraw-during-
+hold regression on the actual network X4 path fails before this change and
+passes after it on both X4 and ONE X2; owner testing and clean package delivery
+remain due.
 Consumed PCM history supports restart without manufacturing samples or changing
 ordinary drift correction. This is not a normal-playback clock adjustment or a
 throughput fix. The owner permits it only if real tests establish improved

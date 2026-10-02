@@ -11,14 +11,6 @@ use std::io::Write;
 const DEADLINE: Duration = Duration::from_secs(60);
 
 #[test]
-fn buffered_restart_lead_fits_the_existing_decode_and_output_bounds() {
-    let lead = filtered::restart_picture_capacity();
-    assert_eq!(lead, 3);
-    assert!(lead <= FilteredCaptureFacade::READY_CAPACITY);
-    assert!(lead + crate::temporal_fusion::stream::CENTER <= Player::PREPARED_AHEAD_CAPACITY);
-}
-
-#[test]
 fn x4_filtered_buffering_holds_time_and_retains_source_history() {
     let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
         return;
@@ -211,17 +203,18 @@ fn assert_buffering_retains_history(path: &Path) {
         }
         assert_eq!(scene.position(resumed), held);
         assert!(Instant::now() < deadline, "buffering could not refill");
+        if scene.player(Player::is_buffering) == Some(true) {
+            prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
+            assert_eq!(
+                scene.displayed_frame_stamp().as_ref(),
+                Some(&first),
+                "a redraw exposed catch-up pictures while the playback clock was buffering"
+            );
+        }
         device.poll(wgpu::PollType::Poll).unwrap();
         std::thread::sleep(Duration::from_millis(1));
     }
     let complete = scene.frame_stamp().unwrap();
-    if scene.player(Player::is_input_exhausted) == Some(false) && !capture.is_finished().unwrap() {
-        assert_eq!(
-            capture.ready_successors(&complete).unwrap(),
-            filtered::restart_picture_capacity(),
-            "buffered restart needs completed output runway, not just input packets"
-        );
-    }
     assert!(
         first.same_decode_epoch(&complete),
         "buffering sought or restarted history"
