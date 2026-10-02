@@ -1,11 +1,11 @@
 //! The sound between the decode thread and the audio device, and the
 //! presentation clock in a form the device's callback can read.
 //!
-//! **The picture is the clock.** Issue #4 anchors playback on video frames and
-//! nothing here re-anchors it: every device callback asks where the picture is
-//! and makes the sound follow. A sound-mastered clock would move the picture
-//! instead, and a reframing player whose frames are paced by a sound card is a
-//! player that judders.
+//! Audio and video follow the shared PTS clock owned by Player. Ordinary
+//! startup, resume and seek landing anchor it on video. Conditional recovery
+//! after a confirmed source/audio shortage may restart it at the next actual
+//! audio timestamp. The device callback follows the published clock; it never
+//! re-anchors it, and view redraws do not pace sound or source processing.
 //!
 //! Following it takes two corrections, and they are different in kind:
 //!
@@ -230,6 +230,18 @@ impl Pipe {
 
     pub fn health(&self) -> Audio {
         self.locked().health
+    }
+
+    /// A real underrun with no playable PCM and an expired write head. Muting,
+    /// a pending seek flush and ordinary empty startup are not this shortage.
+    pub(crate) fn shortage_receipt(&self, due: Duration, lag: Duration) -> Option<(u64, Duration)> {
+        let buffer = self.locked();
+        let audio_at = buffer.head_time();
+        (buffer.target(true) > 0.0
+            && buffer.frames == 0
+            && buffer.health.underruns > 0
+            && due.saturating_sub(audio_at) > lag)
+            .then_some((buffer.health.underruns, audio_at))
     }
 
     /// How much more sound the ring would take. This is the pacing for the

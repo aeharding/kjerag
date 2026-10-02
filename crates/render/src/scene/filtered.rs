@@ -138,6 +138,17 @@ impl Scene {
                     let mut complete = current;
                     complete.complete = Some(CompleteFiltered(picture));
                     self.filtered_display.keep(&complete);
+                    if show.replay.borrow().is_none()
+                        && let Source::Live(player) = &mut show.playing.borrow_mut().source
+                    {
+                        // Only this exact completed, installed picture can
+                        // authorize recovery. Pending GPU work is not a picture.
+                        if player.recover_after_shortage(now, &complete.frames.stamp()) {
+                            // Completed successors may already be waiting, so
+                            // do not rely on a future decode/GPU event to advance.
+                            self.ready_wake.notify();
+                        }
+                    }
                 }
             } else {
                 self.wait_for_filtered_decode()?;

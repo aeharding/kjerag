@@ -31,7 +31,7 @@ use super::audio::{Audio, AudioEpoch, Beat, Reading};
 use super::audio_worker::AudioControl;
 use super::decode_arrival::{self, Arrival, Delivery};
 use super::sound::Sound;
-use super::{Accuracy, Cue, Fallible, Frames, Read, Reader, Size, Timing};
+use super::{Accuracy, Cue, Fallible, FrameStamp, Frames, Read, Reader, Size, Timing};
 
 /// Pairs the decode thread may have ready and waiting.
 const QUEUED: usize = 2;
@@ -193,6 +193,8 @@ pub struct Player {
     /// could not open a speaker is worse than one that plays it silently.
     sound: Option<Sound>,
     audio_control: Option<AudioControl>,
+    /// A callback underrun may authorize at most one clock restart.
+    recovered_underruns: u64,
     timing: Timing,
     size: Size,
     lenses: usize,
@@ -352,6 +354,7 @@ impl Player {
                 presenter: Presenter::new(timing.interval(), Arc::new(Beat::default())),
                 sound: None,
                 audio_control: None,
+                recovered_underruns: 0,
                 timing,
                 size,
                 lenses: 2,
@@ -429,6 +432,7 @@ impl Player {
             presenter: Presenter::new(timing.interval(), beat),
             sound,
             audio_control,
+            recovered_underruns: 0,
             timing,
             size,
             lenses,
@@ -707,6 +711,58 @@ impl Player {
     /// a first frame: neither has a due time yet.
     pub fn next_due(&self) -> Option<Instant> {
         self.presenter.next_due()
+    }
+
+    /// Recover only an observed source/audio shortage at an exact completed
+    /// picture. This does not seek, discard input or reset estimator history.
+    pub fn recover_after_shortage(&mut self, now: Instant, completed: &FrameStamp) -> bool {
+        if self.presenter.policy != PresentationPolicy::SequentialRealtime
+            || !self.is_playing()
+            || !self.presenter.clock.is_anchored()
+            || self.is_seeking()
+            || self.replay_target.is_some()
+            || self.replay_clock_held
+            || self.ended
+            || self.failure.is_some()
+            || self.last_empty_generation.is_none()
+            || !self.epochs.is_newest(self.epochs.shown)
+        {
+            return false;
+        }
+        let Some(current) = &self.presenter.current else {
+            return false;
+        };
+        if current.stamp() != *completed {
+            return false;
+        }
+        let due = self.position(now);
+        // Two missed source intervals distinguish accumulated lag from the
+        // normal refresh rounding. This is recovery eligibility, not pacing.
+        let lag = self.presenter.interval * 2;
+        if due.saturating_sub(current.timestamp) <= lag {
+            return false;
+        }
+        let Some((receipt, audio_at)) = self
+            .audio_control
+            .as_ref()
+            .and_then(|control| control.shortage_receipt(due, lag))
+            .filter(|(receipt, _)| *receipt > self.recovered_underruns)
+        else {
+            return false;
+        };
+        self.recovered_underruns = receipt;
+        // Restart at the actual next sound timestamp, not behind it at the
+        // corrected picture. Otherwise the callback waits for the clock while
+        // the source queue catches up, feeding another shortage. Retain every
+        // source and epoch; normal ordered progression catches the picture up.
+        let restart_at = audio_at.max(completed.timestamp());
+        self.presenter.clock.anchor(now, restart_at);
+        eprintln!(
+            "sync: restarting at {:.3} s after {:.1} ms source lag",
+            restart_at.as_secs_f64(),
+            due.saturating_sub(completed.timestamp()).as_secs_f64() * 1000.0
+        );
+        true
     }
 
     /// Sleep until the missing decoder delivery arrives, instead of polling
@@ -1424,9 +1480,9 @@ impl Presenter {
 ///
 /// `position` is where the last anchor put us and `origin` is when that
 /// happened, so playing position is `position + (now - origin)` and paused
-/// position is `position`. Anchoring happens on the frame that starts or
-/// resumes playback, never on every frame: a clock re-anchored per frame
-/// cannot measure its own drift, and drift is the thing worth measuring.
+/// position is `position`. Ordinary anchors name the frame that starts or
+/// resumes playback. Confirmed shortage recovery may restart at actual audio
+/// time, but healthy frames never re-anchor: that would hide their drift.
 ///
 /// Every move is published to a [`Beat`], because the sound follows this
 /// clock from the audio device's own thread (issue #13). Publishing rather
@@ -1606,6 +1662,150 @@ mod tests {
             "underlying independent audio decode failure"
         );
         assert!(bench.player.presenter.current.is_none());
+    }
+
+    fn shortage_bench() -> (Bench, crate::audio::Pipe, Instant, FrameStamp) {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        let start = Instant::now();
+        bench.player.play();
+        bench.decoded(0, 600);
+        assert_eq!(bench.redraw(start), Some(600));
+        let stamp = bench.player.presenter.current.as_ref().unwrap().stamp();
+        bench.decoded(0, 601);
+        bench.decoded(0, 602);
+        assert_eq!(bench.player.prepare_ahead(6).unwrap(), 2);
+        let pipe = crate::audio::Pipe::new(1000, 1, Duration::from_millis(500));
+        // A real callback discards an expired AAC-sized chunk and underruns,
+        // just as the naturally failing clip does while the clock runs ahead.
+        pipe.write(&[0.5; 20], stamp.timestamp() + NTSC * 3);
+        let now = start + Duration::from_millis(300);
+        pipe.fill(&mut [0.0; 20], Some(bench.player.position(now)));
+        assert!(pipe.health().underruns > 0);
+        assert!(pipe.health().offset < -100_000);
+        bench.player.audio_control = Some(AudioControl::controlled_for_test(pipe.clone()));
+        (bench, pipe, now, stamp)
+    }
+
+    #[test]
+    fn actual_shortage_reanchors_without_refill_wait_seek_or_lost_sources() {
+        let (mut bench, pipe, now, stamp) = shortage_bench();
+        let epoch = pipe.epoch();
+        let before: Vec<_> = (0..2)
+            .map(|i| bench.player.prepared_ahead(i).unwrap().stamp())
+            .collect();
+        assert!(bench.player.recover_after_shortage(now, &stamp));
+        assert!(bench.player.is_playing());
+        assert_eq!(
+            bench.player.position(now),
+            stamp.timestamp() + NTSC * 3,
+            "do not restart behind the next available audio timestamp"
+        );
+        assert_eq!(bench.player.index(), Some(600));
+        assert!(bench.player.presenter.clock.is_anchored());
+        assert!(pipe.is_current(&epoch));
+        assert!(bench.commands.try_recv().is_err(), "recovery must not seek");
+        // The first arriving PCM must play, not wait for the clock to traverse
+        // the gap between the older picture and the audio head again.
+        let underruns = pipe.health().underruns;
+        pipe.write(
+            &[0.5; 20],
+            bench.player.position(now) + Duration::from_millis(20),
+        );
+        let mut out = [0.0; 20];
+        pipe.fill(&mut out, Some(bench.player.position(now)));
+        assert!(out.iter().all(|sample| *sample > 0.0));
+        assert_eq!(pipe.health().underruns, underruns);
+        for (index, expected) in before.into_iter().enumerate() {
+            assert_eq!(
+                bench.player.prepared_ahead(index).unwrap().stamp(),
+                expected
+            );
+        }
+        assert_eq!(
+            bench.redraw(now),
+            Some(601),
+            "next real source advances without waiting for refill"
+        );
+        assert_eq!(bench.player.position(now), stamp.timestamp() + NTSC * 3);
+        assert_eq!(bench.player.presenter.stats.dropped, 0);
+        assert!(
+            !bench.player.recover_after_shortage(now, &stamp),
+            "old owner cannot authorize recovery"
+        );
+    }
+
+    #[test]
+    fn conditional_recovery_leaves_healthy_paused_seeking_and_muted_playback_alone() {
+        for reason in [
+            "healthy",
+            "paused",
+            "seek",
+            "mute",
+            "zero-volume",
+            "stale-audio",
+            "buffered",
+            "silent",
+            "no-empty-read",
+            "EOF",
+            "failed",
+            "replay",
+            "other-policy",
+            "old-epoch",
+        ] {
+            let (mut bench, pipe, mut now, stamp) = shortage_bench();
+            match reason {
+                "healthy" => now = now - Duration::from_millis(300) + NTSC,
+                "paused" => bench.player.pause(now),
+                "seek" => bench.player.seek(Cue::Index(900), Accuracy::Exact),
+                "mute" => pipe.set_muted(true),
+                "zero-volume" => pipe.set_volume(0.0),
+                "stale-audio" => {
+                    pipe.invalidate();
+                }
+                "buffered" => pipe.write(
+                    &[0.5; 100],
+                    bench.player.position(now) + Duration::from_millis(100),
+                ),
+                "silent" => bench.player.audio_control = None,
+                "no-empty-read" => bench.player.last_empty_generation = None,
+                "EOF" => bench.player.ended = true,
+                "failed" => bench.player.failure = Some("underlying fixture failure".into()),
+                "replay" => bench.player.replay_clock_held = true,
+                "other-policy" => bench.player.presenter.policy = PresentationPolicy::EveryFrame,
+                "old-epoch" => bench.player.epochs.asked += 1,
+                _ => unreachable!(),
+            }
+            let reading = bench.player.presenter.clock.reading;
+            assert!(
+                !bench.player.recover_after_shortage(now, &stamp),
+                "{reason} must not restart"
+            );
+            assert_eq!(
+                bench.player.presenter.clock.reading, reading,
+                "{reason} moved time"
+            );
+        }
+    }
+
+    #[test]
+    fn same_numbers_or_an_old_underrun_cannot_authorize_a_clock_restart() {
+        let (mut bench, _pipe, now, stamp) = shortage_bench();
+        let impostor = FrameStamp::new(stamp.index(), stamp.timestamp());
+        assert!(!bench.player.recover_after_shortage(now, &impostor));
+        assert!(bench.player.recover_after_shortage(now, &stamp));
+        assert_eq!(bench.redraw(now), Some(601));
+        let next = bench.player.presenter.current.as_ref().unwrap().stamp();
+        assert!(
+            !bench
+                .player
+                .recover_after_shortage(now + Duration::from_millis(300), &next),
+            "cached callback counters must not turn recovery into constant frame pacing"
+        );
     }
 
     #[test]
@@ -2467,6 +2667,7 @@ mod tests {
                     ),
                     sound: None,
                     audio_control: None,
+                    recovered_underruns: 0,
                     timing,
                     size: Size::new(3840, 3840),
                     lenses: 2,

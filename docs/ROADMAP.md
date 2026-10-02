@@ -1064,7 +1064,7 @@ change installed code or add qualification claims.
 
 The owner reports intermittent persistent stuttering across network footage,
 including spontaneous onset at 23.190 seconds in the September 23 `_003` clip.
-The natural installed pause/resume/seek check did not reproduce that state;
+An earlier natural installed pause/resume/seek check did not reproduce that state;
 temporary demux slowdown did reproduce bad post-shortage recovery. The separate
 automatic-pause prototype remains unqualified and is not included here.
 
@@ -1087,6 +1087,129 @@ GPU coverage. The 160 media passes include real MOV packet/seek and AAC PCM
 comparisons. Actual-player network qualification remains pending; the installed
 app is unchanged. No stutter fix, performance or delivery verdict is claimed.
 Private packet metadata and receipts: `scratch/playback-packet-audit-20261001/`.
+
+Exact candidate `60ee2284` has a clean offline SDK package, but fails ordinary
+60 Hz changing-view network playback alongside its installed control. By about
+33 seconds, control/candidate report roughly 1.07/0.96 seconds worst video lag
+and -943/-811 ms current sound offset, with hundreds of audio underruns per
+later interval. Failure begins later in the candidate, but it is not resolved.
+Both strict display-cohort parsers reject missing shown source indices; those
+are not evidence of skipped stitching inputs or usable capacity numbers. Both
+players quit normally, with no new kernel entries, CPU-quota throttling or scoped
+memory-limit/OOM events. Background Android workloads are present, not changed,
+and not proven causal. Installation and both-camera delivery gates are withheld.
+
+A subsequent unchanged-installed idle-view run on that same September 23 NAS
+clip reproduces the reported recovery pattern without any injected input delay:
+around 23 seconds source progression slows and sound falls behind. At 38.21
+seconds it reports 27.6 source advances/s, -1.37 seconds sound offset and 469
+underruns in the interval. One isolated pause/resume restores the later report
+to 30 source advances/s, +0.7 ms sound offset and zero new underruns. Its normal
+exit, kernel, quota and memory-event checks pass. This is a measured natural
+network reproduction closely matching the owner description, not owner-confirmed
+moving-picture equivalence, proof of a sole cause or a shipped fix. The next
+investigation is what that pause/resume resets, not another larger cache.
+Private receipt: `runtime/natural-sept23-pause-reset-os-01` beneath
+`scratch/playback-independent-20260927/`.
+
+An existing clean `c428658f` conditional-recovery package was then tested on
+the same naturally failing clip at 2256x1504/60 Hz, with no input delay or manual
+pause. Audio offset stays within a few milliseconds and reports no underruns,
+but four picture holds at about 11.88, 22.69, 38.57 and 44.91 seconds retain the
+same source for approximately 0.82, 1.16, 0.82 and 0.80 seconds. Its cadence
+reducer fails. Normal exit and kernel/quota/memory-event checks pass; final
+output inspected. This prevents runaway lag, not the reported stuttering, and
+is not an acceptable smoothness result or authorization to install it. The
+unchanged installed player remains the delivery. Input-only packet controls in
+the same Platform runtime also leave little real-time read margin in one
+40-second region, but do not identify network bandwidth or FFmpeg as the sole
+cause. Detailed private receipts and inference limits remain in
+`scratch/playback-packet-audit-20261001/STATUS.md`.
+
+An input-only 1 MiB batching prototype was also rejected before a player build.
+The same 12-second NAS cohort yields identical packet bytes and metadata, but
+draining takes about 12.19 seconds versus 11.92 seconds for ordinary FFmpeg IO.
+A direct read of the same byte budget into `/dev/null` takes 10.47 seconds with
+no demux, hashing, decoding or rendering. These warm, native-library controls
+leave limited margin in this cohort, not a sole-cause or SDK bandwidth verdict.
+The prototype's initialization/cleanup failures were corrected and its 162
+CPU media tests pass, but it provides no measured benefit. It is removed;
+private source and executable receipts are retained. No player run, package,
+installation or stitching/color change followed this rejected experiment.
+Persistent bad-state recovery remains unresolved.
+
+The next candidate, `fix/conditional-clock-reanchor`, restarts the common clock
+only after actual picture/audio lag and a dry audio
+underrun following an observed missing source. Only the exact completed picture
+can authorize it. It retains all source queues and decoder/audio/temporal
+history, and adds no deliberately held refill interval. CPU regression first
+fails the old behavior; the candidate preserves the next real source, queued
+identities and audio epoch without a seek. Additional guards cover healthy,
+paused, seeking, muted, buffered, silent, EOF, failed and replay states, stale
+epochs, mismatched completed owners and reused callback counters. Actual
+network playback, camera/runtime gates and owner review remain due. Reanchoring
+can move the displayed media position back after a stall;
+this is a candidate behavior, not an accepted tradeoff or a shipped fix.
+
+The first native candidate passes 1,661 device-hidden workspace tests with
+53 ignored, but fails its actual-player controlled-shortage check. It restarts
+78 times, remains slow for much of the post-shortage interval, and ends with
+25.2 source advances/s and 130 new audio underruns in the final report. The
+last captured picture is about 22.7 seconds after the artificial demux delay
+ends, so this is not merely a missing recovery interval in the test. Normal
+exit and kernel/memory-limit checks pass; the unforced native control is healthy
+but never exercises recovery. Both are native runs, not SDK qualification.
+The restart at the corrected picture precedes the next actual audio timestamp.
+A second failing-before Player/Pipe regression exposes that wrong restart point.
+The revised candidate anchors at the actual next audio timestamp, never before
+the exact completed picture, leaving ordered source processing to catch up.
+Its 163 CPU media tests pass with four ignored. Actual-player recovery, clean
+SDK/two-camera qualification and owner-visible behavior remain unqualified.
+
+The corrected native player then recovers in the same controlled-shortage
+setup: its last four five-second reports sustain 30.4/30.0/30.0/30.0 source
+advances/s with no new audio underruns. All 1,094 temporal inputs and 1,091
+filter submissions are contiguous from source zero. There are 115 clock
+restarts during shortage, including natural startup trouble before the injected
+delay; none persist through those final healthy reports. The full run still
+stutters during shortage and fails the cadence reducer, with maximum displayed
+source dwell 203 ms. Exit and kernel/quota/memory-limit checks pass and the final
+picture is inspected. This is one native recovery result, not a paired causal
+speed measurement, spontaneous SDK-network fix, accepted clock-position tradeoff
+or installable delivery. Clean SDK, normal network and both-camera gates follow.
+
+Exact source `a2ebccd4` now builds in the clean offline SDK, excluding the two
+parked color files. Its separate actual Flatpak-runtime controlled-shortage
+test also returns to 30 source advances/s with no new audio underruns in the
+last three reports, without manual recovery. The ordinary NAS control has
+initial trouble and 11 conditional restarts, then holds 29.8-30.0 source
+advances/s with zero new underruns for the remaining eight reports. Temporal
+inputs stay contiguous, 1,248/1,447 in the two runs. Both exit normally, with
+inspected final pictures, no new kernel entries or scoped memory-limit events,
+and zero postflight pressure averages. Full-run cadence still fails, including
+stall/startup dwell and shown-output integrity issues; this is not hitch-free
+or 240 fps qualification. Both-camera UI, exported-bundle authentication,
+owner acceptance of the backward time correction and branch review remain due.
+The installed `6dbbf16b` player is unchanged. The exact candidate's separate
+app-path suites now pass 49 X4 and 50 ONE X2 UI checks with zero failures,
+including playback, pause/resume, seeking and opening. The documented missing
+sound device, portal, exact-view and cross-filesystem pair-fixture skips remain;
+real sound is exercised separately by the runtime playback checks. Both motion
+captures per camera are inspected. Each suite has no new kernel entries or
+scoped memory-limit events and zero postflight pressure averages. The exported
+bundle independently passes private device-hidden commit, executable, metadata
+and license authentication. It is an unsigned local test package, not a release
+signature qualification. Owner review and the clock-position decision are still
+due; no merge, installation, hitch-free or capacity result is claimed.
+
+ONE X2's separate normal-audio SDK run at the accepted 212.512-second view
+also holds 29.8-30.01 source advances/s after startup, with no audio underruns
+or recovery triggers. Worst reported picture lateness is 50.2 ms. Its steady
+shown-source sequence is contiguous; dwell p99/max is 48.08/50.88 ms, not a
+hitch-free verdict. Exit and kernel/memory-event checks pass, postflight pressure
+averages are zero, and the final picture is inspected. The full cadence reducer
+still reports startup/terminal integrity issues. This is ordinary second-camera
+audio coverage, not a forced ONE X2 recovery or 240 fps capacity result.
 
 ### Pre-window startup delay, September 30
 
