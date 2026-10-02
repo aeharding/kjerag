@@ -1062,6 +1062,39 @@ change installed code or add qualification claims.
 
 ### Conditional network-stall recovery, October 1
 
+Latest exact-runtime review, `c428658f`: the owner also rejects the restored
+`6dbbf16b` build. Its actual Moab 2026/VID_20260923_081735_00_002.insv network
+path reproduces growing picture/sound lag and repeated audio underruns. The
+candidate's ordinary run is clean, but a repeated unchanged control is also
+clean, so that natural bracket does not establish a causal improvement.
+
+With a single four-second packet-delivery outage after twelve seconds, the
+installed control reports 462 then 436 audio underruns in successive intervals
+and 1.621 seconds worst picture lag. The retained buffering candidate instead
+holds picture and sound together once at fixed PTS, then recovers with zero
+counted underruns in every interval. An ordinary moving-view candidate run
+also holds once and recovers with zero counted underruns. Both waits are about
+1.8 seconds under this artificial outage: one second of compressed-media lead
+is not a one-second wall-clock wait guarantee. Packets, timestamps and source
+order remain unchanged. Quiet-sink accounting is not audible owner acceptance.
+
+Clean SDK package `c428658f` / executable `a2a0cdb2` / OSTree `43fd2f93`
+now passes 49 X4 and 50 ONE X2 app-path UI checks, zero failures, with existing
+service/fixture skips. Both motion-picture pairs are inspected. Both UI scopes
+have no memory-limit/OOM events, postflight pressure averages or new kernel
+entries. The native shader-twin helper remains separate from clean SDK
+arithmetic provenance. Actual bundle import authenticates commit, executable,
+metadata and license without installation, execution or signing qualification.
+These results supersede the corresponding remaining-gate statements below,
+not the earlier high-rate/240-capacity failure or spontaneous-stutter limits.
+
+The installed rollback remains unchanged. A possible short already-queued
+audio repeat on restart awaits explicit owner tradeoff approval; no answer is
+not approval. Owner branch retest still precedes merge. The separate unpushed
+cache change is not part of this package or qualification. Evidence:
+`scratch/coordinated-buffering-20261001/STATUS.md` and the exact-package runtime,
+UI and payload-audit receipts it names.
+
 The owner reports stuttering across network footage, including spontaneous
 onset at 23.190 seconds in the September 23 `_003` clip. A natural installed
 pause/resume/seek sequence did not reproduce sustained bad recovery. A separate
