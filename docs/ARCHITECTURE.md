@@ -509,11 +509,15 @@ Live Reader and Track input passes through
 [`packet_input.rs`](../crates/media/src/packet_input.rs). A sole worker owns
 each file's libavformat demuxer and routes compressed packets to separate audio
 and video consumers. There is no second live audio demuxer or competing file
-cursor. Video queues stop at 128 MiB or 512
-packets per file; audio stops at 256 KiB or 128 packets. Byte accounting permits
-one packet of overshoot because its size is known only after the read. These
-are compressed-input limits, not added decoded/GPU frame retention. Walk
-instruments retain their synchronous reference input.
+cursor. The uninstalled recovery branch lets those consumers share their
+existing combined budget: 128 MiB plus 256 KiB, or 640 packets per file. Neither
+lane stops the sole reader merely by exhausting its old partition while the
+combined cache has room. Video without an attached audio consumer retains its
+128 MiB/512-packet limits; closing audio does not discard already buffered
+video. Byte accounting permits one packet of overshoot because its size is
+known only after the read. These are compressed-input limits, not added
+decoded/GPU frame retention. Walk instruments retain their synchronous
+reference input. The installed player still uses the separate lane caps.
 
 Input remains idle until the first read or seek. Audio attaches before reading.
 A video seek empties both compressed
@@ -556,7 +560,8 @@ Filtered video promotion and source admission use the playback event owner
 described above. Generic and resident-spatial video paths still use the shader
 redraw path; the independent audio producer is shared by all live Readers.
 
-The uninstalled `fix/network-stall-recovery` prototype distinguishes user play
+The `c428658f` recovery policy, inherited by installed test build `65e00f72`,
+distinguishes user play
 intent from a temporary stopped common clock after missing picture or sound.
 It retains the held PTS, ordered source processing and estimator history;
 explicit pause or seek supersedes recovery. Restart requires completion-proven
@@ -570,14 +575,27 @@ not completion proof or restart lead. Missing input or sound still permits a
 hold. An expired picture deadline sleeps on worker completion rather than
 spinning timers while admitted work finishes.
 The follow-on also observes compressed-input lead across every required lens
-and file, using each source's normalized clock. Recovery alone waits for one
-second of packet lead; EOF or either consumer's existing byte/count limit
+and file, using each source's normalized clock. At `c428658f`, recovery alone waits for one
+second of packet lead; EOF or the compressed cache's byte/count limit
 permits an earlier restart. It adds no decoded/GPU retention or UI input wait.
 Observation and one-shot wake registration share the producer lock, with wakes
-outside it; pause and seek cancel the old wait. Exact startup/seek autoplay
+outside it; pause and seek cancel the old wait. At `c428658f`, exact startup/seek autoplay
 instead primes two completion-proven successors and sound before starting the
 clock. It does not use the recovery-only input threshold, and a paused landing
-still needs only its requested picture. These scheduling choices are unqualified.
+still needs only its requested picture. Test-package qualification does not
+establish reliable network playback or owner acceptance.
+The installed `fix/prepared-input-reserve` test build also checks the same
+bounded one-second compressed-input reserve before startup/seek autoplay. It
+reuses the existing per-file observer and EOF/cache-bound escape, adds no IO
+wait on the UI, and changes neither paused landing readiness nor ordinary
+clock progression. Slow input can delay autoplay preparation; that user-visible
+tradeoff is accepted by the owner for this test build only; owner retest remains
+pending. The clean `65e00f72` SDK package
+passes both cameras' functional app-path suites and scoped network playback,
+pause/resume and seek checks. A forced four-second interruption still needs
+one approximately 1.13-second hold, not a guaranteed zero-to-one-second wait.
+This does not establish hitch-free playback or 240 capacity. The inherited
+recovery policy above is unchanged.
 Consumed PCM history supports restart without manufacturing samples or changing
 ordinary drift correction. This is not a normal-playback clock adjustment or a
 throughput fix. The owner permits it only if real tests establish improved

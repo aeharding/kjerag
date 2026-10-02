@@ -106,11 +106,19 @@ struct Shared {
 
 impl State {
     fn full(&self, limits: Limits) -> bool {
-        self.bytes >= limits.bytes
-            || self.packets.len() >= limits.packets
-            || (self.audio.active
-                && (self.audio.bytes >= Limits::AUDIO.bytes
-                    || self.audio.packets.len() >= Limits::AUDIO.packets))
+        let mut bytes = self.bytes;
+        let mut packets = self.packets.len();
+        let mut budget = limits;
+        if self.audio.active {
+            // One demuxer feeds both consumers. A small audio queue must not
+            // stop video read-ahead while most of the compressed cache is free.
+            // Share the existing total, without growing the combined hard cap.
+            bytes = bytes.saturating_add(self.audio.bytes);
+            packets = packets.saturating_add(self.audio.packets.len());
+            budget.bytes = budget.bytes.saturating_add(Limits::AUDIO.bytes);
+            budget.packets = budget.packets.saturating_add(Limits::AUDIO.packets);
+        }
+        bytes >= budget.bytes || packets >= budget.packets
     }
 }
 
@@ -148,7 +156,7 @@ impl ReadAhead {
         }) {
             return Err(error.clone().into());
         }
-        // EOF and either consumer's byte/count bound can prevent more input.
+        // EOF and the shared cache's byte/count bound can prevent more input.
         // Never wait for a lead the existing bounded cache cannot attain.
         let ready = state.stopped
             || state.terminal.is_some()

@@ -1103,6 +1103,97 @@ unpushed cache change is not part of this package or qualification. Evidence:
 `scratch/coordinated-buffering-20261001/STATUS.md` and the exact-package runtime,
 UI and payload-audit receipts it names.
 
+October 2 follow-up: a transition-only native trace reproduces seven holds
+with both lens packet caches empty, only two or three future decoded sources,
+and admission open. Those holds are actual input shortages, not the suspected
+full-source-queue classification mistake. Normal native and native-in-runtime
+controls do not reproduce them and are not fixes. A no-delay C demux trace
+corrupts one concurrent JSON log record; player exit is normal, but its parsers
+fail, so it is not a passing runtime gate.
+
+Reader-only controls on the same path can fall below realtime without decode,
+stitching or rendering. Actual MPV selects one lens and audio and buffers seven
+times in its 30-second null-output control. This does not contradict the owner's
+earlier smooth MPV experience or excuse Kjerag's cutouts. Input conditions vary:
+identical 640 MiB filesystem reads range from 17.6 to 25.1 MB/s. Native GIO
+packet reading takes 21.27 then 37.59 seconds, bracketing a normal FFmpeg read
+of 42.76 seconds for the same 30-second prefix. All packet bytes, metadata,
+order and counts hash identically. The slower GIO repeat prevents a stable
+backend-speed claim; no GIO backend or Flatpak permission change is selected.
+Private controls and their limits are retained in the STATUS record above.
+
+The already-written shared-cache candidate is now being evaluated on
+`fix/buffering-input-ownership`, retaining coordinated buffering rather than
+changing its thresholds or history. Its current device-hidden media suite
+passes 186 tests, four ignored and no failures. Its native network follow-up
+still has seven picture holds, despite zero counted audio underruns; the cadence
+parser reports failure. It exits normally with no new kernel entries or
+postflight pressure averages, and the actual after picture is inspected.
+The native preview includes the parked color variation and is not clean SDK
+arithmetic qualification. Installed `c428658f` is unchanged. The shared-budget
+change is not established as the smooth-playback solution and is not delivered.
+
+A separate uninstalled `fix/prepared-input-reserve` follow-up reuses the existing
+one-second compressed-input readiness gate before startup/seek autoplay, not
+only after a shortage. It retains two completion-proven successors and sound,
+the same cache bounds and EOF escape, and unchanged explicit paused landings.
+The blocked real-packet-worker regression fails before the change and passes
+afterward; all 186 media CPU tests pass, four ignored. The native preview
+includes the unchanged parked color variation, not clean SDK provenance.
+Its same-path ordinary network cohort has no buffer holds or counted audio
+underruns. A four-second injected read interruption produces one hold, about
+.76 seconds by neighboring presentation records, then regular source cadence
+with zero counted underruns. Three actual clipboard seeks into another range
+show their requested destinations in about .96/.75/1.80 seconds, with no buffer
+holds, counted underruns or growing delay in later playback. All exit normally
+with no new kernel entries or postflight pressure averages; actual pictures
+are inspected. These unpaired native observations do not establish causation
+for every prior pause, audible continuity, physical scanout or 240 capacity.
+The broad cadence parser still rejects frameless startup renders; these are
+scoped playback observations, not a full gate pass. Slow-share autoplay can
+wait longer before opening or seek playback starts. That tradeoff, both-camera
+qualification, clean SDK delivery and owner retest remain due. Installed
+`c428658f` is unchanged and the overall network fix remains unproven.
+The bounded, device-hidden full workspace check passes 1,694 tests with 53
+ignored and no failures. Formatting, workspace Clippy, vendor warning, naming,
+dependency-source and whitespace checks also pass. These CPU checks include
+the parked color variation and unavailable-device returns, not executed GPU
+coverage or clean-package qualification.
+
+Draft [#248](https://github.com/aeharding/kjerag/pull/248) now retains the clean
+offline SDK package from exact source `65e00f72`, excluding the parked colors.
+Its app-path suites pass 49 X4 and 50 ONE X2 checks, with existing service and
+fixture skips. The native shader twin remains separate from clean SDK shader
+provenance. All eight exact-source CI jobs pass, including both architectures.
+On the actual network `_002` path, ordinary playback and a real two-second
+pause/resume have no buffer holds or counted underruns. Three real clipboard
+seeks show their requested pictures in approximately .84/.55/1.73 seconds,
+then regular source cadence, zero holds and zero counted underruns. The same
+four-second input interruption causes one approximately 1.13-second hold,
+then regular playback and zero counted underruns. This exceeds the requested
+zero-to-one-second buffer goal; it is not reported as completion. All exit
+normally with no new kernel entries or pressure averages, quiet output verified
+and actual pictures inspected. Both UI scopes have no memory-limit/OOM events.
+Whole cadence analysis still rejects frameless startup and the last incomplete
+presentation at process exit; the seek run additionally crosses deliberate
+timeline discontinuities. These are scoped observations, not complete cadence,
+audible continuity, physical scanout or 240-capacity verdicts. The actual bundle
+payload is privately authenticated without installation or signing qualification.
+The owner now accepts the autoplay-preparation wait for this test build only.
+The exact qualified `65e00f72` package is installed as OSTree `0deeacde`, with
+executable `a3b56c4d`, unchanged runtime/permissions and origin `kjerag-origin`.
+The replaced `c428658f` bundle is retained for rollback. Owner branch retest
+remains required; no merge, release or general stutter-fix claim.
+The one actual-installed network smoke check exits normally, authenticates the
+running package and quiet output, and maintains approximately 30 source
+advances/s after startup with no buffer holds or counted audio underruns.
+There are no new kernel entries; memory pressure averages after the run are
+0.00 over 10 seconds and 0.02 over 60 seconds. Its simulated pause/resume keys
+leave the final picture paused, so it does not qualify resumed playback. The
+whole-run cadence verdict remains false, including frameless startup and the
+terminal incomplete presentation. Owner testing of ordinary pause/resume and
+seek remains required, not replaced by this scoped smoke check.
+
 The owner reports stuttering across network footage, including spontaneous
 onset at 23.190 seconds in the September 23 `_003` clip. A natural installed
 pause/resume/seek sequence did not reproduce sustained bad recovery. A separate
@@ -1275,6 +1366,40 @@ averages are zero. Both after pictures are inspected, not moving acceptance
 or scanout proof. This is evidence of a shared severe throughput failure and
 scoped recovery behavior, not a deployable performance or spontaneous-stutter
 fix. Further input-stall and both-camera package gates remain due. No install.
+
+The subsequent shared-divider reuse experiment passes arithmetic checks and
+retains both cameras' 31-source captured outputs, but is retired unmerged in
+PR #244. Its exact SDK player repeat achieves 164.00 views/s versus the
+preceding package's 163.83, both at 29.96 ordered sources/s with no holds.
+An earlier candidate run achieves 194.37 views/s but only 20.79 sources/s,
+with four picture holds. No useful player-speed benefit or 240 capacity is
+demonstrated. These battery-powered runs do not attribute the preceding
+plugged-in 800 MHz failure to code. All exit normally with no new kernel,
+CPU-quota throttling or memory-limit/OOM events. The prototype is archived,
+not installed; active work returns to the playback bottleneck.
+
+A packet-order audit of the reported September 23 clip identifies unused
+compressed-cache capacity. With consumers stopped at 14.828 seconds, its actual
+packet order reaches the old 128-audio-packet cap with only about 60 MB retained,
+despite roughly 128 MB of combined budget. A static shared-budget model extends
+source lead from about 2.72 to 5.99 seconds without raising that total. This is
+not measured runtime cache state or proof of the spontaneous stutter's cause.
+The next candidate shares the existing byte/count budget across audio and video
+while both consumers are attached. It leaves video-only limits, packet contents,
+source processing and image arithmetic unchanged. A failing-before regression
+through the real packet worker confirms that the old audio partition stops
+read-ahead with video capacity unused. Candidate checks cover actual producer
+progress, the shared byte/count bounds, refill wakeups, retained packet order,
+and restoring the video-only budget after audio closes. All 186 media CPU tests
+pass, with four ignored and no failures, including real MOV packet/seek and AAC
+PCM comparisons. Full formatting, lint, vendor/source/name and 28 portable
+harness checks pass. The device-hidden workspace passes 1,694 tests with 53
+ignored, including unavailable-device returns and the parked color variation,
+not clean-source GPU coverage. Actual-player network qualification remains
+pending; the installed app is unchanged. The cache change will be qualified
+separately on the installed runtime. The October 2 follow-up evaluates it with
+the retained coordinated-buffering prototype, not as an accepted installed fix.
+This is not an accepted recovery workaround or a performance verdict.
 
 ### Pre-window startup delay, September 30
 
