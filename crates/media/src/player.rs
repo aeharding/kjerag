@@ -719,10 +719,10 @@ impl Player {
         self.presenter.next_due()
     }
 
-    /// Hold picture and sound together during an actual source shortage.
+    /// Hold picture and sound together during an actual completed-source shortage.
     /// This leaves play intent, every source queue and estimator history intact.
-    /// A missed interval with unadmitted picture input, or missing sound,
-    /// triggers the hold. Already-admitted stitch work is not input starvation.
+    /// A missed completed-picture interval, or missing sound, triggers the hold.
+    /// Queued inputs cannot keep sound running past an unfinished picture.
     /// Restart needs two completed
     /// pictures, sound, and a recovery-only compressed-input lead, without
     /// increasing decoded/GPU retention. The finished tail needs no lead.
@@ -784,9 +784,7 @@ impl Player {
         // Let its ordered catch-up consume that prefix before declaring a
         // picture shortage. This never hides missing sound or pending GPU work.
         let catchup_ready = output_ready && ready_successors > 0;
-        if (!covers_position && position >= missing_at && !catchup_ready && picture_input_missing)
-            || !audio_ready
-        {
+        if (!covers_position && position >= missing_at && !catchup_ready) || !audio_ready {
             self.presenter.clock.hold_for_buffer(now);
             eprintln!(
                 "buffer: waiting for {} at {:.3} s",
@@ -1885,7 +1883,42 @@ mod tests {
     }
 
     #[test]
-    fn admitted_picture_work_does_not_hold_or_spin_an_expired_deadline() {
+    fn admitted_picture_work_before_its_deadline_does_not_hold() {
+        for output_ready in [false, true] {
+            let mut bench = Bench::new();
+            assert!(
+                bench
+                    .player
+                    .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+            );
+            bench.player.play();
+            let start = Instant::now();
+            bench.decoded(0, 0);
+            bench.player.pump(start).unwrap();
+            let deadline = start + NTSC * if output_ready { 2 } else { 1 };
+            let before = deadline - Duration::from_nanos(1);
+            assert_eq!(
+                bench
+                    .player
+                    .coordinate_buffering(
+                        before,
+                        output_ready,
+                        0,
+                        false,
+                        false,
+                        Waker::noop().clone(),
+                    )
+                    .unwrap(),
+                Some(deadline)
+            );
+            assert!(!bench.player.is_buffering());
+            assert_eq!(bench.player.position(before), before.duration_since(start));
+            assert_eq!(bench.player.presenter.clock.reading.origin, Some(start));
+        }
+    }
+
+    #[test]
+    fn unfinished_admitted_picture_holds_at_a_missed_deadline_without_spinning() {
         for output_ready in [false, true] {
             let mut bench = Bench::new();
             assert!(
@@ -1913,9 +1946,18 @@ mod tests {
                 None,
                 "wait for the worker, not an already-expired timer"
             );
-            assert!(!bench.player.is_buffering());
-            assert_eq!(bench.player.presenter.clock.reading.origin, Some(start));
+            assert!(
+                bench.player.is_buffering(),
+                "queued inputs are not a completed picture at the missed deadline"
+            );
+            assert_eq!(bench.player.presenter.clock.reading.origin, Some(late));
+            assert!(!bench.player.presenter.clock.reading.playing);
             assert_eq!(bench.player.position(late), late.duration_since(start));
+            assert_eq!(
+                bench.player.position(late + NTSC * 3),
+                late.duration_since(start),
+                "the common clock must not keep running without a ready picture"
+            );
         }
     }
 

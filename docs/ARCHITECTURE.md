@@ -613,6 +613,30 @@ preparation stages take 81.9 ms and 65.1 ms of wall time, not isolated GPU time.
 The underlying queue/work cost remains unresolved. A separate bounded repeat
 records no CPU quota throttling, but does not reproduce the larger dwells.
 Owner acceptance and the broader network playback requirements remain due.
+The uninstalled `fix/processing-stall-buffering` candidate removes the admitted-
+input exemption from the missed-completed-picture decision. The existing
+one/two-interval deadline grace and completed-prefix catch-up exception remain;
+merely queueing normal work before its deadline does not hold the clock. An
+actually overdue unfinished output can hold sound and picture together, even
+with all required inputs admitted. The input classification still decides
+whether an expired timer should wait for worker completion. Restart gates,
+source processing, retention and arithmetic are unchanged. Real X4/ONE X2
+blocked-actor checks preserve the shown owner and resume in the same epoch.
+This does not make the underlying stitch work faster. Clean SDK source
+`37ca091b` passes both camera functional UI suites. A bounded network
+interruption through that uninstalled package holds the exact shown owner,
+resumes once, and records no counted audio underruns. It still has roughly
+47 ms post-resume picture intervals and is not a general smoothness verdict.
+The owner approves installing this conditional-pause test. Its actual-installed
+check then refuses playback at the shared GPU PIS front-end self-check:
+horizontal scratch word 41 is `0x43618a56`, expected `0x43618a57`.
+The prior `5e385619` package is restored and refuses identically, before any
+buffering or playback. Flatpak history records a concurrent Mesa 26.2.2 update
+immediately before installation. This is not a candidate-specific failure or
+a completed runtime-cause isolation. The shared graphics runtime is unchanged
+by our recovery actions; changing it affects other Flatpak apps and needs
+explicit permission. Owner branch retest and broader playback qualification
+remain due.
 Consumed PCM history supports restart without manufacturing samples or changing
 ordinary drift correction. This is not a normal-playback clock adjustment or a
 throughput fix. The owner permits it only if real tests establish improved
