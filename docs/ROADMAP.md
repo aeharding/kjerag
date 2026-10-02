@@ -1241,6 +1241,30 @@ checks; those tests include the unchanged parked owner color edits and do not
 establish hardware coverage. CI, clean SDK packaging and branch review remain
 due. The installed Flatpak is unchanged.
 
+October 1 delivery update: exact-source `4eb97dbe` subsequently passed all
+eight CI jobs and clean SDK app-path UI checks (49 X4, 50 ONE X2, zero
+failures, with the existing skips). The owner approved the backward-time
+recovery tradeoff for this test installation only. The installed combined
+candidate was then rejected: actual network playback lagged and cut audio
+frequently. These functional UI and native capacity results did not qualify
+that use case. The retained `6dbbf16b` package has been restored, with its
+installed executable, commit, metadata and unchanged origin authenticated.
+The owner reports the same symptom on the restored build, so rollback is not
+a fix and the cause has not been isolated to the new cache, recovery or shader
+changes. PRs #245, #246 and #247 remain unaccepted drafts; no merge or release.
+Exact reported-network-path reproduction takes priority over more capacity
+optimization, and no replacement is to be presented as a stutter fix without
+that reproduction and owner retest.
+The restored installed build now also fails a quiet, bounded ordinary-playback
+check of the actual reported network file, without injected delays or manual
+pause/seek. By 48.15 seconds it reports 1.747 seconds worst picture lag,
+-1.578 seconds current audio offset and 468 audio underruns in that interval.
+The player exits normally; kernel logs and memory-pressure averages are clear,
+and the final footage capture was inspected. This establishes the failing
+restored real path, not its root cause, an audible comparison with the null
+sink, or a fix. The full cadence reducer still rejects integrity issues;
+its averages are not a smoothness pass.
+
 ### Pre-window startup delay, September 30
 
 October 1 clarification: the owner wants the normal transparent/blurred window
