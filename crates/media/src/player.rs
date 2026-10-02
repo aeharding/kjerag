@@ -806,9 +806,11 @@ impl Player {
         Ok(deadline)
     }
 
-    /// Startup/seek preparation, before the common clock starts. No recovery
-    /// high-water wait is added here: only the same small completed-picture and
-    /// sound lead used by the actual presentation path is required.
+    /// Startup/seek autoplay preparation, before the common clock starts.
+    /// Keep the same completed-picture and sound lead, and prime the existing
+    /// bounded compressed reserve rather than starting on an empty input queue.
+    /// A finished tail needs no unattainable reserve. Explicit paused landings
+    /// do not use this autoplay gate.
     pub fn prepared_playback_ready(
         &self,
         ready_successors: usize,
@@ -823,10 +825,19 @@ impl Player {
                 } else {
                     self.presenter.interval * 2
                 },
-                wake,
+                wake.clone(),
             )
         })?;
-        Ok((finished || ready_successors >= 2) && audio_ready)
+        let mut input_ready = true;
+        if !finished {
+            for input in &self.read_ahead {
+                input_ready &= input.buffered_or_wait(
+                    self.presenter.clock.reading.position + REFILL_LEAD,
+                    wake.clone(),
+                )?;
+            }
+        }
+        Ok((finished || ready_successors >= 2) && audio_ready && input_ready)
     }
 
     /// A held clock still permits logical source promotion up to its fixed PTS.
@@ -1752,7 +1763,7 @@ mod tests {
     }
 
     #[test]
-    fn preparation_waits_for_two_completed_pictures_but_not_input_high_water() {
+    fn preparation_waits_for_ready_input_without_starting_or_reanchoring_clock() {
         let (input, observer, release, dropped) = crate::packet_input::tests::blocked_read_ahead();
         let mut bench = Bench::new();
         bench.player.read_ahead = vec![observer];
@@ -1763,7 +1774,7 @@ mod tests {
                 .unwrap()
         );
         assert!(
-            bench
+            !bench
                 .player
                 .prepared_playback_ready(2, false, Waker::noop().clone())
                 .unwrap()
@@ -1776,8 +1787,27 @@ mod tests {
         );
         assert!(!bench.player.is_playing());
         assert!(!bench.player.is_buffering());
-        drop(input);
+        let before = bench.player.presenter.clock.reading;
+        let wake = Arc::new(WakeCount::default());
+        assert!(
+            !bench
+                .player
+                .prepared_playback_ready(2, false, Waker::from(wake.clone()))
+                .unwrap()
+        );
         release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !bench
+            .player
+            .prepared_playback_ready(2, false, Waker::from(wake.clone()))
+            .unwrap()
+        {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        assert!(wake.0.load(Ordering::SeqCst) > 0);
+        assert_eq!(bench.player.presenter.clock.reading, before);
+        drop(input);
         dropped.recv_timeout(Duration::from_secs(5)).unwrap();
     }
 

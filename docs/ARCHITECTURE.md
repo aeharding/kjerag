@@ -583,6 +583,13 @@ instead primes two completion-proven successors and sound before starting the
 clock. It does not use the recovery-only input threshold, and a paused landing
 still needs only its requested picture. Test-package qualification does not
 establish reliable network playback or owner acceptance.
+The uninstalled `fix/prepared-input-reserve` candidate also checks the same
+bounded one-second compressed-input reserve before startup/seek autoplay. It
+reuses the existing per-file observer and EOF/cache-bound escape, adds no IO
+wait on the UI, and changes neither paused landing readiness nor ordinary
+clock progression. Slow input can delay autoplay preparation; that user-visible
+tradeoff and clean-package qualification remain pending. The installed
+`c428658f` policy above is unchanged.
 Consumed PCM history supports restart without manufacturing samples or changing
 ordinary drift correction. This is not a normal-playback clock adjustment or a
 throughput fix. The owner permits it only if real tests establish improved

@@ -1133,6 +1133,33 @@ The native preview includes the parked color variation and is not clean SDK
 arithmetic qualification. Installed `c428658f` is unchanged. The shared-budget
 change is not established as the smooth-playback solution and is not delivered.
 
+A separate uninstalled `fix/prepared-input-reserve` follow-up reuses the existing
+one-second compressed-input readiness gate before startup/seek autoplay, not
+only after a shortage. It retains two completion-proven successors and sound,
+the same cache bounds and EOF escape, and unchanged explicit paused landings.
+The blocked real-packet-worker regression fails before the change and passes
+afterward; all 186 media CPU tests pass, four ignored. The native preview
+includes the unchanged parked color variation, not clean SDK provenance.
+Its same-path ordinary network cohort has no buffer holds or counted audio
+underruns. A four-second injected read interruption produces one hold, about
+.76 seconds by neighboring presentation records, then regular source cadence
+with zero counted underruns. Three actual clipboard seeks into another range
+show their requested destinations in about .96/.75/1.80 seconds, with no buffer
+holds, counted underruns or growing delay in later playback. All exit normally
+with no new kernel entries or postflight pressure averages; actual pictures
+are inspected. These unpaired native observations do not establish causation
+for every prior pause, audible continuity, physical scanout or 240 capacity.
+The broad cadence parser still rejects frameless startup renders; these are
+scoped playback observations, not a full gate pass. Slow-share autoplay can
+wait longer before opening or seek playback starts. That tradeoff, both-camera
+qualification, clean SDK delivery and owner retest remain due. Installed
+`c428658f` is unchanged and the overall network fix remains unproven.
+The bounded, device-hidden full workspace check passes 1,694 tests with 53
+ignored and no failures. Formatting, workspace Clippy, vendor warning, naming,
+dependency-source and whitespace checks also pass. These CPU checks include
+the parked color variation and unavailable-device returns, not executed GPU
+coverage or clean-package qualification.
+
 The owner reports stuttering across network footage, including spontaneous
 onset at 23.190 seconds in the September 23 `_003` clip. A natural installed
 pause/resume/seek sequence did not reproduce sustained bad recovery. A separate

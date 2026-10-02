@@ -1775,8 +1775,8 @@ impl Scene {
             })
         {
             // The first exact picture can finish before its successors. Keep
-            // autoplay held until a small completion-proven lead exists, rather
-            // than starting the clock and immediately invoking stall recovery.
+            // autoplay held until a completion-proven lead and the bounded
+            // input reserve exist, rather than immediately invoking recovery.
             // An explicit paused landing needs only its requested picture.
             let prepared = (|| -> Fallible<bool> {
                 if show.replay.borrow().is_some_and(|replay| replay.playing)
