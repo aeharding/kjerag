@@ -1245,6 +1245,29 @@ smoothness or 240-capacity completion is inferred. Recent-file inspection confir
 original September 23 `_003` exists in the share's `SSD/` subfolder, not at the
 previously checked root path; the earlier whole-clip absence assumption is retired.
 
+The separate uninstalled `fix/processing-stall-buffering` candidate then tests
+the completion-aware clock decision, not another network backend or a larger
+buffer. Previously admitted stitch inputs exempted an overdue unfinished
+picture from a common-clock hold. The existing real-Scene blocked-actor case
+reproduces that on the actual X4 path before the policy edit; after the edit,
+X4 and ONE X2 hold only after the picture deadline is missed, retain the shown
+owner during refill, consume all expected sources and resume in the same epoch.
+The normal pre-deadline and completed-prefix catch-up controls do not hold.
+The media suite passes 187 tests with four ignored; the bounded device-hidden
+workspace passes 1,695 with 53 ignored, plus all CPU gates and a native release
+build. These native checks include the preserved parked color variation and
+unavailable-device returns, not clean SDK or broad hardware qualification.
+A bounded native eight-second input-interruption run has one hold, retains
+shown source 486 throughout it, no counted underruns and no repeated buffering.
+It exits normally with no kernel entries or memory-limit events and small
+nonzero pressure averages. Its first restart second has 47–50 ms examples,
+not the earlier 82/63 ms pattern, so this unpaired run cannot establish general
+micro-stutter resolution. Stitching and color arithmetic, source cadence,
+restart lead and cache bounds are unchanged. The conditional processing pause
+is explicitly put to the owner before testing; approval, clean SDK packaging
+and actual-window qualification remain due. Installed source `5e385619` stays
+unchanged while that candidate is prepared. No merge or release.
+
 The owner reports stuttering across network footage, including spontaneous
 onset at 23.190 seconds in the September 23 `_003` clip. A natural installed
 pause/resume/seek sequence did not reproduce sustained bad recovery. A separate

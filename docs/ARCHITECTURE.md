@@ -613,6 +613,17 @@ preparation stages take 81.9 ms and 65.1 ms of wall time, not isolated GPU time.
 The underlying queue/work cost remains unresolved. A separate bounded repeat
 records no CPU quota throttling, but does not reproduce the larger dwells.
 Owner acceptance and the broader network playback requirements remain due.
+The uninstalled `fix/processing-stall-buffering` candidate removes the admitted-
+input exemption from the missed-completed-picture decision. The existing
+one/two-interval deadline grace and completed-prefix catch-up exception remain;
+merely queueing normal work before its deadline does not hold the clock. An
+actually overdue unfinished output can hold sound and picture together, even
+with all required inputs admitted. The input classification still decides
+whether an expired timer should wait for worker completion. Restart gates,
+source processing, retention and arithmetic are unchanged. Real X4/ONE X2
+blocked-actor checks preserve the shown owner and resume in the same epoch.
+This does not make the underlying stitch work faster. Clean package checks and
+owner approval of conditional processing-stall pauses remain due.
 Consumed PCM history supports restart without manufacturing samples or changing
 ordinary drift correction. This is not a normal-playback clock adjustment or a
 throughput fix. The owner permits it only if real tests establish improved

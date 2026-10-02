@@ -43,22 +43,22 @@ fn one_x2_filtered_completed_catchup_does_not_buffer() {
 }
 
 #[test]
-fn x4_filtered_admitted_work_does_not_pause_sound() {
+fn x4_filtered_admitted_work_holds_time_and_sound_after_a_missed_picture() {
     let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
         return;
     };
-    assert_admitted_work_does_not_pause_sound(Path::new(&path));
+    assert_admitted_work_holds_time_and_sound_after_a_missed_picture(Path::new(&path));
 }
 
 #[test]
-fn one_x2_filtered_admitted_work_does_not_pause_sound() {
+fn one_x2_filtered_admitted_work_holds_time_and_sound_after_a_missed_picture() {
     let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
         return;
     };
-    assert_admitted_work_does_not_pause_sound(Path::new(&path));
+    assert_admitted_work_holds_time_and_sound_after_a_missed_picture(Path::new(&path));
 }
 
-fn assert_admitted_work_does_not_pause_sound(path: &Path) {
+fn assert_admitted_work_holds_time_and_sound_after_a_missed_picture(path: &Path) {
     let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
     let mut scene = Scene::open(path).unwrap();
     // The isolated GPU harness routes audio to its quiet sink. Muting here
@@ -98,17 +98,31 @@ fn assert_admitted_work_does_not_pause_sound(path: &Path) {
     assert!(accepted.index() >= pending.index() + 3);
     assert_eq!(capture.ready_successors(&pending).unwrap(), 0);
     assert!(capture.install_due(&pending).unwrap().is_none());
-    assert_eq!(scene.player(Player::is_buffering), Some(false));
-    assert_eq!(scene.position(late), position + late.duration_since(start));
+    assert_eq!(
+        scene.player(Player::is_buffering),
+        Some(true),
+        "queued stitch inputs must not leave sound running past a missed picture"
+    );
+    let held = scene.position(late);
+    assert_eq!(held, position + late.duration_since(start));
+    assert_eq!(scene.position(late + interval * 3), held);
+    prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
     assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
     drop(blocked);
     let deadline = Instant::now() + DEADLINE;
     loop {
         assert!(!matches!(scene.progress(late), Next::Stopped(_)));
-        assert_eq!(scene.player(Player::is_buffering), Some(false));
-        if scene.frame_stamp().is_some_and(|stamp| {
-            stamp.index() == playing.index() + steps as u64 && capture.acknowledged(&stamp).unwrap()
-        }) {
+        assert_eq!(scene.position(late), held);
+        if scene.player(Player::is_buffering) == Some(true) {
+            prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
+            assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+        }
+        if scene.player(Player::is_buffering) == Some(false)
+            && scene.frame_stamp().is_some_and(|stamp| {
+                stamp.index() == playing.index() + steps as u64
+                    && capture.acknowledged(&stamp).unwrap()
+            })
+        {
             break;
         }
         assert!(Instant::now() < deadline, "admitted work did not catch up");
@@ -118,7 +132,8 @@ fn assert_admitted_work_does_not_pause_sound(path: &Path) {
     let after = scene.player(Player::stats).unwrap();
     assert_eq!(after.presented - before.presented, steps as u64);
     assert_eq!(after.dropped, before.dropped);
-    assert_eq!(scene.position(late), position + late.duration_since(start));
+    assert_eq!(scene.position(late), held);
+    assert_eq!(scene.position(late + interval), held + interval);
     let complete = scene.frame_stamp().unwrap();
     assert!(playing.same_decode_epoch(&complete));
     prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
@@ -180,8 +195,8 @@ fn assert_buffering_retains_history(path: &Path) {
     let start = Instant::now();
     assert!(!matches!(scene.progress(start), Next::Stopped(_)));
     // One second exceeds the real sound producer's 500 ms future lead.
-    // Admitted stitch delay alone no longer qualifies as input starvation.
-    // Re-enter through Scene, then prove missing sound was necessary to hold.
+    // Re-enter through Scene with required picture inputs already admitted,
+    // then verify the common hold, refill and exact shown-owner boundary.
     let resumed = start + Duration::from_secs(1);
     assert!(!matches!(scene.progress(resumed), Next::Stopped(_)));
     let capture = scene.show.as_ref().unwrap().filtered.as_ref().unwrap();
