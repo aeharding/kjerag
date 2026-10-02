@@ -1274,8 +1274,18 @@ and has no counted underruns. No new kernel entries, memory-limit events or
 CPU-quota throttling are recorded. Roughly 47 ms first-second picture intervals
 remain; the larger preceding 82/63 ms pattern is not reproduced. This unpaired
 run is not a universal micro-stutter, audible-continuity, scanout or capacity
-verdict. Explicit conditional-pause approval and owner branch retest remain
-due. Installed source `5e385619` stays unchanged. No merge or release.
+verdict. The owner then approves installing the conditional-pause test.
+Installation succeeds, but the actual-installed network check refuses playback
+at the shared GPU PIS front-end arithmetic check: horizontal scratch word 41
+is `0x43618a56`, expected `0x43618a57`. A local no-delay control refuses
+identically. The retained `5e385619` is restored and also refuses identically,
+so rollback does not establish working playback. Flatpak history shows a
+concurrent Mesa 26.2.2 update immediately before candidate installation;
+earlier passing tests preceded it. That is compatibility evidence, not yet
+a completed runtime-cause isolation. No arithmetic guard is bypassed and no
+shared runtime is changed. A shared graphics rollback affects other Flatpak
+apps and needs explicit authority. Owner branch retest and the broader random
+stutter requirement remain outstanding. No merge or release.
 
 The owner reports stuttering across network footage, including spontaneous
 onset at 23.190 seconds in the September 23 `_003` clip. A natural installed
