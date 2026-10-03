@@ -100,6 +100,46 @@ downgrade, merge or release. Draft [#252](https://github.com/aeharding/kjerag/pu
 is stacked on the approved conditional-pause test in #250; the compiler patch
 is an owner-fork-only draft PR, with no upstream interaction.
 
+The `fix/filtered-view-startup-preparation` follow-up under issue #186 moves
+existing corrected-view shader/pipeline construction from the first completed
+picture's draw to initial renderer attachment while autoplay remains held.
+It uses the actual window format and the existing immutable pipeline cache.
+A bounded real-X4 regression fails before this change and passes after it;
+the corresponding ONE X2 check also passes. Both after runs have no new kernel
+entries or memory-pressure averages. These native checks include the unchanged
+parked color variation and prove preparation order, not clean SDK provenance
+or a general hitch fix. The full bounded device-hidden workspace passes 1,699
+tests with 53 ignored; all CPU gates and the native release build pass.
+All eight CI jobs pass on runtime source `039c0a31`; draft
+[#253](https://github.com/aeharding/kjerag/pull/253) is stacked on #252.
+The clean committed-color SDK package passes 49 X4 and 50 ONE X2 functional UI
+checks, with the existing service/fixture skips, authenticated executable
+identities, no new kernel entries, memory-limit events or CPU throttling.
+Actual output pictures are inspected. It is installed at OSTree `3f02b2bf26fe`,
+executable SHA `1abb8f35f623`, retaining working `56232400` for rollback without
+changing the shared graphics runtime, origin or permissions. The actual-installed
+original September 23 `_003` network/view check runs near source cadence with
+no buffer holds or counted audio underruns. These are scoped functional results,
+not audible-continuity, physical-scanout or 240-capacity qualification.
+A matching `_002` forced-input-interruption pair gives one hold in the candidate
+and five in the earlier installed control. The control's post-resume map work
+includes 53–80 ms wall-time samples, while the candidate's selected interval
+stays below 36 ms. Run-to-run input/GPU variation is not isolated: shader
+preparation alone is not established as the cause of that recovery difference.
+Both whole-run cadence verdicts remain false, including frameless startup.
+The random network-stutter goal and owner branch acceptance remain open.
+
+A separate unchanged installed network diagnostic clarifies the ordinary
+47–55 ms picture intervals above: despite advertising 60 Hz, the isolated
+headless compositor delivers callbacks at 61.921 Hz, median 16.045 ms. Two ticks
+are about 32 ms and three about 48 ms, so 29.97 fps video needs occasional longer
+dwells. This protocol trace has no presentation-feedback requests; concurrent
+debug output corrupts one completion JSON record and the cadence parser fails.
+It is not physical-scanout or smoothness qualification. The genuine initial
+processing stalls, random network-stutter report, audible continuity and
+capacity requirements remain open; no thresholds or source cadence are changed
+to make the headless statistics look regular.
+
 Issue [#229](https://github.com/aeharding/kjerag/issues/229) covers a malformed
 saved volume reaching the audio callback. An isolated real COSMIC/RON config
 test confirms that `NaN` is admitted, and a failing-before public Pipe test
