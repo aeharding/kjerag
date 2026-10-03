@@ -1728,11 +1728,12 @@ impl Scene {
                 Next::Never
             };
         };
-        // A held landing needs its six real successors before any filtered
-        // output can exist. Preparation drains decode, never presentation or
-        // the audio clock, and must run before the unacknowledged-current gate.
+        // A held landing needs six real successors for its first output. The
+        // bounded horizon also permits the completed recovery runway plus its
+        // three future dependencies. This drains decode, never media time, and
+        // must run before the unacknowledged-current gate.
         if show.filtered.is_some()
-            && let Err(error) = player.prepare_ahead(6)
+            && let Err(error) = player.prepare_ahead(FilteredCaptureFacade::PREPARED_SUCCESSORS)
         {
             retire_replay(&show.replay);
             self.stalled.fail_now(&error);
@@ -1844,7 +1845,7 @@ impl Scene {
         // The initial call above had no current source. Once Player offers
         // one, make its prepared horizon available to this same render pass.
         if show.filtered.is_some()
-            && let Err(error) = player.prepare_ahead(6)
+            && let Err(error) = player.prepare_ahead(FilteredCaptureFacade::PREPARED_SUCCESSORS)
         {
             retire_replay(&show.replay);
             self.stalled.fail_now(&error);

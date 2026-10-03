@@ -152,7 +152,7 @@ the latest due completed picture, not the source-processing queues.
 The filtered stitch executor owns a capture actor with a bounded ordered work
 queue, rather than one shared-executor channel message per source. Executing
 stitch, queued stitch and temporal work share a four-source CPU admission
-limit and the four-output reservation bound. GPU lifetime slots are separately
+limit and a separate completed-output reservation bound. GPU lifetime slots are separately
 bounded at two and acquired by the worker only when a source begins execution.
 Queued decoded frames do not consume these slots. An admitted successor continues
 without another shell handoff. Actor exit and admission use the same short
@@ -344,8 +344,11 @@ lands, a renderer retries, or an older epoch drains.
 
 The filtered route admits at most four CPU source jobs within an epoch, keeps
 at most two source GPU lifetimes in flight, and
-reserves up to four ready corrected frames plus one installed frame. Player
-may prepare six real successors, including while paused for startup or seek.
+reserves up to six ready corrected frames plus one installed frame in the
+experimental completed-runway branch. Player may prepare nine real successors,
+including while paused for startup or seek. Installed source `039c0a31` still
+uses four ready outputs and six prepared successors; the larger retention is
+not qualified or accepted for installation.
 One temporal executor and its capacity-one channel are shared across restarts;
 seeking does not create another worker thread. Superseded epochs cancel and
 release unpublished history when their executing work permits, while the old
@@ -625,6 +628,19 @@ preparation stages take 81.9 ms and 65.1 ms of wall time, not isolated GPU time.
 The underlying queue/work cost remains unresolved. A separate bounded repeat
 records no CPU quota throttling, but does not reproduce the larger dwells.
 Owner acceptance and the broader network playback requirements remain due.
+
+The experimental `fix/completed-picture-recovery-runway` branch requires six
+completion-proven successor pictures after an actual buffering hold, instead
+of two. Startup/seek autoplay still requires two. The decoded horizon extends
+to nine successors so the six-picture runway has its three real temporal
+dependencies; the ready-output reservation is six. CPU work admission remains
+four and source GPU lifetimes remain two. The first seven sources still produce
+the same four startup outputs, and source ordering, estimator history and
+picture arithmetic are unchanged. Finished EOF has no unattainable lead.
+More retained memory and possibly longer holds are unaccepted test tradeoffs.
+Actual-camera recovery regressions prove readiness and shown-owner retention,
+not a network-stutter fix. This candidate is not installed.
+
 The uninstalled `fix/processing-stall-buffering` candidate removes the admitted-
 input exemption from the missed-completed-picture decision. The existing
 one/two-interval deadline grace and completed-prefix catch-up exception remain;

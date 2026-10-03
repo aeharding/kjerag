@@ -129,6 +129,67 @@ preparation alone is not established as the cause of that recovery difference.
 Both whole-run cadence verdicts remain false, including frameless startup.
 The random network-stutter goal and owner branch acceptance remain open.
 
+The experimental `fix/completed-picture-recovery-runway` follow-up under #186
+starts from the current delivery source. Two bounded native diagnostics in the
+unchanged Flatpak graphics runtime split CPU submission from map completion.
+One reproduces five natural picture holds well after an intentional input
+interruption. Slow map transactions reach 91 and 83 ms, while all completion
+polls/checks account for about 6 and 5 ms respectively. This excludes a long CPU
+polling call for those samples, but does not identify a particular GPU kernel
+or scheduling cause. The old two-picture restart reserve is about 67 ms at
+30 fps. The candidate requires six completed successors after an actual hold,
+with a bounded nine-successor decoded horizon to supply temporal dependencies.
+Startup remains a two-picture gate, work admission remains four, source GPU
+lifetimes remain two, and temporal history/source cadence/arithmetic are
+unchanged. A strengthened real-X4 Scene recovery test fails before at only two
+completed successors and passes after; ONE X2 passes after too. Both after
+runs have no new kernel entries or memory-pressure averages. These native
+checks contain the unchanged parked colors and prove readiness, not clean SDK
+provenance or smooth network playback. More retained memory and potentially
+longer holds are unaccepted tradeoffs. The earlier removed
+three-picture prototype did not demonstrate a useful fix and is not acceptance
+of this larger candidate. It is not installed; controlled playback, package
+qualification and owner retest remain due. All 1,699 device-hidden workspace
+tests, 53 ignored, CPU gates and the native release build pass. A bounded
+old/new/old network-interruption comparison records respectively one initial
+extra hold, no extra holds, and three initial plus two post-restart extra holds.
+Every run has zero counted audio underruns and no new kernel entries or
+pressure averages. All restart about 0.76–0.80 seconds after input returns,
+estimated from adjacent presentation receipts; the deliberately unavailable
+input causes longer total holds. Map work varies substantially between runs,
+so absence of extra holds in the candidate is promising, not causal proof or
+owner acceptance. Its deduplicated GPU-allocation snapshot is about 2,004 MiB
+versus 1,669/1,738 MiB in the controls; these are not peak-memory measurements.
+The actual candidate output image is inspected. These native comparisons
+contain parked colors and do not replace clean SDK or owner testing.
+
+Clean SDK source `c524ad0e` is built, excluding parked colors, and draft
+[PR #254](https://github.com/aeharding/kjerag/pull/254) is stacked on #253.
+All eight runtime-source CI jobs pass. The package passes 49 X4 and 50 ONE X2
+functional UI checks, with the existing service/fixture and Rust-twin provenance
+limits. Both suites have no new kernel entries, memory-limit events or CPU
+throttling; actual pictures are inspected. Its bounded `_002` network outage
+run resumes once with no extra holds or counted audio underruns, even while
+two source-map transactions take 118 and 112 ms. It restarts about 0.66 seconds
+after input returns; the deliberately unavailable input makes the total hold
+about 5.07 seconds. The exact reported `_003` network view runs near source
+cadence without holds or counted underruns and without a delay hook. All exit
+normally with no new kernel entries. Outage pressure averages are zero except
+0.02 over 60 seconds; the natural run's averages are zero. The SDK allocation
+snapshot is about 2,016 MiB, not a peak-memory qualification. Full cadence,
+audible continuity, 240 capacity, owner tradeoff approval and branch retest
+remain open. Installed source `039c0a31` remains unchanged.
+
+Packaged ONE X2 ordinary playback at the reported riser view also maintains
+source cadence without holds or counted underruns, with no new kernel entries
+or pressure averages. A bounded network `_003` changing-view capacity check
+completes about 188 sourced redraws/s at 2256x1504 while advancing 30 consecutive
+camera sources/s, with no holds or counted underruns. Completion-spacing
+p99/max is about 22.92/33.65 ms. Cohort integrity passes, not the 240 target;
+the result remains below that target and is not physical-scanout proof. Its
+postflight has no new kernel entries or pressure averages; actual output is
+inspected. No further code or installed-package change is inferred from this.
+
 A separate unchanged installed network diagnostic clarifies the ordinary
 47–55 ms picture intervals above: despite advertising 60 Hz, the isolated
 headless compositor delivers callbacks at 61.921 Hz, median 16.045 ms. Two ticks

@@ -104,7 +104,10 @@ impl Scene {
                 return Ok(Next::Never);
             };
             let sources = std::iter::once(current.clone())
-                .chain((0..6).filter_map(|ahead| show.prepared_view(held, ahead)))
+                .chain(
+                    (0..FilteredCaptureFacade::PREPARED_SUCCESSORS)
+                        .filter_map(|ahead| show.prepared_view(held, ahead)),
+                )
                 .collect::<Vec<_>>();
             for source in &sources {
                 let accepted = capture.accepted_stamp()?;

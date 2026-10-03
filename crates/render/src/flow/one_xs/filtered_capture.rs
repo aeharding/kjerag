@@ -27,8 +27,11 @@ use crate::{Fallible, Reframe, Size};
 
 use super::temporal_worker::{TemporalEpoch, TemporalJob, TemporalWorker};
 
-const READY_CAPACITY: usize = 4;
-const SOURCE_CAPACITY: usize = READY_CAPACITY;
+// Output retention is separate from work admission and the seven-source
+// temporal law. Increasing the runway does not raise the work-admission bound.
+const READY_CAPACITY: usize = kjerag_media::Player::RECOVERY_SUCCESSORS;
+const SOURCE_CAPACITY: usize = 4;
+const STARTUP_OUTPUT_CAPACITY: usize = crate::temporal_fusion::stream::CENTER + 1;
 const FINISH_OUTPUT_CAPACITY: usize = 3;
 
 fn completed_prefix(readiness: impl IntoIterator<Item = Fallible<bool>>) -> Fallible<usize> {
@@ -158,6 +161,10 @@ pub(crate) struct FilteredCaptureFacade {
 
 impl FilteredCaptureFacade {
     pub(crate) const READY_CAPACITY: usize = READY_CAPACITY;
+    // A completed successor needs three real future sources. Merely increasing
+    // the restart lead without this horizon would make recovery unattainable.
+    pub(crate) const PREPARED_SUCCESSORS: usize =
+        READY_CAPACITY + crate::temporal_fusion::stream::CENTER;
 
     pub(crate) fn is_attached(&self) -> Fallible<bool> {
         let state = self.state()?;
@@ -1134,7 +1141,7 @@ fn reserve_source_permit(session: &FilteredSession) -> Fallible<Option<DrawPermi
 fn source_output_capacity(accepted_sources: usize) -> usize {
     match accepted_sources {
         0..=5 => 0,
-        6 => READY_CAPACITY,
+        6 => STARTUP_OUTPUT_CAPACITY,
         _ => 1,
     }
 }
@@ -1258,7 +1265,7 @@ mod stage_tests {
     #[test]
     fn recovery_lead_counts_only_the_completed_fifo_prefix() {
         use crate::gpu_completion::CompletionStatus;
-        let statuses: Vec<_> = (0..4)
+        let statuses: Vec<_> = (0..READY_CAPACITY)
             .map(|_| CompletionStatus::pending_for_test())
             .collect();
         let count = || completed_prefix(statuses.iter().map(CompletionStatus::ready)).unwrap();
@@ -1275,6 +1282,10 @@ mod stage_tests {
         assert_eq!(count(), 3);
         statuses[3].finish_for_test(Ok(()));
         assert_eq!(count(), 4);
+        for status in &statuses[4..] {
+            status.finish_for_test(Ok(()));
+        }
+        assert_eq!(count(), READY_CAPACITY);
     }
 
     #[test]
@@ -1311,7 +1322,7 @@ mod stage_tests {
                 output_capacity: 4,
             },
         ]);
-        assert_eq!(temporal_output_capacity(&pending), READY_CAPACITY);
+        assert_eq!(temporal_output_capacity(&pending), STARTUP_OUTPUT_CAPACITY);
     }
 
     #[test]
@@ -1321,7 +1332,7 @@ mod stage_tests {
             stamp: first,
             output_capacity: 1,
         }]);
-        let ready = 3;
+        let ready = READY_CAPACITY - 1;
         assert_eq!(ready + temporal_output_capacity(&pending), READY_CAPACITY);
         assert!(
             ready + temporal_output_capacity(&pending) + source_output_capacity(8) > READY_CAPACITY
@@ -1355,7 +1366,7 @@ mod stage_tests {
             });
         }
         assert_eq!(outstanding_source_count(&state), SOURCE_CAPACITY);
-        assert_eq!(reserved_output_capacity(&state), READY_CAPACITY);
+        assert_eq!(reserved_output_capacity(&state), SOURCE_CAPACITY);
         assert!(!source_admission_available(&state));
     }
 
@@ -1393,16 +1404,17 @@ mod stage_tests {
     }
 
     #[test]
-    fn queued_startup_output_reserves_the_whole_ready_fifo() {
+    fn queued_startup_output_preserves_its_four_picture_batch() {
         let mut state = State::new();
         state.accepted_sources = 7;
         state.stitch_pending.push_back(Pending::Source {
             stamp: stamp(6, None),
             previous: None,
-            output_capacity: READY_CAPACITY,
+            output_capacity: source_output_capacity(6),
         });
         assert_eq!(outstanding_source_count(&state), 1);
-        assert!(!source_admission_available(&state));
+        assert_eq!(reserved_output_capacity(&state), 4);
+        assert!(source_admission_available(&state));
     }
 
     #[test]

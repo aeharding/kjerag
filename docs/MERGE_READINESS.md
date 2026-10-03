@@ -57,6 +57,64 @@ Network receipts: `scratch/playback-independent-20260927/runtime/`, labels
 `view-preparation-baseline-moab002-outage-01` and
 `view-preparation-installed-moab003-natural-01`.
 
+### Uninstalled completed-picture recovery candidate
+
+Source `c524ad0e48e12922b11b4a6018135bf7201bb74b`, draft
+[PR #254](https://github.com/aeharding/kjerag/pull/254), waits for six completed
+successors after an actual buffering hold. Its bounded nine-successor decoded
+horizon supplies the three temporal futures. Startup/seek autoplay remains a
+two-picture gate, CPU work admission stays four, GPU source lifetimes stay two,
+and source cadence, history and stitching/color arithmetic are unchanged.
+
+- Candidate OSTree: `53263015fe291e43e401402250e664355118bd76a9c44d635845d3e30d0d96e7`.
+- Executable SHA256: `a39f4d521eec769ce9288e56c6fa3cac9a100df0ca90fdde9f9f49677a2cdd4b`.
+- Bundle SHA256: `d93449f18f670e6496f2bfb1852cf25d03ea12b7fe375f5a2c2cdf6f2475240d`.
+
+All eight runtime-source CI jobs pass, as do all 1,699 device-hidden workspace
+tests, 53 ignored, local CPU gates and the native release build. The real X4
+Scene recovery regression fails before at only two completed successors and
+passes after; ONE X2 also passes after. Existing missed-picture/shown-owner
+regressions pass. Native checks include parked colors; the SDK archive does not.
+The clean SDK package passes 49 X4 and 50 ONE X2 functional UI checks, with the
+existing service/fixture skips and native Rust-twin provenance limit. Both
+suites authenticate running candidate bytes, have no new kernel entries,
+memory-limit events or CPU throttling, and their actual output is inspected.
+
+The native old/new/old network comparison has respectively one, zero and five
+extra holds beyond its deliberately injected eight-second input outage.
+Processing times vary, so this alone does not isolate a causal improvement.
+The clean SDK outage run strengthens the evidence: it has one hold, no extra
+holds or counted audio underruns, despite consecutive 118/112 ms source-map
+transactions. It restarts about 0.66 seconds after input returns, estimated
+from adjacent presentation receipts. Total buffering lasts about 5.07 seconds
+because input was intentionally unavailable, not a zero-to-one-second total
+hold. Warm progression is near 30 source advances/s. The exact reported `_003`
+network clip/view also runs without a delay hook, buffer holds or counted
+underruns, with near-source-cadence warm progression. These runs exit normally
+without new kernel entries; the outage's 60-second pressure average is 0.02,
+the natural run's averages are zero. Actual pictures are inspected. Whole-run
+cadence integrity remains false; neither these receipts nor zero underrun
+counters prove audible continuity, physical scanout or universal smoothness.
+
+ONE X2 ordinary packaged playback at the reported 212.512-second riser view
+also maintains near-source-cadence progression with no holds, counted underruns,
+new kernel entries or pressure averages. The output image is inspected. A
+20-second changing-view capacity check on the network `_003` clip completes
+about 188 sourced redraws/s at 2256x1504, with 30 consecutive source advances/s,
+zero holds and counted underruns. Completion-spacing p99/max is about
+22.92/33.65 ms; no new kernel entries or pressure averages occur. Its strict
+cohort-integrity parser passes, which does not mean the 240-capacity target
+passes. It is below that target and does not establish physical scanout.
+
+Pending tradeoffs are about 266–348 MiB more GPU allocation in retained snapshots
+and potentially longer recovery holds while the runway fills. These are not
+peak-memory measurements. The owner has been asked; approval is not inferred
+from the question delivery receipt or earlier preparation-delay approval.
+The candidate is not installed. Owner branch retest, the 240-capacity target and
+broader network-stutter verification remain due. No merge, release, graphics
+runtime or system setting change. Receipts: `scratch/flatpak-delivery-c524ad0e/`
+and `scratch/playback-independent-20260927/runtime/completed-runway-*`.
+
 The dated private-package sections below are earlier delivery checkpoints,
 not the currently installed identity.
 

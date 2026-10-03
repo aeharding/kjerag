@@ -268,7 +268,9 @@ fn prepare_panorama_draw(
     if source.resident_frame() != *stamp {
         return Err("ONE X2 panorama import differs from its decoded source delivery".into());
     }
-    let ready = super::resident_worker::finish_pending(session, session.submit(source)?)?;
+    let pending = session.submit(source)?;
+    super::native_lifecycle_event("filtered-map-submitted", stamp, Some(started.elapsed()));
+    let ready = super::resident_worker::finish_pending(session, pending)?;
     super::native_lifecycle_event("filtered-map-valid", stamp, Some(started.elapsed()));
     if ready.frame() != stamp {
         return Err("ONE X2 panorama map differs from its decoded source delivery".into());

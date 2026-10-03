@@ -276,6 +276,11 @@ fn assert_buffering_retains_history(path: &Path) {
         first.same_decode_epoch(&complete),
         "buffering sought or restarted history"
     );
+    let runway = capture.ready_successors(&complete).unwrap();
+    assert!(
+        runway >= Player::RECOVERY_SUCCESSORS,
+        "buffering resumed with only {runway} completed successors, before the six-picture recovery runway"
+    );
     assert!(complete.timestamp() <= held);
     assert!(held < complete.timestamp() + scene.player(|p| p.timing().interval()).unwrap());
     assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
