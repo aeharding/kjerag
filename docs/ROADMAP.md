@@ -110,8 +110,24 @@ entries or memory-pressure averages. These native checks include the unchanged
 parked color variation and prove preparation order, not clean SDK provenance
 or a general hitch fix. The full bounded device-hidden workspace passes 1,699
 tests with 53 ignored; all CPU gates and the native release build pass.
-Clean package/player qualification is still due; the installed app remains
-`56232400`.
+All eight CI jobs pass on runtime source `039c0a31`; draft
+[#253](https://github.com/aeharding/kjerag/pull/253) is stacked on #252.
+The clean committed-color SDK package passes 49 X4 and 50 ONE X2 functional UI
+checks, with the existing service/fixture skips, authenticated executable
+identities, no new kernel entries, memory-limit events or CPU throttling.
+Actual output pictures are inspected. It is installed at OSTree `3f02b2bf26fe`,
+executable SHA `1abb8f35f623`, retaining working `56232400` for rollback without
+changing the shared graphics runtime, origin or permissions. The actual-installed
+original September 23 `_003` network/view check runs near source cadence with
+no buffer holds or counted audio underruns. These are scoped functional results,
+not audible-continuity, physical-scanout or 240-capacity qualification.
+A matching `_002` forced-input-interruption pair gives one hold in the candidate
+and five in the earlier installed control. The control's post-resume map work
+includes 53–80 ms wall-time samples, while the candidate's selected interval
+stays below 36 ms. Run-to-run input/GPU variation is not isolated: shader
+preparation alone is not established as the cause of that recovery difference.
+Both whole-run cadence verdicts remain false, including frameless startup.
+The random network-stutter goal and owner branch acceptance remain open.
 
 A separate unchanged installed network diagnostic clarifies the ordinary
 47–55 ms picture intervals above: despite advertising 60 Hz, the isolated

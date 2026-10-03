@@ -372,8 +372,10 @@ completed picture's draw preparation, after the common clock could start.
 The existing per-format cache and restart sharing remain unchanged; no source,
 map, color, buffer threshold or processing cadence changes. The real-Scene
 startup regression fails before this scheduling change on X4 and passes after
-it on X4 and ONE X2. This qualifies preparation order, not a measured general
-network-stutter fix; clean package/player timing qualification is still due.
+it on X4 and ONE X2. The clean SDK package from `039c0a31` passes both camera
+functional UI suites and is installed. Its original network-clip smoke check
+has no buffer holds or counted audio underruns. This qualifies preparation
+order and the named functional paths, not a general network-stutter fix.
 
 Coalesced progress notifications also cover startup operations that produce no
 temporal output, shared executor capacity across seek epochs, and ready-FIFO

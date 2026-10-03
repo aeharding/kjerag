@@ -13,6 +13,53 @@ with a [research navigation index](research/README.md). The shared playback
 slowdown, native/Flatpak differences and frame-time spikes are tracked in
 [issue #186](https://github.com/aeharding/kjerag/issues/186).
 
+## Current private test package, October 3
+
+Runtime source `039c0a317e76970c064a5afab977478ed5b01c75`, draft
+[PR #253](https://github.com/aeharding/kjerag/pull/253), is installed. It inherits
+the startup arithmetic fix in #252 and prepares the existing corrected-view
+pipelines before autoplay rather than during its first picture. No source,
+stitching/color arithmetic, cadence, history, buffer limits or restart thresholds
+change in #253. The working #252 package from source `56232400` is retained.
+
+- Installed OSTree: `3f02b2bf26fe81c499c17ba4c78c0a0d859cec7c00efc82b890a7363921c14c3`.
+- Executable SHA256: `1abb8f35f623e6a6d1b7eb8374486742ebd32ba39026d8b1270b5ebbf223d4c7`.
+- Bundle SHA256: `d7631cafe97ea150a997defb6cbbcaaf58ce3f9a9a09e172ae6c98f87d920682`.
+
+The clean SDK archive excludes both parked color edits. All eight runtime-head
+CI jobs pass; bounded device-hidden local gates pass 1,699 workspace tests with
+53 ignored, plus formatting, Clippy, vendor/source/name/startup/parser checks
+and a native release build. Native checks include parked colors and unavailable
+hardware paths, not clean-package GPU coverage. The real-Scene startup regression
+fails before and passes after on X4; its ONE X2 counterpart also passes.
+The clean package's functional app-path suites pass 49 X4 and 50 ONE X2 checks,
+with existing sound-device, portal, paired-fixture and exact-view skips.
+Candidate process bytes and actual output pictures are verified. Both suites
+have no new kernel entries, memory-limit events or CPU throttling.
+
+The packaged `_002` network interruption check has one hold, no initial
+processing holds or counted underruns, then near-source-cadence progression.
+The matching earlier installed control has five holds and slower post-resume
+map work. This pair does not isolate run-to-run network/GPU variation or prove
+that the startup change fixes random recovery stutters. Both whole-run cadence
+verdicts are false, including frameless startup. The actual-installed `_003`
+original clip/view smoke check has no buffer holds or counted underruns and
+near-source-cadence warm progression. Network checks exit normally with no new
+kernel entries; their pressure averages are zero. These receipts are not
+physical scanout, audible-continuity, universal smoothness or 240-capacity proof.
+
+Accepted tradeoffs remain the owner's initial-picture preparation wait and
+conditional common-clock buffering test from #250. No new quality tradeoff,
+Mesa rollback, shared runtime change, merge or release. Owner retest remains
+required. Package/UI receipts: `scratch/flatpak-delivery-039c0a31/`.
+Network receipts: `scratch/playback-independent-20260927/runtime/`, labels
+`view-preparation-package-moab002-outage-01`,
+`view-preparation-baseline-moab002-outage-01` and
+`view-preparation-installed-moab003-natural-01`.
+
+The dated private-package sections below are earlier delivery checkpoints,
+not the currently installed identity.
+
 ## Accepted native preview, September 30
 
 Draft PR [#240](https://github.com/aeharding/kjerag/pull/240) adds source-specific
@@ -54,10 +101,10 @@ The actual exported bundle passes a separate device-hidden private import:
 its commit, executable, metadata and license match the archived source/build.
 The local test bundle is unsigned, not a release-signature qualification.
 
-## Current transparent-pane private test package, October 1
+## Earlier transparent-pane private test package, October 1
 
 Source `6dbbf16bd4b3f971d0f6b8361b6e194f87752c2c`, draft
-[PR #242](https://github.com/aeharding/kjerag/pull/242), is installed. The owner
+[PR #242](https://github.com/aeharding/kjerag/pull/242), was installed. The owner
 clarified that opening should use the normal transparent/blurred COSMIC pane,
 not black followed by that pane and then video. The pending-open container now
 uses the same backdrop as playback. No loading logo/text, new readiness state,
