@@ -71,6 +71,35 @@ paths and are not release assets.
 
 ## Qualification summary
 
+Issue [#251](https://github.com/aeharding/kjerag/issues/251) covers the
+owner-confirmed startup arithmetic refusal on the current Flatpak graphics
+runtime. The exact failing Gaussian fixture word distinguishes one-rounding
+multiply-add from an unfused two-rounding result. WGSL permits the latter;
+our existing compiler fork now marks explicit SPIR-V Fma results with
+NoContraction rather than relaxing the exact startup guard. A CPU regression
+detects the previously missing precision decoration. The same focused
+front-end GPU qualification fails before and passes after the compiler edit
+on unchanged Flatpak Mesa 26.2.2, with no new kernel entries or memory pressure.
+The patch uses native GPU arithmetic, not software emulation. Source `56232400`
+passes 1,697 device-hidden workspace tests with 53 ignored, all local CPU gates,
+a native release build, and all eight CI jobs. The clean committed-color SDK
+package passes 49 X4 and 50 ONE X2 functional UI checks and is installed at
+OSTree `250b429d3e69`, executable SHA `973fae2d5337`. Real screenshots are
+inspected; no new kernel faults, scoped memory-limit events or CPU throttling
+occur in the camera suites. The original September 23 network clip passes
+startup with no counted audio underruns and near-source-cadence warm processing.
+The actual-installed finite input-interruption check also passes startup and
+resumes, without counted underruns. That unpaired run starts at a different
+time/view from the earlier control and records three additional processing
+holds just after its initial seek. A separate ordinary network control still
+has roughly 47–55 ms completed-picture intervals. Neither its averages nor the
+completed-render receipts establish physical scanout, audible continuity,
+universal smoothness or the 240-capacity target. Owner branch retest and the
+broader network-stutter requirements remain outstanding. No shared runtime
+downgrade, merge or release. Draft [#252](https://github.com/aeharding/kjerag/pull/252)
+is stacked on the approved conditional-pause test in #250; the compiler patch
+is an owner-fork-only draft PR, with no upstream interaction.
+
 Issue [#229](https://github.com/aeharding/kjerag/issues/229) covers a malformed
 saved volume reaching the audio callback. An isolated real COSMIC/RON config
 test confirms that `NaN` is admitted, and a failing-before public Pipe test
@@ -1283,9 +1312,10 @@ so rollback does not establish working playback. Flatpak history shows a
 concurrent Mesa 26.2.2 update immediately before candidate installation;
 earlier passing tests preceded it. That is compatibility evidence, not yet
 a completed runtime-cause isolation. No arithmetic guard is bypassed and no
-shared runtime is changed. A shared graphics rollback affects other Flatpak
-apps and needs explicit authority. Owner branch retest and the broader random
-stutter requirement remain outstanding. No merge or release.
+shared runtime is changed. The owner rejects shared graphics rollback;
+the in-app compiler precision fix is tracked separately in #251 above.
+Owner branch retest and the broader random stutter requirement remain
+outstanding. No merge or release.
 
 The owner reports stuttering across network footage, including spontaneous
 onset at 23.190 seconds in the September 23 `_003` clip. A natural installed

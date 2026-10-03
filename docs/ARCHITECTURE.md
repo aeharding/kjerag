@@ -633,9 +633,22 @@ horizontal scratch word 41 is `0x43618a56`, expected `0x43618a57`.
 The prior `5e385619` package is restored and refuses identically, before any
 buffering or playback. Flatpak history records a concurrent Mesa 26.2.2 update
 immediately before installation. This is not a candidate-specific failure or
-a completed runtime-cause isolation. The shared graphics runtime is unchanged
-by our recovery actions; changing it affects other Flatpak apps and needs
-explicit permission. Owner branch retest and broader playback qualification
+a completed runtime-cause isolation. The owner rejects a shared graphics
+rollback. Issue #251 fixes the precision requirement inside our existing
+compiler fork instead: SPIR-V Fma results carry NoContraction, so the driver
+cannot split an explicit multiply-add into two rounding steps. A CPU regression
+distinguishes the exact reported fused/unfused bits and a compiler regression
+checks the emitted precision decoration. The unchanged Flatpak Mesa 26.2.2
+front-end qualification fails before this patch and passes after it with the
+original exact guard intact. Committed source `56232400` then passes both camera
+functional SDK UI suites and is installed without changing the shared graphics
+runtime. Actual-installed X4 network playback passes startup and resumes after
+the finite input-interruption test with no counted audio underruns. The run
+also records three processing holds in the first second after the initial seek.
+Ordinary completed-picture intervals still reach roughly 47–55 ms in a separate
+network control; these are completion receipts, not physical scanout evidence.
+The startup refusal is removed on the tested paths, but general smoothness,
+audible continuity, owner branch acceptance and broader playback qualification
 remain due.
 Consumed PCM history supports restart without manufacturing samples or changing
 ordinary drift correction. This is not a normal-playback clock adjustment or a
