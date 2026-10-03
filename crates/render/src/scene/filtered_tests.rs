@@ -11,6 +11,48 @@ use std::io::Write;
 const DEADLINE: Duration = Duration::from_secs(60);
 
 #[test]
+fn x4_filtered_view_pipeline_is_prepared_before_autoplay() {
+    let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
+        return;
+    };
+    assert_view_pipeline_prepared_before_autoplay(Path::new(&path));
+}
+
+#[test]
+fn one_x2_filtered_view_pipeline_is_prepared_before_autoplay() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    assert_view_pipeline_prepared_before_autoplay(Path::new(&path));
+}
+
+fn assert_view_pipeline_prepared_before_autoplay(path: &Path) {
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let scene = Scene::open(path).unwrap();
+    let first = super::tests::wait_for_new_scene_frame(&scene, None);
+    let camera = Camera::default();
+    // Exercise a window format, not the RGBA panorama intermediate.
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let mut pipeline = ScenePipeline::new(&device, &queue, format);
+    let primitive = scene.primitive(camera);
+    let capture = primitive.filtered_capture.clone().unwrap();
+    assert!(!capture.is_attached().unwrap());
+    assert_eq!(scene.player(Player::is_playing), Some(false));
+    let held = scene.position(Instant::now());
+    pipeline.prepare(&primitive, &device, &queue, 16.0 / 9.0);
+    assert!(capture.is_attached().unwrap());
+    assert!(
+        capture.view_pipeline_prepared_for_test(format),
+        "first corrected-view compilation must precede autoplay, not its first moving draw"
+    );
+    assert_eq!(scene.player(Player::is_playing), Some(false));
+    assert_eq!(scene.position(Instant::now()), held);
+    assert_eq!(scene.frame_stamp().as_ref(), Some(&first));
+    assert!(scene.displayed_frame_stamp().is_none());
+    assert!(capture.accepted_stamp().unwrap().is_none());
+}
+
+#[test]
 fn x4_filtered_buffering_holds_time_and_retains_source_history() {
     let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
         return;

@@ -100,6 +100,30 @@ downgrade, merge or release. Draft [#252](https://github.com/aeharding/kjerag/pu
 is stacked on the approved conditional-pause test in #250; the compiler patch
 is an owner-fork-only draft PR, with no upstream interaction.
 
+The `fix/filtered-view-startup-preparation` follow-up under issue #186 moves
+existing corrected-view shader/pipeline construction from the first completed
+picture's draw to initial renderer attachment while autoplay remains held.
+It uses the actual window format and the existing immutable pipeline cache.
+A bounded real-X4 regression fails before this change and passes after it;
+the corresponding ONE X2 check also passes. Both after runs have no new kernel
+entries or memory-pressure averages. These native checks include the unchanged
+parked color variation and prove preparation order, not clean SDK provenance
+or a general hitch fix. The full bounded device-hidden workspace passes 1,699
+tests with 53 ignored; all CPU gates and the native release build pass.
+Clean package/player qualification is still due; the installed app remains
+`56232400`.
+
+A separate unchanged installed network diagnostic clarifies the ordinary
+47–55 ms picture intervals above: despite advertising 60 Hz, the isolated
+headless compositor delivers callbacks at 61.921 Hz, median 16.045 ms. Two ticks
+are about 32 ms and three about 48 ms, so 29.97 fps video needs occasional longer
+dwells. This protocol trace has no presentation-feedback requests; concurrent
+debug output corrupts one completion JSON record and the cadence parser fails.
+It is not physical-scanout or smoothness qualification. The genuine initial
+processing stalls, random network-stutter report, audible continuity and
+capacity requirements remain open; no thresholds or source cadence are changed
+to make the headless statistics look regular.
+
 Issue [#229](https://github.com/aeharding/kjerag/issues/229) covers a malformed
 saved volume reaching the audio callback. An isolated real COSMIC/RON config
 test confirms that `NaN` is admitted, and a failing-before public Pipe test

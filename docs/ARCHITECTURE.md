@@ -365,6 +365,16 @@ resident result is installed and acknowledged. Pausing during startup cancels
 autoplay intent. EOF waits for admitted real inputs to drain before flushing
 the temporal tail.
 
+The filtered renderer also prepares its immutable corrected-view pipelines for
+the window's actual target format at initial attachment, before source progress
+can release autoplay. Previously this construction was lazy in the first
+completed picture's draw preparation, after the common clock could start.
+The existing per-format cache and restart sharing remain unchanged; no source,
+map, color, buffer threshold or processing cadence changes. The real-Scene
+startup regression fails before this scheduling change on X4 and passes after
+it on X4 and ONE X2. This qualifies preparation order, not a measured general
+network-stutter fix; clean package/player timing qualification is still due.
+
 Coalesced progress notifications also cover startup operations that produce no
 temporal output, shared executor capacity across seek epochs, and ready-FIFO
 space released by logical installation. A preparation-specific decoder wait
@@ -647,6 +657,14 @@ the finite input-interruption test with no counted audio underruns. The run
 also records three processing holds in the first second after the initial seek.
 Ordinary completed-picture intervals still reach roughly 47–55 ms in a separate
 network control; these are completion receipts, not physical scanout evidence.
+An unchanged installed protocol diagnostic finds that the nominal 60 Hz headless
+output actually delivers approximately 62 Hz callbacks, consistent with the
+integer-millisecond wlroots 0.17 timer. Ordinary 29.97 fps video necessarily mixes
+two- and three-tick dwells on that cadence. The diagnostic has no presentation
+feedback requests and its concurrent tracing corrupts a native-completion JSON
+record, so the cadence parser rejects it. It is not a smoothness pass or a
+reason to dismiss the owner's real stalls. Nominal headless refresh must not be
+treated as exact physical refresh when interpreting picture dwell.
 The startup refusal is removed on the tested paths, but general smoothness,
 audible continuity, owner branch acceptance and broader playback qualification
 remain due.

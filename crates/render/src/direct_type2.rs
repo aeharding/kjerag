@@ -680,6 +680,18 @@ impl DirectType2Pipeline {
         Ok(pipeline)
     }
 
+    #[cfg(test)]
+    pub(crate) fn correction_pipeline_prepared_for_test(
+        &self,
+        format: wgpu::TextureFormat,
+    ) -> bool {
+        self.correction_pipelines
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(cached, _)| *cached == format)
+    }
+
     fn compact_nv12(&self) -> &panorama::nv12::Producer {
         self.compact_nv12.get_or_init(|| {
             panorama::nv12::Producer::new(&self.device, self)

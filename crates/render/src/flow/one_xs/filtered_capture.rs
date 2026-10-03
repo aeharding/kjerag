@@ -165,6 +165,17 @@ impl FilteredCaptureFacade {
         Ok(state.session.is_some())
     }
 
+    /// Compile the immutable window pipeline while autoplay is still held.
+    /// The target format differs from the intermediate panorama format.
+    pub(crate) fn prepare_view_pipeline(&self, format: wgpu::TextureFormat) -> Fallible<()> {
+        let session = self.attached_session()?;
+        session
+            .resident
+            .direct
+            .correction_pipeline(session.resident.context.device(), format)?;
+        Ok(())
+    }
+
     pub(crate) fn set_progress_wake(&self, wake: &ReadyWake) -> Fallible<()> {
         let session = {
             let mut state = self.state()?;
@@ -606,6 +617,15 @@ impl FilteredCaptureFacade {
             .resident
             .worker
             .pause_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn view_pipeline_prepared_for_test(&self, format: wgpu::TextureFormat) -> bool {
+        self.attached_session()
+            .unwrap()
+            .resident
+            .direct
+            .correction_pipeline_prepared_for_test(format)
     }
 
     #[cfg(test)]

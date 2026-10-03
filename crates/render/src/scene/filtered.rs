@@ -209,6 +209,9 @@ impl ScenePipeline {
             capture.set_progress_wake(&primitive.ready_wake)?;
             if !capture.is_attached()? {
                 capture.attach(self.one_xs_gpu.clone())?;
+                // The first completed picture may start the audio clock before
+                // another redraw. Do not leave shader compilation to that draw.
+                capture.prepare_view_pipeline(self.format)?;
                 primitive.ready_wake.notify();
             }
         }
