@@ -42,8 +42,8 @@ const DECODED_AHEAD: usize = 2;
 
 /// Largest explicitly prepared source horizon. This is separate from the
 /// ordinary two-picture presentation lookahead: a causal consumer may need
-/// six decoded successors while the presentation clock remains stopped.
-const PREPARED_AHEAD_MAX: usize = 6;
+/// nine decoded successors while the presentation clock remains stopped.
+const PREPARED_AHEAD_MAX: usize = 9;
 
 /// Frames each lane decodes past a surface before it is mapped
 /// ([`Reader::lookahead`]). Measured: 2.19x realtime at 0, 2.46x at 2, and
@@ -345,6 +345,11 @@ impl Epochs {
 }
 
 impl Player {
+    /// Completed successors required only after a real buffering hold. Keep
+    /// enough processed runway for short completion bursts without repeatedly
+    /// restarting picture and sound. Startup still uses its smaller lead.
+    pub const RECOVERY_SUCCESSORS: usize = 6;
+
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn controlled_for_test(timing: Timing, size: Size) -> (Self, TestDecoder) {
@@ -723,9 +728,8 @@ impl Player {
     /// This leaves play intent, every source queue and estimator history intact.
     /// A missed completed-picture interval, or missing sound, triggers the hold.
     /// Queued inputs cannot keep sound running past an unfinished picture.
-    /// Restart needs two completed
-    /// pictures, sound, and a recovery-only compressed-input lead, without
-    /// increasing decoded/GPU retention. The finished tail needs no lead.
+    /// Restart needs the completed recovery runway, sound, and a recovery-only
+    /// compressed-input lead. The finished tail needs no unattainable lead.
     pub fn coordinate_buffering(
         &mut self,
         now: Instant,
@@ -764,7 +768,10 @@ impl Player {
                     input_ready &= input.buffered_or_wait(position + REFILL_LEAD, wake.clone())?;
                 }
             }
-            if covers_position && (finished || ready_successors >= 2) && audio_ready && input_ready
+            if covers_position
+                && (finished || ready_successors >= Self::RECOVERY_SUCCESSORS)
+                && audio_ready
+                && input_ready
             {
                 for input in &self.read_ahead {
                     input.cancel();
@@ -805,7 +812,7 @@ impl Player {
     }
 
     /// Startup/seek autoplay preparation, before the common clock starts.
-    /// Keep the same completed-picture and sound lead, and prime the existing
+    /// Keep the smaller two-picture and sound lead, and prime the existing
     /// bounded compressed reserve rather than starting on an empty input queue.
     /// A finished tail needs no unattainable reserve. Explicit paused landings
     /// do not use this autoplay gate.
@@ -1730,11 +1737,18 @@ mod tests {
         let wake = Arc::new(WakeCount::default());
         bench
             .player
-            .coordinate_buffering(late, true, 2, true, false, Waker::from(wake.clone()))
+            .coordinate_buffering(
+                late,
+                true,
+                Player::RECOVERY_SUCCESSORS,
+                true,
+                false,
+                Waker::from(wake.clone()),
+            )
             .unwrap();
         assert!(
             bench.player.is_buffering(),
-            "two GPU pictures must not resume short input again"
+            "completed pictures must not resume short input again"
         );
         let held = bench.player.position(late);
         release.send(()).unwrap();
@@ -1748,7 +1762,14 @@ mod tests {
         while bench.player.is_buffering() {
             bench
                 .player
-                .coordinate_buffering(late, true, 2, true, false, Waker::from(wake.clone()))
+                .coordinate_buffering(
+                    late,
+                    true,
+                    Player::RECOVERY_SUCCESSORS,
+                    true,
+                    false,
+                    Waker::from(wake.clone()),
+                )
                 .unwrap();
             assert!(Instant::now() < deadline);
             thread::yield_now();
@@ -2041,17 +2062,27 @@ mod tests {
             "catch-up cannot claim a different PTS"
         );
         assert!(!bench.player.buffered_frame_due());
+        for successors in 0..Player::RECOVERY_SUCCESSORS {
+            bench
+                .player
+                .coordinate_buffering(later, true, successors, true, false, Waker::noop().clone())
+                .unwrap();
+            assert!(
+                bench.player.is_buffering(),
+                "{successors} successors restarted before the completed recovery runway"
+            );
+            assert_eq!(bench.player.position(later), held);
+        }
         bench
             .player
-            .coordinate_buffering(later, true, 1, true, false, Waker::noop().clone())
-            .unwrap();
-        assert!(
-            bench.player.is_buffering(),
-            "one successor is not the chosen refill lead"
-        );
-        bench
-            .player
-            .coordinate_buffering(later, true, 2, true, false, Waker::noop().clone())
+            .coordinate_buffering(
+                later,
+                true,
+                Player::RECOVERY_SUCCESSORS,
+                true,
+                false,
+                Waker::noop().clone(),
+            )
             .unwrap();
         assert!(!bench.player.is_buffering());
         assert_eq!(bench.player.position(later), held);
@@ -2123,7 +2154,7 @@ mod tests {
     }
 
     #[test]
-    fn buffering_finishes_a_short_tail_without_two_successors() {
+    fn buffering_finishes_a_short_tail_without_a_recovery_runway() {
         let mut bench = Bench::new();
         assert!(
             bench
@@ -2173,7 +2204,14 @@ mod tests {
         let position = bench.player.position(start);
         bench
             .player
-            .coordinate_buffering(start, true, 2, false, false, Waker::noop().clone())
+            .coordinate_buffering(
+                start,
+                true,
+                Player::RECOVERY_SUCCESSORS,
+                false,
+                false,
+                Waker::noop().clone(),
+            )
             .unwrap();
         assert!(
             bench.player.is_buffering(),
@@ -2187,7 +2225,14 @@ mod tests {
         let later = start + Duration::from_secs(10);
         bench
             .player
-            .coordinate_buffering(later, true, 2, false, false, Waker::noop().clone())
+            .coordinate_buffering(
+                later,
+                true,
+                Player::RECOVERY_SUCCESSORS,
+                false,
+                false,
+                Waker::noop().clone(),
+            )
             .unwrap();
         assert!(!bench.player.is_buffering());
         assert_eq!(bench.player.position(later), position);
@@ -3370,7 +3415,7 @@ mod tests {
         let now = Instant::now();
         bench.decoded(0, 0);
         assert_eq!(bench.redraw(now), Some(0));
-        for index in 1..=6 {
+        for index in 1..=9 {
             bench.decoded(0, index);
         }
 
@@ -3380,9 +3425,18 @@ mod tests {
         assert_eq!(bench.player.prepare_ahead(3).unwrap(), 3);
         assert_eq!(bench.player.prepare_ahead(6).unwrap(), 6);
         assert_eq!(bench.player.prepare_ahead(3).unwrap(), 3);
-        assert!(bench.player.prepare_ahead(7).is_err());
-        assert!(bench.player.prepared_ahead(6).is_none());
-        assert_eq!(bench.player.presenter.peeked.len(), 6);
+        assert_eq!(bench.player.prepare_ahead(9).unwrap(), 9);
+        assert_eq!(
+            (0..9)
+                .map(|at| bench.player.prepared_ahead(at).unwrap().index)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        );
+        assert!(bench.player.prepare_ahead(10).is_err());
+        assert!(bench.player.prepared_ahead(9).is_none());
+        assert_eq!(bench.player.presenter.peeked.len(), 9);
+        assert_eq!(bench.player.index(), Some(0));
+        assert!(!bench.player.is_playing());
     }
 
     #[test]
