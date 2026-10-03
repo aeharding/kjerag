@@ -15,8 +15,37 @@ slowdown, native/Flatpak differences and frame-time spikes are tracked in
 
 ## Current private test package, October 3
 
+Runtime source `c524ad0e48e12922b11b4a6018135bf7201bb74b`, draft
+[PR #254](https://github.com/aeharding/kjerag/pull/254), is installed for the
+owner's network-playback retest. It inherits #252's arithmetic fix and #253's
+startup pipeline preparation, then waits for six completed successor pictures
+after an actual buffering hold. The owner explicitly accepts roughly 300 MiB
+extra GPU allocation and potentially longer recovery holds for this test.
+This is tradeoff/installation approval, not acceptance of the playback result.
+The working `039c0a31` package is retained for rollback.
+
+- Installed OSTree: `53263015fe291e43e401402250e664355118bd76a9c44d635845d3e30d0d96e7`.
+- Executable SHA256: `a39f4d521eec769ce9288e56c6fa3cac9a100df0ca90fdde9f9f49677a2cdd4b`.
+- Bundle SHA256: `d93449f18f670e6496f2bfb1852cf25d03ea12b7fe375f5a2c2cdf6f2475240d`.
+
+Installation authenticates the actual executable, commit, origin and permissions;
+shared graphics/runtime refs remain unchanged. A bounded actual-installed check
+uses the reported September 23 `_003` network view and a finite eight-second
+input interruption. It resumes after that interruption, with zero counted audio
+underruns, but also records a later approximately one-second picture-buffering
+hold. Both holds resume; warm source progression returns near 30 advances/s.
+The run exits normally with no new kernel entries or memory-pressure averages.
+Its output image is inspected. Whole-run cadence integrity remains false;
+this is not audible-continuity, physical-scanout, 240-capacity or general
+network-stutter qualification. Owner field retest and the broader goal remain
+open. No merge or release. Actual-installed receipt:
+`runtime/completed-runway-installed-moab003-outage-01` under the evidence root
+`scratch/playback-independent-20260927/`.
+
+### Earlier startup-preparation checkpoint
+
 Runtime source `039c0a317e76970c064a5afab977478ed5b01c75`, draft
-[PR #253](https://github.com/aeharding/kjerag/pull/253), is installed. It inherits
+[PR #253](https://github.com/aeharding/kjerag/pull/253), was installed. It inherits
 the startup arithmetic fix in #252 and prepares the existing corrected-view
 pipelines before autoplay rather than during its first picture. No source,
 stitching/color arithmetic, cadence, history, buffer limits or restart thresholds
@@ -57,7 +86,7 @@ Network receipts: `scratch/playback-independent-20260927/runtime/`, labels
 `view-preparation-baseline-moab002-outage-01` and
 `view-preparation-installed-moab003-natural-01`.
 
-### Uninstalled completed-picture recovery candidate
+### Completed-picture recovery qualification
 
 Source `c524ad0e48e12922b11b4a6018135bf7201bb74b`, draft
 [PR #254](https://github.com/aeharding/kjerag/pull/254), waits for six completed
@@ -66,7 +95,7 @@ horizon supplies the three temporal futures. Startup/seek autoplay remains a
 two-picture gate, CPU work admission stays four, GPU source lifetimes stay two,
 and source cadence, history and stitching/color arithmetic are unchanged.
 
-- Candidate OSTree: `53263015fe291e43e401402250e664355118bd76a9c44d635845d3e30d0d96e7`.
+- Installed OSTree: `53263015fe291e43e401402250e664355118bd76a9c44d635845d3e30d0d96e7`.
 - Executable SHA256: `a39f4d521eec769ce9288e56c6fa3cac9a100df0ca90fdde9f9f49677a2cdd4b`.
 - Bundle SHA256: `d93449f18f670e6496f2bfb1852cf25d03ea12b7fe375f5a2c2cdf6f2475240d`.
 
@@ -106,12 +135,12 @@ zero holds and counted underruns. Completion-spacing p99/max is about
 cohort-integrity parser passes, which does not mean the 240-capacity target
 passes. It is below that target and does not establish physical scanout.
 
-Pending tradeoffs are about 266–348 MiB more GPU allocation in retained snapshots
-and potentially longer recovery holds while the runway fills. These are not
-peak-memory measurements. The owner has been asked; approval is not inferred
-from the question delivery receipt or earlier preparation-delay approval.
-The candidate is not installed. Owner branch retest, the 240-capacity target and
-broader network-stutter verification remain due. No merge, release, graphics
+Accepted test tradeoffs are about 266–348 MiB more GPU allocation in retained
+snapshots and potentially longer recovery holds while the runway fills. These are not
+peak-memory measurements. The owner's October 3 "sure" explicitly approves
+installation with those disclosed tradeoffs; playback-result acceptance is
+not inferred. The candidate is installed. Owner branch retest, the 240-capacity
+target and broader network-stutter verification remain due. No merge, release, graphics
 runtime or system setting change. Receipts: `scratch/flatpak-delivery-c524ad0e/`
 and `scratch/playback-independent-20260927/runtime/completed-runway-*`.
 

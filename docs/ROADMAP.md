@@ -115,7 +115,7 @@ All eight CI jobs pass on runtime source `039c0a31`; draft
 The clean committed-color SDK package passes 49 X4 and 50 ONE X2 functional UI
 checks, with the existing service/fixture skips, authenticated executable
 identities, no new kernel entries, memory-limit events or CPU throttling.
-Actual output pictures are inspected. It is installed at OSTree `3f02b2bf26fe`,
+Actual output pictures are inspected. It was installed at OSTree `3f02b2bf26fe`,
 executable SHA `1abb8f35f623`, retaining working `56232400` for rollback without
 changing the shared graphics runtime, origin or permissions. The actual-installed
 original September 23 `_003` network/view check runs near source cadence with
@@ -146,11 +146,12 @@ completed successors and passes after; ONE X2 passes after too. Both after
 runs have no new kernel entries or memory-pressure averages. These native
 checks contain the unchanged parked colors and prove readiness, not clean SDK
 provenance or smooth network playback. More retained memory and potentially
-longer holds are unaccepted tradeoffs. The earlier removed
+longer holds were initially unaccepted tradeoffs. The earlier removed
 three-picture prototype did not demonstrate a useful fix and is not acceptance
-of this larger candidate. It is not installed; controlled playback, package
-qualification and owner retest remain due. All 1,699 device-hidden workspace
-tests, 53 ignored, CPU gates and the native release build pass. A bounded
+of this larger candidate. At that native checkpoint it was not installed;
+clean package qualification follows below and owner retest remains due.
+All 1,699 device-hidden workspace tests, 53 ignored, CPU gates and the native
+release build pass. A bounded
 old/new/old network-interruption comparison records respectively one initial
 extra hold, no extra holds, and three initial plus two post-restart extra holds.
 Every run has zero counted audio underruns and no new kernel entries or
@@ -177,8 +178,24 @@ cadence without holds or counted underruns and without a delay hook. All exit
 normally with no new kernel entries. Outage pressure averages are zero except
 0.02 over 60 seconds; the natural run's averages are zero. The SDK allocation
 snapshot is about 2,016 MiB, not a peak-memory qualification. Full cadence,
-audible continuity, 240 capacity, owner tradeoff approval and branch retest
-remain open. Installed source `039c0a31` remains unchanged.
+audible continuity, 240 capacity and branch retest remain open. The owner then
+explicitly approves installing this test with roughly 300 MiB extra GPU
+allocation and potentially longer buffering holds. Source `c524ad0e` is installed
+at OSTree `53263015fe29`, executable SHA `a39f4d521eec`; the working `039c0a31`
+package is retained for rollback. Origin, permissions and shared runtime refs
+remain unchanged. This is approval of the test tradeoff, not of its playback.
+
+One bounded actual-installed check uses the exact September 23 `_003` network
+view and the existing finite eight-second input interruption. It resumes after
+the interruption with zero counted audio underruns, but also has a later
+approximately one-second processing hold. Both holds resume; warm source
+progression returns near 30 advances/s. Normal exit, actual executable identity,
+output pixels and postflight with no new kernel entries or pressure averages
+are verified. Whole-run cadence integrity remains false; no audible-continuity,
+physical-scanout, universal network-stutter or 240-capacity verdict is inferred.
+The installed build is ready for the owner's ordinary network-playback retest.
+No merge or release. Receipt: `runtime/completed-runway-installed-moab003-outage-01`
+under `scratch/playback-independent-20260927/`.
 
 Packaged ONE X2 ordinary playback at the reported riser view also maintains
 source cadence without holds or counted underruns, with no new kernel entries

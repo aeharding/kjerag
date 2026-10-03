@@ -345,10 +345,11 @@ lands, a renderer retries, or an older epoch drains.
 The filtered route admits at most four CPU source jobs within an epoch, keeps
 at most two source GPU lifetimes in flight, and
 reserves up to six ready corrected frames plus one installed frame in the
-experimental completed-runway branch. Player may prepare nine real successors,
-including while paused for startup or seek. Installed source `039c0a31` still
-uses four ready outputs and six prepared successors; the larger retention is
-not qualified or accepted for installation.
+installed completed-runway test source `c524ad0e`. Player may prepare nine real
+successors, including while paused for startup or seek. The preceding retained
+source `039c0a31` uses four ready outputs and six prepared successors. The owner
+accepts the larger retention and potentially longer holds for testing, not a
+general playback or memory-peak qualification.
 One temporal executor and its capacity-one channel are shared across restarts;
 seeking does not create another worker thread. Superseded epochs cancel and
 release unpublished history when their executing work permits, while the old
@@ -376,8 +377,9 @@ The existing per-format cache and restart sharing remain unchanged; no source,
 map, color, buffer threshold or processing cadence changes. The real-Scene
 startup regression fails before this scheduling change on X4 and passes after
 it on X4 and ONE X2. The clean SDK package from `039c0a31` passes both camera
-functional UI suites and is installed. Its original network-clip smoke check
-has no buffer holds or counted audio underruns. This qualifies preparation
+functional UI suites and was installed. It is now retained for rollback. Its
+original network-clip smoke check has no buffer holds or counted audio underruns.
+This qualifies preparation
 order and the named functional paths, not a general network-stutter fix.
 
 Coalesced progress notifications also cover startup operations that produce no
@@ -637,9 +639,11 @@ dependencies; the ready-output reservation is six. CPU work admission remains
 four and source GPU lifetimes remain two. The first seven sources still produce
 the same four startup outputs, and source ordering, estimator history and
 picture arithmetic are unchanged. Finished EOF has no unattainable lead.
-More retained memory and possibly longer holds are unaccepted test tradeoffs.
+The owner accepts more retained memory and possibly longer holds for this test.
 Actual-camera recovery regressions prove readiness and shown-owner retention,
-not a network-stutter fix. This candidate is not installed.
+not a network-stutter fix. The clean SDK source `c524ad0e` is installed; its
+original network-view interruption check also records a later processing hold.
+Owner field retest and broader smoothness qualification remain due.
 
 The uninstalled `fix/processing-stall-buffering` candidate removes the admitted-
 input exemption from the missed-completed-picture decision. The existing
