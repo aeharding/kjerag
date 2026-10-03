@@ -163,6 +163,33 @@ versus 1,669/1,738 MiB in the controls; these are not peak-memory measurements.
 The actual candidate output image is inspected. These native comparisons
 contain parked colors and do not replace clean SDK or owner testing.
 
+Clean SDK source `c524ad0e` is built, excluding parked colors, and draft
+[PR #254](https://github.com/aeharding/kjerag/pull/254) is stacked on #253.
+All eight runtime-source CI jobs pass. The package passes 49 X4 and 50 ONE X2
+functional UI checks, with the existing service/fixture and Rust-twin provenance
+limits. Both suites have no new kernel entries, memory-limit events or CPU
+throttling; actual pictures are inspected. Its bounded `_002` network outage
+run resumes once with no extra holds or counted audio underruns, even while
+two source-map transactions take 118 and 112 ms. It restarts about 0.66 seconds
+after input returns; the deliberately unavailable input makes the total hold
+about 5.07 seconds. The exact reported `_003` network view runs near source
+cadence without holds or counted underruns and without a delay hook. All exit
+normally with no new kernel entries. Outage pressure averages are zero except
+0.02 over 60 seconds; the natural run's averages are zero. The SDK allocation
+snapshot is about 2,016 MiB, not a peak-memory qualification. Full cadence,
+audible continuity, 240 capacity, owner tradeoff approval and branch retest
+remain open. Installed source `039c0a31` remains unchanged.
+
+Packaged ONE X2 ordinary playback at the reported riser view also maintains
+source cadence without holds or counted underruns, with no new kernel entries
+or pressure averages. A bounded network `_003` changing-view capacity check
+completes about 188 sourced redraws/s at 2256x1504 while advancing 30 consecutive
+camera sources/s, with no holds or counted underruns. Completion-spacing
+p99/max is about 22.92/33.65 ms. Cohort integrity passes, not the 240 target;
+the result remains below that target and is not physical-scanout proof. Its
+postflight has no new kernel entries or pressure averages; actual output is
+inspected. No further code or installed-package change is inferred from this.
+
 A separate unchanged installed network diagnostic clarifies the ordinary
 47–55 ms picture intervals above: despite advertising 60 Hz, the isolated
 headless compositor delivers callbacks at 61.921 Hz, median 16.045 ms. Two ticks
