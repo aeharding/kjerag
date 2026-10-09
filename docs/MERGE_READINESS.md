@@ -1,9 +1,9 @@
 # GPU stitching delivery: merge and release review
 
-Published-release checkpoint: 2026-09-12. PR #183 is merged and 0.3.0 is published.
-Packaging-only PR #188 is also merged; 0.3.1 is published.
-Release qualification remains open because high-rate X4 playback falls behind
-in both the release and a restored accepted-build control. This page
+Published-release checkpoint: 2026-10-09. Cumulative playback PR #254 is merged
+and 0.3.2 is published and installed. Earlier releases 0.3.0 and 0.3.1 remain
+historical checkpoints below. Performance qualification remains open because
+the current scoped capacity result is below 240 and network holds remain. This page
 records the cumulative delivery without requiring reviewers to reconstruct
 the chronological experiment log in ROADMAP.
 
@@ -12,6 +12,59 @@ is now separated from its verbatim [historical record](ROADMAP-HISTORY-20260912.
 with a [research navigation index](research/README.md). The shared playback
 slowdown, native/Flatpak differences and frame-time spikes are tracked in
 [issue #186](https://github.com/aeharding/kjerag/issues/186).
+
+## Signed 0.3.2 delivery, October 9
+
+The owner authorized merging #254 and publishing 0.3.2. Exact checked head
+`9d1cc710` passes both eight-job CI executions; merged main `efdd18a9` has its
+identical tree and green post-merge CI. Clean release source
+`08f0246aaf13b9f11a6f5d13859d42a29e95d376` changes only version metadata after
+native X4/ONE X2 release hooks pass 60/64 checks. Runtime sources are unchanged
+from the accepted `c524ad0e`; neither parked color edit enters the archive.
+
+Release run `37941712593` passes both signed native builds, eight CI gates and
+assembly/sealing, then fails because GitHub drops the public-key job output.
+The local publisher additionally cannot find its newly created draft through
+the by-tag endpoint. The exact same-run signed payload is independently verified
+using the existing channel's trusted public key, not an artifact-selected key.
+All four uploaded assets are downloaded and compared before explicit publication.
+Channel PR #255 then deploys that exact signed repository; Pages run `37946013169`
+passes. The original failed run is preserved. Issue #256 fixes future trust
+transport and draft lookup; it does not rebuild or change this released payload.
+
+- x86_64 app commit: `963a8fd5adc2e97b59e2537a35df79fa4732e027d4001f29551f782f5eb657f9`.
+- x86_64 executable SHA256: `a2c1149d82ab7c7a32a11856e34f30f49ee2026e616729729a67b47b71640f6e`.
+- aarch64 app commit: `6ea0d50d0ea1219b51c435f7ecb860de229584d34f4321aa21db1794d09fb818`.
+- aarch64 executable SHA256: `8d8c855f54fb108b9694d127be7ad3347919fbceb968c781a736f5f02ed8cb3d`.
+
+Both bundles and channel app/Debug commits have verified production signatures,
+matching source/version records, license, permissions, architectures and FFmpeg
+7 linkage. The live HTTPS release record and both app/AppStream architecture
+refs are checked. This is not an ARM installation or playback claim.
+
+The actual x86_64 bundle is installed at that commit and executable. Flatpak
+1.18.1 exits with a libgobject protection fault after deploying it; the abnormal
+exit is retained and its phase/cause is not established by a stack trace.
+Installed files, license and unchanged shared-runtime refs are authenticated.
+The app's existing `kjerag-origin` now has the official HTTPS URL, is enabled and
+verifies both commits and summaries. A normal signed-channel update exits zero
+with "Nothing to update", keeping exactly the same commit and executable.
+Working `c524ad0e` and `039c0a31` bundles remain available for rollback.
+
+The bundle-route X4 suite passes 50 checks; the channel-route ONE X2 suite passes
+54. Each has no new kernel entries or scoped OOM/limit events. X4's memory
+pressure avg60 briefly reads 0.01; ONE X2's pressure averages are zero. Both
+valid moving pictures from both suites are personally inspected. Existing
+sound-device, import-fault, exact-view and X4 single-file-pair skips remain.
+The separate native shader/Rust-twin checks pass; they are not SDK shader
+provenance or universal-camera qualification. Evidence remains private under
+`.worktrees/release-0.3.2-20261009/scratch/release-0.3.2-publication/`.
+
+Publication and functional qualification are complete at this scope, not the
+broader smoothness/capacity goal. Issue #186 remains open: 188 scoped redraws/s
+is below 240, the retained outage check has an additional roughly one-second
+processing hold, and neither UI averages nor still captures prove physical
+scanout, audible continuity or all network conditions.
 
 ## Accepted playback release candidate, October 8
 
@@ -32,7 +85,7 @@ The selected cumulative chain is #233, #235, #236, #238, #240, #241, #242,
 periodic-color files remain excluded, exactly as in the accepted installed
 package. Both signed architectures must succeed before publication.
 
-### Current installed test package, October 3
+### Historical installed test package, October 3
 
 Runtime source `c524ad0e48e12922b11b4a6018135bf7201bb74b`, draft
 [PR #254](https://github.com/aeharding/kjerag/pull/254), is installed for the

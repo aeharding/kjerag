@@ -159,7 +159,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
         verifier = self.jobs["validate-handoff"]
         self.assertEqual(verifier["if"], DISPATCH)
         self.assertEqual(verifier["needs"], ["context", "assemble"])
-        self.assertEqual(verifier["steps"][1]["with"]["name"], "validation-publication")
+        self.assertTrue(any(step.get("with", {}).get("name") == "validation-publication"
+                            for step in verifier["steps"]))
         self.assertIn("release-artifacts.sh verify", verifier["steps"][-1]["run"])
 
     def test_disposable_key_stays_outside_repository_and_bundle_artifacts(self):
@@ -168,13 +169,15 @@ class ReleaseWorkflowTest(unittest.TestCase):
             for step in job.get("steps", []):
                 if step.get("uses") == "actions/upload-artifact@v4":
                     uploads.append((name, step))
-        self.assertEqual([name for name, _ in uploads], ["context", "build", "assemble"])
+        self.assertEqual([name for name, _ in uploads], ["context", "build", "assemble", "assemble"])
         key_upload = uploads[0][1]
         self.assertEqual(key_upload["if"], DISPATCH)
         self.assertEqual(key_upload["with"]["path"], "validation-key/disposable.asc")
         self.assertEqual(key_upload["with"]["retention-days"], "1")
         self.assertEqual(uploads[1][1]["with"]["path"], "release-${{ matrix.arch }}/")
-        self.assertEqual(uploads[2][1]["with"]["path"].splitlines(), [
+        self.assertEqual(uploads[2][1]["with"]["path"],
+                         "${{ runner.temp }}/release-trust/signing-key.gpg")
+        self.assertEqual(uploads[3][1]["with"]["path"].splitlines(), [
             "assembled/repository/", "assembled/bundles/", "assembled/commits.txt",
             "assembled/release.txt", "assembled/payload.sha256", "assembled/payload.sig",
         ])
@@ -186,11 +189,42 @@ class ReleaseWorkflowTest(unittest.TestCase):
             self.assertEqual(download["if"], DISPATCH)
             self.assertEqual(download["with"]["path"], "${{ runner.temp }}/validation-key")
 
+    def test_public_key_uses_separate_same_run_artifact_not_job_output(self):
+        assembly = self.jobs["assemble"]
+        self.assertEqual(assembly["outputs"], {
+            "fingerprint": "${{ steps.signer.outputs.fingerprint }}",
+        })
+        self.assertNotIn("RELEASE_PUBLIC_KEY", yaml.dump(self.workflow))
+        self.assertNotIn("outputs.public-key", yaml.dump(self.workflow))
+        export = next(step for step in assembly["steps"]
+                      if step.get("name") == "Export this run's public signing key")
+        self.assertIn('gpg --batch --export "$FINGERPRINT"', export["run"])
+        self.assertNotIn("--export-secret", export["run"])
+        self.assertNotIn("GITHUB_OUTPUT", export["run"])
+        upload = next(step for step in assembly["steps"]
+                      if step.get("with", {}).get("name") ==
+                      "${{ needs.context.outputs.artifact-prefix }}-signing-key")
+        self.assertEqual(upload["with"]["path"], "${{ runner.temp }}/release-trust/signing-key.gpg")
+        self.assertEqual(upload["with"]["if-no-files-found"], "error")
+        for name, key in (("github-release", "release-signing-key"),
+                          ("pages", "release-signing-key"),
+                          ("validate-handoff", "validation-signing-key")):
+            job = self.jobs[name]
+            self.assertIn("assemble", job["needs"])
+            download = next(step for step in job["steps"]
+                            if step.get("with", {}).get("name") == key)
+            self.assertEqual(download["uses"], "actions/download-artifact@v4")
+            self.assertEqual(download["with"]["path"], "${{ runner.temp }}/release-trust")
+            verify = next(step for step in job["steps"]
+                          if "release-artifacts.sh verify" in step.get("run", ""))
+            self.assertIn('gpg --batch --import "$RUNNER_TEMP/release-trust/signing-key.gpg"', verify["run"])
+
     def test_shared_disposable_key_imports_into_both_signing_jobs(self):
         generation = next(step for step in self.jobs["context"]["steps"]
                           if step.get("name") == "Create a disposable validation signer")
         self.assertEqual(generation["if"], DISPATCH)
         fingerprints = []
+        public_keys = []
         # GPG's Unix sockets need a short path, like Actions' RUNNER_TEMP.
         # Only disposable keyrings live here; the exported fixture key and
         # fingerprint outputs remain in the caller's durable scratch directory.
@@ -212,6 +246,31 @@ class ReleaseWorkflowTest(unittest.TestCase):
                     line = output.read_text().strip()
                     self.assertRegex(line, r"^fingerprint=[0-9A-F]{40}$")
                     fingerprints.append(line)
+                    if name == "assemble":
+                        home = environment.read_text().strip().removeprefix("GNUPGHOME=")
+                        export = next(step for step in self.jobs[name]["steps"]
+                                      if step.get("name") == "Export this run's public signing key")
+                        result = self.run_script(export["run"], {
+                            "GNUPGHOME": home, "RUNNER_TEMP": key_temp,
+                            "FINGERPRINT": line.removeprefix("fingerprint="),
+                        })
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        public_key = Path(key_temp) / "release-trust/signing-key.gpg"
+                        public_keys.append(public_key.read_bytes())
+                        shutil.copyfile(public_key, self.case / "assembly-public-key.gpg")
+                        packets = self.run_script('gpg --batch --list-packets "$RUNNER_TEMP/release-trust/signing-key.gpg"', {
+                            "GNUPGHOME": home, "RUNNER_TEMP": key_temp,
+                        })
+                        self.assertEqual(packets.returncode, 0, packets.stderr)
+                        self.assertIn(":public key packet:", packets.stdout)
+                        self.assertNotIn("secret key packet", packets.stdout)
+                        self.assertNotIn("secret sub key packet", packets.stdout)
+                        missing = self.run_script(export["run"], {
+                            "GNUPGHOME": home, "RUNNER_TEMP": key_temp,
+                            "FINGERPRINT": "f" * 40,
+                        })
+                        self.assertNotEqual(missing.returncode, 0)
+                        self.assertEqual(public_key.stat().st_size, 0)
                 finally:
                     if environment.exists():
                         home = environment.read_text().strip().removeprefix("GNUPGHOME=")
@@ -219,6 +278,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
                         subprocess.run(["gpgconf", "--homedir", home, "--kill", "gpg-agent"],
                                        check=True, timeout=10)
         self.assertEqual(fingerprints[0], fingerprints[1])
+        self.assertEqual(len(public_keys), 1)
+        self.assertTrue(public_keys[0])
 
     def test_all_shell_steps_parse_as_bash(self):
         self.assertEqual(self.workflow["defaults"]["run"]["shell"], "bash")

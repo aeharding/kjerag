@@ -30,15 +30,38 @@ changes no released code, accepted picture or performance qualification.
 
 ## Current delivery
 
-October 8 release preparation: the owner accepts the currently installed
-`c524ad0e` playback build as "acceptable enough for release". Prepare its
-cumulative selected playback fixes for merge and a 0.3.2 patch release, without
-adding an untested runtime change or the parked color optimization. All eight
-CI jobs pass on the preceding final documentation head `ba084bc5`. The signed
-dual-architecture publication gates still apply. This acceptance does not
-close #186, certify all network conditions or meet the 240-capacity target;
-the scoped 188-redraw/s result and occasional buffering hold remain recorded.
-No new release is published at this checkpoint.
+October 9: **0.3.2 is published and installed**, following the owner's October 8
+acceptance of `c524ad0e` as "acceptable enough for release" and explicit merge/
+publication approval. Cumulative PR [#254](https://github.com/aeharding/kjerag/pull/254)
+merged at `efdd18a9`; tag `0.3.2` names `08f0246a`. Application sources remain
+the accepted candidate's, with only release version metadata changed. The two
+parked color files are excluded. Native release hooks pass 60 X4 and 64 ONE X2
+checks. Both signed native builds, all eight CI gates and payload sealing pass.
+
+The original release run `37941712593` remains **failed**, not relabeled green:
+GitHub suppressed the public signing-key job output, then local recovery exposed
+the publisher's draft-lookup bug. The exact same-run signed payload was separately
+authenticated against the already trusted channel key. All four download files
+were uploaded without replacement, downloaded and compared before publication.
+PR [#255](https://github.com/aeharding/kjerag/pull/255) deployed the identical
+signed repository; Pages run `37946013169` passes. No rebuild or tag change occurred.
+Issue [#256](https://github.com/aeharding/kjerag/issues/256) corrects those two
+automation defects without changing the installed app or release payload.
+
+Installed x86_64 commit `963a8fd5adc2`, executable SHA256 `a2c1149d82ab`, follows
+the official signed HTTPS channel again, with shared runtimes unchanged. Actual
+installed suites pass 50 X4 checks after bundle installation and 54 ONE X2 checks
+after the signed-channel update confirms the same commit. Both motion captures
+from each suite are inspected; no new kernel entries or scoped OOM events occur.
+The bundle installer itself exited with a libgobject protection fault after
+deploying the intended commit; that anomaly is retained, not a clean install-exit
+claim. The subsequent signed-channel update exits normally. ARM signatures,
+metadata and public refs are checked, not ARM GPU playback.
+
+This release does not close #186, certify all network conditions or meet the
+240-capacity target. The scoped 188-redraw/s result and occasional buffering
+hold remain recorded. Functional UI checks are not physical-scanout, audible
+continuity or universal hitch-free qualification.
 
 PR [#183](https://github.com/aeharding/kjerag/pull/183) is the cumulative GPU
 stitching delivery. It merged at `53ecc929` after all six fresh CI checks passed

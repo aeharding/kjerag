@@ -167,7 +167,6 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       fingerprint: ${{ steps.signer.outputs.fingerprint }}
-      public-key: ${{ steps.trust.outputs.public-key }}
     env:
       RELEASE_VERSION: ${{ needs.context.outputs.version }}
     steps:
@@ -227,11 +226,24 @@ jobs:
           bash scripts/release-artifacts.sh seal assembled "$RELEASE_VERSION" "$GITHUB_SHA" "$FINGERPRINT"
           bash scripts/release-artifacts.sh verify assembled "$RELEASE_VERSION" "$GITHUB_SHA" "$FINGERPRINT"
           python3 scripts/check-release-channel.py assembled/not-published-yet assembled/release.txt
-      # Trust comes from this job, not a key chosen by the downloaded artifact.
-      - id: trust
+      # Trust comes from this signing job, separately from the publication
+      # payload. GitHub redacted the production 0.3.2 public-key job output.
+      # Export public packets only; never
+      # artifact a production private key or the signing job's GPG home.
+      - name: Export this run's public signing key
         env:
           FINGERPRINT: ${{ steps.signer.outputs.fingerprint }}
-        run: echo "public-key=$(gpg --batch --export "$FINGERPRINT" | base64 -w0)" >> "$GITHUB_OUTPUT"
+        run: |
+          mkdir -p "$RUNNER_TEMP/release-trust"
+          gpg --batch --export "$FINGERPRINT" > "$RUNNER_TEMP/release-trust/signing-key.gpg"
+          test -s "$RUNNER_TEMP/release-trust/signing-key.gpg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.context.outputs.artifact-prefix }}-signing-key
+          path: ${{ runner.temp }}/release-trust/signing-key.gpg
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ needs.context.outputs.artifact-prefix }}-publication
@@ -259,11 +271,14 @@ jobs:
     env:
       RELEASE_VERSION: ${{ github.ref_name }}
       FINGERPRINT: ${{ needs.assemble.outputs.fingerprint }}
-      RELEASE_PUBLIC_KEY: ${{ needs.assemble.outputs.public-key }}
       GH_REPO: ${{ github.repository }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-signing-key
+          path: ${{ runner.temp }}/release-trust
       - uses: actions/download-artifact@v4
         with:
           name: release-publication
@@ -271,7 +286,7 @@ jobs:
       - name: Authenticate the complete staged publication
         run: |
           export GNUPGHOME="$(mktemp -d "$RUNNER_TEMP/release-trust.XXXXXXXX")"
-          printf '%s' "$RELEASE_PUBLIC_KEY" | base64 --decode | gpg --batch --import
+          gpg --batch --import "$RUNNER_TEMP/release-trust/signing-key.gpg"
           bash scripts/release-artifacts.sh verify assembled "$RELEASE_VERSION" "$GITHUB_SHA" "$FINGERPRINT"
       - name: Publish downloads without replacing divergent assets
         run: python3 scripts/publish-release-assets.py "$RELEASE_VERSION" "$GITHUB_SHA" assembled/bundles
@@ -289,7 +304,6 @@ jobs:
     env:
       RELEASE_VERSION: ${{ github.ref_name }}
       FINGERPRINT: ${{ needs.assemble.outputs.fingerprint }}
-      RELEASE_PUBLIC_KEY: ${{ needs.assemble.outputs.public-key }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -300,12 +314,16 @@ jobs:
           path: published
       - uses: actions/download-artifact@v4
         with:
+          name: release-signing-key
+          path: ${{ runner.temp }}/release-trust
+      - uses: actions/download-artifact@v4
+        with:
           name: release-publication
           path: assembled
       - name: Authenticate payload and refuse a stale channel replacement
         run: |
           export GNUPGHOME="$(mktemp -d "$RUNNER_TEMP/release-trust.XXXXXXXX")"
-          printf '%s' "$RELEASE_PUBLIC_KEY" | base64 --decode | gpg --batch --import
+          gpg --batch --import "$RUNNER_TEMP/release-trust/signing-key.gpg"
           bash scripts/release-artifacts.sh verify assembled "$RELEASE_VERSION" "$GITHUB_SHA" "$FINGERPRINT"
           python3 scripts/check-release-channel.py published/kjerag-release.txt assembled/release.txt
       - uses: JamesIves/github-pages-deploy-action@v4
@@ -320,9 +338,12 @@ jobs:
     env:
       RELEASE_VERSION: ${{ needs.context.outputs.version }}
       FINGERPRINT: ${{ needs.assemble.outputs.fingerprint }}
-      RELEASE_PUBLIC_KEY: ${{ needs.assemble.outputs.public-key }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: validation-signing-key
+          path: ${{ runner.temp }}/release-trust
       - uses: actions/download-artifact@v4
         with:
           name: validation-publication
@@ -330,5 +351,5 @@ jobs:
       - name: Authenticate the final downloaded validation artifact
         run: |
           export GNUPGHOME="$(mktemp -d "$RUNNER_TEMP/validation-trust.XXXXXXXX")"
-          printf '%s' "$RELEASE_PUBLIC_KEY" | base64 --decode | gpg --batch --import
+          gpg --batch --import "$RUNNER_TEMP/release-trust/signing-key.gpg"
           bash scripts/release-artifacts.sh verify assembled "$RELEASE_VERSION" "$GITHUB_SHA" "$FINGERPRINT"
