@@ -19,6 +19,7 @@ mod dnd;
 mod fail;
 mod key_bind;
 mod menu;
+mod opening;
 mod shot;
 mod strings;
 

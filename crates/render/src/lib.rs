@@ -22,6 +22,7 @@ mod draw_retirement;
 pub mod field_interior;
 pub mod flow;
 mod framing;
+mod gpu_completion;
 #[cfg(test)]
 mod gpu_profile;
 pub mod image_fusion;
@@ -69,7 +70,7 @@ pub use projection::{
     Blend, Held, Landing, MAX_LENSES, Reframe, Rolling, SeamAnchor, seam_follows_a_lens,
 };
 pub use sampling::Sampling;
-pub use scene::{FrameClock, Horizon, Next, Scene, ScenePipeline, ScenePrimitive};
+pub use scene::{FrameClock, Horizon, Next, PreparedScene, Scene, ScenePipeline, ScenePrimitive};
 pub use seam::{Correction, SeamFit};
 pub use stall::{STUCK_FOR, Stall};
 pub use studio_type2::{MapBindError, OneXsMapFrame, OneXsMapRaster, PisBackend, PreparedPicture};

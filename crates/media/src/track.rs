@@ -1,24 +1,10 @@
-//! The file's sound: one AAC stream, on a demuxer of its own.
+//! The file's sound: AAC decoding and resampling, independent of video delivery.
 //!
-//! **Why its own** (issue #97). The sound used to come off the pictures'
-//! demuxer, because an `.insv` writes all three streams into one MP4 and one
-//! file handle is simpler than two. The owner's April capture says that
-//! cannot hold: it has one place, 4.885 s in, where the camera left 67 MB of
-//! picture between two audio samples, and libavformat reads a file whose
-//! streams are interleaved like that by letting one of them fall up to a
-//! second behind (`mov_find_next_sample` reads in file order until the
-//! timestamps differ by more than `AV_TIME_BASE`, and only then seeks). The
-//! sound for those three and a half seconds therefore arrived after its
-//! moment had passed, was dropped by the splice, and the owner heard silence
-//! from 4.9 s to 8.2 s. No ring depth can fix that: the samples had not been
-//! read yet, and the pictures cannot be read further ahead than the decoder's
-//! surface pool allows.
-//!
-//! A demuxer of its own has no other stream to fall behind. It carries the
-//! same file, with the pictures discarded, so libavformat seeks straight to
-//! each audio chunk: 190 kbps of a 180 Mbps file, measured at 40x realtime
-//! for the whole 30 minute capture. The cost is one more open of the
-//! container (measured at 0.2 s on the 36 GB file) and one more file handle.
+//! Production consumes its own bounded packet queue from the capture demuxer.
+//! That reader can pass the measured 67 MB picture interleave gap (issue #97)
+//! without holding decoder surfaces. It replaces competing audio/video file
+//! cursors, not the independent audio producer. Tests retain an audio-only
+//! demuxer as a reference.
 //!
 //! What leaves the decoder is planar `fltp` at the file's own rate; what the
 //! device wants is interleaved at the device's rate and channel count. So
@@ -28,13 +14,18 @@
 //! card's.
 
 use std::ffi::c_int;
+#[cfg(test)]
 use std::path::Path;
 use std::time::Duration;
 
 use ffmpeg_next as ff;
 
-use super::audio::{Pipe, compensation};
-use super::{Fallible, media_time, read_only};
+use super::audio::{AudioEpoch, Pipe, compensation};
+use super::packet_input::{AudioTimeline, PacketInput};
+use super::{Fallible, media_time};
+#[cfg(test)]
+use super::{packet_input::Limits, read_only};
+use ff::format::context::Input;
 
 /// Output frames the drift correction is spread over: one second. Long enough
 /// that the ratio is a rounding error, short enough that it is re-aimed before
@@ -45,17 +36,48 @@ const DISTANCE: u32 = 1;
 /// packet is 21 ms of sound and a decoder can hand over more than one at a
 /// time, so the margin is a few of them: read past it and [`Pipe::write`]
 /// would drop what it had just read.
-const HEADROOM: Duration = Duration::from_millis(100);
+pub(crate) const HEADROOM: Duration = Duration::from_millis(100);
 
 type Resampler = ff::software::resampling::Context;
 
-/// One audio stream, on its own demuxer, decoded and resampled into the
-/// device's own format.
+/// Owned stream metadata retained before the capture input moves to its reader.
+pub(crate) struct AudioSpec {
+    timeline: AudioTimeline,
+    parameters: ff::codec::Parameters,
+}
+
+impl AudioSpec {
+    pub(crate) fn inspect(input: &Input) -> Option<Self> {
+        let stream = input
+            .streams()
+            .find(|s| s.parameters().medium() == ff::media::Type::Audio)?;
+        Some(Self {
+            timeline: AudioTimeline {
+                stream: stream.index(),
+                time_base: stream.time_base(),
+                start: match stream.start_time() {
+                    ff::ffi::AV_NOPTS_VALUE => 0,
+                    start => start,
+                },
+            },
+            parameters: stream.parameters().clone(),
+        })
+    }
+
+    pub(crate) fn timeline(&self) -> AudioTimeline {
+        self.timeline
+    }
+
+    pub(crate) fn rate(&self) -> Option<u32> {
+        let rate = unsafe { (*self.parameters.as_ptr()).sample_rate };
+        u32::try_from(rate).ok().filter(|rate| *rate > 0)
+    }
+}
+
+/// One audio stream decoded and resampled into the device's own format.
 pub struct Track {
-    /// The same file the pictures are read from, opened again with every
-    /// other stream discarded. Two file handles rather than one, which is
-    /// what the interleave costs (issue #97).
-    input: ff::format::context::Input,
+    /// Audio packets from the capture's reader, or the test-only reference.
+    input: PacketInput,
     stream: usize,
     /// The file has been read to its end. Cleared by a seek, which is the
     /// only way back into it.
@@ -72,47 +94,73 @@ pub struct Track {
     time_base: ff::Rational,
     start: i64,
     pipe: Pipe,
+    epoch: AudioEpoch,
     /// Interleaved scratch the planar output is woven into, kept between
     /// chunks so a packet costs no allocation.
     woven: Vec<f32>,
 }
 
 impl Track {
+    pub(crate) fn epoch(&self) -> AudioEpoch {
+        self.epoch.clone()
+    }
+
     /// Opens `path` again for its first audio stream, if it has one, to be
     /// resampled into `rate` and `channels`.
     ///
     /// `Ok(None)` is a file with no sound in it, which the older cameras'
     /// per-lens files are. Those play their pictures exactly as before, and
     /// silently rather than by refusing to open.
+    #[cfg(test)]
     pub fn open(path: &Path, pipe: Pipe, rate: u32, channels: usize) -> Fallible<Option<Self>> {
-        let mut input = ff::format::input(&path)?;
-        let Some(stream) = input
-            .streams()
-            .find(|s| s.parameters().medium() == ff::media::Type::Audio)
-        else {
+        let input = super::capture::open_input(path)?;
+        Self::from_input(input, pipe, rate, channels)
+    }
+
+    #[cfg(test)]
+    fn from_input(
+        mut input: Input,
+        pipe: Pipe,
+        rate: u32,
+        channels: usize,
+    ) -> Fallible<Option<Self>> {
+        let Some(spec) = AudioSpec::inspect(&input) else {
             return Ok(None);
         };
-        let (index, time_base, start) = (stream.index(), stream.time_base(), stream.start_time());
-        let context = ff::codec::context::Context::from_parameters(stream.parameters())?;
-        read_only(&mut input, &[index]);
+        read_only(&mut input, &[spec.timeline.stream]);
+        Self::from_packets(
+            spec,
+            PacketInput::new(input, Limits::AUDIO)?,
+            pipe,
+            rate,
+            channels,
+        )
+        .map(Some)
+    }
 
-        Ok(Some(Self {
+    pub(crate) fn from_packets(
+        spec: AudioSpec,
+        input: PacketInput,
+        pipe: Pipe,
+        rate: u32,
+        channels: usize,
+    ) -> Fallible<Self> {
+        let context = ff::codec::context::Context::from_parameters(spec.parameters)?;
+        Ok(Self {
             input,
-            stream: index,
+            stream: spec.timeline.stream,
             drained: false,
             decoder: context.decoder().audio()?,
             resampler: None,
             format: ff::format::Sample::F32(ff::format::sample::Type::Planar),
             rate,
             channels,
-            time_base,
-            start: match start == ff::ffi::AV_NOPTS_VALUE {
-                true => 0,
-                false => start,
-            },
+            time_base: spec.timeline.time_base,
+            start: spec.timeline.start,
+            epoch: pipe.epoch(),
             pipe,
             woven: Vec::new(),
-        }))
+        })
     }
 
     /// Where the samples are going: the plain layout for [`Self::channels`].
@@ -128,28 +176,38 @@ impl Track {
 
     /// Read sound until the ring is nearly full, and no further.
     ///
-    /// The ring is the pacing: the reader calls this once per turn of its own
-    /// loop ([`Reader::read_until`](super::Reader::read_until)), which is at
-    /// least once per pair of pictures, and it returns at once with nothing
-    /// read when there is no room. Sound the ring cannot take yet is sound
-    /// that would be dropped, and it is still in the file next time.
+    /// The retained interleave regression uses this synchronous reference.
+    /// Production performs one packet per independent producer turn.
+    #[cfg(test)]
     pub fn pump(&mut self) -> Fallible<()> {
         while !self.drained && self.pipe.room() > HEADROOM {
-            let mut packet = ff::Packet::empty();
-            match packet.read(&mut self.input) {
+            self.pump_one()?;
+        }
+        Ok(())
+    }
+
+    /// One packet per producer turn leaves seeks and shutdown interruptible
+    /// between packets, without changing decoding or resampling arithmetic.
+    pub(crate) fn pump_one(&mut self) -> Fallible<bool> {
+        if !self.drained {
+            let pipe = self.pipe.clone();
+            let epoch = self.epoch.clone();
+            match self.input.read_while(|| pipe.is_current(&epoch))? {
                 // Every other stream is discarded, so this is the sound's own
                 // packet; the guard is for a container that puts something
                 // else through anyway.
-                Ok(()) if packet.stream() == self.stream => self.take(&packet)?,
-                Ok(()) => {}
-                Err(ff::Error::Eof) => {
+                Some(packet) if packet.stream() == self.stream => self.take(&packet)?,
+                Some(_) => {}
+                // Cancellation is not EOF and must not flush the AAC decoder.
+                // The producer will handle its pending seek or shutdown next.
+                None if !pipe.is_current(&epoch) => return Ok(false),
+                None => {
                     self.drained = true;
                     self.end()?;
                 }
-                Err(e) => return Err(e.into()),
             }
         }
-        Ok(())
+        Ok(self.drained)
     }
 
     /// Put the sound where a seek has put the pictures, and throw away
@@ -159,10 +217,11 @@ impl Track {
     /// [`Reader::seek`](super::Reader::seek) gives its own demuxers, so both
     /// land on the same instant. AAC frames are all keyframes, so this lands
     /// within one packet of it.
-    pub fn seek(&mut self, to: i64) -> Fallible<()> {
+    pub(crate) fn seek_in(&mut self, to: i64, epoch: AudioEpoch) -> Fallible<()> {
         self.flush();
-        self.input.seek(to, ..to)?;
+        self.input.seek(to)?;
         self.drained = false;
+        self.epoch = epoch;
         Ok(())
     }
 
@@ -192,7 +251,6 @@ impl Track {
             let mut spill = ff::frame::Audio::new(self.format, self.rate as usize, layout);
             while matches!(resampler.flush(&mut spill), Ok(Some(_))) {}
         }
-        self.pipe.flush();
     }
 
     fn drain(&mut self) -> Fallible<()> {
@@ -204,7 +262,7 @@ impl Track {
             let through = self.through(&frame);
             self.aim(pipe.offset(), &frame)?;
             if self.weave(&frame)? {
-                pipe.write(&self.woven, through);
+                pipe.write_in(&self.epoch, &self.woven, through);
             }
         }
         Ok(())
@@ -269,5 +327,44 @@ impl Track {
         let at = media_time(frame.timestamp().unwrap_or(0), self.start, self.time_base);
         let held = frame.samples() as f64 / f64::from(frame.rate().max(1));
         at + Duration::from_secs_f64(held)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routed_aac_decoder_matches_audio_only_pcm_without_video_consumption() {
+        let fixture = crate::capture_fixture::FixtureDir::new();
+        let path = fixture.write_audio("track-routed.mov");
+        let input = super::super::capture::open_input(&path).unwrap();
+        let spec = AudioSpec::inspect(&input).unwrap();
+        let video = PacketInput::with_audio(input, Limits::VIDEO, Some(spec.timeline())).unwrap();
+        let routed_pipe = Pipe::new(48_000, 1, Duration::from_millis(500));
+        let reference_pipe = Pipe::new(48_000, 1, Duration::from_millis(500));
+        let mut routed = Track::from_packets(
+            spec,
+            video.audio_reader().unwrap(),
+            routed_pipe.clone(),
+            48_000,
+            1,
+        )
+        .unwrap();
+        let mut reference = Track::open(&path, reference_pipe.clone(), 48_000, 1)
+            .unwrap()
+            .unwrap();
+        let mut actual = [0.0; 960];
+        let mut expected = [0.0; 960];
+        for tick in 0..140 {
+            routed.pump().unwrap();
+            reference.pump().unwrap();
+            let due = Duration::from_millis(tick * 20);
+            routed_pipe.fill(&mut actual, Some(due));
+            reference_pipe.fill(&mut expected, Some(due));
+            assert_eq!(actual, expected, "decoded PCM at {due:?}");
+        }
+        assert_eq!(routed_pipe.health().underruns, 0);
+        assert_eq!(routed_pipe.health().dropped, 0);
     }
 }

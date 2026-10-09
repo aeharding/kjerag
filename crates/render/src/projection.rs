@@ -359,6 +359,22 @@ pub(crate) struct Screen {
 }
 
 impl Screen {
+    fn is_rasterizable_curved(self) -> bool {
+        if !(0.5..1.0).contains(&self.shrink) {
+            return false;
+        }
+        let Some(corner) = self.ray([0.0, 0.0]) else {
+            return false;
+        };
+        let corner_angle = corner[2].clamp(-1.0, 1.0).acos();
+        let domain_angle = std::f32::consts::FRAC_PI_2 / self.shrink;
+        // The shader clips halfway between the visible corner and the
+        // projection singularity. Keep at least one whole native cell outside
+        // the visible cone, so clipping never moves a visible triangle.
+        let cell_bound = std::f32::consts::PI / 50.0 + std::f32::consts::TAU / 100.0;
+        domain_angle - corner_angle > 2.0 * cell_bound
+    }
+
     fn new(camera: Camera, aspect: f32) -> Self {
         let shrink = (FOV_FLAT / camera.fov).min(1.0);
         Self {
@@ -1595,6 +1611,13 @@ impl Reframe {
 
     pub(crate) fn is_rectilinear(&self) -> bool {
         self.screen.shrink == 1.0
+    }
+
+    /// A finite curved window with room to clip hidden native cells before
+    /// the projection singularity. This includes slightly rearward corners
+    /// when the controls hide and the picture fills the whole window.
+    pub(crate) fn is_rasterizable_curved(&self) -> bool {
+        self.screen.is_rasterizable_curved()
     }
 
     /// How much of this ray each lens shows, and where in its frame.
@@ -7481,6 +7504,31 @@ pub(crate) mod tests {
             },
             aspect,
         )
+    }
+
+    #[test]
+    fn curved_rasterization_covers_the_reported_window_with_and_without_controls() {
+        assert!(screen(166.23, 2256.0 / 1456.0).is_rasterizable_curved());
+        assert!(screen(166.23, 1.5).is_rasterizable_curved());
+        assert!(screen(166.23, 1.5).ray([0.0, 0.0]).unwrap()[2] < 0.0);
+        assert!(!screen(90.0, 1.5).is_rasterizable_curved());
+        // Exactly220deg is stereographic, with an infinite image plane, not
+        // a finite ball. Its visible rectangle still has ample clipping room.
+        assert!(screen(220.0, 1.5).is_rasterizable_curved());
+        assert!(!screen(360.0, 1.5).is_rasterizable_curved());
+        for aspect in [0.6, 1.0, 1.5, WIDE] {
+            for fov in [110.1, 120.0, 150.0, 166.23, 180.0, 220.0, 360.0] {
+                let selected = screen(fov, aspect);
+                if selected.is_rasterizable_curved() {
+                    let domain = std::f32::consts::FRAC_PI_2 / selected.shrink;
+                    let corner = selected.ray([0.0, 0.0]).unwrap()[2].clamp(-1.0, 1.0).acos();
+                    let clip = (domain + corner) * 0.5;
+                    for uv in places() {
+                        assert!(selected.ray(uv).unwrap()[2].clamp(-1.0, 1.0).acos() < clip);
+                    }
+                }
+            }
+        }
     }
 
     /// How far off the view axis a point of the output looks, in radians.

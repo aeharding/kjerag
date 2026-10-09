@@ -24,6 +24,7 @@ use crate::{Fallible, FrameStamp, Reframe};
 struct DisplaySource {
     source: SourceSnapshot,
     map: MapSnapshot,
+    view_map: crate::direct_type2::view_mesh_cache::CachedMap,
     pipeline: Arc<DirectType2Pipeline>,
     context: OneXsGpuContext,
     coordinates: CorrectionCoordinates,
@@ -39,16 +40,21 @@ impl CorrectionInput {
         panorama: WorldPanorama,
         source: SourceSnapshot,
         map: MapSnapshot,
+        view_map: crate::direct_type2::view_mesh_cache::CachedMap,
         pipeline: Arc<DirectType2Pipeline>,
         context: &OneXsGpuContext,
     ) -> Fallible<Self> {
         let (body, body_from_world) = panorama.into_parts();
         source.ensure_context(context)?;
         map.ensure_context(context)?;
+        view_map.ensure_context(context)?;
         if !body.belongs_to(context.device()) {
             return Err("temporal correction body belongs to a different graphics device".into());
         }
-        if source.frame() != body.frame() || map.frame() != body.frame() {
+        if source.frame() != body.frame()
+            || map.frame() != body.frame()
+            || view_map.frame() != body.frame()
+        {
             return Err("temporal correction source, map and body name different frames".into());
         }
         Ok(Self {
@@ -56,6 +62,7 @@ impl CorrectionInput {
             display: DisplaySource {
                 source,
                 map,
+                view_map,
                 pipeline,
                 context: context.clone(),
                 coordinates: CorrectionCoordinates::new(context.device(), body_from_world),
@@ -131,7 +138,7 @@ impl CorrectionSequence {
     }
 }
 
-/// Completed temporal correction and its exact original source/map/colour.
+/// Submitted temporal correction and its exact original source/map/colour.
 pub(crate) struct CorrectedFrame {
     display: DisplaySource,
     correction: CorrectionFrame,
@@ -140,6 +147,10 @@ pub(crate) struct CorrectedFrame {
 impl CorrectedFrame {
     pub(crate) fn frame(&self) -> &FrameStamp {
         self.correction.frame()
+    }
+
+    pub(super) fn completion(&self) -> &crate::gpu_completion::SubmissionCompletion {
+        self.correction.completion()
     }
 
     /// Read the immutable map and color ratios sampled by this exact output.
@@ -180,11 +191,44 @@ impl CorrectedFrame {
         )?;
         Ok(PreparedCorrectionDraw {
             picture,
-            map: self.display.map.read().clone(),
+            map: self.display.view_map.read().clone(),
             fusion: self.display.map.fusion_read().cloned(),
             pipeline,
             frame: self.frame().clone(),
             native_capacity: native_capacity::DrawMarker::for_reframe(reframe),
+        })
+    }
+
+    /// Retained uncached view arithmetic over this same completed owner.
+    /// Diagnostic only, never a selectable second playback path.
+    #[cfg(test)]
+    pub(crate) fn prepare_view_uncached_for_review(
+        &self,
+        device: &wgpu::Device,
+        reframe: &Reframe,
+        format: wgpu::TextureFormat,
+    ) -> Fallible<PreparedCorrectionDraw> {
+        if self.display.context.device() != device {
+            return Err("corrected view belongs to a different graphics device".into());
+        }
+        let pipeline = Arc::new(CorrectionPipeline::uncached_for_review(
+            device,
+            &self.display.pipeline,
+            format,
+        )?);
+        let picture = self.display.source.prepare_correction_picture(
+            &pipeline,
+            reframe,
+            &self.correction,
+            &self.display.coordinates,
+        )?;
+        Ok(PreparedCorrectionDraw {
+            picture,
+            map: self.display.map.read().clone(),
+            fusion: self.display.map.fusion_read().cloned(),
+            pipeline,
+            frame: self.frame().clone(),
+            native_capacity: None,
         })
     }
 
@@ -212,7 +256,7 @@ impl CorrectedFrame {
             )?;
         Ok(PreparedCorrectionDraw {
             picture,
-            map: self.display.map.read().clone(),
+            map: self.display.view_map.read().clone(),
             fusion: self.display.map.fusion_read().cloned(),
             pipeline,
             frame: self.frame().clone(),

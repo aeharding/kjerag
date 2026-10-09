@@ -2228,6 +2228,69 @@ mod tests {
     }
 
     #[test]
+    fn qualification_fixture_requires_fused_gaussian_rounding() {
+        let (blurred, masks) = qualification_fixture();
+        let outputs = cpu_outputs(&blurred, &masks);
+        let gradients = &outputs
+            .iter()
+            .find(|(name, _)| *name == "direction gradients")
+            .unwrap()
+            .1;
+        let magnitude = |word: usize| {
+            f32::from_bits(gradients[2 * word]).abs()
+                + f32::from_bits(gradients[2 * word + 1]).abs()
+        };
+        // The current Flatpak driver refused this exact fixture word. Splitting
+        // this multiply-add loses one bit even though WGSL permits that split.
+        let middle = magnitude(41);
+        let sides = magnitude(40) + magnitude(42);
+        let side = f32::from_bits(0x3e8c_52b9);
+        let centre = f32::from_bits(0x3ee7_5a8e);
+        assert_eq!(middle.mul_add(centre, sides * side).to_bits(), 0x4361_8a57);
+        assert_eq!((middle * centre + sides * side).to_bits(), 0x4361_8a56);
+    }
+
+    #[test]
+    fn explicit_fma_stays_one_operation_in_vulkan_shader() {
+        use wgpu::naga;
+
+        let module = naga::front::wgsl::parse_str(SHADER).unwrap();
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+        let words =
+            naga::back::spv::write_vec(&module, &info, &naga::back::spv::Options::default(), None)
+                .unwrap();
+        let mut fused_results = Vec::new();
+        let mut indivisible = Vec::new();
+        let mut cursor = 5; // SPIR-V module header.
+        while cursor < words.len() {
+            let length = (words[cursor] >> 16) as usize;
+            let opcode = words[cursor] & 0xffff;
+            let instruction = &words[cursor..cursor + length];
+            // OpExtInst result ID and GLSL.std.450 Fma opcode.
+            if opcode == 12 && length >= 5 && instruction[4] == 50 {
+                fused_results.push(instruction[2]);
+            }
+            // OpDecorate result ID, NoContraction.
+            if opcode == 71 && length == 3 && instruction[2] == 42 {
+                indivisible.push(instruction[1]);
+            }
+            cursor += length;
+        }
+        assert!(!fused_results.is_empty(), "the regression has no live fma");
+        for result in fused_results {
+            assert!(
+                indivisible.contains(&result),
+                "explicit fma result {result} may be split into two rounding steps"
+            );
+        }
+    }
+
+    #[test]
     fn production_front_end_qualifies_on_the_actual_adapter() {
         let (device, queue, adapter) = match gpu() {
             Ok(gpu) => gpu,

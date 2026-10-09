@@ -99,9 +99,12 @@ features = ["wgpu"]
 # VK_EXT_external_memory_dma_buf but never VK_EXT_image_drm_format_modifier,
 # and iced_wgpu builds its device from a fixed DeviceDescriptor with no hook,
 # so the device the shader widget renders on cannot import a tiled dmabuf.
-# This commit is the extension-enable hunk of gfx-rs/wgpu#9366 (shipped in
-# wgpu 30) applied verbatim to the v28.0.1 tag, and nothing else. Delete this
-# entry and the fork the day libcosmic reaches wgpu 30.
+# This fork includes the extension-enable hunk of gfx-rs/wgpu#9366 (shipped
+# in wgpu 30), applied verbatim to v28.0.1. It also decorates explicit SPIR-V
+# Fma results with NoContraction: without that requirement the current Mesa
+# runtime may split an fma into two rounding steps and our startup arithmetic
+# qualification refuses playback (issue #251). Remove the fork once the
+# renderer's upstream versions satisfy both requirements and qualify.
 #
 # The entry names `wgpu` even though the change is in `wgpu-hal`: patching
 # wgpu-hal alone leaves the rest of the tree on the crates.io wgpu-types,
@@ -117,10 +120,10 @@ features = ["wgpu"]
 # `cargo vendor` and flatpak/cargo-sources.json both fetch it by hash. A
 # branch name is the part that can move: force-push the fork and every
 # recorded build breaks at fetch time, a published Flatpak's rebuild
-# included. The rev below is the tip of `v28-drm-modifier-backport`, which
-# stays on the fork as the readable name for it.
+# included. The original extension patch remains on
+# `v28-drm-modifier-backport`; the precision fix is on `fix/fma-rounding-contract`.
 [patch.crates-io]
-wgpu = { git = "https://github.com/aeharding/wgpu", rev = "fb66f36c5cf1135c11523767652ea7a809b3e598" }
+wgpu = { git = "https://github.com/aeharding/wgpu", rev = "e754efa3287949bd432e96d1fc8014fc81436348" }
 
 # iced's fixed device descriptor otherwise caps shader widgets at eight
 # storage buffers, even on capable hardware. Only device-limit negotiation

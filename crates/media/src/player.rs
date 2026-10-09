@@ -27,8 +27,10 @@ use std::task::Waker;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::audio::{Audio, Beat, Reading};
+use super::audio::{Audio, AudioEpoch, Beat, Reading};
+use super::audio_worker::AudioControl;
 use super::decode_arrival::{self, Arrival, Delivery};
+use super::packet_input::ReadAhead;
 use super::sound::Sound;
 use super::{Accuracy, Cue, Fallible, Frames, Read, Reader, Size, Timing};
 
@@ -40,8 +42,8 @@ const DECODED_AHEAD: usize = 2;
 
 /// Largest explicitly prepared source horizon. This is separate from the
 /// ordinary two-picture presentation lookahead: a causal consumer may need
-/// six decoded successors while the presentation clock remains stopped.
-const PREPARED_AHEAD_MAX: usize = 6;
+/// nine decoded successors while the presentation clock remains stopped.
+const PREPARED_AHEAD_MAX: usize = 9;
 
 /// Frames each lane decodes past a surface before it is mapped
 /// ([`Reader::lookahead`]). Measured: 2.19x realtime at 0, 2.46x at 2, and
@@ -49,6 +51,11 @@ const PREPARED_AHEAD_MAX: usize = 6;
 /// pair on screen, the two peeked and the three the renderer retains, the
 /// engine holds 10 of the 20 surfaces in a decoder's pool.
 const LOOKAHEAD: usize = 2;
+
+/// Recovery-only compressed-input high water. This scheduling choice does not
+/// delay ordinary play or retain additional decoded/GPU pictures. Existing
+/// packet limits and EOF permit an earlier restart when the lead is impossible.
+const REFILL_LEAD: Duration = Duration::from_secs(1);
 
 /// What playback values when presenting decoded frames.
 ///
@@ -65,9 +72,9 @@ pub enum PresentationPolicy {
     /// synchronous stage advances one frame at a time instead of continually
     /// trying to catch up.
     EveryFrame,
-    /// Present every frame in order without shifting the media/audio clock.
-    /// Used by the resident stitcher once it can keep pace. A late render can
-    /// catch up on following redraws; it cannot silently slow the sound clock.
+    /// Process every frame in order against one media/audio clock. Filtered
+    /// playback may hold that shared clock while refilling after a shortage.
+    /// Ordinary frame promotion never reanchors it.
     SequentialRealtime,
 }
 
@@ -81,12 +88,14 @@ impl PresentationPolicy {
 /// measures. Every count here is a defect except `presented`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
-    /// Calls to [`Player::pump`], which is one per redraw. Reported
+    /// Calls to [`Player::pump`]. Generic playback pumps on redraw; a filtered
+    /// source consumer can pump independently of physical drawing. Reported
     /// because the presented rate alone cannot tell a player that wakes
     /// once per frame from one that wakes twice and shows the same picture
     /// again, and the two cost very different amounts of battery.
     pub redraws: u64,
-    /// Frames that reached the screen.
+    /// Frames promoted by Player. This is not physical scanout when the
+    /// filtered source consumer progresses independently of drawing.
     pub presented: u64,
     /// Frames decoded but never shown, because their moment had passed
     /// before the picture next changed. Stutter, in other words.
@@ -122,9 +131,19 @@ impl Stats {
 
     /// One line, for a run of `over`.
     pub fn report(&self, over: Duration) -> String {
+        self.report_with_labels(over, "fps presented", "redraws/s")
+    }
+
+    /// Source admission progress is not a display-fps or completed-draw
+    /// measurement. Keep the historical counters but name their actual work.
+    pub fn report_source_progress(&self, over: Duration) -> String {
+        self.report_with_labels(over, "source advances/s", "progress pumps/s")
+    }
+
+    fn report_with_labels(&self, over: Duration, advances: &str, pumps: &str) -> String {
         let per_second = |count: u64| count as f64 / over.as_secs_f64().max(f64::EPSILON);
         let line = format!(
-            "{:.2} fps presented in {:.1} redraws/s, {} dropped, {} starved, \
+            "{:.2} {advances} in {:.1} {pumps}, {} dropped, {} starved, \
              worst {:.1} ms late",
             per_second(self.presented),
             per_second(self.redraws),
@@ -155,11 +174,13 @@ enum Note {
 enum Command {
     Seek {
         epoch: u64,
+        audio_epoch: Option<AudioEpoch>,
         to: Cue,
         accuracy: Accuracy,
     },
     Replay {
         epoch: u64,
+        audio_epoch: Option<AudioEpoch>,
         video_at: Cue,
         audio_at: Cue,
     },
@@ -177,6 +198,8 @@ pub struct Player {
     /// with no working one. A player that will not show a video because it
     /// could not open a speaker is worse than one that plays it silently.
     sound: Option<Sound>,
+    audio_control: Option<AudioControl>,
+    read_ahead: Vec<ReadAhead>,
     timing: Timing,
     size: Size,
     lenses: usize,
@@ -195,6 +218,14 @@ pub struct Player {
     /// A bounded replay whose intermediate video sources must not move the
     /// requested media/audio position.
     replay_clock_held: bool,
+}
+
+impl Drop for Player {
+    fn drop(&mut self) {
+        if let Some(control) = &self.audio_control {
+            control.stop();
+        }
+    }
 }
 
 /// Controlled input for cross-layer clock/wakeup tests, with the production
@@ -314,6 +345,11 @@ impl Epochs {
 }
 
 impl Player {
+    /// Completed successors required only after a real buffering hold. Keep
+    /// enough processed runway for short completion bursts without repeatedly
+    /// restarting picture and sound. Startup still uses its smaller lead.
+    pub const RECOVERY_SUCCESSORS: usize = 6;
+
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn controlled_for_test(timing: Timing, size: Size) -> (Self, TestDecoder) {
@@ -327,6 +363,8 @@ impl Player {
                 commands,
                 presenter: Presenter::new(timing.interval(), Arc::new(Beat::default())),
                 sound: None,
+                audio_control: None,
+                read_ahead: Vec::new(),
                 timing,
                 size,
                 lenses: 2,
@@ -344,9 +382,8 @@ impl Player {
         )
     }
 
-    /// Opens the file and starts decoding. Returns as soon as the container
-    /// is parsed: the first frame arrives on the thread, so a big file does
-    /// not hold the window shut.
+    /// Opens the file and starts decoding. Container inspection is synchronous;
+    /// an interactive caller should prepare a Reader away from its UI thread.
     pub fn open(path: &Path) -> Fallible<Self> {
         Self::open_with(path, &[])
     }
@@ -365,7 +402,9 @@ impl Player {
         Self::from_reader(Reader::open_pair(first, second)?)
     }
 
-    fn from_reader(reader: Reader) -> Fallible<Self> {
+    /// Starts decoding an already inspected capture. No file is reopened.
+    /// Sound-device creation stays on the caller's thread.
+    pub fn from_reader(reader: Reader) -> Fallible<Self> {
         let mut reader = reader.lookahead(LOOKAHEAD);
         let (timing, size) = (reader.timing(), reader.size());
         let (lenses, files) = (reader.lenses(), reader.paths());
@@ -383,6 +422,11 @@ impl Player {
             reader = reader.listen(sound)?;
         }
         let (sender, notes, decode_arrival) = decode_arrival::channel(QUEUED);
+        let audio_control = reader.audio_control();
+        let read_ahead = reader.read_ahead();
+        if let Some(control) = &audio_control {
+            control.failure_wake(Waker::from(decode_arrival.clone()));
+        }
         // Unbounded, because a drag asks for a position per pointer move and
         // the player must never block on handing one over. The thread throws
         // away everything but the newest before each read.
@@ -398,6 +442,8 @@ impl Player {
             commands,
             presenter: Presenter::new(timing.interval(), beat),
             sound,
+            audio_control,
+            read_ahead,
             timing,
             size,
             lenses,
@@ -533,6 +579,9 @@ impl Player {
     /// remains for [`Self::pump`]. Stale-epoch notes are discarded; a
     /// newest-epoch gap or decode failure is returned rather than hidden.
     pub fn prepare_ahead(&mut self, capacity: usize) -> Fallible<usize> {
+        if let Some(control) = &self.audio_control {
+            control.check()?;
+        }
         if capacity > PREPARED_AHEAD_MAX {
             return Err(format!(
                 "decoded source preparation requested {capacity} successors, maximum is {PREPARED_AHEAD_MAX}"
@@ -549,7 +598,10 @@ impl Player {
             return Ok(self.presenter.peeked.len().min(capacity));
         }
 
+        self.cancel_decode_wait();
         while self.presenter.peeked.len() < capacity {
+            let generation = self.decode_arrival.generation();
+            self.last_empty_generation = None;
             match self.notes.try_recv() {
                 Ok(Note::Frames(tag, _)) if !self.epochs.is_newest(tag) => continue,
                 Ok(Note::Frames(_, frames)) => {
@@ -590,7 +642,10 @@ impl Player {
                     break;
                 }
                 Ok(Note::Failed(error)) => return Err(error),
-                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Empty) => {
+                    self.last_empty_generation = Some(generation);
+                    break;
+                }
                 Err(TryRecvError::Disconnected) => {
                     if let Some(target) = self.replay_target
                         && self
@@ -669,6 +724,140 @@ impl Player {
         self.presenter.next_due()
     }
 
+    /// Hold picture and sound together during an actual completed-source shortage.
+    /// This leaves play intent, every source queue and estimator history intact.
+    /// A missed completed-picture interval, or missing sound, triggers the hold.
+    /// Queued inputs cannot keep sound running past an unfinished picture.
+    /// Restart needs the completed recovery runway, sound, and a recovery-only
+    /// compressed-input lead. The finished tail needs no unattainable lead.
+    pub fn coordinate_buffering(
+        &mut self,
+        now: Instant,
+        output_ready: bool,
+        ready_successors: usize,
+        picture_input_missing: bool,
+        finished: bool,
+        wake: Waker,
+    ) -> Fallible<Option<Instant>> {
+        if self.presenter.policy != PresentationPolicy::SequentialRealtime
+            || !self.is_playing()
+            || !self.presenter.clock.is_anchored()
+            || self.is_seeking()
+            || self.replay_target.is_some()
+        {
+            return Ok(None);
+        }
+        let Some(current) = self.presenter.current.as_ref() else {
+            return Ok(None);
+        };
+        let interval = self.presenter.interval;
+        let position = self.position(now);
+        let covers_position = output_ready && position < current.timestamp + interval;
+        if self.presenter.clock.buffering {
+            let lead = if finished {
+                Duration::ZERO
+            } else {
+                interval * 2
+            };
+            let audio_ready = self.audio_control.as_ref().map_or(Ok(true), |control| {
+                control.buffered_or_wait(position, lead, wake.clone())
+            })?;
+            let mut input_ready = true;
+            if !finished {
+                for input in &self.read_ahead {
+                    input_ready &= input.buffered_or_wait(position + REFILL_LEAD, wake.clone())?;
+                }
+            }
+            if covers_position
+                && (finished || ready_successors >= Self::RECOVERY_SUCCESSORS)
+                && audio_ready
+                && input_ready
+            {
+                for input in &self.read_ahead {
+                    input.cancel();
+                }
+                self.presenter.clock.resume_buffered(now);
+                eprintln!("buffer: resumed at {:.3} s", position.as_secs_f64());
+            }
+            return Ok(None);
+        }
+        let missing_at = current.timestamp + interval * if output_ready { 2 } else { 1 };
+        let deadline = self.presenter.clock.reaches(missing_at);
+        let audio_ready = self
+            .audio_control
+            .as_ref()
+            .map_or(Ok(true), |control| control.has_sound_at(position))?;
+        // The shell can wake late with several completed outputs waiting.
+        // Let its ordered catch-up consume that prefix before declaring a
+        // picture shortage. This never hides missing sound or pending GPU work.
+        let catchup_ready = output_ready && ready_successors > 0;
+        if (!covers_position && position >= missing_at && !catchup_ready) || !audio_ready {
+            self.presenter.clock.hold_for_buffer(now);
+            eprintln!(
+                "buffer: waiting for {} at {:.3} s",
+                if audio_ready { "picture" } else { "sound" },
+                position.as_secs_f64()
+            );
+            if let Some(control) = &self.audio_control {
+                let _ = control.buffered_or_wait(position, interval * 2, wake)?;
+            }
+            return Ok(None);
+        }
+        if !picture_input_missing && deadline.is_some_and(|deadline| deadline <= now) {
+            // A worker completion will wake the shell. An expired picture
+            // deadline must not spin timers while that admitted work finishes.
+            return Ok(None);
+        }
+        Ok(deadline)
+    }
+
+    /// Startup/seek autoplay preparation, before the common clock starts.
+    /// Keep the smaller two-picture and sound lead, and prime the existing
+    /// bounded compressed reserve rather than starting on an empty input queue.
+    /// A finished tail needs no unattainable reserve. Explicit paused landings
+    /// do not use this autoplay gate.
+    pub fn prepared_playback_ready(
+        &self,
+        ready_successors: usize,
+        finished: bool,
+        wake: Waker,
+    ) -> Fallible<bool> {
+        let audio_ready = self.audio_control.as_ref().map_or(Ok(true), |control| {
+            control.buffered_or_wait(
+                self.presenter.clock.reading.position,
+                if finished {
+                    Duration::ZERO
+                } else {
+                    self.presenter.interval * 2
+                },
+                wake.clone(),
+            )
+        })?;
+        let mut input_ready = true;
+        if !finished {
+            for input in &self.read_ahead {
+                input_ready &= input.buffered_or_wait(
+                    self.presenter.clock.reading.position + REFILL_LEAD,
+                    wake.clone(),
+                )?;
+            }
+        }
+        Ok((finished || ready_successors >= 2) && audio_ready && input_ready)
+    }
+
+    /// A held clock still permits logical source promotion up to its fixed PTS.
+    /// The caller must continue the exact completion gate between promotions.
+    pub fn buffered_frame_due(&self) -> bool {
+        self.presenter.clock.buffering
+            && self.presenter.current.as_ref().is_some_and(|current| {
+                current.timestamp + self.presenter.interval <= self.presenter.clock.reading.position
+            })
+    }
+
+    pub fn is_buffering(&self) -> bool {
+        self.presenter.clock.buffering
+    }
+
     /// Sleep until the missing decoder delivery arrives, instead of polling
     /// an already expired presentation deadline. The caller must keep the
     /// waker's event subscription alive, and retain its ordinary deadline if
@@ -691,17 +880,50 @@ impl Player {
             .is_some_and(|generation| self.decode_arrival.wait_after(generation, waker))
     }
 
+    /// Arm the last observed empty decoder queue for a sequential source
+    /// consumer, including paused startup and seek preparation. Unlike the
+    /// generic display wait, this does not require an overdue picture. The
+    /// caller decides whether another bounded preparation slot is needed.
+    /// A delivery racing registration wakes the caller immediately; false
+    /// never means that a previously observed Empty may safely be forgotten.
+    pub fn wait_for_prepared_decode(&self, waker: Waker) -> bool {
+        if self.presenter.policy != PresentationPolicy::SequentialRealtime || self.ended {
+            return false;
+        }
+        let Some(generation) = self.last_empty_generation else {
+            return false;
+        };
+        if self.decode_arrival.wait_after(generation, waker.clone()) {
+            true
+        } else {
+            waker.wake();
+            false
+        }
+    }
+
     fn cancel_decode_wait(&mut self) {
         self.last_empty_generation = None;
         self.decode_arrival.cancel();
     }
 
     pub fn play(&mut self) {
+        for input in &self.read_ahead {
+            input.cancel();
+        }
+        if let Some(control) = &self.audio_control {
+            control.cancel_buffer_wait();
+        }
         self.presenter.clock.play();
     }
 
     pub fn pause(&mut self, now: Instant) {
+        for input in &self.read_ahead {
+            input.cancel();
+        }
         self.cancel_decode_wait();
+        if let Some(control) = &self.audio_control {
+            control.cancel_buffer_wait();
+        }
         self.presenter.clock.pause(now);
     }
 
@@ -732,10 +954,11 @@ impl Player {
         self.replay_clock_held = false;
         let epoch = self.epochs.ask();
         self.ended = false;
-        self.hush();
+        let audio_epoch = self.hush();
         self.presenter.reseek(to.time(self.timing));
         let command = Command::Seek {
             epoch,
+            audio_epoch,
             to,
             accuracy,
         };
@@ -775,12 +998,13 @@ impl Player {
             self.replay_clock_held = false;
             self.ended = false;
             let epoch = self.epochs.ask();
-            self.hush();
+            let audio_epoch = self.hush();
             self.presenter.reseek(Duration::ZERO);
             if self
                 .commands
                 .send(Command::Replay {
                     epoch,
+                    audio_epoch,
                     video_at: Cue::Index(0),
                     audio_at: Cue::Index(target),
                 })
@@ -817,7 +1041,7 @@ impl Player {
         self.pause(Instant::now());
         self.ended = false;
         let epoch = self.epochs.ask();
-        self.hush();
+        let audio_epoch = self.hush();
         // The media clock and independent sound track name the requested
         // target, never the non-presenting video pre-roll.
         let now = Instant::now();
@@ -829,6 +1053,7 @@ impl Player {
             .commands
             .send(Command::Replay {
                 epoch,
+                audio_epoch,
                 video_at: Cue::Index(first),
                 audio_at: Cue::Index(target),
             })
@@ -877,10 +1102,14 @@ impl Player {
     /// rather than waiting for the decode thread to reach the seek: that
     /// thread can be blocked handing over a frame, and every millisecond it
     /// waits is a millisecond of the old position still playing.
-    fn hush(&self) {
-        if let Some(sound) = &self.sound {
-            sound.pipe().flush();
+    fn hush(&self) -> Option<AudioEpoch> {
+        for input in &self.read_ahead {
+            input.cancel();
         }
+        self.audio_control
+            .as_ref()
+            .map(AudioControl::invalidate)
+            .or_else(|| self.sound.as_ref().map(|sound| sound.pipe().invalidate()))
     }
 
     /// The last frame of the file, or 0 for a container that does not say how
@@ -892,6 +1121,9 @@ impl Player {
     /// The frame that belongs on screen at `now`, or `None` when the picture
     /// must not change. Call it on every redraw; it is the whole clock.
     pub fn pump(&mut self, now: Instant) -> Fallible<Option<Arc<Frames>>> {
+        if let Some(control) = &self.audio_control {
+            control.check()?;
+        }
         self.cancel_decode_wait();
         let sequential = self.presenter.policy.is_sequential();
         let prefetch_successor = self.presenter.policy == PresentationPolicy::SequentialRealtime
@@ -1022,9 +1254,42 @@ trait Source {
     fn seek(&mut self, to: Cue, accuracy: Accuracy) -> Fallible<()>;
     fn replay_from(&mut self, video_at: Cue, audio_at: Cue) -> Fallible<()>;
     fn read_until(&mut self, interrupted: &mut dyn FnMut() -> bool) -> Fallible<Read>;
+    fn seek_in(
+        &mut self,
+        to: Cue,
+        accuracy: Accuracy,
+        _audio_epoch: Option<AudioEpoch>,
+    ) -> Fallible<()> {
+        self.seek(to, accuracy)
+    }
+    fn replay_from_in(
+        &mut self,
+        video_at: Cue,
+        audio_at: Cue,
+        _audio_epoch: Option<AudioEpoch>,
+    ) -> Fallible<()> {
+        self.replay_from(video_at, audio_at)
+    }
 }
 
 impl Source for Reader {
+    fn seek_in(
+        &mut self,
+        to: Cue,
+        accuracy: Accuracy,
+        audio_epoch: Option<AudioEpoch>,
+    ) -> Fallible<()> {
+        Reader::seek_in(self, to, accuracy, audio_epoch)
+    }
+
+    fn replay_from_in(
+        &mut self,
+        video_at: Cue,
+        audio_at: Cue,
+        audio_epoch: Option<AudioEpoch>,
+    ) -> Fallible<()> {
+        Reader::replay_from_in(self, video_at, audio_at, audio_epoch)
+    }
     fn seek(&mut self, to: Cue, accuracy: Accuracy) -> Fallible<()> {
         Reader::seek(self, to, accuracy)
     }
@@ -1076,19 +1341,21 @@ fn decode_ahead(mut reader: impl Source, notes: &Delivery<Note>, commands: &Rece
             let result = match order {
                 Command::Seek {
                     epoch: to,
+                    audio_epoch,
                     to: cue,
                     accuracy,
                 } => {
                     epoch = to;
-                    reader.seek(cue, accuracy)
+                    reader.seek_in(cue, accuracy, audio_epoch)
                 }
                 Command::Replay {
                     epoch: to,
+                    audio_epoch,
                     video_at,
                     audio_at,
                 } => {
                     epoch = to;
-                    reader.replay_from(video_at, audio_at)
+                    reader.replay_from_in(video_at, audio_at, audio_epoch)
                 }
             };
             ended = false;
@@ -1332,6 +1599,9 @@ impl Presenter {
 struct Clock {
     reading: Reading,
     beat: Arc<Beat>,
+    /// User play intent survives a temporary hold. Beat independently records
+    /// whether media time is currently advancing for the audio callback.
+    buffering: bool,
 }
 
 impl Clock {
@@ -1339,6 +1609,7 @@ impl Clock {
         Self {
             reading: Reading::default(),
             beat,
+            buffering: false,
         }
     }
 
@@ -1347,7 +1618,7 @@ impl Clock {
     }
 
     fn is_playing(&self) -> bool {
-        self.reading.playing
+        self.reading.playing || self.buffering
     }
 
     fn is_anchored(&self) -> bool {
@@ -1366,6 +1637,7 @@ impl Clock {
     }
 
     fn play(&mut self) {
+        self.buffering = false;
         self.moved(Reading {
             playing: true,
             origin: None,
@@ -1374,6 +1646,7 @@ impl Clock {
     }
 
     fn pause(&mut self, now: Instant) {
+        self.buffering = false;
         self.moved(Reading {
             playing: false,
             position: self.position(now),
@@ -1392,9 +1665,30 @@ impl Clock {
     /// Where the clock reads until the frame that was seeked to arrives.
     /// Unanchoring is what makes that frame anchor it, whenever it comes.
     fn seek(&mut self, to: Duration) {
+        let playing = self.is_playing();
+        self.buffering = false;
         self.moved(Reading {
+            playing,
             position: to,
             origin: None,
+        });
+    }
+
+    fn hold_for_buffer(&mut self, now: Instant) {
+        self.buffering = true;
+        self.moved(Reading {
+            playing: false,
+            position: self.position(now),
+            // Retain an anchor so ordered catch-up cannot claim a new PTS.
+            origin: Some(now),
+        });
+    }
+
+    fn resume_buffered(&mut self, now: Instant) {
+        self.buffering = false;
+        self.moved(Reading {
+            playing: true,
+            origin: Some(now),
             ..self.reading
         });
     }
@@ -1415,6 +1709,647 @@ mod tests {
     use crate::Size;
 
     const NTSC: Duration = Duration::from_nanos(33_366_666);
+
+    #[test]
+    fn recovery_waits_for_real_compressed_input_even_with_completed_picture_lead() {
+        let (input, observer, release, dropped) = crate::packet_input::tests::blocked_read_ahead();
+        let mut bench = Bench::new();
+        bench.player.read_ahead = vec![observer];
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        bench.player.pump(start).unwrap();
+        let late = start + NTSC * 3;
+        bench
+            .player
+            .coordinate_buffering(late, true, 0, true, false, Waker::noop().clone())
+            .unwrap();
+        assert!(bench.player.is_buffering());
+        for index in 1..=3 {
+            bench.decoded(0, index);
+            bench.player.pump(late).unwrap();
+        }
+        let wake = Arc::new(WakeCount::default());
+        bench
+            .player
+            .coordinate_buffering(
+                late,
+                true,
+                Player::RECOVERY_SUCCESSORS,
+                true,
+                false,
+                Waker::from(wake.clone()),
+            )
+            .unwrap();
+        assert!(
+            bench.player.is_buffering(),
+            "completed pictures must not resume short input again"
+        );
+        let held = bench.player.position(late);
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while wake.0.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        // A notification may arrive before the target packet. Re-registering
+        // the same real readiness gate must neither resume early nor lose wake.
+        while bench.player.is_buffering() {
+            bench
+                .player
+                .coordinate_buffering(
+                    late,
+                    true,
+                    Player::RECOVERY_SUCCESSORS,
+                    true,
+                    false,
+                    Waker::from(wake.clone()),
+                )
+                .unwrap();
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        assert_eq!(bench.player.position(late), held);
+        assert_eq!(bench.player.position(late + NTSC), held + NTSC);
+        assert_eq!(bench.player.stats().dropped, 0);
+        drop(input);
+        dropped.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn preparation_waits_for_ready_input_without_starting_or_reanchoring_clock() {
+        let (input, observer, release, dropped) = crate::packet_input::tests::blocked_read_ahead();
+        let mut bench = Bench::new();
+        bench.player.read_ahead = vec![observer];
+        assert!(
+            !bench
+                .player
+                .prepared_playback_ready(1, false, Waker::noop().clone())
+                .unwrap()
+        );
+        assert!(
+            !bench
+                .player
+                .prepared_playback_ready(2, false, Waker::noop().clone())
+                .unwrap()
+        );
+        assert!(
+            bench
+                .player
+                .prepared_playback_ready(0, true, Waker::noop().clone())
+                .unwrap()
+        );
+        assert!(!bench.player.is_playing());
+        assert!(!bench.player.is_buffering());
+        let before = bench.player.presenter.clock.reading;
+        let wake = Arc::new(WakeCount::default());
+        assert!(
+            !bench
+                .player
+                .prepared_playback_ready(2, false, Waker::from(wake.clone()))
+                .unwrap()
+        );
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !bench
+            .player
+            .prepared_playback_ready(2, false, Waker::from(wake.clone()))
+            .unwrap()
+        {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        assert!(wake.0.load(Ordering::SeqCst) > 0);
+        assert_eq!(bench.player.presenter.clock.reading, before);
+        drop(input);
+        dropped.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn normal_playback_never_holds_or_reanchors_the_clock() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        // Exercise two minutes of ordinary progression, including small
+        // delivery delays. Running out of ready successors alone is not a
+        // stall and must not turn normal playback into stop/start playback.
+        for index in 0..3_600 {
+            bench.decoded(0, index);
+            let now = start + NTSC * index as u32 + Duration::from_millis(5);
+            assert_eq!(bench.player.pump(now).unwrap().unwrap().index, index);
+            bench
+                .player
+                .coordinate_buffering(now, true, 0, true, false, Waker::noop().clone())
+                .unwrap();
+            assert!(!bench.player.is_buffering());
+            assert_eq!(
+                bench.player.presenter.clock.reading.origin,
+                Some(start + Duration::from_millis(5))
+            );
+            assert_eq!(bench.player.position(now), NTSC * index as u32);
+        }
+        assert_eq!(bench.player.stats().dropped, 0);
+    }
+
+    #[test]
+    fn late_scheduler_walks_completed_successors_without_buffering() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        bench.player.pump(start).unwrap();
+        // The shell wakes late, but the next four source results are already
+        // complete. Ordered logical catch-up is work, not an input shortage.
+        for index in 1..=4 {
+            bench.decoded(0, index);
+        }
+        let late = start + NTSC * 4 + Duration::from_millis(5);
+        for index in 1..=4 {
+            assert_eq!(bench.player.pump(late).unwrap().unwrap().index, index);
+            bench
+                .player
+                .coordinate_buffering(
+                    late,
+                    true,
+                    (4 - index) as usize,
+                    true,
+                    false,
+                    Waker::noop().clone(),
+                )
+                .unwrap();
+            assert!(
+                !bench.player.is_buffering(),
+                "completed source catch-up must not interrupt sound"
+            );
+            assert_eq!(bench.player.position(late), late.duration_since(start));
+            assert_eq!(bench.player.presenter.clock.reading.origin, Some(start));
+        }
+        assert_eq!(bench.player.stats().presented, 5);
+        assert_eq!(bench.player.stats().dropped, 0);
+    }
+
+    #[test]
+    fn admitted_picture_work_before_its_deadline_does_not_hold() {
+        for output_ready in [false, true] {
+            let mut bench = Bench::new();
+            assert!(
+                bench
+                    .player
+                    .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+            );
+            bench.player.play();
+            let start = Instant::now();
+            bench.decoded(0, 0);
+            bench.player.pump(start).unwrap();
+            let deadline = start + NTSC * if output_ready { 2 } else { 1 };
+            let before = deadline - Duration::from_nanos(1);
+            assert_eq!(
+                bench
+                    .player
+                    .coordinate_buffering(
+                        before,
+                        output_ready,
+                        0,
+                        false,
+                        false,
+                        Waker::noop().clone(),
+                    )
+                    .unwrap(),
+                Some(deadline)
+            );
+            assert!(!bench.player.is_buffering());
+            assert_eq!(bench.player.position(before), before.duration_since(start));
+            assert_eq!(bench.player.presenter.clock.reading.origin, Some(start));
+        }
+    }
+
+    #[test]
+    fn unfinished_admitted_picture_holds_at_a_missed_deadline_without_spinning() {
+        for output_ready in [false, true] {
+            let mut bench = Bench::new();
+            assert!(
+                bench
+                    .player
+                    .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+            );
+            bench.player.play();
+            let start = Instant::now();
+            bench.decoded(0, 0);
+            bench.player.pump(start).unwrap();
+            let late = start + NTSC * 3;
+            assert_eq!(
+                bench
+                    .player
+                    .coordinate_buffering(
+                        late,
+                        output_ready,
+                        0,
+                        false,
+                        false,
+                        Waker::noop().clone(),
+                    )
+                    .unwrap(),
+                None,
+                "wait for the worker, not an already-expired timer"
+            );
+            assert!(
+                bench.player.is_buffering(),
+                "queued inputs are not a completed picture at the missed deadline"
+            );
+            assert_eq!(bench.player.presenter.clock.reading.origin, Some(late));
+            assert!(!bench.player.presenter.clock.reading.playing);
+            assert_eq!(bench.player.position(late), late.duration_since(start));
+            assert_eq!(
+                bench.player.position(late + NTSC * 3),
+                late.duration_since(start),
+                "the common clock must not keep running without a ready picture"
+            );
+        }
+    }
+
+    #[test]
+    fn completed_catchup_still_holds_when_its_ready_prefix_runs_out() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        bench.player.pump(start).unwrap();
+        bench.decoded(0, 1);
+        bench.decoded(0, 2);
+        let late = start + NTSC * 4 + Duration::from_millis(5);
+        bench.player.pump(late).unwrap();
+        bench
+            .player
+            .coordinate_buffering(late, true, 1, true, false, Waker::noop().clone())
+            .unwrap();
+        assert!(!bench.player.is_buffering());
+        bench.player.pump(late).unwrap();
+        bench
+            .player
+            .coordinate_buffering(late, true, 0, true, false, Waker::noop().clone())
+            .unwrap();
+        assert!(bench.player.is_buffering());
+        assert_eq!(bench.player.position(late), late.duration_since(start));
+        assert_eq!(bench.player.stats().presented, 3);
+        assert_eq!(bench.player.stats().dropped, 0);
+    }
+
+    #[test]
+    fn buffering_holds_audio_time_but_walks_every_source_to_the_held_position() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        assert_eq!(bench.player.pump(start).unwrap().unwrap().index, 0);
+        let late = start + Duration::from_millis(100);
+        assert!(bench.player.pump(late).unwrap().is_none());
+        bench
+            .player
+            .coordinate_buffering(late, true, 0, true, false, Waker::noop().clone())
+            .unwrap();
+        assert!(bench.player.is_buffering());
+        assert!(
+            bench.player.is_playing(),
+            "a shortage must retain play intent"
+        );
+        let held = bench.player.position(late);
+        let later = late + Duration::from_secs(5);
+        assert_eq!(bench.player.position(later), held);
+        assert!(
+            bench
+                .player
+                .presenter
+                .clock
+                .beat
+                .read(Reading::default())
+                .running_at(later)
+                .is_none()
+        );
+        assert!(bench.player.next_due().is_none());
+
+        for index in 1..=2 {
+            bench.decoded(0, index);
+            assert_eq!(bench.player.pump(later).unwrap().unwrap().index, index);
+        }
+        assert_eq!(
+            bench.player.position(later),
+            held,
+            "catch-up cannot claim a different PTS"
+        );
+        assert!(!bench.player.buffered_frame_due());
+        for successors in 0..Player::RECOVERY_SUCCESSORS {
+            bench
+                .player
+                .coordinate_buffering(later, true, successors, true, false, Waker::noop().clone())
+                .unwrap();
+            assert!(
+                bench.player.is_buffering(),
+                "{successors} successors restarted before the completed recovery runway"
+            );
+            assert_eq!(bench.player.position(later), held);
+        }
+        bench
+            .player
+            .coordinate_buffering(
+                later,
+                true,
+                Player::RECOVERY_SUCCESSORS,
+                true,
+                false,
+                Waker::noop().clone(),
+            )
+            .unwrap();
+        assert!(!bench.player.is_buffering());
+        assert_eq!(bench.player.position(later), held);
+        assert_eq!(bench.player.position(later + NTSC), held + NTSC);
+        assert_eq!(bench.player.stats().dropped, 0);
+    }
+
+    #[test]
+    fn a_small_video_delay_does_not_reanchor_or_buffer() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        bench.player.pump(start).unwrap();
+        let now = start + NTSC + Duration::from_millis(5);
+        assert_eq!(
+            bench
+                .player
+                .coordinate_buffering(now, true, 0, true, false, Waker::noop().clone())
+                .unwrap(),
+            Some(start + NTSC * 2)
+        );
+        assert!(!bench.player.is_buffering());
+        assert_eq!(bench.player.position(now), now.duration_since(start));
+    }
+
+    #[test]
+    fn user_pause_and_seek_supersede_buffering() {
+        for seek in [false, true] {
+            let mut bench = Bench::new();
+            assert!(
+                bench
+                    .player
+                    .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+            );
+            bench.player.play();
+            let start = Instant::now();
+            bench.decoded(0, 0);
+            bench.player.pump(start).unwrap();
+            let late = start + NTSC * 3;
+            bench
+                .player
+                .coordinate_buffering(late, true, 0, true, false, Waker::noop().clone())
+                .unwrap();
+            assert!(bench.player.is_buffering());
+            if seek {
+                bench.player.seek(Cue::Index(90), Accuracy::Exact);
+                assert!(bench.player.is_playing());
+                assert!(bench.player.is_seeking());
+            } else {
+                bench.player.pause(late);
+                assert!(!bench.player.is_playing());
+                bench
+                    .player
+                    .coordinate_buffering(late + NTSC, true, 4, true, true, Waker::noop().clone())
+                    .unwrap();
+                assert!(
+                    !bench.player.is_playing(),
+                    "refill must not undo user pause"
+                );
+            }
+            assert!(!bench.player.is_buffering());
+        }
+    }
+
+    #[test]
+    fn buffering_finishes_a_short_tail_without_a_recovery_runway() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 0);
+        bench.player.pump(start).unwrap();
+        let late = start + NTSC + Duration::from_millis(1);
+        bench.decoded(0, 1);
+        bench.player.pump(late).unwrap();
+        // A temporarily empty sound source can require a hold even when this
+        // final picture is already complete. Exercise the same clock state.
+        bench.player.presenter.clock.hold_for_buffer(late);
+        bench
+            .player
+            .coordinate_buffering(late + NTSC * 9, true, 0, true, true, Waker::noop().clone())
+            .unwrap();
+        assert!(!bench.player.is_buffering());
+        assert_eq!(
+            bench.player.position(late + NTSC * 9),
+            late.duration_since(start)
+        );
+    }
+
+    #[test]
+    fn completed_video_waits_for_audio_refill_at_the_same_held_pts() {
+        use crate::audio::Pipe;
+        use crate::audio_worker::tests as producer;
+        let pipe = Pipe::new(1000, 1, Duration::from_millis(500));
+        let epoch = pipe.epoch();
+        let (worker, _) = producer::fixture(pipe.clone());
+        producer::until(|| pipe.room() <= Duration::from_millis(100));
+        let mut bench = Bench::new();
+        bench.player.audio_control = Some(worker.control());
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 60);
+        bench.player.pump(start).unwrap();
+        let position = bench.player.position(start);
+        bench
+            .player
+            .coordinate_buffering(
+                start,
+                true,
+                Player::RECOVERY_SUCCESSORS,
+                false,
+                false,
+                Waker::noop().clone(),
+            )
+            .unwrap();
+        assert!(
+            bench.player.is_buffering(),
+            "video readiness cannot hide missing sound"
+        );
+        assert_eq!(
+            bench.player.position(start + Duration::from_secs(10)),
+            position
+        );
+        producer::until(|| pipe.buffered_through(position, NTSC * 2));
+        let later = start + Duration::from_secs(10);
+        bench
+            .player
+            .coordinate_buffering(
+                later,
+                true,
+                Player::RECOVERY_SUCCESSORS,
+                false,
+                false,
+                Waker::noop().clone(),
+            )
+            .unwrap();
+        assert!(!bench.player.is_buffering());
+        assert_eq!(bench.player.position(later), position);
+        assert!(pipe.is_current(&epoch));
+    }
+
+    #[test]
+    fn filtered_progress_report_does_not_claim_physical_present_or_redraw_rates() {
+        let stats = Stats {
+            presented: 60,
+            redraws: 120,
+            worst_late: Duration::from_millis(7),
+            ..Stats::default()
+        };
+        let report = stats.report_source_progress(Duration::from_secs(2));
+        assert_eq!(
+            report,
+            "30.00 source advances/s in 60.0 progress pumps/s, 0 dropped, 0 starved, worst 7.0 ms late"
+        );
+        assert!(!report.contains("presented"));
+        assert!(!report.contains("redraws"));
+        assert_eq!(
+            stats.report(Duration::from_secs(2)),
+            "30.00 fps presented in 60.0 redraws/s, 0 dropped, 0 starved, worst 7.0 ms late"
+        );
+    }
+
+    #[test]
+    fn full_video_delivery_cannot_stop_independent_audio_refill() {
+        use crate::audio::Pipe;
+        use crate::audio_worker::{AudioWorker, tests as producer};
+        struct Video {
+            _audio: AudioWorker,
+            read: Arc<AtomicUsize>,
+        }
+        impl Source for Video {
+            fn seek(&mut self, _: Cue, _: Accuracy) -> Fallible<()> {
+                Ok(())
+            }
+            fn replay_from(&mut self, _: Cue, _: Cue) -> Fallible<()> {
+                Ok(())
+            }
+            fn read_until(&mut self, _: &mut dyn FnMut() -> bool) -> Fallible<Read> {
+                let index = self.read.fetch_add(1, Ordering::AcqRel);
+                Ok(Read::Frames(frame(index as u64)))
+            }
+        }
+        let pipe = Pipe::new(1000, 1, Duration::from_millis(500));
+        let (audio, packets) = producer::fixture(pipe.clone());
+        let control = audio.control();
+        let read = Arc::new(AtomicUsize::new(0));
+        let (sender, notes, _) = decode_arrival::channel(QUEUED);
+        let (commands, orders) = channel();
+        let video = Video {
+            _audio: audio,
+            read: read.clone(),
+        };
+        let decoding = thread::spawn(move || decode_ahead(video, &sender, &orders));
+        producer::until(|| read.load(Ordering::Acquire) == QUEUED + 1);
+        // Deliberately never drain video. Its real decode_ahead loop is now
+        // blocked on Delivery::send, beyond the audio ring's half-second depth.
+        for ordinal in 0..40 {
+            producer::until(|| pipe.room() <= Duration::from_millis(100));
+            let mut out = [0.0; 20];
+            pipe.fill(&mut out, Some(Duration::from_millis(ordinal * 20)));
+            assert_eq!(out[19], 0.5);
+            assert_eq!(pipe.health().underruns, 0);
+            control.check().unwrap();
+        }
+        assert!(packets.load(Ordering::Acquire) > 40);
+        assert_eq!(read.load(Ordering::Acquire), QUEUED + 1);
+        drop(notes);
+        drop(commands);
+        decoding.join().unwrap();
+    }
+
+    #[test]
+    fn independent_audio_failure_reaches_player_without_video_delivery() {
+        use crate::audio::Pipe;
+        use crate::audio_worker::tests as producer;
+        let pipe = Pipe::new(1000, 1, Duration::from_millis(500));
+        let worker = producer::failure_fixture(pipe);
+        let mut bench = Bench::new();
+        bench.player.audio_control = Some(worker.control());
+        // Existing video is available, but it cannot hide the producer error.
+        bench.decoded(0, 0);
+        producer::until(|| worker.check().is_err());
+        let error = bench.player.pump(Instant::now()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "underlying independent audio decode failure"
+        );
+        assert!(bench.player.presenter.current.is_none());
+    }
+
+    #[test]
+    fn seek_commands_retain_the_ui_hush_epoch_across_newer_requests() {
+        use crate::audio::Pipe;
+        use crate::audio_worker::tests as producer;
+        let pipe = Pipe::new(1000, 1, Duration::from_millis(500));
+        let (worker, _) = producer::fixture(pipe.clone());
+        let mut bench = Bench::new();
+        bench.player.audio_control = Some(worker.control());
+        bench.player.seek(Cue::Index(10), Accuracy::Exact);
+        let old = match bench.commands.try_recv().unwrap() {
+            Command::Seek { audio_epoch, .. } => audio_epoch.unwrap(),
+            _ => panic!("expected ordinary seek"),
+        };
+        bench.player.seek(Cue::Index(20), Accuracy::Exact);
+        let new = match bench.commands.try_recv().unwrap() {
+            Command::Seek { audio_epoch, .. } => audio_epoch.unwrap(),
+            _ => panic!("expected ordinary seek"),
+        };
+        assert!(!pipe.is_current(&old));
+        assert!(pipe.is_current(&new));
+        assert!(!old.same(&new));
+    }
     const HZ_60: Duration = Duration::from_nanos(16_666_666);
 
     #[derive(Default)]
@@ -1424,6 +2359,85 @@ mod tests {
         fn wake(self: Arc<Self>) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    #[test]
+    fn paused_sequential_preparation_wait_wakes_without_moving_media_time() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        let now = Instant::now();
+        bench.decoded(0, 0);
+        assert_eq!(bench.redraw(now), Some(0));
+        let position = bench.player.position(now);
+        assert_eq!(bench.player.prepare_ahead(6).unwrap(), 0);
+        let counter = Arc::new(WakeCount::default());
+        assert!(
+            bench
+                .player
+                .wait_for_prepared_decode(Waker::from(counter.clone()))
+        );
+        bench.decoded(0, 1);
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+        assert_eq!(bench.player.prepare_ahead(6).unwrap(), 1);
+        assert_eq!(bench.player.index(), Some(0));
+        assert_eq!(
+            bench.player.position(now + Duration::from_secs(1)),
+            position
+        );
+    }
+
+    #[test]
+    fn sequential_preparation_arrival_racing_registration_requeues_progress() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.decoded(0, 0);
+        assert_eq!(bench.redraw(Instant::now()), Some(0));
+        assert_eq!(bench.player.prepare_ahead(6).unwrap(), 0);
+        bench.decoded(0, 1);
+        let counter = Arc::new(WakeCount::default());
+        assert!(
+            !bench
+                .player
+                .wait_for_prepared_decode(Waker::from(counter.clone()))
+        );
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+        assert_eq!(bench.player.prepare_ahead(6).unwrap(), 1);
+        assert_eq!(bench.player.prepared_ahead(0).unwrap().index, 1);
+    }
+
+    #[test]
+    fn sequential_startup_wait_survives_empty_preparation_and_seek_cancels_it() {
+        let mut bench = Bench::new();
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        assert_eq!(bench.redraw(Instant::now()), None);
+        assert_eq!(bench.player.prepare_ahead(6).unwrap(), 0);
+        let counter = Arc::new(WakeCount::default());
+        assert!(
+            bench
+                .player
+                .wait_for_prepared_decode(Waker::from(counter.clone()))
+        );
+        bench.player.seek(Cue::Index(7), Accuracy::Exact);
+        bench.decoded(1, 7);
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+        assert!(
+            !bench
+                .player
+                .wait_for_prepared_decode(Waker::from(counter.clone()))
+        );
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
     }
 
     fn starved_bench() -> (Bench, Instant) {
@@ -1939,6 +2953,7 @@ mod tests {
     fn seek_to(epoch: u64, index: u64, accuracy: Accuracy) -> Command {
         Command::Seek {
             epoch,
+            audio_epoch: None,
             to: Cue::Index(index),
             accuracy,
         }
@@ -1949,6 +2964,7 @@ mod tests {
         let (shown, did) = decode(
             vec![Command::Replay {
                 epoch: 4,
+                audio_epoch: None,
                 video_at: Cue::Index(0),
                 audio_at: Cue::Index(317),
             }],
@@ -1964,6 +2980,7 @@ mod tests {
         let (shown, did) = decode(
             vec![Command::Replay {
                 epoch: 9,
+                audio_epoch: None,
                 video_at: Cue::Index(993),
                 audio_at: Cue::Index(999),
             }],
@@ -2169,6 +3186,8 @@ mod tests {
                         PresentationPolicy::default(),
                     ),
                     sound: None,
+                    audio_control: None,
+                    read_ahead: Vec::new(),
                     timing,
                     size: Size::new(3840, 3840),
                     lenses: 2,
@@ -2396,7 +3415,7 @@ mod tests {
         let now = Instant::now();
         bench.decoded(0, 0);
         assert_eq!(bench.redraw(now), Some(0));
-        for index in 1..=6 {
+        for index in 1..=9 {
             bench.decoded(0, index);
         }
 
@@ -2406,9 +3425,18 @@ mod tests {
         assert_eq!(bench.player.prepare_ahead(3).unwrap(), 3);
         assert_eq!(bench.player.prepare_ahead(6).unwrap(), 6);
         assert_eq!(bench.player.prepare_ahead(3).unwrap(), 3);
-        assert!(bench.player.prepare_ahead(7).is_err());
-        assert!(bench.player.prepared_ahead(6).is_none());
-        assert_eq!(bench.player.presenter.peeked.len(), 6);
+        assert_eq!(bench.player.prepare_ahead(9).unwrap(), 9);
+        assert_eq!(
+            (0..9)
+                .map(|at| bench.player.prepared_ahead(at).unwrap().index)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        );
+        assert!(bench.player.prepare_ahead(10).is_err());
+        assert!(bench.player.prepared_ahead(9).is_none());
+        assert_eq!(bench.player.presenter.peeked.len(), 9);
+        assert_eq!(bench.player.index(), Some(0));
+        assert!(!bench.player.is_playing());
     }
 
     #[test]
@@ -2617,6 +3645,7 @@ mod tests {
                 epoch,
                 video_at,
                 audio_at,
+                ..
             } => {
                 assert_eq!(epoch, 1);
                 assert_eq!(video_at.index(bench.player.timing), 93);

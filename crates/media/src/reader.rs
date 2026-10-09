@@ -33,11 +33,14 @@ use std::time::Duration;
 
 use ffmpeg_next as ff;
 
+use super::audio::AudioEpoch;
+use super::audio_worker::{AudioControl, AudioWorker};
 use super::capture::{Opened, agreed_samples};
+use super::packet_input::{Limits, PacketInput, ReadAhead};
 use super::pairing::{Alignment, alignment};
 use super::sound::Sound;
-use super::track::Track;
-use super::{DrmFrame, Fallible, HwDevice, NANOS, Samples, Size, decode, media_time};
+use super::track::{AudioSpec, Track};
+use super::{DrmFrame, Fallible, HwDevice, NANOS, Samples, Size, decode, media_time, read_only};
 
 /// Which frame a caller wants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,10 +304,10 @@ pub struct Reader {
     sources: Vec<Source>,
     lanes: Vec<Lane>,
     /// The capture's sound, when it has one and a device took it. It carries
-    /// a demuxer of its own over [`SOUND_SOURCE`]'s file: a real capture's
-    /// interleave will not let it share one, and the three seconds of silence
-    /// that proved it are issue #97 ([`Track`]).
-    track: Option<Track>,
+    /// its own packet queue over [`SOUND_SOURCE`]'s demuxer. Compressed read-
+    /// ahead passes the interleave gap without holding decoder surfaces.
+    /// The independent producer refills sound outside video delivery.
+    track: Option<AudioWorker>,
     timing: Timing,
     size: Size,
     /// How the planes of every frame this hands out are written. One answer
@@ -336,10 +339,11 @@ const SOUND_SOURCE: usize = 0;
 /// One file: its demuxer, its own timeline, and whether it has been read to
 /// the end.
 struct Source {
-    /// Kept because the sound opens the same file again, for its own demuxer
-    /// ([`Track::open`]).
+    /// Original capture path, handed back to the caller without another lookup.
     path: PathBuf,
-    input: ff::format::context::Input,
+    audio: Option<AudioSpec>,
+    input: PacketInput,
+    sound_rate: Option<u32>,
     /// Stream time base, shared by every video stream of this file (checked
     /// at open, and checked between files when there are two).
     time_base: ff::Rational,
@@ -448,7 +452,10 @@ impl Reader {
         // favour.
         let frames = videos().map(|video| video.frames).min().unwrap_or(0);
         Ok(Self {
-            sources: sources.into_iter().map(Opened::into_source).collect(),
+            sources: sources
+                .into_iter()
+                .map(Opened::into_source)
+                .collect::<Fallible<_>>()?,
             lanes,
             track: None,
             timing: Timing::new(rate, frames)?,
@@ -480,31 +487,53 @@ impl Reader {
 
     /// Decode this capture's sound as well, into `sound`'s ring (issue #13).
     ///
-    /// A file with no audio stream takes this and stays silent. What it costs
-    /// is a second open of [`SOUND_SOURCE`]'s file, because the sound is read
-    /// on a demuxer of its own (issue #97, [`Track`]).
+    /// A file with no audio stream takes this and stays silent. Attaches the
+    /// sound consumer before compressed reading starts, without reopening IO.
     pub fn listen(mut self, sound: &Sound) -> Fallible<Self> {
-        let Some(source) = self.sources.get(SOUND_SOURCE) else {
+        let Some(source) = self.sources.get_mut(SOUND_SOURCE) else {
             return Ok(self);
         };
-        self.track = Track::open(&source.path, sound.pipe(), sound.rate(), sound.channels())?;
+        let Some(spec) = source.audio.take() else {
+            return Ok(self);
+        };
+        let track = Track::from_packets(
+            spec,
+            source.input.audio_reader()?,
+            sound.pipe(),
+            sound.rate(),
+            sound.channels(),
+        )?;
+        self.track = Some(AudioWorker::new(track, sound.pipe())?);
         Ok(self)
+    }
+
+    pub(crate) fn audio_control(&self) -> Option<AudioControl> {
+        self.track.as_ref().map(AudioWorker::control)
+    }
+
+    pub(crate) fn read_ahead(&self) -> Vec<ReadAhead> {
+        self.sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| {
+                source.input.read_ahead(
+                    self.lanes
+                        .iter()
+                        .filter(|lane| lane.source == index)
+                        .map(|lane| lane.stream)
+                        .collect(),
+                    source.time_base,
+                    source.start,
+                )
+            })
+            .collect()
     }
 
     /// The sample rate of the capture's audio stream, or `None` for one with
     /// no sound in it. Read before a device is opened, so the device can be
     /// asked for the rate that needs no resampling.
     pub fn sound_rate(&self) -> Option<u32> {
-        let stream = self
-            .sources
-            .get(SOUND_SOURCE)?
-            .input
-            .streams()
-            .find(|s| s.parameters().medium() == ff::media::Type::Audio)?;
-        // `Parameters` hands out no accessors, and opening a second decoder to
-        // read one integer is worse than reading the integer.
-        let rate = unsafe { (*stream.parameters().as_ptr()).sample_rate };
-        u32::try_from(rate).ok().filter(|rate| *rate > 0)
+        self.sources.get(SOUND_SOURCE)?.sound_rate
     }
 
     pub fn timing(&self) -> Timing {
@@ -582,12 +611,10 @@ impl Reader {
     /// reader's own 21.
     pub fn read_until(&mut self, mut interrupted: impl FnMut() -> bool) -> Fallible<Read> {
         loop {
-            // Before the pictures, and on the way past every one of them: the
-            // sound reads on its own demuxer now, and this is what turns it
-            // (issue #97). Once per pair is the slowest this can happen, and
-            // a pair is 33 ms against a ring holding 500.
-            if let Some(track) = &mut self.track {
-                track.pump()?;
+            // Audio refills independently, including while video delivery is
+            // blocked. Keep its underlying failure on the same error path.
+            if let Some(track) = &self.track {
+                track.check()?;
             }
             if let Some(frames) = self.take()? {
                 return Ok(Read::Frames(frames));
@@ -630,11 +657,25 @@ impl Reader {
     /// of that table would buy nothing;
     /// `cargo run --release -p kjerag-spike --bin seek` is the measurement.
     pub fn seek(&mut self, at: Cue, accuracy: Accuracy) -> Fallible<()> {
+        self.seek_in(at, accuracy, None)
+    }
+
+    pub(crate) fn seek_in(
+        &mut self,
+        at: Cue,
+        accuracy: Accuracy,
+        audio_epoch: Option<AudioEpoch>,
+    ) -> Fallible<()> {
         // Rotate before the first mutation. A seek can fail after moving one
         // source or flushing part of the retained state; any later delivery
         // must then refuse continuity with the position this call tried to
         // leave.
         self.decode_epoch = DecodeEpoch::new();
+        let audio_epoch = audio_epoch.or_else(|| {
+            self.track
+                .as_ref()
+                .map(|track| track.control().invalidate())
+        });
         let index = at.index(self.timing);
         // Stream index -1 means the timestamp is in AV_TIME_BASE units,
         // which is microseconds, and `..ts` asks for the keyframe at or
@@ -644,19 +685,19 @@ impl Reader {
         // Every file of the capture goes to the same media time. They share a
         // frame grid exactly, so this lands both of them on the same frame.
         for source in &mut self.sources {
-            source.input.seek(target, ..target)?;
+            source.input.seek(target)?;
             source.drained = false;
         }
         for lane in &mut self.lanes {
             lane.decoder.flush();
             lane.queue.clear();
         }
-        // The sound goes with them, on its own demuxer and to the same media
+        // The sound goes with them, on its own packet queue and to the same media
         // time. Everything already decoded is from before the seek, and a
         // scrub that leaves a tail of it playing is the thing the epoch
         // discipline exists to stop.
-        if let Some(track) = &mut self.track {
-            track.seek(target)?;
+        if let Some(track) = &self.track {
+            track.seek(target, audio_epoch)?;
         }
         self.skip_before = match accuracy {
             Accuracy::Exact => index,
@@ -668,7 +709,7 @@ impl Reader {
     }
 
     /// Start a causal video replay at exact frame zero while positioning the
-    /// independent sound demuxer at the eventual target.
+    /// sound packet consumer at the eventual target.
     ///
     /// Video must traverse every frame for a sequential consumer. Audio has
     /// no such estimator state; filling its bounded ring from frame zero
@@ -678,22 +719,39 @@ impl Reader {
     }
 
     /// Start a causal video replay at `video_at` while positioning the
-    /// independent sound demuxer at the eventual presented target.
+    /// sound packet consumer at the eventual presented target.
     pub(crate) fn replay_from(&mut self, video_at: Cue, audio_at: Cue) -> Fallible<()> {
+        self.replay_from_in(video_at, audio_at, None)
+    }
+
+    pub(crate) fn replay_from_in(
+        &mut self,
+        video_at: Cue,
+        audio_at: Cue,
+        audio_epoch: Option<AudioEpoch>,
+    ) -> Fallible<()> {
         self.decode_epoch = DecodeEpoch::new();
+        let audio_epoch = audio_epoch.or_else(|| {
+            self.track
+                .as_ref()
+                .map(|track| track.control().invalidate())
+        });
         let video_index = video_at.index(self.timing);
         let video_target = self.timing.time_of(video_index).as_micros() as i64;
+        let audio_target = self.timing.time_of(audio_at.index(self.timing));
         for source in &mut self.sources {
-            source.input.seek(video_target, ..video_target)?;
+            source
+                .input
+                .seek_with_audio(video_target, Some(audio_target))?;
             source.drained = false;
         }
         for lane in &mut self.lanes {
             lane.decoder.flush();
             lane.queue.clear();
         }
-        if let Some(track) = &mut self.track {
-            let target = self.timing.time_of(audio_at.index(self.timing)).as_micros() as i64;
-            track.seek(target)?;
+        if let Some(track) = &self.track {
+            let target = audio_target.as_micros() as i64;
+            track.seek(target, audio_epoch)?;
         }
         self.skip_before = video_index;
         self.landing = true;
@@ -710,9 +768,8 @@ impl Reader {
     /// holding [`Self::ready`] up, so its file is the one to read.
     fn pump(&mut self) -> Fallible<()> {
         let source = self.hungriest();
-        let mut packet = ff::Packet::empty();
-        match packet.read(&mut self.sources[source].input) {
-            Ok(()) => {
+        match self.sources[source].input.read()? {
+            Some(packet) => {
                 let stream = packet.stream();
                 let Some(lane) = self
                     .lanes
@@ -724,7 +781,7 @@ impl Reader {
                 lane.decoder.send_packet(&packet)?;
                 lane.drain()
             }
-            Err(ff::Error::Eof) => {
+            None => {
                 self.sources[source].drained = true;
                 for lane in self.lanes.iter_mut().filter(|l| l.source == source) {
                     lane.decoder.send_eof()?;
@@ -732,7 +789,6 @@ impl Reader {
                 }
                 Ok(())
             }
-            Err(e) => Err(e.into()),
         }
     }
 
@@ -884,14 +940,28 @@ impl Lane {
 }
 
 impl Opened {
-    fn into_source(self) -> Source {
-        Source {
+    fn into_source(self) -> Fallible<Source> {
+        let audio = AudioSpec::inspect(&self.input);
+        let sound_rate = audio.as_ref().and_then(AudioSpec::rate);
+        let mut wanted: Vec<_> = self.videos.iter().map(|video| video.stream).collect();
+        if let Some(spec) = &audio {
+            wanted.push(spec.timeline().stream);
+        }
+        let mut input = self.input;
+        read_only(&mut input, &wanted);
+        Ok(Source {
             path: self.path,
-            input: self.input,
+            input: PacketInput::with_audio(
+                input,
+                Limits::VIDEO,
+                audio.as_ref().map(AudioSpec::timeline),
+            )?,
+            audio,
+            sound_rate,
             time_base: self.time_base,
             start: self.start,
             drained: false,
-        }
+        })
     }
 }
 

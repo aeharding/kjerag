@@ -2,6 +2,200 @@
 
 use super::*;
 
+fn filtered_progress_deadline(due: Option<Instant>) -> Next {
+    due.map_or(Next::Never, Next::At)
+}
+
+fn wait_for_source_decode(player: &Player, wants_source: bool, wake: &ReadyWake) {
+    // An arrival racing an earlier Empty intentionally wakes immediately.
+    // That is useful only if this consumer can admit more decoded work.
+    // Otherwise worker capacity/completion, not decoder readiness, is the
+    // event that can advance the pipeline.
+    if wants_source && wake.listening() {
+        let _ = player.wait_for_prepared_decode(std::task::Waker::from(Arc::new(wake.clone())));
+    }
+}
+
+fn selected_filtered_picture<T: Clone>(
+    stopped: bool,
+    offered: Option<&T>,
+    shown: Option<T>,
+) -> Option<T> {
+    if stopped {
+        shown
+    } else {
+        offered.cloned().or(shown)
+    }
+}
+
+impl Scene {
+    /// Selected filtered playback is driven by shell events, not compositor
+    /// redraw callbacks. Other projection paths retain their existing policy.
+    pub fn event_playback(&self) -> bool {
+        self.show
+            .as_ref()
+            .is_some_and(|show| show.filtered.is_some())
+    }
+
+    /// Absolute next media deadline. A replaced subscription cancels the old
+    /// timer on pause, seek, capture replacement or a changed due source.
+    pub fn playback_deadline(&self) -> Option<Instant> {
+        self.event_playback()
+            .then(|| self.playback_deadline.get())
+            .flatten()
+    }
+
+    pub fn progress(&self, now: Instant) -> Next {
+        if !self.event_playback() {
+            return self.pump(now);
+        }
+        self.playback_deadline.set(None);
+        let result = self.progress_filtered(now);
+        match result {
+            Ok(next) => {
+                if let Next::At(deadline) = next {
+                    self.playback_deadline.set(Some(deadline));
+                }
+                next
+            }
+            Err(error) => {
+                self.stalled.fail_now(error);
+                self.pump_inner(now)
+            }
+        }
+    }
+
+    fn progress_filtered(&self, now: Instant) -> Fallible<Next> {
+        let show = self.show.as_ref().expect("selected filtered capture");
+        let capture = show.filtered.as_ref().expect("selected filtered facade");
+        if self.stalled.stopped() {
+            return Ok(self.pump_inner(now));
+        }
+        capture.set_progress_wake(&self.ready_wake)?;
+        let held = Holding {
+            horizon: self.horizon.get(),
+            clock: self.clock.get(),
+            forced: self.forced.get(),
+            readout: self.readout.get(),
+        };
+
+        // The bound is the existing completed-picture FIFO, not a new source
+        // refresh cadence. A subsequent coalesced event continues catch-up.
+        for _ in 0..FilteredCaptureFacade::READY_CAPACITY {
+            let before = self.frame_stamp();
+            let was_ready = before
+                .as_ref()
+                .map(|stamp| capture.acknowledged(stamp))
+                .transpose()?
+                .unwrap_or(false);
+            // Pumping promotes at most one real source and retains startup,
+            // exact-seek and autoplay clock gates.
+            let next = self.pump_inner(now);
+            if matches!(next, Next::Stopped(_)) {
+                return Ok(next);
+            }
+            if !capture.is_attached()? {
+                self.wait_for_filtered_decode()?;
+                return Ok(Next::Never);
+            }
+
+            let Some(current) = show.view(held) else {
+                self.wait_for_filtered_decode()?;
+                return Ok(Next::Never);
+            };
+            let sources = std::iter::once(current.clone())
+                .chain(
+                    (0..FilteredCaptureFacade::PREPARED_SUCCESSORS)
+                        .filter_map(|ahead| show.prepared_view(held, ahead)),
+                )
+                .collect::<Vec<_>>();
+            for source in &sources {
+                let accepted = capture.accepted_stamp()?;
+                if resident_stamp_follows(accepted.as_ref(), &source.frames.stamp())
+                    && (!capture.wants_source()?
+                        || !capture.try_submit(
+                            source.frames.clone(),
+                            filtered_source_reframe(source, self.sampling.get()),
+                        )?)
+                {
+                    break;
+                }
+            }
+            let exhausted = matches!(&show.playing.borrow().source,
+                Source::Live(player) if player.is_input_exhausted());
+            if exhausted
+                && capture.accepted_stamp()? == sources.last().map(|view| view.frames.stamp())
+                && !capture.is_finished()?
+            {
+                let _ = capture.try_finish()?;
+            }
+
+            let picture = capture.install_due(&current.frames.stamp())?;
+            let output_ready = picture.is_some();
+            let buffer_deadline = match &mut show.playing.borrow_mut().source {
+                Source::Live(player) => player.coordinate_buffering(
+                    now,
+                    output_ready,
+                    capture.ready_successors(&current.frames.stamp())?,
+                    !capture.has_output_inputs(&current.frames.stamp(), output_ready)?,
+                    capture.is_finished()?,
+                    std::task::Waker::from(Arc::new(self.ready_wake.clone())),
+                )?,
+                Source::Stepped(_) => None,
+            };
+            if let Some(picture) = picture {
+                let target = show
+                    .replay
+                    .borrow()
+                    .as_ref()
+                    .filter(|replay| replay.accuracy == Accuracy::Exact)
+                    .map(|replay| replay.target);
+                if target.is_none_or(|target| picture.frame().index() == target) {
+                    let mut complete = current;
+                    complete.complete = Some(CompleteFiltered(picture));
+                    self.filtered_display.keep(&complete);
+                }
+            } else {
+                self.wait_for_filtered_decode()?;
+                return Ok(filtered_progress_deadline(buffer_deadline));
+            }
+
+            // A completed frame may be logically consumed without submitting
+            // an obsolete screen update. Every real source still traverses
+            // the exact source, map, color and temporal transactions.
+            let (due, buffered_due) = match &show.playing.borrow().source {
+                Source::Live(player) => (player.next_due(), player.buffered_frame_due()),
+                Source::Stepped(_) => (None, false),
+            };
+            let replaying = show.replay.borrow().is_some();
+            if !replaying && !buffered_due && due.is_none_or(|due| due > now) {
+                self.wait_for_filtered_decode()?;
+                return Ok(filtered_progress_deadline(due));
+            }
+            let waiting_start = show.replay.borrow().is_some_and(|replay| {
+                self.frame_stamp()
+                    .is_some_and(|stamp| replay.landed(stamp.index()))
+            });
+            if was_ready && self.frame_stamp() == before && (!replaying || waiting_start) {
+                self.wait_for_filtered_decode()?;
+                return Ok(filtered_progress_deadline(buffer_deadline));
+            }
+        }
+        self.ready_wake.notify();
+        Ok(Next::Never)
+    }
+
+    fn wait_for_filtered_decode(&self) -> Fallible<()> {
+        if let Some(show) = self.show.as_ref()
+            && let Some(capture) = show.filtered.as_ref()
+            && let Source::Live(player) = &show.playing.borrow().source
+        {
+            wait_for_source_decode(player, capture.wants_source()?, &self.ready_wake);
+        }
+        Ok(())
+    }
+}
+
 impl ScenePipeline {
     pub(super) fn prepare_filtered(
         &mut self,
@@ -10,37 +204,24 @@ impl ScenePipeline {
     ) -> Fallible<()> {
         self.resident_draw = ResidentDrawSelection::None;
         self.flow_draw = FlowDraw::Nothing;
-        let shown = primitive.shown.get();
-
-        // A terminal capture performs no more stateful worker operations.
-        // Its last completed panorama remains independently owned by Shown.
-        if primitive.stalled.stopped() {
-            if let Some(shown) = shown.as_ref()
-                && let Some(shown_capture) = shown.filtered.as_ref()
-                && let Some(panorama) = shown_capture.installed()?
-                && panorama.frame() == &shown.frames.stamp()
-            {
-                let device = self.one_xs_gpu.device().clone();
-                let reframe = self.resident_reframe(primitive, shown, aspect);
-                let draw = panorama.prepare_view(&device, &reframe, self.format)?;
-                if draw.frame() != &shown.frames.stamp() {
-                    return Err("filtered draw differs from the shown Scene frame".into());
-                }
-                self.filtered_draw = Some(draw);
+        // Renderer attachment is the sole bootstrap exception. Source admission
+        // and FIFO publication belong to Scene::progress, not surface callbacks.
+        if !primitive.stalled.stopped()
+            && let Some(capture) = primitive.filtered_capture.as_ref()
+        {
+            capture.set_progress_wake(&primitive.ready_wake)?;
+            if !capture.is_attached()? {
+                capture.attach(self.one_xs_gpu.clone())?;
+                // The first completed picture may start the audio clock before
+                // another redraw. Do not leave shader compilation to that draw.
+                capture.prepare_view_pipeline(self.format)?;
+                primitive.ready_wake.notify();
             }
-            if let Some(request) = primitive.shutter.take() {
-                self.shoot_filtered(primitive, request, aspect);
-            }
-            return Ok(());
         }
-
-        // This path owns its own upstream stitch session. Retire any raw-path
-        // attachment left by an earlier selection without publishing from it.
         if let Some(old) = self.resident_one_xs.take() {
             self.retired_one_xs.push(old);
             self.resident_completed_view = None;
         }
-        let mut raw_retirement_pending = false;
         let mut index = 0;
         while index < self.retired_one_xs.len() {
             match self.retired_one_xs[index]
@@ -50,148 +231,33 @@ impl ScenePipeline {
                 ResidentDrain::Drained => {
                     self.retired_one_xs.remove(index);
                 }
-                ResidentDrain::Pending => {
-                    raw_retirement_pending = true;
-                    primitive
-                        .resident_refresh
-                        .store(true, AtomicOrdering::Release);
-                    index += 1;
-                }
-                ResidentDrain::FailClosedRetained => index += 1,
+                ResidentDrain::Pending | ResidentDrain::FailClosedRetained => index += 1,
             }
         }
-
-        let capture = primitive.filtered_capture.as_ref();
-        if let Some(capture) = capture {
-            capture.attach(self.one_xs_gpu.clone())?;
-        }
-        let offered = primitive.view.as_ref().filter(|view| {
-            capture.is_some_and(|capture| {
-                view.filtered
-                    .as_ref()
-                    .is_some_and(|owner| owner.same_capture(capture))
-            })
-        });
-        let due = offered.map(|view| view.frames.stamp());
-
-        let mut installed_due = None;
-        if let (Some(capture), Some(due)) = (capture, due.as_ref()) {
-            installed_due = capture.install_due(due)?;
-        }
-        let due_acknowledged = match (capture, due.as_ref()) {
-            (Some(capture), Some(due)) => capture.acknowledged(due)?,
-            _ => false,
-        };
-        let shown_is_due = offered.is_some_and(|view| {
-            shown.as_ref().is_some_and(|shown| {
-                shown.frames.stamp() == view.frames.stamp()
-                    && shown.filtered.as_ref().is_some_and(|shown_capture| {
-                        capture.is_some_and(|capture| shown_capture.same_capture(capture))
-                    })
-            })
-        });
-        let due_unready = due.is_some() && !due_acknowledged && !shown_is_due;
-        self.redraw_after_prepare =
-            due_redraw_after_prepare(due_unready, primitive.stalled.stopped());
-        if self.redraw_after_prepare {
+        let selected = selected_filtered_picture(
+            primitive.stalled.stopped(),
             primitive
-                .resident_refresh
-                .store(true, AtomicOrdering::Release);
-        }
-
-        let device = self.one_xs_gpu.device().clone();
-        if let (Some(view), Some(panorama)) = (offered, installed_due.as_ref())
-            && primitive
-                .resident_target
-                .is_none_or(|target| panorama.frame().index() == target)
+                .view
+                .as_ref()
+                .filter(|view| view.complete.is_some()),
+            primitive.shown.get(),
+        );
+        if let Some(view) = selected
+            && let Some(picture) = view.complete.as_ref()
         {
-            if panorama.frame() != &view.frames.stamp() {
-                return Err("filtered panorama differs from the offered Scene frame".into());
+            if picture.0.frame() != &view.frames.stamp() {
+                return Err("filtered picture differs from its Scene view".into());
             }
-            let reframe = self.resident_reframe(primitive, view, aspect);
-            let draw = panorama.prepare_view(&device, &reframe, self.format)?;
-            if draw.frame() != &view.frames.stamp() {
-                return Err("filtered draw differs from the offered Scene frame".into());
-            }
-            self.filtered_draw = Some(draw);
-            primitive.shown.keep(view);
-        } else if let Some(shown) = shown.as_ref()
-            && let Some(shown_capture) = shown.filtered.as_ref()
-            && let Some(panorama) = shown_capture.installed()?
-            && panorama.frame() == &shown.frames.stamp()
-        {
-            let reframe = self.resident_reframe(primitive, shown, aspect);
-            let draw = panorama.prepare_view(&device, &reframe, self.format)?;
-            if draw.frame() != &shown.frames.stamp() {
-                return Err("filtered draw differs from the shown Scene frame".into());
-            }
-            self.filtered_draw = Some(draw);
+            let reframe = self.resident_reframe(primitive, &view, aspect);
+            self.filtered_draw = Some(picture.0.prepare_view(
+                self.one_xs_gpu.device(),
+                &reframe,
+                self.format,
+            )?);
+            primitive.shown.keep(&view);
         }
-
-        let mut admitted = false;
-        if !primitive.stalled.stopped()
-            && let (Some(capture), Some(offered)) = (capture, offered)
-        {
-            let accepted = capture.accepted_stamp()?;
-            let next = std::iter::once(offered)
-                .chain(primitive.filtered_ahead.iter())
-                .filter(|view| {
-                    view.filtered
-                        .as_ref()
-                        .is_some_and(|owner| owner.same_capture(capture))
-                })
-                .find(|view| resident_stamp_follows(accepted.as_ref(), &view.frames.stamp()));
-            if let Some(view) = next {
-                let reframe = filtered_source_reframe(view, primitive.sampling);
-                admitted = capture.try_submit(view.frames.clone(), reframe)?;
-                if admitted {
-                    primitive.stalled.landed();
-                }
-            }
-
-            let accepted = capture.accepted_stamp()?;
-            let last = std::iter::once(offered)
-                .chain(primitive.filtered_ahead.iter())
-                .rfind(|view| {
-                    view.filtered
-                        .as_ref()
-                        .is_some_and(|owner| owner.same_capture(capture))
-                })
-                .map(|view| view.frames.stamp());
-            if primitive.filtered_eof
-                && accepted.as_ref() == last.as_ref()
-                && !capture.is_finished()?
-            {
-                // A full ready FIFO needs presentation, not another redraw.
-                // While paused, retain it without spinning. An unready due
-                // source below still gets the normal worker wake/retry.
-                let _ = capture.try_finish()?;
-            }
-        }
-
         if let Some(request) = primitive.shutter.take() {
             self.shoot_filtered(primitive, request, aspect);
-        }
-
-        // Worker completion may replace a renderer retry only when an exact
-        // due output is genuinely pending. Missing decode lookahead keeps the
-        // ordinary refresh alive so more sources can be prepared and admitted.
-        if self.redraw_after_prepare
-            && !raw_retirement_pending
-            && let (Some(capture), Some(due)) = (capture, due.as_ref())
-            && capture.wait_for_frame(due, &primitive.ready_wake)?
-        {
-            self.redraw_after_prepare = false;
-            primitive
-                .resident_refresh
-                .store(false, AtomicOrdering::Release);
-            primitive
-                .resident_waiting
-                .store(true, AtomicOrdering::Release);
-        } else if self.redraw_after_prepare && !admitted {
-            primitive
-                .resident_refresh
-                .store(true, AtomicOrdering::Release);
         }
         Ok(())
     }
@@ -209,16 +275,15 @@ impl ScenePipeline {
             return;
         };
         let result = (|| {
-            let capture = view
-                .filtered
+            let panorama = view
+                .complete
                 .as_ref()
-                .ok_or("filtered screenshot lost its capture owner")?;
-            let panorama = capture
-                .installed()?
-                .filter(|panorama| panorama.frame() == &view.frames.stamp())
+                .filter(|picture| picture.0.frame() == &view.frames.stamp())
                 .ok_or("filtered screenshot output differs from the shown frame")?;
             let reframe = self.resident_reframe(primitive, &view, aspect);
-            let draw = panorama.prepare_view(self.one_xs_gpu.device(), &reframe, self.format)?;
+            let draw = panorama
+                .0
+                .prepare_view(self.one_xs_gpu.device(), &reframe, self.format)?;
             let at = Stamp {
                 index: view.frames.index,
                 time: view.frames.timestamp,
@@ -328,6 +393,58 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    #[test]
+    fn full_source_queue_does_not_requeue_a_racing_decoder_arrival() {
+        let timing =
+            kjerag_media::Timing::new(ffmpeg_next::Rational::new(30_000, 1001), 100).unwrap();
+        let (mut player, decoder) = Player::controlled_for_test(
+            timing,
+            Size {
+                width: 3840,
+                height: 3840,
+            },
+        );
+        assert!(
+            player.set_presentation_policy(kjerag_media::PresentationPolicy::SequentialRealtime)
+        );
+        assert!(player.pump(Instant::now()).unwrap().is_none());
+        let wake = ReadyWake::default();
+        let mut listener = wake.listen();
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(listener.poll_ready(&mut context).is_pending());
+        // Delivery races the last Empty, before the consumer arms its wait.
+        // EOF uses the same arrival channel without constructing fake pixels.
+        decoder.end();
+        wait_for_source_decode(&player, false, &wake);
+        assert!(listener.poll_ready(&mut context).is_pending());
+        // Releasing source capacity must still observe that pending arrival.
+        wait_for_source_decode(&player, true, &wake);
+        assert!(listener.poll_ready(&mut context).is_ready());
+    }
+
+    #[test]
+    fn paused_complete_pipeline_has_no_progress_timer() {
+        assert_eq!(filtered_progress_deadline(None), Next::Never);
+    }
+
+    #[test]
+    fn media_deadline_is_absolute_without_a_ui_gpu_retry_timer() {
+        let now = Instant::now();
+        let due = now + Duration::from_millis(33);
+        assert_eq!(filtered_progress_deadline(Some(due)), Next::At(due));
+    }
+
+    #[test]
+    fn terminal_draw_retains_exact_shown_owner_after_later_logical_completion() {
+        let shown = Arc::new(7);
+        let later = Arc::new(11);
+        let selected = selected_filtered_picture(true, Some(&later), Some(shown.clone())).unwrap();
+        assert!(Arc::ptr_eq(&selected, &shown));
+        assert!(!Arc::ptr_eq(&selected, &later));
+        let active = selected_filtered_picture(false, Some(&later), Some(shown)).unwrap();
+        assert!(Arc::ptr_eq(&active, &later));
+    }
+
     fn view(body_from_world: Quat, held: Held) -> View {
         let stamp = FrameStamp::for_test(7, Duration::from_millis(233), None);
         View {
@@ -345,6 +462,7 @@ mod tests {
             one_xs: None,
             resident_one_xs: None,
             filtered: None,
+            complete: None,
             one_xs_profile: None,
         }
     }

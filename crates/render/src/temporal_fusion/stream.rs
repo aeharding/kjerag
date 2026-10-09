@@ -1,13 +1,11 @@
 //! Worker-driven full-panorama temporal filtering.
 //!
 //! This owner has no thread of its own. Motion images, searches and predictor
-//! handoffs remain on the GPU. Only completed filtered outputs publish; the
-//! current completion boundary drives wgpu with nonblocking polls. Seven real contiguous sources gate
+//! handoffs remain on the GPU. Outputs carry their own completion proof;
+//! the bounded temporal executor polls without serializing each output. Seven real contiguous sources gate
 //! startup centers 0 through 3, steady center 3, and tail centers 4 through 6.
 
 use std::collections::VecDeque;
-use std::sync::mpsc;
-use std::time::Duration;
 
 #[cfg(test)]
 use crate::direct_type2::CompactNv12Panorama;
@@ -22,9 +20,10 @@ use super::packed;
 use super::parallel_refine::coarse::gpu::{self as coarse_gpu, MotionPyramid};
 use super::pyramid::gpu as pyramid_gpu;
 use super::settings::{EffParams, Provider};
+use crate::gpu_completion::SubmissionCompletion;
 
-const SOURCES: usize = 7;
-const CENTER: usize = 3;
+pub(crate) const SOURCES: usize = 7;
+pub(crate) const CENTER: usize = 3;
 const FULL_RESOLUTION_LEVELS: usize = 7;
 #[cfg(test)]
 const HALF_RESOLUTION_LEVELS: usize = 6;
@@ -39,11 +38,12 @@ struct Retained {
     motion: Option<MotionPyramid>,
 }
 
-/// One completed full gamma-RGB panorama bound to its actual history center.
+/// One submitted gamma-RGB panorama bound to its actual history center.
 pub(crate) struct FilteredPanorama {
     texture: wgpu::Texture,
     frame: FrameStamp,
     device: wgpu::Device,
+    completion: SubmissionCompletion,
 }
 
 impl FilteredPanorama {
@@ -57,6 +57,10 @@ impl FilteredPanorama {
 
     pub(crate) fn belongs_to(&self, device: &wgpu::Device) -> bool {
         self.device == *device
+    }
+
+    pub(crate) fn completion(&self) -> &SubmissionCompletion {
+        &self.completion
     }
 
     #[cfg(test)]
@@ -73,6 +77,7 @@ impl FilteredPanorama {
             &self.texture,
             shift,
         );
+        self.completion = SubmissionCompletion::encode(device, encoder);
         self
     }
 }
@@ -423,16 +428,17 @@ impl Stream {
             gpu_profile.mark(&mut encoder, "final_color");
             gpu_profile.resolve(&mut encoder);
         }
+        let completion = SubmissionCompletion::encode(&self.device, &mut encoder);
         let started = trace_start();
         self.queue.submit([encoder.finish()]);
         #[cfg(test)]
         gpu_profile.report_after_submit(&self.queue);
-        wait_for_queue(&self.device, &self.queue)?;
-        trace_elapsed("filter-submit-complete", &retained.stamp, started);
+        trace_elapsed("filter-submitted", &retained.stamp, started);
         Ok(FilteredPanorama {
             texture,
             frame: retained.stamp.clone(),
             device: self.device.clone(),
+            completion,
         })
     }
 
@@ -789,25 +795,6 @@ fn geometry(full: [u32; 2], pyramid: &MotionPyramid) -> Fallible<Geometry> {
         output_grid: [full[0] / 16, full[1] / 16],
         block: [BLOCK, BLOCK],
     })
-}
-
-fn wait_for_queue(device: &wgpu::Device, queue: &wgpu::Queue) -> Fallible<()> {
-    let (send, receive) = mpsc::channel();
-    queue.on_submitted_work_done(move || {
-        let _ = send.send(());
-    });
-    loop {
-        match receive.try_recv() {
-            Ok(()) => return Ok(()),
-            Err(mpsc::TryRecvError::Empty) => {
-                device.poll(wgpu::PollType::Poll)?;
-                std::thread::park_timeout(Duration::from_micros(100));
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                return Err("temporal GPU completion callback disconnected".into());
-            }
-        }
-    }
 }
 
 fn array_texture(

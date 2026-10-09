@@ -46,7 +46,7 @@ use std::process::Command;
 use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
-use kjerag_media::{Fallible, FrameStamp, Reader};
+use kjerag_media::{Accuracy, Cue, Fallible, FrameStamp, Reader};
 use kjerag_render::{
     Camera, Extent, Horizon, Next, OneXsMapFrame, PisBackend, Readout, Request, Sampling, Scene,
     ScenePipeline, Shot, Size, Sweep, dmabuf,
@@ -75,6 +75,13 @@ const SHOT_WIDTH: u32 = 3840;
 fn main() -> Fallible<()> {
     let args: Vec<String> = std::env::args().collect();
     let options = Options::parse(&args)?;
+    if let Some((lookahead, count)) = options.decode {
+        println!(
+            "{}",
+            drain(&options.input, lookahead, count, options.target)?
+        );
+        return Ok(());
+    }
     let evidence = options
         .evidence_out
         .as_deref()
@@ -105,7 +112,7 @@ fn main() -> Fallible<()> {
 
     if options.bench {
         for lookahead in [0, 2, 4] {
-            println!("{}", drain(&options.input, lookahead)?);
+            println!("{}", drain(&options.input, lookahead, BENCH_PAIRS, None)?);
         }
         println!();
     }
@@ -149,7 +156,8 @@ const USAGE: &str = "usage: playback <file.insv> [seconds] [hz] [shots] [yaw] \
      [file|off|right|left|down|up] [fov] [bilinear|luma|sharp] [band|noband] \
      [target=N] [bench=0|1] [yaw=deg] [pitch=deg] [fov=deg] [lock=0|1] [out=PNG] \
      [evidence-out=NEW-DIRECTORY] [range=START:COUNT out-dir=NEW-DIRECTORY] \
-     [measure=START:COUNT pace=off receipt=NEW-FILE]";
+     [measure=START:COUNT pace=off receipt=NEW-FILE] \
+     [decode=LOOKAHEAD:COUNT target=START bench=0]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RangeSpec {
@@ -234,6 +242,7 @@ struct Options {
     out_dir: Option<PathBuf>,
     measure: Option<MeasureSpec>,
     receipt: Option<PathBuf>,
+    decode: Option<(usize, usize)>,
 }
 
 impl Options {
@@ -272,6 +281,7 @@ impl Options {
                     | "measure"
                     | "pace"
                     | "receipt"
+                    | "decode"
             ) {
                 return Err(format!("unknown playback option {name}=").into());
             }
@@ -330,6 +340,37 @@ impl Options {
             Some(_) => return Err("pace= must be off".into()),
         };
         let receipt = named.get("receipt").map(PathBuf::from);
+        let decode = named
+            .get("decode")
+            .map(|raw| {
+                let (depth, count) = raw
+                    .split_once(':')
+                    .ok_or("decode= must be LOOKAHEAD:COUNT")?;
+                let depth = depth
+                    .parse::<usize>()
+                    .map_err(|error| format!("bad decode lookahead: {error}"))?;
+                let count = count
+                    .parse::<usize>()
+                    .map_err(|error| format!("bad decode count: {error}"))?;
+                if depth > 8 || !(1..=900).contains(&count) {
+                    return Err("decode lookahead must be 0..8 and count must be 1..900".into());
+                }
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>((depth, count))
+            })
+            .transpose()?;
+        if decode.is_some()
+            && (bench
+                || shots != 0
+                || out.is_some()
+                || evidence_out.is_some()
+                || range.is_some()
+                || out_dir.is_some()
+                || measure.is_some()
+                || receipt.is_some()
+                || pace_off)
+        {
+            return Err("decode= requires bench=0 and cannot run rendering or captures".into());
+        }
 
         if target.is_none() && (out.is_some() || evidence_out.is_some()) {
             return Err("out= and evidence-out= are only valid with target=".into());
@@ -390,6 +431,7 @@ impl Options {
             out_dir,
             measure,
             receipt,
+            decode,
         })
     }
 }
@@ -448,13 +490,16 @@ fn forced(readout: &str) -> Option<fn(Readout) -> Readout> {
 /// Decode as fast as the hardware will go, with `lookahead` frames between
 /// a surface being decoded and being mapped. Both lenses, one demuxer, no
 /// GPU work: this is the ceiling realtime playback is measured against.
-fn drain(input: &Path, lookahead: usize) -> Fallible<String> {
+fn drain(input: &Path, lookahead: usize, count: usize, target: Option<u64>) -> Fallible<String> {
     let mut reader = Reader::open(input)?.lookahead(lookahead);
     let timing = reader.timing();
+    if let Some(index) = target {
+        reader.seek(Cue::Index(index), Accuracy::Exact)?;
+    }
 
     let start = Instant::now();
     let mut pairs = 0;
-    while pairs < BENCH_PAIRS {
+    while pairs < count {
         match reader.next_frames()? {
             Some(_) => pairs += 1,
             None => break,
@@ -466,7 +511,7 @@ fn drain(input: &Path, lookahead: usize) -> Fallible<String> {
     let pool = reader.pool_size();
 
     Ok(format!(
-        "decode: lookahead {lookahead}: {fps:6.1} pairs/s, {:4.2}x realtime, \
+        "decode: lookahead {lookahead}, {pairs} pairs from {target:?}: {fps:6.1} pairs/s, {:4.2}x realtime, \
          {:5.2} ms/pair (pool {})",
         fps / timing.fps(),
         elapsed.as_secs_f64() * 1000.0 / pairs as f64,
@@ -2923,6 +2968,28 @@ mod tests {
         let mut words = vec!["playback".to_owned()];
         words.extend(arguments.iter().map(|word| (*word).to_owned()));
         Options::parse(&words)
+    }
+
+    #[test]
+    fn decode_only_is_one_bounded_reader_run_at_the_requested_frame() {
+        let parsed = options(&["clip.insv", "bench=0", "decode=2:900", "target=38404"]).unwrap();
+        assert_eq!(parsed.decode, Some((2, 900)));
+        assert_eq!(parsed.target, Some(38_404));
+        for args in [
+            vec!["clip.insv", "decode=2:900"],
+            vec!["clip.insv", "bench=0", "decode=9:200"],
+            vec!["clip.insv", "bench=0", "decode=2:901"],
+            vec!["clip.insv", "bench=0", "decode=2:0"],
+            vec![
+                "clip.insv",
+                "bench=0",
+                "decode=2:20",
+                "target=10",
+                "out=a.png",
+            ],
+        ] {
+            assert!(options(&args).is_err(), "accepted {args:?}");
+        }
     }
 
     #[test]

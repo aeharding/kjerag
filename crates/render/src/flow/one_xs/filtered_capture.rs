@@ -3,7 +3,8 @@
 //! This owner is one decode epoch. Admission and exact-stamp presentation are
 //! nonblocking. The existing stitch worker owns ordered panorama preparation;
 //! one capture-local temporal worker owns the seven-source stream and its GPU
-//! completion polling.
+//! completion polling. A stitch actor drains the source queue independently of
+//! shell messages. CPU work admission is separate from GPU lifetime slots.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -26,8 +27,23 @@ use crate::{Fallible, Reframe, Size};
 
 use super::temporal_worker::{TemporalEpoch, TemporalJob, TemporalWorker};
 
-const READY_CAPACITY: usize = 4;
+// Output retention is separate from work admission and the seven-source
+// temporal law. Increasing the runway does not raise the work-admission bound.
+const READY_CAPACITY: usize = kjerag_media::Player::RECOVERY_SUCCESSORS;
+const SOURCE_CAPACITY: usize = 4;
+const STARTUP_OUTPUT_CAPACITY: usize = crate::temporal_fusion::stream::CENTER + 1;
 const FINISH_OUTPUT_CAPACITY: usize = 3;
+
+fn completed_prefix(readiness: impl IntoIterator<Item = Fallible<bool>>) -> Fallible<usize> {
+    let mut completed = 0;
+    for ready in readiness {
+        if !ready? {
+            break;
+        }
+        completed += 1;
+    }
+    Ok(completed)
+}
 
 /// Quarter-field review candidate. Retain the whole 2:1 sphere while rounding
 /// raster height down to a complete motion block footprint. Source planes,
@@ -62,7 +78,11 @@ enum TemporalPending {
 
 struct State {
     session: Option<Arc<FilteredSession>>,
-    stitch_pending: Option<Pending>,
+    // Queued decoded work reserves output capacity, not a GPU lifetime slot.
+    // The worker acquires that slot only when it begins the source transaction.
+    stitch_pending: VecDeque<Pending>,
+    queued: VecDeque<Work>,
+    worker_running: bool,
     temporal_pending: VecDeque<TemporalPending>,
     accepted: Option<FrameStamp>,
     accepted_sources: usize,
@@ -74,14 +94,17 @@ struct State {
     finished: bool,
     failure: Option<String>,
     due_waiter: Option<(FrameStamp, ReadyWake)>,
+    progress_wake: Option<ReadyWake>,
 }
 
 impl State {
     fn new() -> Self {
         Self {
             session: None,
-            stitch_pending: None,
-            temporal_pending: VecDeque::with_capacity(2),
+            stitch_pending: VecDeque::with_capacity(SOURCE_CAPACITY),
+            queued: VecDeque::with_capacity(SOURCE_CAPACITY),
+            worker_running: false,
+            temporal_pending: VecDeque::with_capacity(SOURCE_CAPACITY),
             accepted: None,
             accepted_sources: 0,
             expected: VecDeque::new(),
@@ -92,34 +115,33 @@ impl State {
             finished: false,
             failure: None,
             due_waiter: None,
+            progress_wake: None,
         }
     }
 }
 
-pub(super) struct FilteredPanoramaJob {
-    owner: Arc<FilteredCaptureInner>,
-    session: Arc<FilteredSession>,
+struct FilteredSource {
     frames: Arc<Frames>,
     reframe: Reframe,
     stamp: FrameStamp,
     size: Size,
-    permit: DrawPermit,
 }
 
-pub(super) enum FilteredJob {
-    Push(Box<FilteredPanoramaJob>),
-    Finish {
-        owner: Arc<FilteredCaptureInner>,
-        session: Arc<FilteredSession>,
-    },
+enum Work {
+    Source(Box<FilteredSource>),
+    Finish,
+}
+
+/// One capture actor, not one channel job per camera frame. Payloads in State
+/// hold no Arc back to their owner, so an idle facade cannot retain itself.
+pub(super) struct FilteredJob {
+    owner: Arc<FilteredCaptureInner>,
+    session: Arc<FilteredSession>,
 }
 
 impl FilteredJob {
     pub(super) fn owner(&self) -> Arc<FilteredCaptureInner> {
-        match self {
-            Self::Push(job) => Arc::clone(&job.owner),
-            Self::Finish { owner, .. } => Arc::clone(owner),
-        }
+        Arc::clone(&self.owner)
     }
 }
 
@@ -138,6 +160,43 @@ pub(crate) struct FilteredCaptureFacade {
 }
 
 impl FilteredCaptureFacade {
+    pub(crate) const READY_CAPACITY: usize = READY_CAPACITY;
+    // A completed successor needs three real future sources. Merely increasing
+    // the restart lead without this horizon would make recovery unattainable.
+    pub(crate) const PREPARED_SUCCESSORS: usize =
+        READY_CAPACITY + crate::temporal_fusion::stream::CENTER;
+
+    pub(crate) fn is_attached(&self) -> Fallible<bool> {
+        let state = self.state()?;
+        self.ensure_healthy(&state)?;
+        Ok(state.session.is_some())
+    }
+
+    /// Compile the immutable window pipeline while autoplay is still held.
+    /// The target format differs from the intermediate panorama format.
+    pub(crate) fn prepare_view_pipeline(&self, format: wgpu::TextureFormat) -> Fallible<()> {
+        let session = self.attached_session()?;
+        session
+            .resident
+            .direct
+            .correction_pipeline(session.resident.context.device(), format)?;
+        Ok(())
+    }
+
+    pub(crate) fn set_progress_wake(&self, wake: &ReadyWake) -> Fallible<()> {
+        let session = {
+            let mut state = self.state()?;
+            self.ensure_healthy(&state)?;
+            state.progress_wake = Some(wake.clone());
+            state.session.clone()
+        };
+        if let Some(session) = session {
+            session.resident.worker.set_progress_wake(wake);
+            session.temporal.set_progress_wake(wake);
+        }
+        Ok(())
+    }
+
     /// Construct the CPU owner. GPU resources remain lazy until [`Self::attach`].
     pub(crate) fn new(
         profile: Arc<ResidentCameraProfile>,
@@ -170,12 +229,12 @@ impl FilteredCaptureFacade {
     /// Create a fresh decode epoch, sharing immutable GPU pipelines when the
     /// original owner was already attached.
     pub(crate) fn restart(&self) -> Fallible<Self> {
-        let old_session = {
+        let (old_session, progress_wake) = {
             let state = self.state()?;
             if let Some(error) = &state.failure {
                 return Err(error.clone().into());
             }
-            state.session.clone()
+            (state.session.clone(), state.progress_wake.clone())
         };
         let session = old_session
             .as_ref()
@@ -197,6 +256,7 @@ impl FilteredCaptureFacade {
             .transpose()?;
         let mut state = State::new();
         state.session = session;
+        state.progress_wake = progress_wake;
         // The installed old picture remains usable during seeking, but no
         // unpublished source/correction should accumulate across old epochs.
         // Cancellation never blocks the UI behind the temporal worker.
@@ -256,40 +316,56 @@ impl FilteredCaptureFacade {
                 .resident
                 .ensure_renderer(&candidate.resident.context, wgpu::TextureFormat::Rgba8Unorm)
         } else {
-            state.session = Some(candidate);
+            state.session = Some(candidate.clone());
+            let wake = state.progress_wake.clone();
+            drop(state);
+            if let Some(wake) = wake {
+                candidate.resident.worker.set_progress_wake(&wake);
+                candidate.temporal.set_progress_wake(&wake);
+                wake.notify();
+            }
             Ok(())
         }
     }
 
     /// Admit one contiguous decoded source without waiting for worker or GPU.
+    /// The shell can query this before constructing a source's projection;
+    /// try_submit still rechecks under the admission lock.
+    pub(crate) fn wants_source(&self) -> Fallible<bool> {
+        let state = self.state()?;
+        self.ensure_healthy(&state)?;
+        Ok(!state.finished && !state.finish_requested && source_admission_available(&state))
+    }
+
+    /// Admit one contiguous decoded source without waiting for worker or GPU.
     pub(crate) fn try_submit(&self, frames: Arc<Frames>, reframe: Reframe) -> Fallible<bool> {
+        // Ordinary backpressure is a CPU queue decision. In particular, mouse
+        // events never poll the graphics device or reserve GPU lifetimes.
+        // The actor acquires those only when queued work begins execution.
+        {
+            let state = self.state()?;
+            self.ensure_healthy(&state)?;
+            if state.finished || state.finish_requested {
+                return Err("filtered capture received a source after finish".into());
+            }
+            if !source_admission_available(&state) {
+                return Ok(false);
+            }
+        }
         validate_reframe(&frames, &reframe)?;
         let stamp = frames.stamp();
         // The same source metadata must govern both panorama decoding and the
         // temporal representation. Do not maintain a second coefficient table.
         let reframe = reframe.with_samples(frames.samples);
         let session = self.attached_session()?;
-        if let Err(error) = session.resident.retirements.poll() {
-            self.inner.fail_worker(&error.to_string());
-            return Err(error);
-        }
-        let permit = match session.resident.retirements.reserve() {
-            Ok(permit) => permit,
-            Err(DrawRetirementError::Full) => return Ok(false),
-            Err(error) => return Err(error.into()),
-        };
-        {
+        let kick = {
             let mut state = self.state()?;
             self.ensure_healthy(&state)?;
             if state.finished || state.finish_requested {
                 return Err("filtered capture received a source after finish".into());
             }
             let output_capacity = source_output_capacity(state.accepted_sources);
-            if state.stitch_pending.is_some()
-                || outstanding_source_count(&state) >= 2
-                || state.ready.len() + reserved_output_capacity(&state) + output_capacity
-                    > READY_CAPACITY
-            {
+            if !source_admission_available(&state) {
                 return Ok(false);
             }
             if let Some(previous) = state.accepted.as_ref() {
@@ -302,25 +378,32 @@ impl FilteredCaptureFacade {
             let previous = state.accepted.replace(stamp.clone());
             state.accepted_sources = accepted_sources;
             state.expected.push_back(stamp.clone());
-            state.stitch_pending = Some(Pending::Source {
+            state.stitch_pending.push_back(Pending::Source {
                 stamp: stamp.clone(),
                 previous,
                 output_capacity,
             });
+            state
+                .queued
+                .push_back(Work::Source(Box::new(FilteredSource {
+                    frames,
+                    reframe,
+                    stamp,
+                    size: Size::new(self.inner.field_size[0], self.inner.field_size[1]),
+                })));
+            !std::mem::replace(&mut state.worker_running, true)
+        };
+        if !kick {
+            return Ok(true);
         }
-        let job = FilteredJob::Push(Box::new(FilteredPanoramaJob {
+        let job = FilteredJob {
             owner: Arc::clone(&self.inner),
             session: Arc::clone(&session),
-            frames,
-            reframe,
-            stamp,
-            size: Size::new(self.inner.field_size[0], self.inner.field_size[1]),
-            permit,
-        }));
+        };
         match session.resident.worker.try_kick_filtered(job) {
             Ok(()) => Ok(true),
-            Err(mpsc::TrySendError::Full(job)) => {
-                self.inner.cancel(job)?;
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.inner.cancel_kick()?;
                 Ok(false)
             }
             Err(mpsc::TrySendError::Disconnected(job)) => {
@@ -336,29 +419,34 @@ impl FilteredCaptureFacade {
     /// be published, so the bounded FIFO must have room for all of them.
     pub(crate) fn try_finish(&self) -> Fallible<bool> {
         let session = self.attached_session()?;
-        {
+        let kick = {
             let mut state = self.state()?;
             self.ensure_healthy(&state)?;
             if state.finished || state.finish_requested {
                 return Ok(true);
             }
-            if state.stitch_pending.is_some()
+            if !state.stitch_pending.is_empty()
                 || !state.temporal_pending.is_empty()
                 || state.ready.len() + FINISH_OUTPUT_CAPACITY > READY_CAPACITY
             {
                 return Ok(false);
             }
             state.finish_requested = true;
-            state.stitch_pending = Some(Pending::Finish);
+            state.stitch_pending.push_back(Pending::Finish);
+            state.queued.push_back(Work::Finish);
+            !std::mem::replace(&mut state.worker_running, true)
+        };
+        if !kick {
+            return Ok(true);
         }
-        let job = FilteredJob::Finish {
+        let job = FilteredJob {
             owner: Arc::clone(&self.inner),
             session: Arc::clone(&session),
         };
         match session.resident.worker.try_kick_filtered(job) {
             Ok(()) => Ok(true),
-            Err(mpsc::TrySendError::Full(job)) => {
-                self.inner.cancel(job)?;
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.inner.cancel_kick()?;
                 Ok(false)
             }
             Err(mpsc::TrySendError::Disconnected(job)) => {
@@ -374,6 +462,19 @@ impl FilteredCaptureFacade {
         let state = self.state()?;
         self.ensure_healthy(&state)?;
         Ok(state.accepted.clone())
+    }
+
+    /// All real inputs for the pending output are admitted, not necessarily
+    /// processed. This is not completion proof or restart lead. If the current
+    /// output is complete, the missing work is its next source instead.
+    pub(crate) fn has_output_inputs(
+        &self,
+        stamp: &FrameStamp,
+        current_ready: bool,
+    ) -> Fallible<bool> {
+        let state = self.state()?;
+        self.ensure_healthy(&state)?;
+        Ok(output_inputs_admitted(&state, stamp, current_ready))
     }
 
     pub(crate) fn acknowledged(&self, stamp: &FrameStamp) -> Fallible<bool> {
@@ -413,11 +514,19 @@ impl FilteredCaptureFacade {
             )
             .into());
         }
+        if !front.completion().ready()? {
+            return Ok(None);
+        }
         let output = state
             .ready
             .pop_front()
             .expect("checked filtered FIFO front");
         state.installed = Some(Arc::clone(&output));
+        let progress = state.progress_wake.clone();
+        drop(state);
+        if let Some(progress) = progress {
+            progress.notify();
+        }
         Ok(Some(output))
     }
 
@@ -430,9 +539,25 @@ impl FilteredCaptureFacade {
             .map(|output| output.frame().clone()))
     }
 
+    /// Completed contiguous successors of the exact installed owner. Pending
+    /// source work is not playback lead, and another epoch cannot count.
+    pub(crate) fn ready_successors(&self, stamp: &FrameStamp) -> Fallible<usize> {
+        let state = self.state()?;
+        self.ensure_healthy(&state)?;
+        if state
+            .installed
+            .as_ref()
+            .is_none_or(|output| output.frame() != stamp)
+        {
+            return Ok(0);
+        }
+        completed_prefix(state.ready.iter().map(|output| output.completion().ready()))
+    }
+
     /// Preserve the last complete picture for a terminal-error screenshot.
     /// Unlike observed-state queries, this deliberately does not mask that
     /// already-installed resource with a later sticky worker failure.
+    #[cfg(test)]
     pub(crate) fn installed(&self) -> Fallible<Option<Arc<CorrectedFrame>>> {
         Ok(self.state()?.installed.clone())
     }
@@ -454,14 +579,17 @@ impl FilteredCaptureFacade {
             .installed
             .as_ref()
             .is_some_and(|output| output.frame() == stamp)
-            || state
-                .ready
-                .front()
-                .is_some_and(|output| output.frame() == stamp)
         {
             return Ok(false);
         }
         if let Some(front) = state.ready.front() {
+            if front.frame() == stamp {
+                if front.completion().ready()? {
+                    return Ok(false);
+                }
+                state.due_waiter = Some((stamp.clone(), wake.clone()));
+                return Ok(true);
+            }
             return Err(format!(
                 "filtered output frame {} precedes requested frame {}",
                 front.frame().index(),
@@ -476,7 +604,7 @@ impl FilteredCaptureFacade {
             )
             .into());
         }
-        if (state.stitch_pending.is_none() && state.temporal_pending.is_empty())
+        if (state.stitch_pending.is_empty() && state.temporal_pending.is_empty())
             || !state.expected.iter().any(|expected| expected == stamp)
         {
             return Ok(false);
@@ -487,6 +615,34 @@ impl FilteredCaptureFacade {
 
     pub(crate) fn same_capture(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_stitch_for_test(&self) -> super::resident_worker::StitchPause {
+        self.attached_session()
+            .unwrap()
+            .resident
+            .worker
+            .pause_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn view_pipeline_prepared_for_test(&self, format: wgpu::TextureFormat) -> bool {
+        self.attached_session()
+            .unwrap()
+            .resident
+            .direct
+            .correction_pipeline_prepared_for_test(format)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn work_idle_for_test(&self) -> Fallible<bool> {
+        let state = self.state()?;
+        self.ensure_healthy(&state)?;
+        Ok(!state.worker_running
+            && state.queued.is_empty()
+            && state.stitch_pending.is_empty()
+            && state.temporal_pending.is_empty())
     }
 
     #[cfg(test)]
@@ -604,17 +760,51 @@ impl FilteredCaptureInner {
             .map_err(|_| "filtered capture state is poisoned".into())
     }
 
+    /// GPU completion wakes the exact waiter even if both CPU workers have
+    /// become idle. It does not install or select the finished picture.
+    pub(super) fn output_completed(&self) -> Fallible<()> {
+        let (wake, progress) = {
+            let mut state = self.state()?;
+            (
+                state.due_waiter.take().map(|(_, wake)| wake),
+                state.progress_wake.clone(),
+            )
+        };
+        if let Some(wake) = wake {
+            wake.notify();
+        }
+        if let Some(progress) = progress {
+            progress.notify();
+        }
+        Ok(())
+    }
+
     fn ensure_stitch_source(&self, stamp: &FrameStamp) -> Fallible<()> {
         let state = self.state()?;
         ensure_healthy_state(&state)?;
         if matches!(
-            &state.stitch_pending,
+            state.stitch_pending.front(),
             Some(Pending::Source { stamp: pending, .. }) if pending == stamp
         ) {
             Ok(())
         } else {
             Err("filtered panorama worker source differs from its pending request".into())
         }
+    }
+
+    fn take_work(&self) -> Fallible<Option<Work>> {
+        let mut state = self.state()?;
+        ensure_healthy_state(&state)?;
+        if state.retired {
+            state.queued.clear();
+        }
+        let work = state.queued.pop_front();
+        if work.is_none() {
+            // Admission and actor exit use this same lock: a successor is
+            // either already owned by this actor or kicks its replacement.
+            state.worker_running = false;
+        }
+        Ok(work)
     }
 
     pub(super) fn ensure_temporal_source(&self, stamp: &FrameStamp) -> Fallible<()> {
@@ -650,7 +840,7 @@ impl FilteredCaptureInner {
             stamp: pending,
             output_capacity,
             ..
-        }) = state.stitch_pending.take()
+        }) = state.stitch_pending.pop_front()
         else {
             return Err("filtered stitch handoff has no pending source".into());
         };
@@ -661,17 +851,29 @@ impl FilteredCaptureInner {
             stamp: pending,
             output_capacity,
         });
-        Ok(state.due_waiter.take().map(|(_, wake)| wake))
+        let wake = state.due_waiter.take().map(|(_, wake)| wake);
+        let progress = state.progress_wake.clone();
+        drop(state);
+        if let Some(progress) = progress {
+            progress.notify();
+        }
+        Ok(wake)
     }
 
     fn handoff_finish(&self) -> Fallible<Option<ReadyWake>> {
         let mut state = self.state()?;
         ensure_healthy_state(&state)?;
-        if !matches!(state.stitch_pending.take(), Some(Pending::Finish)) {
+        if !matches!(state.stitch_pending.pop_front(), Some(Pending::Finish)) {
             return Err("filtered stitch handoff has no pending finish".into());
         }
         state.temporal_pending.push_back(TemporalPending::Finish);
-        Ok(state.due_waiter.take().map(|(_, wake)| wake))
+        let wake = state.due_waiter.take().map(|(_, wake)| wake);
+        let progress = state.progress_wake.clone();
+        drop(state);
+        if let Some(progress) = progress {
+            progress.notify();
+        }
+        Ok(wake)
     }
 
     pub(super) fn complete_source(
@@ -691,7 +893,7 @@ impl FilteredCaptureInner {
         pending: PendingKind,
         outputs: Vec<CorrectedFrame>,
     ) -> Fallible<()> {
-        let wake = {
+        let (wake, progress) = {
             let mut state = self.state()?;
             ensure_healthy_state(&state)?;
             if state.retired {
@@ -733,20 +935,29 @@ impl FilteredCaptureInner {
                 state.finished = true;
             }
             state.temporal_pending.pop_front();
-            state.due_waiter.take().map(|(_, wake)| wake)
+            (
+                state.due_waiter.take().map(|(_, wake)| wake),
+                state.progress_wake.clone(),
+            )
         };
         if let Some(wake) = wake {
             wake.notify();
         }
+        if let Some(progress) = progress {
+            progress.notify();
+        }
         Ok(())
     }
 
-    fn cancel(&self, job: FilteredJob) -> Fallible<()> {
+    fn cancel_kick(&self) -> Fallible<()> {
         let mut state = self.state()?;
         ensure_healthy_state(&state)?;
-        match (job, state.stitch_pending.take()) {
+        // A refused channel send belongs to the latest admission, not to the
+        // source already executing at the front of the worker's FIFO.
+        state.worker_running = false;
+        match (state.queued.pop_back(), state.stitch_pending.pop_back()) {
             (
-                FilteredJob::Push(job),
+                Some(Work::Source(job)),
                 Some(Pending::Source {
                     stamp, previous, ..
                 }),
@@ -760,11 +971,14 @@ impl FilteredCaptureInner {
                     .checked_sub(1)
                     .ok_or("filtered source count underflowed during backpressure")?;
             }
-            (FilteredJob::Finish { .. }, Some(Pending::Finish)) => {
+            (Some(Work::Finish), Some(Pending::Finish)) => {
                 state.finish_requested = false;
             }
             _ => return Err("filtered backpressure changed its pending request".into()),
         }
+        // This is a failed-admission rollback, not newly available capacity.
+        // Waking here on channel Full would create a self-sustaining retry
+        // loop. The shared worker notifies when it actually dequeues a job.
         Ok(())
     }
 
@@ -775,6 +989,13 @@ impl FilteredCaptureInner {
         }
         if let Some(wake) = wake {
             wake.notify();
+        }
+        let progress = self
+            .state()
+            .ok()
+            .and_then(|state| state.progress_wake.clone());
+        if let Some(progress) = progress {
+            progress.notify();
         }
         if report {
             eprintln!("{message}");
@@ -787,6 +1008,7 @@ impl FilteredCaptureInner {
 fn commit_restart(previous: &mut State) -> Fallible<()> {
     ensure_healthy_state(previous)?;
     previous.retired = true;
+    previous.queued.clear();
     previous.ready.clear();
     previous.due_waiter = None;
     Ok(())
@@ -812,7 +1034,9 @@ fn record_worker_failure(
 }
 
 fn record_failure(state: &mut State, message: &str) -> (Option<ReadyWake>, bool) {
-    state.stitch_pending = None;
+    state.stitch_pending.clear();
+    state.queued.clear();
+    state.worker_running = false;
     state.temporal_pending.clear();
     state.ready.clear();
     let report = state.failure.is_none();
@@ -837,54 +1061,79 @@ enum PendingKind<'a> {
 }
 
 pub(super) fn service_filtered(job: FilteredJob) -> Fallible<()> {
-    match job {
-        FilteredJob::Push(job) => {
-            job.owner.ensure_stitch_source(&job.stamp)?;
-            let started = native_lifecycle_probe_enabled().then(std::time::Instant::now);
-            native_lifecycle_event("filtered-worker-start", &job.stamp, None);
-            if job.session.epoch.is_canceled() {
-                return Ok(());
-            }
-            let panorama = prepare_correction_input(
-                &job.session.resident,
-                job.frames,
-                job.reframe,
-                &job.stamp,
-                job.size,
-                job.permit,
-            )?;
-            if let Some(started) = started {
-                // This ends at panorama submission, not GPU completion.
-                native_lifecycle_event(
-                    "filtered-panorama-submitted",
-                    &job.stamp,
-                    Some(started.elapsed()),
-                );
-            }
-            let wake = job.owner.handoff_source(&job.stamp)?;
-            let owner = Arc::clone(&job.owner);
-            let temporal = TemporalJob::Push {
-                owner,
-                epoch: Arc::clone(&job.session.epoch),
-                panorama: Box::new(panorama),
-                started,
-            };
-            let sent = job.session.temporal.send(temporal);
-            if let Some(wake) = wake {
-                wake.notify();
-            }
-            sent
+    let FilteredJob { owner, session } = job;
+    while let Some(work) = owner.take_work()? {
+        if session.epoch.is_canceled() {
+            return Ok(());
         }
-        FilteredJob::Finish { owner, session } => {
-            let wake = owner.handoff_finish()?;
-            let sent = session.temporal.send(TemporalJob::Finish {
-                owner: Arc::clone(&owner),
-                epoch: Arc::clone(&session.epoch),
-            });
-            if let Some(wake) = wake {
-                wake.notify();
+        match work {
+            Work::Source(job) => {
+                owner.ensure_stitch_source(&job.stamp)?;
+                let started = native_lifecycle_probe_enabled().then(std::time::Instant::now);
+                native_lifecycle_event("filtered-worker-start", &job.stamp, None);
+                let Some(permit) = reserve_source_permit(&session)? else {
+                    return Ok(());
+                };
+                let panorama = prepare_correction_input(
+                    &session.resident,
+                    job.frames,
+                    job.reframe,
+                    &job.stamp,
+                    job.size,
+                    permit,
+                )?;
+                if let Some(started) = started {
+                    // This ends at panorama submission, not GPU completion.
+                    native_lifecycle_event(
+                        "filtered-panorama-submitted",
+                        &job.stamp,
+                        Some(started.elapsed()),
+                    );
+                }
+                let wake = owner.handoff_source(&job.stamp)?;
+                let temporal = TemporalJob::Push {
+                    owner: Arc::clone(&owner),
+                    epoch: Arc::clone(&session.epoch),
+                    panorama: Box::new(panorama),
+                    started,
+                };
+                let sent = session.temporal.send(temporal);
+                if let Some(wake) = wake {
+                    wake.notify();
+                }
+                sent?;
             }
-            sent
+            Work::Finish => {
+                let wake = owner.handoff_finish()?;
+                let sent = session.temporal.send(TemporalJob::Finish {
+                    owner: Arc::clone(&owner),
+                    epoch: Arc::clone(&session.epoch),
+                });
+                if let Some(wake) = wake {
+                    wake.notify();
+                }
+                sent?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// CPU admission does not consume either GPU lifetime slot. Only the actor
+/// waits for source-snapshot retirement, with no UI mutex held or GPU fence
+/// wait. Canceling the epoch interrupts this wait before another import.
+fn reserve_source_permit(session: &FilteredSession) -> Fallible<Option<DrawPermit>> {
+    loop {
+        if session.epoch.is_canceled() {
+            return Ok(None);
+        }
+        session.resident.retirements.poll()?;
+        match session.resident.retirements.reserve() {
+            Ok(permit) => return Ok(Some(permit)),
+            Err(DrawRetirementError::Full) => {
+                std::thread::park_timeout(std::time::Duration::from_micros(100));
+            }
+            Err(error) => return Err(error.into()),
         }
     }
 }
@@ -892,9 +1141,29 @@ pub(super) fn service_filtered(job: FilteredJob) -> Fallible<()> {
 fn source_output_capacity(accepted_sources: usize) -> usize {
     match accepted_sources {
         0..=5 => 0,
-        6 => READY_CAPACITY,
+        6 => STARTUP_OUTPUT_CAPACITY,
         _ => 1,
     }
+}
+
+fn output_inputs_admitted(state: &State, stamp: &FrameStamp, current_ready: bool) -> bool {
+    use crate::temporal_fusion::stream::{CENTER, SOURCES};
+    if state.accepted_sources < SOURCES {
+        return false;
+    }
+    let Some(last) = state.accepted.as_ref() else {
+        return false;
+    };
+    if !last.same_decode_epoch(stamp) {
+        return false;
+    }
+    let Some(ahead) = last.index().checked_sub(stamp.index()) else {
+        return false;
+    };
+    // A queued finish owns the complete, clipped EOF window. Ordinary work
+    // needs the actual seven-source stream's three future sources, plus one
+    // when it is the successor of an already-complete current output.
+    state.finish_requested || ahead >= CENTER as u64 + u64::from(current_ready)
 }
 
 fn temporal_output_capacity(pending: &VecDeque<TemporalPending>) -> usize {
@@ -911,30 +1180,124 @@ fn temporal_output_capacity(pending: &VecDeque<TemporalPending>) -> usize {
 
 fn reserved_output_capacity(state: &State) -> usize {
     temporal_output_capacity(&state.temporal_pending)
-        + match state.stitch_pending.as_ref() {
-            Some(Pending::Source {
-                output_capacity, ..
-            }) => *output_capacity,
-            Some(Pending::Finish) => FINISH_OUTPUT_CAPACITY,
-            None => 0,
-        }
+        + state
+            .stitch_pending
+            .iter()
+            .map(|pending| match pending {
+                Pending::Source {
+                    output_capacity, ..
+                } => *output_capacity,
+                Pending::Finish => FINISH_OUTPUT_CAPACITY,
+            })
+            .sum::<usize>()
 }
 
 fn outstanding_source_count(state: &State) -> usize {
-    usize::from(matches!(
-        &state.stitch_pending,
-        Some(Pending::Source { .. })
-    )) + state
-        .temporal_pending
+    state
+        .stitch_pending
         .iter()
-        .filter(|pending| matches!(pending, TemporalPending::Source { .. }))
+        .filter(|pending| matches!(pending, Pending::Source { .. }))
         .count()
+        + state
+            .temporal_pending
+            .iter()
+            .filter(|pending| matches!(pending, TemporalPending::Source { .. }))
+            .count()
+}
+
+fn source_admission_available(state: &State) -> bool {
+    outstanding_source_count(state) < SOURCE_CAPACITY
+        && state.ready.len()
+            + reserved_output_capacity(state)
+            + source_output_capacity(state.accepted_sources)
+            <= READY_CAPACITY
 }
 
 #[cfg(test)]
 mod stage_tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn output_input_ownership_requires_startup_and_exact_future_sources() {
+        let first = stamp(10, None);
+        let current = stamp(13, Some(&first));
+        let mut state = State::new();
+        state.accepted_sources = 6;
+        state.accepted = Some(stamp(15, Some(&first)));
+        assert!(!output_inputs_admitted(&state, &first, false));
+        state.accepted_sources = 7;
+        state.accepted = Some(stamp(16, Some(&first)));
+        assert!(output_inputs_admitted(&state, &current, false));
+        assert!(!output_inputs_admitted(&state, &current, true));
+        assert!(
+            state.ready.is_empty(),
+            "input ownership is not GPU completion"
+        );
+        state.accepted_sources = 8;
+        state.accepted = Some(stamp(17, Some(&first)));
+        assert!(output_inputs_admitted(&state, &current, true));
+        let another_epoch = stamp(13, None);
+        assert!(!output_inputs_admitted(&state, &another_epoch, false));
+        state.accepted = Some(stamp(12, Some(&first)));
+        assert!(!output_inputs_admitted(&state, &current, false));
+    }
+
+    #[test]
+    fn admitted_finish_owns_the_clipped_tail_but_not_another_epoch_or_future() {
+        let first = stamp(10, None);
+        let current = stamp(15, Some(&first));
+        let mut state = State::new();
+        state.accepted_sources = 7;
+        state.accepted = Some(stamp(16, Some(&first)));
+        assert!(!output_inputs_admitted(&state, &current, false));
+        state.finish_requested = true;
+        assert!(output_inputs_admitted(&state, &current, false));
+        assert!(output_inputs_admitted(&state, &current, true));
+        assert!(!output_inputs_admitted(&state, &stamp(15, None), false));
+        assert!(!output_inputs_admitted(
+            &state,
+            &stamp(17, Some(&first)),
+            false
+        ));
+    }
+
+    #[test]
+    fn recovery_lead_counts_only_the_completed_fifo_prefix() {
+        use crate::gpu_completion::CompletionStatus;
+        let statuses: Vec<_> = (0..READY_CAPACITY)
+            .map(|_| CompletionStatus::pending_for_test())
+            .collect();
+        let count = || completed_prefix(statuses.iter().map(CompletionStatus::ready)).unwrap();
+        assert_eq!(count(), 0, "queued work is not completed playback lead");
+        statuses[2].finish_for_test(Ok(()));
+        assert_eq!(
+            count(),
+            0,
+            "a later completion cannot skip an unfinished predecessor"
+        );
+        statuses[0].finish_for_test(Ok(()));
+        assert_eq!(count(), 1);
+        statuses[1].finish_for_test(Ok(()));
+        assert_eq!(count(), 3);
+        statuses[3].finish_for_test(Ok(()));
+        assert_eq!(count(), 4);
+        for status in &statuses[4..] {
+            status.finish_for_test(Ok(()));
+        }
+        assert_eq!(count(), READY_CAPACITY);
+    }
+
+    #[test]
+    fn recovery_lead_preserves_the_raw_completion_error() {
+        use crate::gpu_completion::CompletionStatus;
+        let failed = CompletionStatus::pending_for_test();
+        failed.finish_for_test(Err("exact recovery completion failure".into()));
+        assert_eq!(
+            completed_prefix([failed.ready()]).unwrap_err().to_string(),
+            "exact recovery completion failure"
+        );
+    }
 
     fn stamp(index: u64, previous: Option<&FrameStamp>) -> FrameStamp {
         FrameStamp::for_test(index, Duration::from_millis(index), previous)
@@ -959,7 +1322,7 @@ mod stage_tests {
                 output_capacity: 4,
             },
         ]);
-        assert_eq!(temporal_output_capacity(&pending), READY_CAPACITY);
+        assert_eq!(temporal_output_capacity(&pending), STARTUP_OUTPUT_CAPACITY);
     }
 
     #[test]
@@ -969,7 +1332,7 @@ mod stage_tests {
             stamp: first,
             output_capacity: 1,
         }]);
-        let ready = 3;
+        let ready = READY_CAPACITY - 1;
         assert_eq!(ready + temporal_output_capacity(&pending), READY_CAPACITY);
         assert!(
             ready + temporal_output_capacity(&pending) + source_output_capacity(8) > READY_CAPACITY
@@ -977,7 +1340,7 @@ mod stage_tests {
     }
 
     #[test]
-    fn stitch_and_temporal_stages_share_one_two_source_bound() {
+    fn stitch_and_temporal_stages_share_the_bounded_cpu_work_capacity() {
         let first = stamp(0, None);
         let second = stamp(1, Some(&first));
         let mut state = State::new();
@@ -985,13 +1348,85 @@ mod stage_tests {
             stamp: first,
             output_capacity: 1,
         });
-        state.stitch_pending = Some(Pending::Source {
+        state.stitch_pending.push_back(Pending::Source {
             stamp: second,
             previous: None,
             output_capacity: 1,
         });
         assert_eq!(outstanding_source_count(&state), 2);
         assert_eq!(reserved_output_capacity(&state), 2);
+        assert!(source_admission_available(&state));
+        let third = stamp(2, state.accepted.as_ref());
+        let fourth = stamp(3, Some(&third));
+        for stamp in [third, fourth] {
+            state.stitch_pending.push_back(Pending::Source {
+                stamp,
+                previous: None,
+                output_capacity: 1,
+            });
+        }
+        assert_eq!(outstanding_source_count(&state), SOURCE_CAPACITY);
+        assert_eq!(reserved_output_capacity(&state), SOURCE_CAPACITY);
+        assert!(!source_admission_available(&state));
+    }
+
+    #[test]
+    fn actor_can_admit_a_successor_before_its_first_stitch_handoff() {
+        let first = stamp(0, None);
+        let second = stamp(1, Some(&first));
+        let mut state = State::new();
+        state.accepted_sources = 1;
+        state.worker_running = true;
+        state.stitch_pending.push_back(Pending::Source {
+            stamp: first,
+            previous: None,
+            output_capacity: 0,
+        });
+        assert!(source_admission_available(&state));
+        state.accepted_sources += 1;
+        state.stitch_pending.push_back(Pending::Source {
+            stamp: second,
+            previous: None,
+            output_capacity: 0,
+        });
+        assert_eq!(outstanding_source_count(&state), 2);
+        assert!(source_admission_available(&state));
+        for index in 2..SOURCE_CAPACITY as u64 {
+            state.accepted_sources += 1;
+            state.stitch_pending.push_back(Pending::Source {
+                stamp: stamp(index, None),
+                previous: None,
+                output_capacity: 0,
+            });
+        }
+        assert_eq!(outstanding_source_count(&state), SOURCE_CAPACITY);
+        assert!(!source_admission_available(&state));
+    }
+
+    #[test]
+    fn queued_startup_output_preserves_its_four_picture_batch() {
+        let mut state = State::new();
+        state.accepted_sources = 7;
+        state.stitch_pending.push_back(Pending::Source {
+            stamp: stamp(6, None),
+            previous: None,
+            output_capacity: source_output_capacity(6),
+        });
+        assert_eq!(outstanding_source_count(&state), 1);
+        assert_eq!(reserved_output_capacity(&state), 4);
+        assert!(source_admission_available(&state));
+    }
+
+    #[test]
+    fn failure_retires_queued_actor_work() {
+        let mut state = State::new();
+        state.worker_running = true;
+        state.queued.push_back(Work::Finish);
+        state.stitch_pending.push_back(Pending::Finish);
+        record_failure(&mut state, "exact queued worker error");
+        assert!(!state.worker_running);
+        assert!(state.queued.is_empty());
+        assert!(state.stitch_pending.is_empty());
     }
 
     #[test]

@@ -22,6 +22,7 @@ use crate::{Fallible, FrameStamp, MAX_LENSES, Planes};
 pub(crate) mod correction;
 pub(crate) mod panorama;
 mod source_snapshot;
+pub(crate) mod view_mesh_cache;
 pub(crate) use panorama::nv12::{
     CompactNv12Panorama, Prepared as CompactNv12Prepared, attachment as compact_nv12_attachment,
 };
@@ -487,6 +488,7 @@ pub(crate) struct DirectType2Pipeline {
     #[cfg(test)]
     vertex_cached_compact_nv12: OnceLock<panorama::nv12_vertex_cache::Producer>,
     source_snapshot: OnceLock<source_snapshot::SnapshotPipeline>,
+    view_mesh_cache: OnceLock<view_mesh_cache::Pipeline>,
     correction_pipelines: Mutex<Vec<(wgpu::TextureFormat, Arc<correction::CorrectionPipeline>)>>,
 }
 
@@ -643,6 +645,7 @@ impl DirectType2Pipeline {
             #[cfg(test)]
             vertex_cached_compact_nv12: OnceLock::new(),
             source_snapshot: OnceLock::new(),
+            view_mesh_cache: OnceLock::new(),
             correction_pipelines: Mutex::new(Vec::new()),
         }
     }
@@ -650,6 +653,11 @@ impl DirectType2Pipeline {
     fn source_snapshot(&self) -> &source_snapshot::SnapshotPipeline {
         self.source_snapshot
             .get_or_init(|| source_snapshot::SnapshotPipeline::new(&self.device))
+    }
+
+    pub(crate) fn view_mesh_cache(&self) -> &view_mesh_cache::Pipeline {
+        self.view_mesh_cache
+            .get_or_init(|| view_mesh_cache::Pipeline::new(&self.device))
     }
 
     pub(crate) fn correction_pipeline(
@@ -670,6 +678,18 @@ impl DirectType2Pipeline {
         let pipeline = Arc::new(correction::CorrectionPipeline::new(device, self, format)?);
         pipelines.push((format, Arc::clone(&pipeline)));
         Ok(pipeline)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn correction_pipeline_prepared_for_test(
+        &self,
+        format: wgpu::TextureFormat,
+    ) -> bool {
+        self.correction_pipelines
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(cached, _)| *cached == format)
     }
 
     fn compact_nv12(&self) -> &panorama::nv12::Producer {
@@ -1290,7 +1310,6 @@ fn draw_wgsl_with_fusion_mode(fusion: bool, hardware_fusion: bool) -> String {
     )
 }
 
-#[cfg(test)]
 pub(in crate::direct_type2) fn vertex_cached_draw_wgsl_with_fusion_mode(
     fusion: bool,
     hardware_fusion: bool,
@@ -1311,7 +1330,6 @@ pub(in crate::direct_type2) fn vertex_cached_draw_wgsl_with_fusion_mode(
     )
 }
 
-#[cfg(test)]
 pub(in crate::direct_type2) fn vertex_cache_prepass_wgsl() -> String {
     let cell = MAP
         .find("fn type2_cell(")
@@ -1322,7 +1340,6 @@ pub(in crate::direct_type2) fn vertex_cache_prepass_wgsl() -> String {
     )
 }
 
-#[cfg(test)]
 fn vertex_cached_map_wgsl() -> String {
     let cell = MAP
         .find("fn type2_cell(")
@@ -1503,7 +1520,6 @@ fn type2_mesh(body: vec3<f32>) -> Type2Sample {
 }
 "#;
 
-#[cfg(test)]
 const VERTEX_CACHED_CELL: &str = r#"
 struct Type2CachedVertex {
   position: vec4<f32>,
@@ -1552,7 +1568,6 @@ fn type2_cell(ray: vec3<f32>, row: i32, col_unwrapped: i32) -> Type2Sample {
 }
 "#;
 
-#[cfg(test)]
 const VERTEX_CACHE_PREPASS: &str = r#"
 struct Type2CachedVertex {
   position: vec4<f32>,

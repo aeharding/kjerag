@@ -6,7 +6,7 @@
 //! poll. A completed second result parks in capture state when the one future
 //! slot is occupied; the actor then ends until publication kicks it again.
 
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use super::filtered_capture::{FilteredJob, service_filtered};
@@ -16,6 +16,54 @@ use super::{
     native_lifecycle_event, native_lifecycle_probe_enabled, prepare_resident_bound,
 };
 use crate::Fallible;
+use crate::ready_wake::ReadyWake;
+
+/// Shared across seek epochs. Channel space released by an old epoch must
+/// wake the current source consumer too, not just the old exact-frame waiter.
+#[derive(Default)]
+pub(super) struct WorkerProgressWake(Mutex<Option<ReadyWake>>);
+
+impl WorkerProgressWake {
+    pub(super) fn set(&self, wake: &ReadyWake) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(wake.clone());
+    }
+
+    pub(super) fn notify(&self) {
+        let wake = self.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(wake) = wake {
+            wake.notify();
+        }
+    }
+}
+
+#[cfg(test)]
+mod progress_wake_tests {
+    use super::*;
+    use std::task::{Context, Waker};
+
+    #[test]
+    fn shared_executor_progress_wake_survives_multiple_epoch_turns() {
+        let wake = ReadyWake::default();
+        let mut listener = wake.listen();
+        let progress = WorkerProgressWake::default();
+        let mut cx = Context::from_waker(Waker::noop());
+        progress.set(&wake);
+        assert!(listener.poll_ready(&mut cx).is_pending());
+        // Dequeue/finish notifications coalesce, but registration persists
+        // after consumption for the next (possibly superseded) epoch.
+        progress.notify();
+        progress.notify();
+        assert!(listener.poll_ready(&mut cx).is_ready());
+        assert!(listener.poll_ready(&mut cx).is_pending());
+        progress.notify();
+        assert!(listener.poll_ready(&mut cx).is_ready());
+        progress.set(&wake);
+        assert!(
+            listener.poll_ready(&mut cx).is_pending(),
+            "registration cannot self-wake"
+        );
+    }
+}
 
 pub(super) struct PanoramaJob {
     pub(super) ingest: Arc<ResidentPanoramaIngestInner>,
@@ -30,10 +78,26 @@ enum Job {
     Capture(Arc<ResidentCaptureFacadeInner>),
     Panorama(Box<PanoramaJob>),
     Filtered(FilteredJob),
+    #[cfg(test)]
+    Pause {
+        entered: mpsc::SyncSender<()>,
+        release: mpsc::Receiver<()>,
+    },
+}
+
+#[cfg(test)]
+pub(crate) struct StitchPause(mpsc::SyncSender<()>);
+
+#[cfg(test)]
+impl Drop for StitchPause {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
 }
 
 pub(super) struct ResidentStitchWorker {
     jobs: mpsc::SyncSender<Job>,
+    progress: Arc<WorkerProgressWake>,
 }
 
 impl ResidentStitchWorker {
@@ -41,10 +105,13 @@ impl ResidentStitchWorker {
         // One executing capture actor and one queued actor across seek
         // restarts. Each capture independently limits accepted sources to two.
         let (jobs, incoming) = mpsc::sync_channel::<Job>(1);
+        let progress = Arc::new(WorkerProgressWake::default());
+        let running_progress = progress.clone();
         let thread = std::thread::Builder::new()
             .name("kjerag-stitch".into())
             .spawn(move || {
                 for job in incoming {
+                    running_progress.notify();
                     match job {
                         Job::Capture(capture) => {
                             let owner = Arc::clone(&capture);
@@ -64,14 +131,43 @@ impl ResidentStitchWorker {
                                 owner.fail_worker(&error.to_string());
                             }
                         }
+                        #[cfg(test)]
+                        Job::Pause { entered, release } => {
+                            let _ = entered.send(());
+                            let _ = release.recv();
+                        }
                     }
+                    running_progress.notify();
                 }
             })?;
         context.register_worker_thread(thread.thread().id())?;
         // The sender owns shutdown. The detached thread finishes any exact
         // active source before the channel closes and never blocks the UI.
         drop(thread);
-        Ok(Self { jobs })
+        Ok(Self { jobs, progress })
+    }
+
+    pub(super) fn set_progress_wake(&self, wake: &ReadyWake) {
+        self.progress.set(wake);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_for_test(&self) -> StitchPause {
+        let (entered, incoming) = mpsc::sync_channel(1);
+        let (release, waiting) = mpsc::sync_channel(1);
+        assert!(
+            self.jobs
+                .send(Job::Pause {
+                    entered,
+                    release: waiting
+                })
+                .is_ok()
+        );
+        let guard = StitchPause(release);
+        incoming
+            .recv_timeout(Duration::from_secs(10))
+            .expect("stitch pause did not enter");
+        guard
     }
 
     /// Schedule one capture actor without waiting. The caller has already set

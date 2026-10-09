@@ -12,6 +12,7 @@
 # Set KJERAG_UITEST_ONLY=view-paths for the spaced-filename clipboard regression.
 # Set KJERAG_UITEST_ONLY=drag-release for the video-to-controls drag regression.
 # Set KJERAG_UITEST_ONLY=end-seek for the scrubber endpoint regression.
+# Set KJERAG_UITEST_ONLY=blocked-open for startup with stalled filesystem IO.
 #
 # The same checks run against the installed Flatpak with
 # KJERAG_FLATPAK=dev.harding.Kjerag, which is how a bundle is checked before
@@ -204,6 +205,7 @@ fi
 
 case ${KJERAG_UITEST_ONLY:-} in
 "") ;;
+blocked-open) ;;
 view-paths)
 	[ -n "$media" ] || die "KJERAG_UITEST_ONLY=view-paths needs test media"
 	;;
@@ -218,7 +220,7 @@ stalls)
 	[ -z "${KJERAG_FLATPAK:-}" ] ||
 		die "KJERAG_UITEST_ONLY=stalls cannot preload into a Flatpak"
 	;;
-*) die "KJERAG_UITEST_ONLY must be stalls, view-paths, drag-release or end-seek when it is set" ;;
+*) die "KJERAG_UITEST_ONLY must be stalls, view-paths, drag-release, end-seek or blocked-open when it is set" ;;
 esac
 
 # The session went away with checks still to run: a dead compositor cannot
@@ -740,16 +742,16 @@ press_until() {
 	return 1
 }
 
-# The last report line's presented rate: "play:  12.34 s, 27.34 fps ...".
-presented_fps() {
-	grep '^play:' "$log" | tail -1 | sed -n 's/.*, \([0-9.]*\) fps presented.*/\1/p'
+# The last report's source advance rate, not proof of visible motion.
+playback_rate() {
+	grep '^play:' "$log" | tail -1 | sed -n -E 's/.*, ([0-9.]+) (fps presented|source advances\/s).*/\1/p'
 }
 
 # Wait for a painted window before sending input. Its backdrop can paint
 # before any video; with_media separately checks visible playback below.
 await_paint() {
-	local waited=0 shot
-	while [ "$waited" -le $((READY * 2)) ]; do
+	local waited=0 shot limit=${2:-$READY}
+	while [ "$waited" -le $((limit * 2)) ]; do
 		alive || return 1
 		shot=$(grab "$1")
 		nonblack "$shot" && return 0
@@ -769,6 +771,12 @@ visible_picture() {
 	python3 "$root/scripts/check-ui-picture.py" "$1" "$HEADER_BAND" "$CONTROL_BAND"
 }
 
+# The opening pane is empty but not black, not a welcome or loading screen.
+# Validate the capture first so a missing/truncated image cannot count as blank.
+blank_picture() {
+	python3 "$root/scripts/check-ui-picture.py" "$1" "$HEADER_BAND" "$CONTROL_BAND" --blank
+}
+
 # A positive Player report can precede the corrected display commit. Require
 # both the report and a visible picture, inside one existing readiness bound.
 await_visible_playback() {
@@ -781,7 +789,9 @@ await_visible_playback() {
 	while [ $((SECONDS - started)) -lt "$READY" ]; do
 		alive || return 1
 		if [ "$positive" = no ] && awk '
-			/^play:/ && $4 ~ /^[0-9]+[.][0-9]+$/ && $4 + 0 > 0 && $5 == "fps" {
+			/^play:/ && $4 ~ /^[0-9]+[.][0-9]+$/ && $4 + 0 > 0 &&
+				(($5 == "fps" && $6 == "presented") ||
+				 ($5 == "source" && $6 == "advances/s")) {
 				found = 1; exit
 			}
 			END { exit !found }
@@ -935,7 +945,7 @@ with_media() {
 	if [ "$paused" = no ]; then
 		skip "space resumes (nothing paused to resume)"
 	elif press_until more_report_lines resumed -k space; then
-		pass "space resumes ($(presented_fps) fps presented)"
+		pass "space resumes ($(playback_rate) source advances/s)"
 	else
 		alive || lost "space resumes"
 		fail "space resumes" \
@@ -958,7 +968,7 @@ more_report_lines() {
 	local waited=0
 	while [ "$waited" -le $((REPORT * 2)) ]; do
 		alive || return 1
-		if [ "$(grep -c '^play:' "$log")" -gt "$reported" ] && [ "$(presented_fps)" != 0.00 ]; then
+		if [ "$(grep -c '^play:' "$log")" -gt "$reported" ] && [ -n "$(playback_rate)" ] && [ "$(playback_rate)" != 0.00 ]; then
 			return 0
 		fi
 		sleep 0.5
@@ -2465,6 +2475,13 @@ pane_rgb() {
 		-f rawvideo -pix_fmt rgb24 - 2>>"$log" | od -An -tu1 | tr -s ' ' | sed 's/^ //;s/ $//'
 }
 
+same_pane() {
+	local first second
+	first=$(pane_rgb "$1") || return 1
+	second=$(pane_rgb "$2") || return 1
+	[ -n "$first" ] && [ "$first" = "$second" ]
+}
+
 # mirror_rgb <file> <left|right>: one of two patches at places the middle of
 # the window reflects onto each other.
 mirror_rgb() {
@@ -3216,6 +3233,72 @@ welcome() {
 	exits_clean
 }
 
+# Real CLI opening, with the first format-sniff File::open blocked on a FIFO.
+# No test delay knob, GPU decode, or invented metadata is involved. The old
+# synchronous App::init never creates a window until the writer releases it.
+# The asynchronous shell must paint and accept Close before IO can return;
+# that canceled result must not later raise an alert or apply its copied view.
+blocked_open_is_closed() {
+	local closed
+	closed=$(grab "$1") || return 1
+	[ -f "$closed" ] && visible_picture "$closed" &&
+		! same_picture "$session/blocked-opening.ppm" "$closed"
+}
+
+blocked_open() {
+	printf '\n-- window startup with blocked filesystem IO\n'
+	local fifo=$session/blocked-open.360 closed after
+	mkfifo "$fifo" || die "could not create the blocked-open fixture"
+	boot blocked-open "$fifo" time=40 yaw=50 pitch=20 fov=60 lock=1
+	if ! await_paint blocked-opening 5; then
+		fail "the window renders while file opening is blocked" \
+			"capture: $session/blocked-opening.ppm" "log: $log"
+		# Release the old synchronous app before normal session teardown.
+		timeout 5 bash -c ': > "$1"' bash "$fifo" || :
+		if await_paint blocked-released 5; then
+			quit >/dev/null 2>&1 || teardown
+		else
+			teardown
+		fi
+		return
+	fi
+	pass "the window renders while file opening is blocked"
+	if blank_picture "$session/blocked-opening.ppm"; then
+		pass "file opening shows a blank player without a loading screen"
+	else
+		fail "file opening shows a blank player without a loading screen" \
+			"capture: $session/blocked-opening.ppm" "log: $log"
+	fi
+	if press_until blocked_open_is_closed blocked-closed -M ctrl -k w -m ctrl; then
+		pass "Close is responsive before file opening returns"
+	else
+		fail "Close is responsive before file opening returns" \
+			"the opening view never returned to the welcome view" "log: $log"
+	fi
+	closed=$(grab blocked-closed)
+	if same_pane "$session/blocked-opening.ppm" "$closed"; then
+		pass "opening uses the same window backdrop as the closed player"
+	else
+		fail "opening uses the same window backdrop as the closed player" \
+			"$session/blocked-opening.ppm" "$closed" "log: $log"
+	fi
+	# The still-blocked worker owns the read until this writer arrives. The
+	# non-seekable FIFO is refused by the unchanged .360 format rule.
+	if timeout 5 bash -c ': > "$1"' bash "$fifo"; then
+		sleep "$SETTLE"
+		after=$(grab blocked-released)
+		if ! said 'not shown:\|^goto:' && same_picture "$closed" "$after"; then
+			pass "canceled opening neither alerts nor changes the view after IO returns"
+		else
+			fail "canceled opening neither alerts nor changes the view after IO returns" \
+				"$closed" "$after" "log: $log"
+		fi
+	else
+		fail "the blocked-open fixture releases its reader" "log: $log"
+	fi
+	exits_clean
+}
+
 # -------------------------------------------------- the checks, with a dud
 #
 # A file with video in it and no Insta360 trailer is what the app meets when
@@ -3477,7 +3560,9 @@ twin_guard() {
 
 # ------------------------------------------------------------------- run
 
-if [ "${KJERAG_UITEST_ONLY:-}" = view-paths ]; then
+if [ "${KJERAG_UITEST_ONLY:-}" = blocked-open ]; then
+	blocked_open
+elif [ "${KJERAG_UITEST_ONLY:-}" = view-paths ]; then
 	spaced_view_reference
 elif [ "${KJERAG_UITEST_ONLY:-}" = drag-release ]; then
 	drag_release_check
@@ -3486,6 +3571,7 @@ elif [ "${KJERAG_UITEST_ONLY:-}" = end-seek ]; then
 elif [ "${KJERAG_UITEST_ONLY:-}" = stalls ]; then
 	stalls
 else
+	blocked_open
 	if [ -n "$media" ]; then
 		with_media
 		spaced_view_reference

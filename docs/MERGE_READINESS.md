@@ -13,7 +13,581 @@ with a [research navigation index](research/README.md). The shared playback
 slowdown, native/Flatpak differences and frame-time spikes are tracked in
 [issue #186](https://github.com/aeharding/kjerag/issues/186).
 
-## Current private test package, September 16
+## Accepted playback release candidate, October 8
+
+After returning to the installed build, the owner reports "seems acceptable
+enough for release" on October 8. This satisfies the branch-player acceptance
+gate for the currently installed runtime source `c524ad0e`, not a claim that
+all microstutters are gone. Prepare the cumulative selected playback changes
+for merge and a 0.3.2 patch release without changing their runtime code.
+The 240-capacity target, frame-time spikes and broader network verification
+remain open in #186. Publication and signed-package qualification are separate
+gates; no new release has been published at this checkpoint.
+
+All eight CI jobs pass on documentation head
+`ba084bc585ea22dc112ece6f28a112e80f49b77e`, run `37146840123`.
+The selected cumulative chain is #233, #235, #236, #238, #240, #241, #242,
+#243, #248, #249, #250, #252, #253 and #254. Alternative experiments #234,
+#245, #246 and #247 are not selected for this release. The two uncommitted
+periodic-color files remain excluded, exactly as in the accepted installed
+package. Both signed architectures must succeed before publication.
+
+### Current installed test package, October 3
+
+Runtime source `c524ad0e48e12922b11b4a6018135bf7201bb74b`, draft
+[PR #254](https://github.com/aeharding/kjerag/pull/254), is installed for the
+owner's network-playback retest. It inherits #252's arithmetic fix and #253's
+startup pipeline preparation, then waits for six completed successor pictures
+after an actual buffering hold. The owner explicitly accepts roughly 300 MiB
+extra GPU allocation and potentially longer recovery holds for this test.
+That October 3 approval was for testing; the October 8 playback acceptance
+above is the later release-preparation decision.
+The working `039c0a31` package is retained for rollback.
+
+- Installed OSTree: `53263015fe291e43e401402250e664355118bd76a9c44d635845d3e30d0d96e7`.
+- Executable SHA256: `a39f4d521eec769ce9288e56c6fa3cac9a100df0ca90fdde9f9f49677a2cdd4b`.
+- Bundle SHA256: `d93449f18f670e6496f2bfb1852cf25d03ea12b7fe375f5a2c2cdf6f2475240d`.
+
+Installation authenticates the actual executable, commit, origin and permissions;
+shared graphics/runtime refs remain unchanged. A bounded actual-installed check
+uses the reported September 23 `_003` network view and a finite eight-second
+input interruption. It resumes after that interruption, with zero counted audio
+underruns, but also records a later approximately one-second picture-buffering
+hold. Both holds resume; warm source progression returns near 30 advances/s.
+The run exits normally with no new kernel entries or memory-pressure averages.
+Its output image is inspected. Whole-run cadence integrity remains false;
+this is not audible-continuity, physical-scanout, 240-capacity or general
+network-stutter qualification. The owner now accepts the installed result for
+release preparation; the broader goal remains open. No merge or release has
+occurred at this checkpoint. Actual-installed receipt:
+`runtime/completed-runway-installed-moab003-outage-01` under the evidence root
+`scratch/playback-independent-20260927/`.
+
+### Earlier startup-preparation checkpoint
+
+Runtime source `039c0a317e76970c064a5afab977478ed5b01c75`, draft
+[PR #253](https://github.com/aeharding/kjerag/pull/253), was installed. It inherits
+the startup arithmetic fix in #252 and prepares the existing corrected-view
+pipelines before autoplay rather than during its first picture. No source,
+stitching/color arithmetic, cadence, history, buffer limits or restart thresholds
+change in #253. The working #252 package from source `56232400` is retained.
+
+- Installed OSTree: `3f02b2bf26fe81c499c17ba4c78c0a0d859cec7c00efc82b890a7363921c14c3`.
+- Executable SHA256: `1abb8f35f623e6a6d1b7eb8374486742ebd32ba39026d8b1270b5ebbf223d4c7`.
+- Bundle SHA256: `d7631cafe97ea150a997defb6cbbcaaf58ce3f9a9a09e172ae6c98f87d920682`.
+
+The clean SDK archive excludes both parked color edits. All eight runtime-head
+CI jobs pass; bounded device-hidden local gates pass 1,699 workspace tests with
+53 ignored, plus formatting, Clippy, vendor/source/name/startup/parser checks
+and a native release build. Native checks include parked colors and unavailable
+hardware paths, not clean-package GPU coverage. The real-Scene startup regression
+fails before and passes after on X4; its ONE X2 counterpart also passes.
+The clean package's functional app-path suites pass 49 X4 and 50 ONE X2 checks,
+with existing sound-device, portal, paired-fixture and exact-view skips.
+Candidate process bytes and actual output pictures are verified. Both suites
+have no new kernel entries, memory-limit events or CPU throttling.
+
+The packaged `_002` network interruption check has one hold, no initial
+processing holds or counted underruns, then near-source-cadence progression.
+The matching earlier installed control has five holds and slower post-resume
+map work. This pair does not isolate run-to-run network/GPU variation or prove
+that the startup change fixes random recovery stutters. Both whole-run cadence
+verdicts are false, including frameless startup. The actual-installed `_003`
+original clip/view smoke check has no buffer holds or counted underruns and
+near-source-cadence warm progression. Network checks exit normally with no new
+kernel entries; their pressure averages are zero. These receipts are not
+physical scanout, audible-continuity, universal smoothness or 240-capacity proof.
+
+Accepted tradeoffs remain the owner's initial-picture preparation wait and
+conditional common-clock buffering test from #250. No new quality tradeoff,
+Mesa rollback, shared runtime change, merge or release. Owner retest remains
+required. Package/UI receipts: `scratch/flatpak-delivery-039c0a31/`.
+Network receipts: `scratch/playback-independent-20260927/runtime/`, labels
+`view-preparation-package-moab002-outage-01`,
+`view-preparation-baseline-moab002-outage-01` and
+`view-preparation-installed-moab003-natural-01`.
+
+### Completed-picture recovery qualification
+
+Source `c524ad0e48e12922b11b4a6018135bf7201bb74b`, draft
+[PR #254](https://github.com/aeharding/kjerag/pull/254), waits for six completed
+successors after an actual buffering hold. Its bounded nine-successor decoded
+horizon supplies the three temporal futures. Startup/seek autoplay remains a
+two-picture gate, CPU work admission stays four, GPU source lifetimes stay two,
+and source cadence, history and stitching/color arithmetic are unchanged.
+
+- Installed OSTree: `53263015fe291e43e401402250e664355118bd76a9c44d635845d3e30d0d96e7`.
+- Executable SHA256: `a39f4d521eec769ce9288e56c6fa3cac9a100df0ca90fdde9f9f49677a2cdd4b`.
+- Bundle SHA256: `d93449f18f670e6496f2bfb1852cf25d03ea12b7fe375f5a2c2cdf6f2475240d`.
+
+All eight runtime-source CI jobs pass, as do all 1,699 device-hidden workspace
+tests, 53 ignored, local CPU gates and the native release build. The real X4
+Scene recovery regression fails before at only two completed successors and
+passes after; ONE X2 also passes after. Existing missed-picture/shown-owner
+regressions pass. Native checks include parked colors; the SDK archive does not.
+The clean SDK package passes 49 X4 and 50 ONE X2 functional UI checks, with the
+existing service/fixture skips and native Rust-twin provenance limit. Both
+suites authenticate running candidate bytes, have no new kernel entries,
+memory-limit events or CPU throttling, and their actual output is inspected.
+
+The native old/new/old network comparison has respectively one, zero and five
+extra holds beyond its deliberately injected eight-second input outage.
+Processing times vary, so this alone does not isolate a causal improvement.
+The clean SDK outage run strengthens the evidence: it has one hold, no extra
+holds or counted audio underruns, despite consecutive 118/112 ms source-map
+transactions. It restarts about 0.66 seconds after input returns, estimated
+from adjacent presentation receipts. Total buffering lasts about 5.07 seconds
+because input was intentionally unavailable, not a zero-to-one-second total
+hold. Warm progression is near 30 source advances/s. The exact reported `_003`
+network clip/view also runs without a delay hook, buffer holds or counted
+underruns, with near-source-cadence warm progression. These runs exit normally
+without new kernel entries; the outage's 60-second pressure average is 0.02,
+the natural run's averages are zero. Actual pictures are inspected. Whole-run
+cadence integrity remains false; neither these receipts nor zero underrun
+counters prove audible continuity, physical scanout or universal smoothness.
+
+ONE X2 ordinary packaged playback at the reported 212.512-second riser view
+also maintains near-source-cadence progression with no holds, counted underruns,
+new kernel entries or pressure averages. The output image is inspected. A
+20-second changing-view capacity check on the network `_003` clip completes
+about 188 sourced redraws/s at 2256x1504, with 30 consecutive source advances/s,
+zero holds and counted underruns. Completion-spacing p99/max is about
+22.92/33.65 ms; no new kernel entries or pressure averages occur. Its strict
+cohort-integrity parser passes, which does not mean the 240-capacity target
+passes. It is below that target and does not establish physical scanout.
+
+Accepted test tradeoffs are about 266–348 MiB more GPU allocation in retained
+snapshots and potentially longer recovery holds while the runway fills. These are not
+peak-memory measurements. The owner's October 3 "sure" explicitly approves
+installation with those disclosed tradeoffs; playback-result acceptance is
+not inferred from that earlier approval. The October 8 owner verdict accepts
+the installed candidate for release preparation. The 240-capacity target and
+broader network-stutter verification remain due. No merge, release, graphics
+runtime or system setting change. Receipts: `scratch/flatpak-delivery-c524ad0e/`
+and `scratch/playback-independent-20260927/runtime/completed-runway-*`.
+
+The dated private-package sections below are earlier delivery checkpoints,
+not the currently installed identity.
+
+## Accepted native preview, September 30
+
+Draft PR [#240](https://github.com/aeharding/kjerag/pull/240) adds source-specific
+GPU completion proofs, bounded worker-owned source admission and output
+completion, and a finite curved native-mesh renderer. The source/seam/color
+cadence is unchanged. The renderer keeps full-resolution source planes but
+approximates subpixel projection and sampling; the original ray renderer remains
+the diagnostic reference and ball fallback.
+
+The frozen preview uses committed source
+`dd908324f0e23039a6037d3f4ecb74d6b110264b` plus the two preserved parked
+periodic-color edits. Its executable SHA256 is
+`668ed968def53d23319fe4f023062e0e2c1f4b6d0f008261524c80f6eae4456c`.
+After running it at the reported September 20 view, the owner reports
+"Performance looks much improved" and "Good enough" in response to the requested
+moving-picture/seam and audio-sync check. This accepts that preview for the
+next delivery step. It does not qualify a clean committed-source package,
+arbitrary footage, network playback or the 240 fps capacity target.
+
+All eight CI jobs pass on `dd908324`. Native X4 UI passes 55 checks, zero failures.
+The bounded device-hidden workspace passes 1,638 tests with 53 ignored; unavailable
+hardware returns are not GPU coverage. The real seven-source no-shell regression
+and both-camera moving coverage checks pass separately. Local 2256x1504 playback
+maintains 30 source advances/s, including 60 Hz pan. Uncapped pan reaches 155.06
+completed redraws/s with full source cadence, still below 240; callback
+p99/max 27.33/32.78 ms does not establish the 4.17 ms budget. Network pan still fails
+badly despite a realtime decoder-only control. No general playback fix is claimed.
+
+The clean committed-source SDK build passes separate app-path UI suites,
+43 X4 and 44 ONE X2 checks with zero failures. Existing sound-device, portal,
+exact-view, sandbox import-fault and cross-mount paired-fixture skips remain.
+Both motion captures for each camera were inspected; the shader/Rust-twin
+helper remains native rather than a clean SDK shader test. Each launched
+package executable is authenticated. Both suites have no new kernel entries
+or scoped memory-limit/OOM events, and postflight pressure averages are zero.
+These are functional checks, not capacity, all-camera or freeze-cause proof.
+
+The actual exported bundle passes a separate device-hidden private import:
+its commit, executable, metadata and license match the archived source/build.
+The local test bundle is unsigned, not a release-signature qualification.
+
+## Earlier transparent-pane private test package, October 1
+
+Source `6dbbf16bd4b3f971d0f6b8361b6e194f87752c2c`, draft
+[PR #242](https://github.com/aeharding/kjerag/pull/242), was installed. The owner
+clarified that opening should use the normal transparent/blurred COSMIC pane,
+not black followed by that pane and then video. The pending-open container now
+uses the same backdrop as playback. No loading logo/text, new readiness state,
+timing rule, stitching/color arithmetic or cadence change is added. Existing
+fullscreen black surround and no-file welcome behavior remain unchanged.
+
+- Installed OSTree: `91aea32a8d44dd6f1b693c04e4c01d9667301b849903d106a3e24d2d70d433b9`.
+- Executable SHA256: `22fa1498e12724b75bf5f65de41206b9b7c5daff31baac452e9ad728f1658f2c`.
+- Bundle SHA256: `7f9219784df5c77d7b8dbbaad6b5625003787353aee90d660b5c08a64b99e5fb`.
+
+All eight CI jobs pass on this implementation. Bounded device-hidden local gates
+pass 1,656 workspace tests, 53 ignored, full lint/format/vendor/source/name checks,
+23 harness CPU tests and five parser startup tests. Local tests include the two
+preserved parked color edits and unavailable-device returns, not clean-source
+GPU coverage. The offline SDK archive excludes those edits. Separate app-path
+suites pass 49 X4 and 50 ONE X2 checks, zero failures, with existing fixture/service
+skips. Executables are authenticated and both motion captures per camera are
+inspected; the shader/Rust-twin helper remains native. A separate device-hidden
+private import authenticates the exported bundle. It is an unsigned local test,
+not release-signature qualification.
+
+Native and actual-installed CLI/FIFO suites each pass all six checks, including
+nonblack blank pixels, matching ordinary pane, responsive Close and canceled
+publication. Startup captures are inspected. Both camera suites and startup runs
+exit normally with no new kernel entries or scoped memory-limit/OOM events.
+X4 postflight pressure avg10 is zero but avg60/avg300 are nonzero; X2 and installed
+startup postflight averages are zero. Headless captures verify the ordinary pane,
+not the desktop compositor's blur. Installation uses no dependency/related-ref/
+pull updates. Origin, permissions and recorded shared runtimes remain unchanged;
+the authenticated preceding `5aaf97a7` bundle is retained below. The owner's reopen
+retest remains the merge gate. The new persistent pause/resume/seek stutter report
+is unlocalized and is not fixed by this styling change. No latency, hitch-free,
+240 fps, merge or release verdict is claimed.
+
+Package: `scratch/flatpak-delivery-6dbbf16b/`. Camera receipts:
+`scratch/playback-independent-20260927/packaging/qualification-ui-6dbbf16b/`.
+Actual-installed startup: `runtime/transparent-player-installed-01`.
+
+## Preceding blank-player private test package, September 30
+
+Source `5aaf97a7e921ff02cf2dd51b5bddda8b9c260070`, draft
+[PR #242](https://github.com/aeharding/kjerag/pull/242), was installed and is now
+retained for rollback. The owner
+requested a blank player instead of the "Opening video..." welcome screen.
+The normal header and black video area now paint while initial preparation is
+pending, without a logo, loading text or open button. No-file launch and Close
+retain the welcome view; replacement failure retains the old video. Complete
+preparation and stitching/color/source behavior are unchanged.
+
+- Installed OSTree: `729f579ca04705465c67b3c2f29ada6480e65cd146d32bc3c35a45426febf265`.
+- Executable SHA256: `2feb7837af2cf3c1ef2785c6558dd6fb0946985c5046a2f608ef912bd84e27b9`.
+- Bundle SHA256: `506acd934ca8471acfa3ee3ec108ed1ce79c4ba7b7d93fe836899f554e1fe2c2`.
+
+All eight CI jobs pass on this exact implementation. Bounded device-hidden local
+gates pass 1,656 workspace tests, 53 ignored, plus full lint/format/vendor/source/
+name checks, 22 harness CPU tests and five startup parser tests. The local tree
+includes the two preserved parked color edits and unavailable-device returns,
+not clean-source GPU coverage. The offline clean SDK archive excludes those
+edits. Separate app-path UI suites pass 48 X4 and 49 ONE X2 checks, zero failures,
+with the existing isolated sound/portal, exact-view, import-fault and cross-mount
+fixture skips. Launched executables are authenticated. Both motion captures per
+camera and the startup capture are inspected. The shader/Rust-twin helper is
+native, not a clean SDK shader test. The exported bundle passes a separate
+device-hidden private import and executable/metadata/license audit. This local
+test bundle is unsigned, not release-signature qualification.
+
+The real CLI/FIFO check passes all five checks in native and actual-installed
+modes, including blank pixels, responsive Close and canceled-result preservation.
+Those runs and both camera suites exit normally, with no new kernel entries or
+scoped memory-limit/OOM events, and zero postflight pressure averages. Installation
+uses no dependency/related-ref/pull updates. Origin, permissions and recorded
+shared runtimes remain unchanged; the authenticated preceding `5ecc9946` bundle
+below is retained for rollback. The owner's reopen retest remains the merge gate.
+No new first-picture/window timing, general hitch-free or capacity verdict is
+claimed. No merge or release.
+
+Package: `scratch/flatpak-delivery-5aaf97a7/`. UI receipts:
+`scratch/playback-independent-20260927/packaging/qualification-ui-5aaf97a7/`.
+Actual-installed startup: `runtime/blank-player-installed-01` in that workflow.
+Details are in the [startup record](research/nonblocking-file-open-20260930.md).
+
+## Preceding nonblocking-open private test package, September 30
+
+Source `5ecc99466442cc5c61e577709f60c7ffc2e9fd80`, draft
+[PR #242](https://github.com/aeharding/kjerag/pull/242), was installed and is now
+retained for rollback. It is stacked on
+PR #241. Complete capture inspection, calibration and orientation preparation
+move off the UI thread. One worker and one replaceable queued request retain
+the inspected Reader. Decode/audio start only after preparation. Close or a
+new choice revokes stale publication without joining a blocked filesystem call.
+CLI/pasted views follow their exact request; failed opens retain the old picture
+and view. No stitching/color arithmetic, source cadence or horizon shortcut is
+included. A blocked active filesystem call can still delay the next queued
+file, but does not block the window.
+
+- Installed OSTree: `4a39f4ddae092d45290cdad09b6ef0a1b69a39897e69546c5c46dc165787c7c1`.
+- Executable SHA256: `db649245cd11824bdcdc5ac1d6b8a6339980bdb6fc4c504eb905ad4901eefc79`.
+- Bundle SHA256: `a6f4d7e837b4871c30e753411b9c6214cf20d5865346648fc7f5932d9973de1e`.
+
+All eight CI jobs pass on this implementation source. The device-hidden local
+workspace passes 1,656 tests, 53 ignored, plus lint/format/source/name and CPU
+harness checks. It includes unavailable-device returns and the two preserved
+parked color files, not clean-source or GPU qualification. The clean SDK archive
+excludes those files. Separate app-path suites pass 48 X4 and 49 ONE X2 checks,
+zero failures, including five real CLI/FIFO blocked-open checks. Existing
+isolated sound/portal, explicit-view, sandbox import-fault and cross-mount fixture
+skips remain. Launched executables are authenticated; both motion captures per
+camera are inspected. The shader/Rust-twin helper is native, not a clean SDK
+shader test. Both suites have no new kernel entries or scoped memory-limit/OOM
+events, and zero postflight pressure averages. The exported bundle passes a
+device-hidden private import and executable/metadata/license audit. This local
+test bundle is unsigned, not a release-signature qualification.
+
+The packaged NAS trace attempts its first surface preparation 0.777 seconds
+after app exec, before the 35,927,360-byte motion read. That read now takes place
+on the opening worker. The preceding installed trace took 4.811 seconds to first
+surface preparation while metadata blocked the UI thread. These are buffered
+trace observations, not authenticated cold-cache or click-to-window latency,
+and do not time the first video picture. Later packaged playback holds recorded
+cadence, zero audio underruns and 46.8 ms worst reported picture lateness.
+Both pictures are inspected; normal exit, no new kernel entries or postflight
+pressure averages.
+
+Installation uses no dependency, related-ref or pull updates. Origin,
+permissions and recorded shared runtime identities remain unchanged. The
+authenticated `78075a42` bundle below is retained for rollback. A final
+actual-installed run, with no app-path substitution, restores the reported NAS
+CLI view at 1281.413 seconds, yaw -136.14, pitch -19.43, fov 166.23, lock 1.
+Subsequent intervals report 30 source advances/s, zero underruns and no growing
+delay; worst reported picture lateness is 131.0 ms. The process exits normally
+with no new kernel entries or postflight pressure averages. Both pictures are
+inspected. These are functional opening/playback checks, not an all-file,
+hitch-free, display-tail or 240 fps capacity pass. The owner's startup retest
+remains the merge gate. No merge or release is claimed.
+
+Package: `scratch/flatpak-delivery-5ecc9946/`. UI receipts:
+`scratch/playback-independent-20260927/packaging/qualification-ui-5ecc9946/`.
+Packaged/installed NAS receipts: `sdk-startup-nas-trace-02` and
+`installed-startup-reported-view-01` under that workflow's `runtime/`, each with
+a separate health directory. Full reproduction and scope are in the
+[startup record](research/nonblocking-file-open-20260930.md).
+
+## Preceding single-reader private test package, September 30
+
+Source `78075a42d159aeb90c6864e299b5936fcefd4236`, draft
+[PR #241](https://github.com/aeharding/kjerag/pull/241), was installed and is now
+retained for rollback beneath the startup change above. One normal
+FFmpeg input per container routes bounded compressed queues to video and audio;
+the competing live file cursors, custom AVIO callbacks and byte cache are gone.
+Video retention is 128 MiB/512 packets to pass the measured 67 MiB camera
+interleave; audio retains its 256 KiB/128-packet bound. Either full queue
+backpressures the reader, so audio independence is finite. Source processing,
+stitching/color arithmetic, PCM and clock policy are unchanged.
+
+- Installed OSTree: `854dc120fcb3a7a564ced1fa10b4ef77fbc523ad8a0e86d0431e4382d97d6ed6`.
+- Executable SHA256: `96a5004ab350245c53c812ebe1616fedbb22008adb586dafe7e745916bc843d5`.
+- Bundle SHA256: `8adc3c2671f85834cd6e36b39c0c4e64c007a7c215a9cf10ed89c319fe2dc57e`.
+
+All eight CI jobs pass on this source. The local device-hidden workspace gate
+passes 1,648 tests with 53 ignored, plus full lint/format/vendor/source/name
+checks; it includes the two parked owner color files and unavailable-device
+returns, not clean-source or hardware qualification. Those files are preserved
+and excluded from the committed source and package. Separate clean SDK app-path
+suites pass 43 X4 and 44 ONE X2 checks, zero failures, with existing isolated
+sound/portal, explicit-view, import-fault and cross-mount fixture skips. Each
+launched candidate executable is authenticated. Both motion captures per camera
+are inspected. The shader/Rust-twin helper is native, not a clean SDK shader
+test. Both suites have no new kernel entries or scoped memory-limit/OOM events,
+and zero postflight pressure averages. The exported bundle passes a separate
+device-hidden private import and executable/metadata/license audit. It is a
+local unsigned test bundle, not a release-signature qualification.
+
+The packaged reported NAS clip completes forward/backward seeks in approximately
+1.36, 1.36 and 0.75 seconds, then holds source cadence through the previously
+failed region, zero underruns and no growing delay; worst lateness remains
+42.4 ms. There are no new kernel entries; postflight pressure avg60 is 0.02,
+not entirely pressure-free. A separate local 1 Hz/60 Hz redraw-recovery check
+retains approximately 30 source advances/s and zero audio underruns, returns to
+a current displayed source after restoration, and exits normally with no new
+kernel entries or postflight pressure averages. This verifies the selected X4
+path, not indefinite audio progress with stalled video or generic-camera coverage.
+
+Installation disables dependency/related-ref/pull updates. Origin, permissions
+and all recorded shared runtime identities remain unchanged. Authenticated
+`591cf695` and `dd908324` bundles are retained for rollback. Actual installed
+playback, with no app-path substitution, holds 29.95 consecutive sources/s
+during the reported 40-second, 2256x1504 requested-60-Hz NAS pan. It records zero
+audio underruns and 41.2 ms worst lateness without growing delay, and exits
+normally with no new kernel entries or postflight pressure averages. Pictures
+are inspected. It completes 62.40 redraws/s within the pan window; completion
+spacing p99/max is 29.76/30.78 ms. Steady sourced-picture dwell p99/max is
+48.12/51.00 ms, so display timing remains uneven. The whole-run cadence reducer
+is false, including startup commits without sourced draws; the separate pan
+capacity reducer is true for its defined 60 Hz cohort, not 240 fps capacity.
+Owner retest remains the merge gate. No merge, release, instant seeks, general
+hitch-free fix or 240 fps capacity pass is claimed.
+Package: `scratch/flatpak-delivery-78075a42/`; private runtime receipts:
+`sdk-single-demux-nas-seeks-01` and `sdk-single-demux-low-redraw-01` below
+`scratch/playback-independent-20260927/runtime/`; actual installed evidence is
+`installed-single-demux-nas-pan-01`, with a separate health directory.
+Full input/rejected-control
+details are in the [network input record](research/network-file-buffering-20260930.md).
+
+## Rejected byte-cache private test package, September 30
+
+Source `591cf695c5a1142732d4b60fd8e9cbeec1d2b0c8`, draft
+[PR #241](https://github.com/aeharding/kjerag/pull/241), was installed. Audio and
+video keep independent demux timelines over one bounded shared file-byte cache.
+Custom IO exists before capture inspection. The first `2e4466a8` candidate's
+post-inspection AVIO replacement was unsafe; its X4 pasted-reopen crash rejected
+it before installation. Do not install that superseded package or treat its
+native measurements as qualification. The corrected candidate passes that exact
+reopen path and the repeated-open allocation-churn regression.
+
+- Installed OSTree: `82a418bb0c1688b1a9f1ead5c76e4e3421c786773cc01819d6e9e6056a1aa063`.
+- Executable SHA256: `5028b0917d86ea92f443685812a1399d1e3ca7ed9e6e4f28713d623dd9b7452e`.
+- Bundle SHA256: `6ac6bb68008ada1cdde16c61956a213b8795aada27afa8aa6602c02d5f58818f`.
+
+Device-hidden CPU gates pass 1,645 workspace tests, 53 ignored, plus Clippy,
+formatting, vendor warnings, naming and source-list checks. All eight CI jobs
+pass on that source. The clean SDK archive excludes the two preserved parked
+color edits. Its app-path suites pass 43 X4 and 44 ONE X2 checks, zero failures,
+with the existing isolated-service/fixture skips. Both camera motion captures
+were inspected. The shader/Rust-twin helper is native, not a clean SDK shader
+test. The real exported bundle passes a private, device-hidden import and
+executable/metadata/license audit. This local test bundle is unsigned.
+
+Normal-audio 2256x1504 60 Hz NAS pan at 1281.413 seconds settles at 30 sources/s,
+zero underruns and no growing delay after startup, but worst startup lateness
+reaches 1238.9 ms. A different NAS section, 1481.413 seconds, holds recorded
+cadence with worst 36.9 ms lateness and zero underruns. Neither result establishes
+hitch-free playback, all-file coverage or 240 fps capacity.
+
+The actual installed app, with no app-path override, also settles at 30 sources/s
+on the reported NAS view, zero audio underruns. Startup still reaches 2284.5 ms
+picture lateness and catches up during subsequent intervals; the whole-run
+cadence parser fails. Existing trace receipts show several 100 to 235 ms draw
+completion spikes early in that run, but do not isolate GPU execution from
+submission, callback delivery or scheduling. Startup remains a defect, not an
+accepted delay. Installed ONE X2 riser pan settles at 30 sources/s, worst 39.8 ms
+lateness and zero audio underruns. No new kernel entries or scoped OOM events;
+postflight pressure averages are zero in the corrected playback/UI runs.
+
+Installation disables dependency/related-ref/pull updates. Origin, permissions
+and all recorded shared runtime identities remain unchanged. The authenticated
+`dd908324` package is retained for rollback. Owner network retesting remains the
+merge gate. No merge, release, general performance fix or 240 fps pass is claimed.
+Package: `scratch/flatpak-delivery-591cf695/`; evidence and the dated input
+controls: `scratch/playback-independent-20260927/` and
+[network buffering record](research/network-file-buffering-20260930.md).
+
+## Previous source-completion private test package, September 30
+
+The clean `dd908324` package described above was installed. Its archived
+source excludes the two parked periodic-color edits present in the accepted
+native preview; both dirty files remain preserved. Exact package identities:
+
+- Installed OSTree: `ecaf7ca759ed4576b93ef73518ec89d1118d543a2b2760eac77a8c4aa15b6354`.
+- Executable SHA256: `26dff50a64214df96e803bc078423f8629267a6fe7235d719184d41b3ac78fc9`.
+- Bundle SHA256: `19b70da525c14a2e4373c7f632413c475d4f377636fdee70cecb94afa87c59d6`.
+
+Before installation, the actual runtime's local 2256x1504 60 Hz pan maintains
+29.96 consecutive source advances/s, with no audio underruns or growing delay.
+Network-backed pan still fails, roughly 18.6-22.4 sources/s and 6.05 seconds of
+worst accumulated lateness. The separate local 300 Hz pan fails capacity:
+129.31 completed redraws/s, 29.44 consecutive sources/s, callback p99/max
+33.73/38.53 ms and 236.9 ms worst lateness. Host conditions differ from the
+earlier native cohorts; these runs are not an isolated performance comparison.
+No new kernel entries or postflight pressure in these checks.
+
+After replacement, the actual installed app, without an app-path override,
+maintains 29.94 consecutive sources/s and 62.37 completed redraws/s during a
+short local full-window 60 Hz pan at the reported September 20 view. Worst
+reported lateness stays at 45.1 ms, with zero audio underruns and no new kernel
+entries. Callback p99/max is 21.19/27.84 ms, not the 4.17 ms budget. This is a
+smoke check, not a repeated full installed UI suite or hitch-free verdict.
+
+The separate actual-installed ONE X2 riser check maintains 29.92 consecutive
+sources/s and 62.33 completed redraws/s in its short 60 Hz pan. Worst lateness
+stays at 44.9 ms, with zero underruns and no new kernel entries. Callback
+p99/max is 17.07/22.34 ms. Both installed checks' initial pictures were inspected;
+neither establishes a 240 fps result or physical scanout timing.
+
+Installation uses `--no-deps --no-related --no-pull`. Origin, permissions and
+all recorded shared runtime identities are unchanged. The source `635e9b04`
+bundle is authenticated and retained for rollback. This is an interim test
+delivery, not a complete network fix, 240 fps pass, merge or release.
+Immutable package: `scratch/flatpak-delivery-dd908324/`; runtime/UI and frozen
+preview evidence: `scratch/playback-independent-20260927/`.
+
+## Previous private test package, September 29
+
+The interim source-actor package is installed from exact source
+`635e9b04e81c4601915a77b953165fb46d4ad732`. It retains the prior independent
+audio/source scheduling, adds bounded compressed read-ahead, prepares native
+map endpoints once per source, and drains a capture-owned ordered source queue
+without a per-source shell handoff. It changes no stitching/color arithmetic,
+source cadence or clock-hold policy. The failed triangle prototype, unaccepted
+buffering prototype and two parked color edits are excluded.
+
+- Installed OSTree: `122c2d2dce79c2131bbde0e6cad8f9022d7f153c1a1a40930414812119a36278`.
+- Executable SHA256: `06ae1bccddfb2996f6e70903102934b1c1a14d3eadfa960426db11fd60ebf63e`.
+- Bundle SHA256: `14eefdc4019bf513af5b2a5b1683149487929afc2d72b5054426b6fcf39710b4`.
+
+All eight CI jobs pass. Full device-hidden workspace gates pass1,630tests with
+53ignored, including unavailable-device returns and parked color variation,
+not hardware qualification. Real GPU no-shell regressions pass on both cameras;
+31-source sequences on the reported X4 wide view and ONE X2 riser view are
+byte-identical to retained parent captures. Separate actual app-path suites
+pass43X4 and44ONE X2 checks, zero failures, with the existing sandbox-service,
+exact-view, import-fault and pair-fixture skips. Motion captures inspected;
+the shader/Rust-twin helper is native, not the clean SDK shader. X4 postflight
+records dock-disconnect/USB-C events, not a GPU reset; ONE X2 has no new kernel
+entries. Global postflight memory-pressure averages settle at zero.
+
+Packaged full-size60Hz local pan keeps29.95source advances/s without growing
+delay, worst25.2ms. Completion gaps still reach34.1ms. A NAS idle-view repeat
+also keeps up, but is a previously exercised range. The300Hz pan FAILS:
+213.9redraws/s,19.4source advances/s and14.1s growing delay. More importantly,
+the final actual-installed NAS60Hz pan also FAILS, roughly20source advances/s
+and10.91s growing delay, no audio underruns. Its capacity parser separately
+rejects a skipped screen source; this does not erase the genuine cadence
+failure. No new kernel entries in that run. These are callback/wall-time
+measurements, not physical scanout or a complete performance qualification.
+
+Installation uses `--no-deps --no-related --no-pull`: origin and permissions
+are unchanged and shared runtimes are not updated. The prior68591c10bundle is
+retained for rollback. This package is not a reliable playback fix, accepted
+branch, merge or release. Owner retest and remaining architecture/performance
+work remain due. Immutable build: `scratch/flatpak-delivery-635e9b04/`;
+runtime/UI receipts: `scratch/playback-independent-20260927/`.
+
+## Earlier September 29 private test package
+
+The interim playback redesign is installed from source
+`68591c10df7c7771b8e735866d2f0eadaf45622a`. Audio refill no longer waits behind
+bounded video delivery, and filtered source progression no longer depends on
+compositor redraws. The approved presentation policy may omit stale completed
+screen updates, while every stitching/color input remains ordered. Shown-frame
+ownership is retained separately. Stitching and color arithmetic are unchanged;
+two parked working-tree color changes were excluded by building a clean archive.
+
+- Installed OSTree: `075b9f58b288b83233e75fba9c409cd2d6ea4cf226cd17169440c094578280bd`.
+- Executable SHA256: `9510194b623b6e3ae3d67a64052420d667b69c961bfc24e21d3a7be008399cc6`.
+- Bundle SHA256: `4422659a01af887466b9cba6f35a59e6831e510558d62e04ea630e46d972cdde`.
+
+Separate actual app-path UI suites pass 43 X4 and 44 ONE X2 checks, zero failures,
+with the existing sound-device, portal, exact-view, sandbox import-fault and
+paired-fixture skips. Four motion captures were inspected. A separate X4
+60-to-1-to-60-Hz compositor experiment keeps audio supplied and source completion
+ordered, eliminating the old package's accumulating draw lag in that scenario.
+It is not proof of physical scanout, all-camera coverage or 240 fps capacity.
+The native shader-twin helper uses the working tree, not the packaged SDK shader.
+After installation and runtime restoration, a normal installed launch (no
+app-path override) also sustains 30 source advances/s in its short X4 check,
+with no audio underruns, a normal exit and no new kernel entries. Its executable
+is authenticated and its final picture inspected. This is a smoke check, not
+a second full installed camera suite or capacity qualification.
+
+The slow-input defect remains: a delayed-packet experiment reduces delivery to
+about 23.7 fps and accumulates 3.332 seconds of video lateness before catching up.
+The package is not a complete A/V-sync fix. Coordinated rebuffering is not yet
+implemented or owner-approved. New branch acceptance and merge gates remain due.
+
+The old installer unexpectedly updated five shared runtime refs. Their exact
+pre-installation commits were recovered from the transaction journal, restored
+and verified; this was not an intentional dependency upgrade. Future installation
+commands must use `--no-deps --no-related --no-pull`. Origin remains
+`kjerag-origin`, and the verified September16 `f557ee59` package below is retained
+for rollback. No release was published. Private receipts and restoration log:
+`scratch/playback-independent-20260927/`; immutable build:
+`scratch/flatpak-delivery-68591c10/`.
+
+## Previous private test package, September 16
 
 The installed private test package was built from exact source
 `f557ee5970e37e18c1e1561ba76081ff914f3494`, tree
@@ -68,6 +642,10 @@ tradeoff, performance acceptance or closure of #186/#187 is implied.
 
 ## Accepted tradeoffs
 
+- For the September29 playback redesign, the owner approved omitting outdated
+  completed screen updates to recover synchronization. Every camera source still
+  receives ordered stitching and color processing. This does not authorize
+  reduced source/seam cadence or accept sustained A/V lag.
 - The owner accepts the installed branch player: "looks good. not perfect but
   pretty damn good" (2026-09-12). This is Studio-like output on reviewed footage,
   not exact Studio parity or universal camera/mode coverage.

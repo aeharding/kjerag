@@ -10,6 +10,483 @@ use std::io::Write;
 
 const DEADLINE: Duration = Duration::from_secs(60);
 
+#[test]
+fn x4_filtered_view_pipeline_is_prepared_before_autoplay() {
+    let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
+        return;
+    };
+    assert_view_pipeline_prepared_before_autoplay(Path::new(&path));
+}
+
+#[test]
+fn one_x2_filtered_view_pipeline_is_prepared_before_autoplay() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    assert_view_pipeline_prepared_before_autoplay(Path::new(&path));
+}
+
+fn assert_view_pipeline_prepared_before_autoplay(path: &Path) {
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let scene = Scene::open(path).unwrap();
+    let first = super::tests::wait_for_new_scene_frame(&scene, None);
+    let camera = Camera::default();
+    // Exercise a window format, not the RGBA panorama intermediate.
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let mut pipeline = ScenePipeline::new(&device, &queue, format);
+    let primitive = scene.primitive(camera);
+    let capture = primitive.filtered_capture.clone().unwrap();
+    assert!(!capture.is_attached().unwrap());
+    assert_eq!(scene.player(Player::is_playing), Some(false));
+    let held = scene.position(Instant::now());
+    pipeline.prepare(&primitive, &device, &queue, 16.0 / 9.0);
+    assert!(capture.is_attached().unwrap());
+    assert!(
+        capture.view_pipeline_prepared_for_test(format),
+        "first corrected-view compilation must precede autoplay, not its first moving draw"
+    );
+    assert_eq!(scene.player(Player::is_playing), Some(false));
+    assert_eq!(scene.position(Instant::now()), held);
+    assert_eq!(scene.frame_stamp().as_ref(), Some(&first));
+    assert!(scene.displayed_frame_stamp().is_none());
+    assert!(capture.accepted_stamp().unwrap().is_none());
+}
+
+#[test]
+fn x4_filtered_buffering_holds_time_and_retains_source_history() {
+    let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
+        return;
+    };
+    assert_buffering_retains_history(Path::new(&path));
+}
+
+#[test]
+fn one_x2_filtered_buffering_holds_time_and_retains_source_history() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    assert_buffering_retains_history(Path::new(&path));
+}
+
+#[test]
+fn x4_filtered_completed_catchup_does_not_buffer() {
+    let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
+        return;
+    };
+    assert_completed_catchup_does_not_buffer(Path::new(&path));
+}
+
+#[test]
+fn one_x2_filtered_completed_catchup_does_not_buffer() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    assert_completed_catchup_does_not_buffer(Path::new(&path));
+}
+
+#[test]
+fn x4_filtered_admitted_work_holds_time_and_sound_after_a_missed_picture() {
+    let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
+        return;
+    };
+    assert_admitted_work_holds_time_and_sound_after_a_missed_picture(Path::new(&path));
+}
+
+#[test]
+fn one_x2_filtered_admitted_work_holds_time_and_sound_after_a_missed_picture() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    assert_admitted_work_holds_time_and_sound_after_a_missed_picture(Path::new(&path));
+}
+
+fn assert_admitted_work_holds_time_and_sound_after_a_missed_picture(path: &Path) {
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let mut scene = Scene::open(path).unwrap();
+    // The isolated GPU harness routes audio to its quiet sink. Muting here
+    // would bypass sound readiness and fail to exercise the live clock gate.
+    scene.set_muted(false);
+    scene.pause(Instant::now());
+    let first = super::tests::wait_for_new_scene_frame(&scene, None);
+    let camera = Camera::default();
+    let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    settle_filtered(&scene, &mut pipeline, &device, &queue, &first, camera, None);
+    let capture = scene
+        .show
+        .as_ref()
+        .unwrap()
+        .filtered
+        .as_ref()
+        .unwrap()
+        .clone();
+    let blocked = capture.pause_stitch_for_test();
+    scene.play();
+    let start = Instant::now();
+    assert!(!matches!(scene.progress(start), Next::Stopped(_)));
+    let playing = scene.frame_stamp().unwrap();
+    let position = scene.position(start);
+    let interval = scene.player(|player| player.timing().interval()).unwrap();
+    // Startup has emitted four pictures. Withhold the stitch actor, not file
+    // input, while the clock reaches one interval beyond the first new output.
+    let first_pending = first.index() + 4;
+    let steps = (first_pending + 1 - playing.index()) as u32;
+    let late = start + interval * steps + Duration::from_millis(5);
+    let before = scene.player(Player::stats).unwrap();
+    assert!(!matches!(scene.progress(late), Next::Stopped(_)));
+    let pending = scene.frame_stamp().unwrap();
+    let accepted = capture.accepted_stamp().unwrap().unwrap();
+    assert_eq!(pending.index(), first_pending);
+    assert!(pending.same_decode_epoch(&accepted));
+    assert!(accepted.index() >= pending.index() + 3);
+    assert_eq!(capture.ready_successors(&pending).unwrap(), 0);
+    assert!(capture.install_due(&pending).unwrap().is_none());
+    assert_eq!(
+        scene.player(Player::is_buffering),
+        Some(true),
+        "queued stitch inputs must not leave sound running past a missed picture"
+    );
+    let held = scene.position(late);
+    assert_eq!(held, position + late.duration_since(start));
+    assert_eq!(scene.position(late + interval * 3), held);
+    prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+    drop(blocked);
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        assert!(!matches!(scene.progress(late), Next::Stopped(_)));
+        assert_eq!(scene.position(late), held);
+        if scene.player(Player::is_buffering) == Some(true) {
+            prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
+            assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+        }
+        if scene.player(Player::is_buffering) == Some(false)
+            && scene.frame_stamp().is_some_and(|stamp| {
+                stamp.index() == playing.index() + steps as u64
+                    && capture.acknowledged(&stamp).unwrap()
+            })
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "admitted work did not catch up");
+        device.poll(wgpu::PollType::Poll).unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let after = scene.player(Player::stats).unwrap();
+    assert_eq!(after.presented - before.presented, steps as u64);
+    assert_eq!(after.dropped, before.dropped);
+    assert_eq!(scene.position(late), held);
+    assert_eq!(scene.position(late + interval), held + interval);
+    let complete = scene.frame_stamp().unwrap();
+    assert!(playing.same_decode_epoch(&complete));
+    prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&complete));
+}
+
+fn assert_completed_catchup_does_not_buffer(path: &Path) {
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let mut scene = Scene::open(path).unwrap();
+    scene.set_muted(true);
+    scene.pause(Instant::now());
+    let first = super::tests::wait_for_new_scene_frame(&scene, None);
+    let camera = Camera::default();
+    let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    settle_filtered(&scene, &mut pipeline, &device, &queue, &first, camera, None);
+    scene.play();
+    let start = Instant::now();
+    assert!(!matches!(scene.progress(start), Next::Stopped(_)));
+    let playing = scene.frame_stamp().unwrap();
+    let position = scene.position(start);
+    let interval = scene.player(|player| player.timing().interval()).unwrap();
+    let capture = scene.show.as_ref().unwrap().filtered.as_ref().unwrap();
+    // Complete three actual GPU outputs without running the shell scheduler.
+    // This models a late wake, not withheld decode or stitch work. In
+    // particular, queued-but-uncompleted results are not counted as ready.
+    let deadline = Instant::now() + DEADLINE;
+    while capture.ready_successors(&playing).unwrap() < 3 {
+        assert!(Instant::now() < deadline, "completed prefix did not fill");
+        device.poll(wgpu::PollType::Poll).unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let before = scene.player(Player::stats).unwrap();
+    let late = start + interval * 3 + Duration::from_millis(5);
+    assert!(!matches!(scene.progress(late), Next::Stopped(_)));
+    assert_eq!(scene.player(Player::is_buffering), Some(false));
+    assert_eq!(scene.position(late), position + late.duration_since(start));
+    let complete = scene.frame_stamp().unwrap();
+    assert_eq!(complete.index(), playing.index() + 3);
+    assert!(playing.same_decode_epoch(&complete));
+    let after = scene.player(Player::stats).unwrap();
+    assert_eq!(after.presented - before.presented, 3);
+    assert_eq!(after.dropped, before.dropped);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+    prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&complete));
+}
+
+fn assert_buffering_retains_history(path: &Path) {
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let mut scene = Scene::open(path).unwrap();
+    // Use the harness's quiet sink, not the mute readiness exemption.
+    scene.set_muted(false);
+    scene.pause(Instant::now());
+    let first = super::tests::wait_for_new_scene_frame(&scene, None);
+    let camera = Camera::default();
+    let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    settle_filtered(&scene, &mut pipeline, &device, &queue, &first, camera, None);
+    scene.play();
+    let start = Instant::now();
+    assert!(!matches!(scene.progress(start), Next::Stopped(_)));
+    // One second exceeds the real sound producer's 500 ms future lead.
+    // Re-enter through Scene with required picture inputs already admitted,
+    // then verify the common hold, refill and exact shown-owner boundary.
+    let resumed = start + Duration::from_secs(1);
+    assert!(!matches!(scene.progress(resumed), Next::Stopped(_)));
+    let capture = scene.show.as_ref().unwrap().filtered.as_ref().unwrap();
+    let current = scene.frame_stamp().unwrap();
+    let current_ready = capture.acknowledged(&current).unwrap();
+    assert!(
+        capture.has_output_inputs(&current, current_ready).unwrap(),
+        "the recovery fixture must have its required picture inputs"
+    );
+    assert_eq!(scene.player(Player::is_buffering), Some(true));
+    assert!(scene.is_playing(), "buffering retains user play intent");
+    let held = scene.position(resumed);
+    assert_eq!(scene.position(resumed + Duration::from_secs(5)), held);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+    let deadline = Instant::now() + DEADLINE;
+    while scene.player(Player::is_buffering) == Some(true) {
+        if let Next::Stopped(error) = scene.progress(resumed) {
+            panic!("buffering stopped the capture: {error}");
+        }
+        assert_eq!(scene.position(resumed), held);
+        assert!(Instant::now() < deadline, "buffering could not refill");
+        if scene.player(Player::is_buffering) == Some(true) {
+            prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
+            assert_eq!(
+                scene.displayed_frame_stamp().as_ref(),
+                Some(&first),
+                "a redraw exposed catch-up pictures while the playback clock was buffering"
+            );
+        }
+        device.poll(wgpu::PollType::Poll).unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let complete = scene.frame_stamp().unwrap();
+    assert!(
+        first.same_decode_epoch(&complete),
+        "buffering sought or restarted history"
+    );
+    let runway = capture.ready_successors(&complete).unwrap();
+    assert!(
+        runway >= Player::RECOVERY_SUCCESSORS,
+        "buffering resumed with only {runway} completed successors, before the six-picture recovery runway"
+    );
+    assert!(complete.timestamp() <= held);
+    assert!(held < complete.timestamp() + scene.player(|p| p.timing().interval()).unwrap());
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+    prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&complete));
+    assert_eq!(
+        scene.position(resumed + Duration::from_millis(20)),
+        held + Duration::from_millis(20)
+    );
+}
+
+/// Actual decoder and both GPU workers, with no shell progress or redraw
+/// after admission. Holding the stitch worker makes the former single-source
+/// handshake refusal deterministic, rather than relying on thread timing.
+#[test]
+fn reported_filtered_worker_drains_without_shell() {
+    let Ok(line) = std::env::var("KJERAG_REPORTED_SEAM_VIEW") else {
+        return;
+    };
+    let (path, framing) = crate::Framing::read_line(&line).expect("invalid actor review view");
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let mut scene = Scene::open(&path).unwrap();
+    scene.set_muted(true);
+    scene.pause(Instant::now());
+    scene.set_horizon(framing.horizon);
+    scene.seek(framing.at, Accuracy::Exact);
+    let deadline = Instant::now() + DEADLINE;
+    let held = Holding {
+        horizon: scene.horizon.get(),
+        clock: scene.clock.get(),
+        forced: scene.forced.get(),
+        readout: scene.readout.get(),
+    };
+    let sources = loop {
+        // Decode preparation only. Do not admit a source through progress().
+        if let Next::Stopped(error) = scene.pump_inner(Instant::now()) {
+            panic!("actor input stopped: {error}");
+        }
+        if let Some(show) = scene.show.as_ref()
+            && let Some(first) = show.view(held)
+        {
+            let sources = std::iter::once(first)
+                .chain((0..6).filter_map(|ahead| show.prepared_view(held, ahead)))
+                .collect::<Vec<_>>();
+            if sources.len() == 7 {
+                break sources;
+            }
+        }
+        assert!(Instant::now() < deadline, "actor input did not decode");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert!(
+        sources
+            .windows(2)
+            .all(|pair| pair[1].frames.index == pair[0].frames.index + 1)
+    );
+    let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    pipeline.prepare(
+        &scene.primitive(framing.camera),
+        &device,
+        &queue,
+        16.0 / 9.0,
+    );
+    let capture = scene.primitive(framing.camera).filtered_capture.unwrap();
+    let blocked = capture.pause_stitch_for_test();
+    for source in &sources[..4] {
+        assert!(
+            capture
+                .try_submit(
+                    source.frames.clone(),
+                    super::filtered::filtered_source_reframe(source, Sampling::default())
+                )
+                .unwrap(),
+            "decoded work still needs a GPU lifetime slot or shell handoff"
+        );
+    }
+    let last = sources[3].frames.stamp();
+    assert_eq!(capture.accepted_stamp().unwrap(), Some(last.clone()));
+    drop(blocked);
+    while !capture.work_idle_for_test().unwrap() {
+        assert!(
+            Instant::now() < deadline,
+            "stitch actor needed shell progress"
+        );
+        // No Scene progress, renderer callback or test-side device polling.
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(capture.accepted_stamp().unwrap(), Some(last));
+    assert!(capture.installed_stamp().unwrap().is_none());
+    assert!(scene.displayed_frame_stamp().is_none());
+    capture.assert_unpublished_history_for_test();
+    // Complete the real seven-source startup without a shell event, draw or
+    // test-side device poll. Once CPU recording goes idle, the temporal worker
+    // must still drive and prove its output completion before installation.
+    for source in &sources[4..] {
+        assert!(
+            capture
+                .try_submit(
+                    source.frames.clone(),
+                    super::filtered::filtered_source_reframe(source, Sampling::default())
+                )
+                .unwrap()
+        );
+    }
+    let first = sources[0].frames.stamp();
+    let output = loop {
+        if let Some(output) = capture.install_due(&first).unwrap() {
+            break output;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "temporal output completion needed shell progress or test-side GPU polling"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert_eq!(output.frame(), &first);
+    assert!(scene.displayed_frame_stamp().is_none());
+    capture.fail_for_test("actor regression terminal cleanup", false);
+    capture.assert_history_released_for_test();
+}
+
+#[test]
+fn x4_filtered_progress_without_redraw_retains_shown_on_terminal_failure() {
+    let Some(path) = std::env::var_os("KJERAG_X4_TEST_MEDIA") else {
+        return;
+    };
+    assert_progress_without_redraw(Path::new(&path));
+}
+
+#[test]
+fn one_x2_filtered_progress_without_redraw_retains_shown_on_terminal_failure() {
+    let Some(path) = std::env::var_os("KJERAG_ONE_X2_TEST_MEDIA") else {
+        return;
+    };
+    assert_progress_without_redraw(Path::new(&path));
+}
+
+fn assert_progress_without_redraw(path: &Path) {
+    let ((device, queue), _) = super::tests::test_import_gpu_and_foreign().unwrap();
+    let mut scene = Scene::open(path).unwrap();
+    scene.set_muted(true);
+    scene.pause(Instant::now());
+    let first = super::tests::wait_for_new_scene_frame(&scene, None);
+    let camera = Camera::default();
+    let mut pipeline = ScenePipeline::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+    settle_filtered(&scene, &mut pipeline, &device, &queue, &first, camera, None);
+    let shown = scene.shown.get().unwrap();
+    let shown_picture = shown.complete.as_ref().unwrap().0.clone();
+    let before = capture_shown(&scene, &mut pipeline, &device, &queue, camera);
+    let capture = scene
+        .show
+        .as_ref()
+        .unwrap()
+        .filtered
+        .as_ref()
+        .unwrap()
+        .clone();
+    scene.play();
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        // No renderer preparation or draw: simulate withheld compositor
+        // callbacks while the shell handles media/worker events.
+        if let Next::Stopped(error) = scene.progress(Instant::now()) {
+            panic!("event-owned playback stopped: {error}");
+        }
+        assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+        assert!(Arc::ptr_eq(
+            &scene.shown.get().unwrap().complete.as_ref().unwrap().0,
+            &shown_picture,
+        ));
+        if capture
+            .installed_stamp()
+            .unwrap()
+            .is_some_and(|stamp| stamp.index() >= first.index() + 5)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "playback waited for a surface redraw"
+        );
+        device.poll(wgpu::PollType::Poll).unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_ne!(capture.installed_stamp().unwrap().as_ref(), Some(&first));
+    capture.fail_for_test(
+        "injected failure after undisplayed source progression",
+        false,
+    );
+    assert!(matches!(scene.progress(Instant::now()), Next::Stopped(_)));
+    prepare_and_draw(&scene, &mut pipeline, &device, &queue, camera);
+    assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&first));
+    assert_eq!(
+        scene
+            .diagnostic_filtered_displayed_frame()
+            .unwrap()
+            .as_ref(),
+        Some(&first)
+    );
+    let shown_map = scene.diagnostic_one_xs_displayed_map().unwrap().unwrap();
+    assert_eq!(shown_map.frame(), &first);
+    let after = capture_shown(&scene, &mut pipeline, &device, &queue, camera);
+    assert_eq!(after.index, before.index);
+    assert_eq!(after.rgba, before.rgba);
+}
+
 /// Capture the selected player's actual current/filtered fields, without
 /// rebuilding either term through an offline approximation. A reported line
 /// can then be compared with the panorama boundary and the real shown view.
@@ -21,8 +498,18 @@ fn reported_filtered_correction_fields() {
     let line = std::env::var("KJERAG_REPORTED_SEAM_VIEW").expect("review needs a full view line");
     let (path, view) = crate::Framing::read_line(&line).expect("invalid review view line");
     assert_eq!(view.horizon, Horizon::Locked);
+    // The reported 2256x1504 player fills this aspect when its controls hide.
+    // A 16:9 screenshot misses the slightly rearward wide-view corners and
+    // would incorrectly qualify a renderer that falls back in the real app.
+    let aspect = 1.5;
     std::fs::create_dir(&output).expect("review output must be a new directory");
-    for arm in ["current", "filtered", "shown", "temporal-off"] {
+    for arm in [
+        "current",
+        "filtered",
+        "shown",
+        "temporal-off",
+        "uncached-view",
+    ] {
         std::fs::create_dir(output.join(arm)).unwrap();
     }
     std::fs::write(output.join("request.txt"), format!("{line}\n")).unwrap();
@@ -88,7 +575,8 @@ fn reported_filtered_correction_fields() {
                 &rgba,
             );
         }
-        let shot = capture_shown(&scene, &mut pipeline, &device, &queue, view.camera);
+        let shot =
+            capture_shown_at_aspect(&scene, &mut pipeline, &device, &queue, view.camera, aspect);
         assert_eq!(shot.index, stamp.index());
         assert_eq!(scene.displayed_frame_stamp().as_ref(), Some(&stamp));
         super::tests::write_review_ppm_sized(
@@ -109,7 +597,7 @@ fn reported_filtered_correction_fields() {
             coordinate_bytes(coordinates),
         )
         .unwrap();
-        let reframe = pipeline.resident_reframe(&primitive, &shown, 16.0 / 9.0);
+        let reframe = pipeline.resident_reframe(&primitive, &shown, aspect);
         std::fs::write(
             output.join(format!("frame-{:010}.reframe.bin", stamp.index())),
             reframe.bytes(),
@@ -122,6 +610,42 @@ fn reported_filtered_correction_fields() {
             capture_correction_draw(&normal, &device, &queue, shot.width, shot.height),
             shot.rgba,
             "diagnostic draw must reproduce the exact shown pixels before removing the temporal term"
+        );
+        let reference = installed
+            .prepare_view_uncached_for_review(&device, &reframe, wgpu::TextureFormat::Rgba8Unorm)
+            .unwrap();
+        assert_eq!(reference.frame(), &stamp);
+        let reference_pixels =
+            capture_correction_draw(&reference, &device, &queue, shot.width, shot.height);
+        // Screenshot targets flatten onto opaque black. Their alpha cannot
+        // distinguish a legitimate black picture pixel from an uncovered ray.
+        let coverage = [&normal, &reference].map(|draw| {
+            capture_correction_draw_with_clear(
+                draw,
+                &device,
+                &queue,
+                shot.width,
+                shot.height,
+                wgpu::Color::TRANSPARENT,
+            )
+        });
+        let mut added = 0;
+        let mut removed = 0;
+        for (candidate, original) in coverage[0].chunks_exact(4).zip(coverage[1].chunks_exact(4)) {
+            added += usize::from(candidate[3] > original[3]);
+            removed += usize::from(candidate[3] < original[3]);
+        }
+        eprintln!(
+            "view-coverage: source={} added={added} removed={removed}",
+            stamp.index()
+        );
+        assert_eq!(removed, 0, "candidate removed original picture coverage");
+        super::tests::write_review_ppm_sized(
+            &output.join("uncached-view"),
+            stamp.index(),
+            shot.width,
+            shot.height,
+            &reference_pixels,
         );
         let temporal_off = installed
             .prepare_view_without_temporal_for_review(
@@ -177,6 +701,28 @@ fn capture_correction_draw(
     width: u32,
     height: u32,
 ) -> Vec<u8> {
+    capture_correction_draw_with_clear(draw, device, queue, width, height, wgpu::Color::BLACK)
+}
+
+fn capture_correction_draw_with_clear(
+    draw: &PreparedCorrectionDraw,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    clear: wgpu::Color,
+) -> Vec<u8> {
+    capture_draw_with_clear(|pass| draw.draw(pass), device, queue, width, height, clear)
+}
+
+fn capture_draw_with_clear(
+    draw: impl FnOnce(&mut wgpu::RenderPass<'_>),
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    clear: wgpu::Color,
+) -> Vec<u8> {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("filtered Scene temporal-off diagnostic target"),
         size: wgpu::Extent3d {
@@ -201,13 +747,13 @@ fn capture_correction_draw(
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    load: wgpu::LoadOp::Clear(clear),
                     store: wgpu::StoreOp::Store,
                 },
             })],
             ..Default::default()
         });
-        draw.draw(&mut pass);
+        draw(&mut pass);
     }
     let read = super::panorama_review::PendingReadback::encode(device, &mut encoder, &texture);
     let submission = queue.submit([encoder.finish()]);
@@ -999,6 +1545,17 @@ fn capture_shown(
     queue: &wgpu::Queue,
     camera: Camera,
 ) -> capture::Shot {
+    capture_shown_at_aspect(scene, pipeline, device, queue, camera, 16.0 / 9.0)
+}
+
+fn capture_shown_at_aspect(
+    scene: &Scene,
+    pipeline: &mut ScenePipeline,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    camera: Camera,
+    aspect: f32,
+) -> capture::Shot {
     let (send, receive) = std::sync::mpsc::sync_channel(1);
     scene.capture(Request {
         width: 1280,
@@ -1008,7 +1565,7 @@ fn capture_shown(
     });
     let deadline = Instant::now() + DEADLINE;
     loop {
-        pipeline.prepare(&scene.primitive(camera), device, queue, 16.0 / 9.0);
+        pipeline.prepare(&scene.primitive(camera), device, queue, aspect);
         if let Ok(shot) = receive.try_recv() {
             return shot.unwrap();
         }

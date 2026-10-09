@@ -11,13 +11,30 @@
 //! facades, that is at most six distinct epoch histories rather than one per
 //! seek. Intermediate idle restart facades have no job owner and drop.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, Weak, mpsc};
+use std::time::Duration;
 
 use super::corrected::{CorrectionInput, CorrectionSequence};
 use super::filtered_capture::FilteredCaptureInner;
 use super::native_lifecycle_event;
+use super::resident_worker::WorkerProgressWake;
 use crate::Fallible;
+use crate::gpu_completion::SubmissionCompletion;
+use crate::ready_wake::ReadyWake;
+
+// Stop taking another CPU job at four pending outputs. A startup job can
+// emit four centers, so at most seven tiny markers exist across seek epochs.
+// Weak owners do not retain abandoned seven-source histories while polling.
+const OUTPUT_HIGH_WATER: usize = 4;
+const MAX_OUTPUT_BATCH: usize = 4;
+const POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+struct PendingOutput {
+    owner: Weak<FilteredCaptureInner>,
+    completion: SubmissionCompletion,
+}
 
 pub(super) enum TemporalJob {
     Push {
@@ -43,6 +60,7 @@ pub(super) struct TemporalEpoch {
 
 pub(super) struct TemporalWorker {
     jobs: mpsc::SyncSender<ExecutorJob>,
+    progress: Arc<WorkerProgressWake>,
 }
 
 impl TemporalWorker {
@@ -52,15 +70,51 @@ impl TemporalWorker {
         // which is deliberate cross-epoch backpressure rather than another
         // temporal thread or an unbounded collection of histories.
         let (jobs, incoming) = mpsc::sync_channel::<ExecutorJob>(1);
+        let progress = Arc::new(WorkerProgressWake::default());
+        let running_progress = progress.clone();
         let thread = std::thread::Builder::new()
             .name("kjerag-temporal".into())
             .spawn(move || {
-                for job in incoming {
+                let mut pending = VecDeque::new();
+                loop {
+                    poll_outputs(&mut pending);
+                    if pending.len() >= OUTPUT_HIGH_WATER {
+                        std::thread::park_timeout(POLL_INTERVAL);
+                        continue;
+                    }
+                    let job = if pending.is_empty() {
+                        match incoming.recv() {
+                            Ok(job) => job,
+                            Err(_) => break,
+                        }
+                    } else {
+                        match incoming.recv_timeout(POLL_INTERVAL) {
+                            Ok(job) => job,
+                            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                std::thread::park_timeout(POLL_INTERVAL);
+                                continue;
+                            }
+                        }
+                    };
+                    running_progress.notify();
                     match job {
                         ExecutorJob::Run(job) => {
                             let owner = job.owner();
-                            if let Err(error) = catch_temporal_panic(|| service(job)) {
-                                owner.fail_worker(&error.to_string());
+                            match catch_temporal_panic(|| service(job)) {
+                                Ok(outputs) => {
+                                    debug_assert!(outputs.len() <= MAX_OUTPUT_BATCH);
+                                    pending.extend(outputs.into_iter().map(|completion| {
+                                        PendingOutput {
+                                            owner: Arc::downgrade(&owner),
+                                            completion,
+                                        }
+                                    }));
+                                    debug_assert!(
+                                        pending.len() < OUTPUT_HIGH_WATER + MAX_OUTPUT_BATCH
+                                    );
+                                }
+                                Err(error) => owner.fail_worker(&error.to_string()),
                             }
                         }
                         #[cfg(test)]
@@ -69,18 +123,51 @@ impl TemporalWorker {
                             let _ = release.recv();
                         }
                     }
+                    running_progress.notify();
                 }
             })?;
         // The sender owns shutdown. Jobs retain their capture only while
         // queued or executing, so dropping the facade cannot form a cycle.
         drop(thread);
-        Ok(Self { jobs })
+        Ok(Self { jobs, progress })
+    }
+
+    pub(super) fn set_progress_wake(&self, wake: &ReadyWake) {
+        self.progress.set(wake);
     }
 
     pub(super) fn send(&self, job: TemporalJob) -> Fallible<()> {
         self.jobs
             .send(ExecutorJob::Run(job))
             .map_err(|_| "filtered temporal worker stopped before accepting a job".into())
+    }
+}
+
+fn poll_outputs(pending: &mut VecDeque<PendingOutput>) {
+    let Some(front) = pending.front() else {
+        return;
+    };
+    if let Err(error) = catch_temporal_panic(|| front.completion.poll()) {
+        for output in pending.drain(..) {
+            if let Some(owner) = output.owner.upgrade() {
+                owner.fail_worker(&error.to_string());
+            }
+        }
+        return;
+    }
+    while let Some(front) = pending.front() {
+        match front.completion.ready() {
+            Ok(false) => break,
+            result => {
+                let output = pending.pop_front().expect("checked pending GPU output");
+                if let Some(owner) = output.owner.upgrade() {
+                    let result = result.and_then(|_| owner.output_completed());
+                    if let Err(error) = result {
+                        owner.fail_worker(&error.to_string());
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -178,7 +265,7 @@ impl TemporalJob {
     }
 }
 
-fn service(job: TemporalJob) -> Fallible<()> {
+fn service(job: TemporalJob) -> Fallible<Vec<SubmissionCompletion>> {
     let epoch = job.epoch();
     with_epoch_cleanup(&epoch, || service_inner(job))
 }
@@ -194,7 +281,7 @@ fn with_epoch_cleanup<T>(epoch: &TemporalEpoch, work: impl FnOnce() -> T) -> T {
     result
 }
 
-fn service_inner(job: TemporalJob) -> Fallible<()> {
+fn service_inner(job: TemporalJob) -> Fallible<Vec<SubmissionCompletion>> {
     match job {
         TemporalJob::Push {
             owner,
@@ -203,7 +290,7 @@ fn service_inner(job: TemporalJob) -> Fallible<()> {
             started,
         } => {
             if epoch.is_canceled() {
-                return Ok(());
+                return Ok(Vec::new());
             }
             let stamp = panorama.frame().clone();
             owner.ensure_temporal_source(&stamp)?;
@@ -213,7 +300,7 @@ fn service_inner(job: TemporalJob) -> Fallible<()> {
                 .map_err(|_| "filtered temporal epoch stream is poisoned")?;
             if epoch.is_canceled() {
                 stream.take();
-                return Ok(());
+                return Ok(Vec::new());
             }
             let outputs = stream
                 .as_mut()
@@ -221,16 +308,21 @@ fn service_inner(job: TemporalJob) -> Fallible<()> {
                 .push(*panorama)?;
             if epoch.is_canceled() {
                 stream.take();
-                return Ok(());
+                return Ok(Vec::new());
             }
             if let Some(started) = started {
                 native_lifecycle_event("filtered-worker-complete", &stamp, Some(started.elapsed()));
             }
-            owner.complete_source(&stamp, outputs)
+            let completions = outputs
+                .iter()
+                .map(|output| output.completion().clone())
+                .collect();
+            owner.complete_source(&stamp, outputs)?;
+            Ok(completions)
         }
         TemporalJob::Finish { owner, epoch } => {
             if epoch.is_canceled() {
-                return Ok(());
+                return Ok(Vec::new());
             }
             owner.ensure_temporal_finish()?;
             let mut stream = epoch
@@ -239,7 +331,7 @@ fn service_inner(job: TemporalJob) -> Fallible<()> {
                 .map_err(|_| "filtered temporal epoch stream is poisoned")?;
             if epoch.is_canceled() {
                 stream.take();
-                return Ok(());
+                return Ok(Vec::new());
             }
             let outputs = stream
                 .as_mut()
@@ -247,14 +339,19 @@ fn service_inner(job: TemporalJob) -> Fallible<()> {
                 .finish()?;
             if epoch.is_canceled() {
                 stream.take();
-                return Ok(());
+                return Ok(Vec::new());
             }
-            owner.complete_finish(outputs)
+            let completions = outputs
+                .iter()
+                .map(|output| output.completion().clone())
+                .collect();
+            owner.complete_finish(outputs)?;
+            Ok(completions)
         }
     }
 }
 
-fn catch_temporal_panic(submit: impl FnOnce() -> Fallible<()>) -> Fallible<()> {
+fn catch_temporal_panic<T>(submit: impl FnOnce() -> Fallible<T>) -> Fallible<T> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(submit)).unwrap_or_else(|payload| {
         let message = payload
             .downcast_ref::<&str>()

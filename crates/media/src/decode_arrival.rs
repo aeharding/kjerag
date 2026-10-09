@@ -3,10 +3,17 @@
 
 use std::sync::mpsc::{self, Receiver, SendError, SyncSender};
 use std::sync::{Arc, Mutex};
+use std::task::Wake;
 use std::task::Waker;
 
 #[derive(Default)]
 pub(super) struct Arrival(Mutex<State>);
+
+impl Wake for Arrival {
+    fn wake(self: Arc<Self>) {
+        self.published(false);
+    }
+}
 
 #[derive(Default)]
 struct State {

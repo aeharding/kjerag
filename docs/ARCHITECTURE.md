@@ -51,6 +51,27 @@ not report directly to the pilot.
 
 ## Capture admission and camera selection
 
+The shell prepares file opens on one background worker, with one replaceable
+queued choice. `Scene::prepare_with` reads the same complete calibration and
+motion track into a Send-only `PreparedScene`, retaining the inspected Reader.
+Packet input remains idle during that preparation. UI initialization returns
+without waiting for capture IO. While the first file is preparing, the window
+shows its normal transparent pane, not a black, welcome or loading screen.
+With an existing video, that picture remains until the replacement is ready.
+The UI starts Player/sound and constructs Scene only when the
+still-current result arrives. No Scene or UI cells cross that thread boundary.
+Close and a newer file choice revoke publication without joining a blocked
+read. Obsolete results are released without waiting for their UI messages.
+Failed opens preserve the old picture and view. CLI/pasted framing travels
+with the request and is applied only after that same file opens successfully.
+The clean `6dbbf16b` transparent-pane test Flatpak is installed. Both camera UI
+suites and all six actual-installed blocked-open checks pass; the owner's
+startup retest remains pending. Headless verification checks the ordinary pane,
+not the desktop compositor's blur. This does not qualify instant first-picture
+preparation or the remaining presentation/capacity requirements. The owner also
+reports persistent intermittent stuttering after pause/resume or seeking,
+cleared by another pause/resume or seek; its cause is not yet established.
+
 An eligible selected capture constructs one immutable `ResidentCameraProfile`
 from the parsed calibration before GPU state or sequential playback is selected.
 Selection requires usable orientation, delivery of all calibrated lenses, and
@@ -103,6 +124,7 @@ paired VA-API decoded Frames
   -> one source-preparation command buffer producing:
        raw lenses + map + colour -> world panorama for temporal input
        raw lenses -> prefiltered R8/RG8 display snapshots owned by wgpu
+       source map -> native endpoint cache for curved view drawing
   -> reduced periodic temporal correction over seven real sources
   -> CorrectedFrame pairing the exact source, map, colour, matrix, current
      low-resolution control, and filtered low-resolution result
@@ -113,15 +135,41 @@ The final view is one render pass, but source preparation is not. Source-rate
 GPU work precedes publication, and its completed result is reused across view
 redraws. A 29.970 fps source does not imply 240 distinct source pictures.
 
+The unqualified `refactor/filtered-work-admission` branch changes admission and
+GPU continuation scheduling, not picture sampling. Its RGB and coordinate-cube
+experiments failed actual-player qualification and are removed. Source-stamped
+native endpoint caching and the existing full-resolution display path remain.
+
 The worker and facade live in
 [`filtered_capture.rs`](../crates/render/src/flow/one_xs/filtered_capture.rs),
 [`resident_worker.rs`](../crates/render/src/flow/one_xs/resident_worker.rs),
 and [`temporal_worker.rs`](../crates/render/src/flow/one_xs/temporal_worker.rs).
-Completion cannot publish a frame. Only the UI-side due-frame transaction may
-install the completed result matching `Player`'s opaque `FrameStamp`.
+Completion cannot publish a frame. Only the UI-side playback event transaction
+may install the completed result matching `Player`'s opaque `FrameStamp`.
+That transaction is independent of surface redraw callbacks. A redraw consumes
+the latest due completed picture, not the source-processing queues.
+
+The filtered stitch executor owns a capture actor with a bounded ordered work
+queue, rather than one shared-executor channel message per source. Executing
+stitch, queued stitch and temporal work share a four-source CPU admission
+limit and a separate completed-output reservation bound. GPU lifetime slots are separately
+bounded at two and acquired by the worker only when a source begins execution.
+Queued decoded frames do not consume these slots. An admitted successor continues
+without another shell handoff. Actor exit and admission use the same short
+state lock, so the successor either belongs to the running actor or kicks its
+replacement. Queue payloads hold no back-reference to their capture owner.
+Source admission never polls the graphics device or reserves GPU lifetimes.
+The worker drives nonblocking retirement polls and checks epoch cancellation
+while waiting for a slot, with no Scene/state lock held.
+The shell checks that CPU admission capacity before constructing another source
+projection; the final admission still rechecks it under the same state lock.
+Seek and terminal failure discard unexecuted queue payloads, while submitted
+work keeps its existing GPU-retirement ownership.
 
 The resident map path remains GPU-owned. After capture-session construction,
-ordinary live processing maps only the four-byte final validity word to the CPU.
+ordinary live processing maps the four-byte final validity word and a private
+four-byte temporal-output completion marker. The marker's contents are never
+read: its buffer mapping proves the final output submission's completion.
 It does not read back solver belts, sparse terminals, full maps, source images,
 or temporal output. The first lazy resident-session construction does run
 target-device arithmetic probes with bulk readbacks and waits. Tests and
@@ -148,6 +196,20 @@ carrier or decoder leases. Explicit Scene map inspection follows the retained
 filtered owner when that path is selected; it must not consult the separate
 spatial facade. Map readback remains diagnostic-only, never a playback step.
 
+The filtered path also evaluates its 51 by 101 native map endpoints once in
+the same source-preparation command buffer. Each source owns a 164,832-byte
+GPU cache containing endpoint positions and packed map samples. Curved-view
+fragments reuse these values instead of recomputing them for each screen pixel
+and redraw. Native cell search, watertight triangle admission, barycentrics,
+alpha, fusion and full-resolution source sampling remain in the final draw.
+The cache names the same opaque frame and graphics context as the map and
+source snapshots; their completed owner retains its binding until retirement.
+It introduces no readback, CPU wait, extra queue submission or source-cadence
+change. Temporal-input panorama evaluation is unchanged. The uncached draw
+remains a test-only same-owner reference. Separate GPU compilation can change
+floating-point rounding, so this optimization requires rendered comparison,
+not an assumed pixel-identity claim.
+
 [`panorama.rs`](../crates/render/src/direct_type2/panorama.rs) distinguishes:
 
 - `RgbPanorama`, a coordinate-neutral source-stamped gamma-RGB texture;
@@ -159,6 +221,7 @@ The temporal image stream consumes only the coordinate-neutral panorama.
 Coordinate ownership stays beside the matching high-resolution display source.
 [`corrected.rs`](../crates/render/src/flow/one_xs/corrected.rs) enforces that
 `CorrectionInput` names the same `FrameStamp` for panorama, source, and map.
+Its view endpoint cache must name that same frame and graphics context too.
 
 [`correction_stream.rs`](../crates/render/src/temporal_fusion/correction_stream.rs)
 owns two low-resolution textures per emitted source:
@@ -253,16 +316,41 @@ fitting and crossover measurements belong in research and architecture history.
 Qualified captures use `PresentationPolicy::SequentialRealtime` in
 [`player.rs`](../crates/media/src/player.rs). Media PTS controls presentation
 deadlines. The capture worker advances source computation in order while the
-UI retains publication authority.
+UI retains publication authority. For the selected filtered path,
+`Scene::progress` handles source admission, completed-output installation and
+clock transitions on decoder/worker notifications and absolute media deadlines.
+It consumes sources in order even when the compositor withholds redraws.
+On the unqualified branch the app dispatches source progression only from
+`SceneReady`, which represents these notifications/deadlines. Mouse movement
+and unrelated UI messages no longer rerun the source scheduler. Play, pause,
+seek and step publish their own coalesced wake.
+
+Source processing never skips camera inputs. With the owner's approval,
+obsolete completed screen updates may be omitted while the playback owner
+catches up with the audio clock. A render preparation samples the latest due
+complete output. `Shown` separately retains the exact corrected-frame owner
+used by the most recent draw preparation; screenshots, copied views, map
+inspection and terminal-picture recovery follow it rather than a newer logical
+installation. Neither logical progression nor draw submission proves physical
+scanout. Filtered playback reports source advances and progress pumps, not
+physical presentation rates.
 
 Admission and ready queues are bounded. Backpressure may block a worker handoff,
-never the UI thread. Only completed outputs enter the ready queue. The currently
+never the UI thread. Submitted outputs may enter the bounded ready queue, but
+the exact FIFO-front completion proof gates installation and acknowledgement.
+Only completed pictures become displayable. The currently
 shown frame remains independently drawable while a successor computes, a seek
 lands, a renderer retries, or an older epoch drains.
 
-The filtered route overlaps at most two source stages within an epoch and
-reserves up to four ready corrected frames plus one installed frame. Player
-may prepare six real successors, including while paused for startup or seek.
+The filtered route admits at most four CPU source jobs within an epoch, keeps
+at most two source GPU lifetimes in flight, and
+reserves up to six ready corrected frames plus one installed frame in the
+installed completed-runway test source `c524ad0e`. Player may prepare nine real
+successors, including while paused for startup or seek. The preceding retained
+source `039c0a31` uses four ready outputs and six prepared successors. The owner
+accepts the larger retention and potentially longer holds for testing, then
+accepts the installed result for release preparation on October 8. This is not
+a general playback, 240-capacity or memory-peak qualification.
 One temporal executor and its capacity-one channel are shared across restarts;
 seeking does not create another worker thread. Superseded epochs cancel and
 release unpublished history when their executing work permits, while the old
@@ -282,13 +370,106 @@ resident result is installed and acknowledged. Pausing during startup cancels
 autoplay intent. EOF waits for admitted real inputs to drain before flushing
 the temporal tail.
 
-The worker uses completion callbacks plus nonblocking device polls. Resident
-L1 keeps its six chunks and five prefix-completion waits on the worker; these
-waits use callback receive timeouts, not blocking GPU fence polls. Renderer
+The filtered renderer also prepares its immutable corrected-view pipelines for
+the window's actual target format at initial attachment, before source progress
+can release autoplay. Previously this construction was lazy in the first
+completed picture's draw preparation, after the common clock could start.
+The existing per-format cache and restart sharing remain unchanged; no source,
+map, color, buffer threshold or processing cadence changes. The real-Scene
+startup regression fails before this scheduling change on X4 and passes after
+it on X4 and ONE X2. The clean SDK package from `039c0a31` passes both camera
+functional UI suites and was installed. It is now retained for rollback. Its
+original network-clip smoke check has no buffer holds or counted audio underruns.
+This qualifies preparation
+order and the named functional paths, not a general network-stutter fix.
+
+Coalesced progress notifications also cover startup operations that produce no
+temporal output, shared executor capacity across seek epochs, and ready-FIFO
+space released by logical installation. A preparation-specific decoder wait
+supports paused startup and detects delivery racing registration. GPU lifetime
+backpressure is worker-owned and adds no UI poll deadline; a paused, complete
+pipeline has no periodic playback timer. Renderer attachment supplies
+the authenticated GPU context once, but renderer preparation no longer submits
+filtered sources or installs completed outputs. Other paths retain their
+existing redraw-driven behavior.
+
+The worker uses completion callbacks plus nonblocking device polls. On the
+unqualified branch, resident L1 keeps its six command chunks but no longer
+waits for the shared queue prefix between them. Same-queue ordering and dispatch
+barriers preserve dependencies; the exact lease advances to the last submission
+and retains its source until final validity proves completion. Renderer
 retirement also polls without blocking. A blocking GPU wait in steady-state
 playback can hold pinned wgpu's fence read lock while another thread needs
 the write lock to submit work. Constructor arithmetic qualification remains
 the explicit startup exception described above.
+
+Temporal filtering likewise records the next ordered source without waiting
+for each output's queue prefix. Each output owns a unique completion marker,
+cleared in its final encoder and mapped after that submission. Since the marker
+is never reused, unrelated later submissions cannot extend its last-use proof.
+The sole temporal executor polls pending outputs even when its input channel is
+idle; completion wakes Scene but never installs a picture. At four pending
+markers the executor stops receiving jobs until GPU progress, and a startup
+batch can produce four, bounding this monitor to seven markers across seeks.
+Monitor entries have weak capture owners, not retained epoch histories.
+Device/map errors retain the underlying error and use terminal worker cleanup.
+This scheduling change is unqualified, not an established playback fix.
+
+The source snapshot encoder now uses the same private submission-marker proof
+for imported-source retirement. Pinned wgpu attaches a render-pass work-done
+callback to the newest queue submission when deferred callbacks are registered;
+a concurrent display submit can conservatively extend that boundary. The
+snapshot marker's last use instead belongs only to its compound command buffer,
+including its later lens copies. Retention still precedes source sampling;
+mapping errors quarantine uncertain owners and preserve the underlying error.
+Other generic draw paths retain their conservative callback generations.
+The real seven-source decoder/GPU regression completes without a shell pump.
+Short local2256x1504 player runs now maintain full source cadence during idle
+playback,60Hz pan and uncapped pan. Network-backed pan still fails, and capacity
+is155completed redraws/s with32.78ms maximum callback interval, not240/4.17ms.
+This is a scoped local result, not a general playback or release verdict.
+
+The six-face source-picture cache was retried after removing shared-prefix
+CPU waits. It still failed NAS60Hz playback:20.58 source advances/s,9.63s
+accumulating lateness and94.75ms maximum draw interval, with memory pressure.
+It is removed, not a selectable production path. The restored candidate draws
+the corrected source directly using its lens samples, map and temporal field.
+The failed cache source and binaries remain in gitignored recovery artifacts;
+no quantization/resampling tradeoff from that cache was accepted or installed.
+
+The sphere broad-phase attempt also failed playback, despite its corrected
+31-source images differing by at most3RGB8 codes from the reference. It is
+replaced by an unqualified native-triangle rasterization candidate for finite
+curved screens. Four subdivisions per native edge
+follow the original triangle diagonal, positions and packed lens coordinates.
+Hardware interpolation replaces per-pixel ray intersection on those views.
+This approximates curved projection between subdivision vertices and can alter
+subpixel detail/temporal coordinates. The frozen native preview has owner
+acceptance. The clean committed-source package passes both camera UI suites;
+network playback and the capacity requirement remain unresolved.
+Original lens planes remain full resolution, with the same source history,
+alpha map, photometric matching and temporal residual law. Ball views and
+diagnostic uncached draws retain the original complete ray renderer. The static
+index buffer is pipeline-owned, not a per-source picture cache.
+
+The initial front-hemisphere guard passed the 16:9 diagnostic but disabled the
+fast path in the actual 2256x1504 player after controls hid. At166.23deg its
+full-window corners look slightly rearward. That NAS run still failed; it did
+not qualify the intended renderer. The replacement projects a finite curved
+view with a hidden-cell clipping rim halfway between the visible corner and
+the projection singularity. Admission leaves a whole native cell outside the
+visible cone before that rim; narrow-margin/ball views retain the ray path.
+The real-source moving comparison now uses the actual full-window1.5aspect,
+not a16:9 screenshot that misses this selection boundary. The owner subsequently
+accepted the frozen native preview as "Good enough" after reporting improved
+performance. The preview contains parked periodic-color edits excluded from
+the clean SDK package. Qualification and identities are in MERGE_READINESS.
+
+The corrected full-window mesh captures31ordered sources with no removed
+coverage and at most8RGB8codes difference from the ray reference. It still fails
+real-player runs before the source-specific retirement correction: NAS and local
+storage both accumulate large video lateness. The later local results above
+do not erase the unresolved network failure or establish the240capacity target.
 
 The local iced renderer prepares the Scene before surface acquisition. If no
 exact resident draw can be reserved, it keeps the previous complete surface
@@ -332,10 +513,188 @@ error. The existing Reader admission and color-metadata rules are the common
 policy. Demux seek targets remain unchanged; frame-origin normalization happens
 at delivery, after decode.
 
-Audio has its own demuxer in [`audio.rs`](../crates/media/src/audio.rs).
-Large video interleave gaps must not delay sound delivery. The presentation
-clock remains based on container PTS and is pumped from the shader redraw path,
-not a shell-side tick counter.
+The single-reader path gives audio its own packet queue and
+decoder in [`track.rs`](../crates/media/src/track.rs), and retains the independent
+producer in [`audio_worker.rs`](../crates/media/src/audio_worker.rs). Ring capacity paces
+refill. Compressed read-ahead, not decoder surfaces, absorbs camera interleave
+gaps; reaching its bound still backpressures both consumers. The producer parks at
+audio EOF until a seek or shutdown. Video decode waits for audio-seek
+acknowledgment, but the UI and device callback never join the producer or wait
+for its I/O. Player observes the producer's underlying errors independently
+of the video delivery channel and stops it when the capture closes.
+
+Live Reader and Track input passes through
+[`packet_input.rs`](../crates/media/src/packet_input.rs). A sole worker owns
+each file's libavformat demuxer and routes compressed packets to separate audio
+and video consumers. There is no second live audio demuxer or competing file
+cursor. The uninstalled recovery branch lets those consumers share their
+existing combined budget: 128 MiB plus 256 KiB, or 640 packets per file. Neither
+lane stops the sole reader merely by exhausting its old partition while the
+combined cache has room. Video without an attached audio consumer retains its
+128 MiB/512-packet limits; closing audio does not discard already buffered
+video. Byte accounting permits one packet of overshoot because its size is
+known only after the read. These are compressed-input limits, not added
+decoded/GPU frame retention. Walk instruments retain their synchronous
+reference input. The installed player still uses the separate lane caps.
+
+Input remains idle until the first read or seek. Audio attaches before reading.
+A video seek empties both compressed
+queues and invalidates an in-flight read before the same demuxer repositions;
+the decoder waits for acknowledgment. Closing signals the reader without
+joining a possibly blocked filesystem call. The worker owns the input until
+that read returns. Packet bytes, order, stream identity, timestamps, seek
+targets, EOF and raw errors remain unchanged. This read-ahead stage absorbs
+input bursts; it cannot make sustained slow input or GPU work run at realtime.
+
+The audio target gate is set in that seek transaction, before input resumes.
+An earlier video replay discards only pre-target audio packets, leaving source
+processing ordered. Audio seek flushes its decoder and adjusts the gate without
+repositioning video. Audio epoch invalidation interrupts an empty-queue wait
+within 50 ms, without joining backend IO or treating cancellation as AAC EOF.
+
+The follow-on candidate removes the custom file handle, AVIO callbacks and
+16 MiB byte cache. The capture opener passes raw filesystem filename bytes,
+without the convenience wrapper's UTF-8 unwrap. FFmpeg owns normal container IO from inspection
+through close; there is no context substitution or second cursor. Closing
+leaves that input alive until its sole reader finishes pending IO. Reader and
+offline Walk share capture inspection, while Walk retains synchronous packet
+delivery. This simpler input candidate still needs clean-package qualification.
+CPU regressions compare packet bytes, timestamps, positions and flags with normal
+FFmpeg reads, including routed audio/video consumers with repeated seeks.
+Removed cache code/tests remain in Git history and the failed native control's
+binary is retained in scratch. CPU AAC output matches the audio-only decoder reference.
+That synthetic audio/video fixture uses the `ffmpeg` executable, installed
+explicitly in both architecture CI jobs; no footage or sound device is required.
+
+A seek invalidates audio writes under the ring lock before returning to the
+UI. That authorization travels with the video seek command and the audio
+decoder; an older in-flight packet or superseded seek cannot refill the new
+ring. The existing callback, gain fades, resampling and splice arithmetic in
+[`audio.rs`](../crates/media/src/audio.rs) remain unchanged.
+
+The presentation clock remains based on container PTS. Its published `Beat`
+anchor is extrapolated by the audio callback without needing redraw ticks.
+Filtered video promotion and source admission use the playback event owner
+described above. Generic and resident-spatial video paths still use the shader
+redraw path; the independent audio producer is shared by all live Readers.
+
+The `c428658f` recovery policy, inherited by installed test build `65e00f72`,
+distinguishes user play
+intent from a temporary stopped common clock after missing picture or sound.
+It retains the held PTS, ordered source processing and estimator history;
+explicit pause or seek supersedes recovery. Restart requires completion-proven
+successor pictures and sound at that PTS, with no impossible lead at EOF.
+An overdue logical owner is not a picture shortage while it has a completed
+successor: ordered catch-up consumes that ready prefix before considering a
+hold. Pending stitch work also does not stop the clock when that exact output's
+required real inputs are already admitted. The input check follows the selected
+seven-source window, exact decode epoch and queued clipped-tail finish. It is
+not completion proof or restart lead. Missing input or sound still permits a
+hold. An expired picture deadline sleeps on worker completion rather than
+spinning timers while admitted work finishes.
+The follow-on also observes compressed-input lead across every required lens
+and file, using each source's normalized clock. At `c428658f`, recovery alone waits for one
+second of packet lead; EOF or the compressed cache's byte/count limit
+permits an earlier restart. It adds no decoded/GPU retention or UI input wait.
+Observation and one-shot wake registration share the producer lock, with wakes
+outside it; pause and seek cancel the old wait. At `c428658f`, exact startup/seek autoplay
+instead primes two completion-proven successors and sound before starting the
+clock. It does not use the recovery-only input threshold, and a paused landing
+still needs only its requested picture. Test-package qualification does not
+establish reliable network playback or owner acceptance.
+The installed `fix/prepared-input-reserve` test build also checks the same
+bounded one-second compressed-input reserve before startup/seek autoplay. It
+reuses the existing per-file observer and EOF/cache-bound escape, adds no IO
+wait on the UI, and changes neither paused landing readiness nor ordinary
+clock progression. Slow input can delay autoplay preparation; that user-visible
+tradeoff is accepted by the owner for this test build only; owner retest remains
+pending. The clean `65e00f72` SDK package
+passes both cameras' functional app-path suites and scoped network playback,
+pause/resume and seek checks. A forced four-second interruption still needs
+one approximately 1.13-second hold, not a guaranteed zero-to-one-second wait.
+This does not establish hitch-free playback or 240 capacity. The inherited
+recovery policy above is unchanged.
+The installed `fix/buffer-restart-runway` follow-up separates held-clock
+logical catch-up from physical picture selection. While Player is buffering,
+Scene's filtered primitive selects the exact last `Shown` picture rather than
+the latest logical completion. Mouse/horizon controls still apply to that
+picture, and source processing continues in order. When recovery ends, normal
+latest-due selection resumes. This changes no readiness threshold, source or
+color arithmetic, decoded/GPU retention or estimator history. A redraw-during-
+hold regression on the actual network X4 path fails before this change and
+passes after it on both X4 and ONE X2. The clean `5e385619` SDK package passes
+both camera UI suites and is installed. An actual-installed network interruption
+keeps the shown source fixed through every held-clock redraw. This qualifies
+that display boundary, not restart smoothness: 82 ms and 63 ms picture dwells
+still occur after restart in the same run. Their corresponding stitch/map
+preparation stages take 81.9 ms and 65.1 ms of wall time, not isolated GPU time.
+The underlying queue/work cost remains unresolved. A separate bounded repeat
+records no CPU quota throttling, but does not reproduce the larger dwells.
+Owner acceptance and the broader network playback requirements remain due.
+
+The experimental `fix/completed-picture-recovery-runway` branch requires six
+completion-proven successor pictures after an actual buffering hold, instead
+of two. Startup/seek autoplay still requires two. The decoded horizon extends
+to nine successors so the six-picture runway has its three real temporal
+dependencies; the ready-output reservation is six. CPU work admission remains
+four and source GPU lifetimes remain two. The first seven sources still produce
+the same four startup outputs, and source ordering, estimator history and
+picture arithmetic are unchanged. Finished EOF has no unattainable lead.
+The owner accepts more retained memory and possibly longer holds for this test.
+Actual-camera recovery regressions prove readiness and shown-owner retention,
+not a network-stutter fix. The clean SDK source `c524ad0e` is installed; its
+original network-view interruption check also records a later processing hold.
+Owner field retest and broader smoothness qualification remain due.
+
+The uninstalled `fix/processing-stall-buffering` candidate removes the admitted-
+input exemption from the missed-completed-picture decision. The existing
+one/two-interval deadline grace and completed-prefix catch-up exception remain;
+merely queueing normal work before its deadline does not hold the clock. An
+actually overdue unfinished output can hold sound and picture together, even
+with all required inputs admitted. The input classification still decides
+whether an expired timer should wait for worker completion. Restart gates,
+source processing, retention and arithmetic are unchanged. Real X4/ONE X2
+blocked-actor checks preserve the shown owner and resume in the same epoch.
+This does not make the underlying stitch work faster. Clean SDK source
+`37ca091b` passes both camera functional UI suites. A bounded network
+interruption through that uninstalled package holds the exact shown owner,
+resumes once, and records no counted audio underruns. It still has roughly
+47 ms post-resume picture intervals and is not a general smoothness verdict.
+The owner approves installing this conditional-pause test. Its actual-installed
+check then refuses playback at the shared GPU PIS front-end self-check:
+horizontal scratch word 41 is `0x43618a56`, expected `0x43618a57`.
+The prior `5e385619` package is restored and refuses identically, before any
+buffering or playback. Flatpak history records a concurrent Mesa 26.2.2 update
+immediately before installation. This is not a candidate-specific failure or
+a completed runtime-cause isolation. The owner rejects a shared graphics
+rollback. Issue #251 fixes the precision requirement inside our existing
+compiler fork instead: SPIR-V Fma results carry NoContraction, so the driver
+cannot split an explicit multiply-add into two rounding steps. A CPU regression
+distinguishes the exact reported fused/unfused bits and a compiler regression
+checks the emitted precision decoration. The unchanged Flatpak Mesa 26.2.2
+front-end qualification fails before this patch and passes after it with the
+original exact guard intact. Committed source `56232400` then passes both camera
+functional SDK UI suites and is installed without changing the shared graphics
+runtime. Actual-installed X4 network playback passes startup and resumes after
+the finite input-interruption test with no counted audio underruns. The run
+also records three processing holds in the first second after the initial seek.
+Ordinary completed-picture intervals still reach roughly 47–55 ms in a separate
+network control; these are completion receipts, not physical scanout evidence.
+An unchanged installed protocol diagnostic finds that the nominal 60 Hz headless
+output actually delivers approximately 62 Hz callbacks, consistent with the
+integer-millisecond wlroots 0.17 timer. Ordinary 29.97 fps video necessarily mixes
+two- and three-tick dwells on that cadence. The diagnostic has no presentation
+feedback requests and its concurrent tracing corrupts a native-completion JSON
+record, so the cadence parser rejects it. It is not a smoothness pass or a
+reason to dismiss the owner's real stalls. Nominal headless refresh must not be
+treated as exact physical refresh when interpreting picture dwell.
+The startup refusal is removed on the tested paths, but general smoothness,
+audible continuity, owner branch acceptance and broader playback qualification
+remain due.
+Consumed PCM history supports restart without manufacturing samples or changing
+ordinary drift correction. This is not a normal-playback clock adjustment or a
+throughput fix. The owner permits it only if real tests establish improved
+stall recovery and no unnecessary holds; runtime qualification remains due.
 
 The gyro clock is distinct. Frame orientation uses the camera timestamp from
 the exposure track, not nominal container PTS. Trailer tick units depend on

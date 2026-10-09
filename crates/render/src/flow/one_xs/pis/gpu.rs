@@ -814,7 +814,8 @@ impl GpuPisPipeline {
     }
 
     /// Preserve the complete schedule, with at most eight dispatches per
-    /// submission so the worker can leave queue space for interactive draws.
+    /// submission. Same-queue ordering supplies dependencies without a CPU
+    /// wait; interactive draws may submit between these command boundaries.
     /// The first encoder already contains this stage's input preparation.
     pub(crate) fn encode_worker_chunks(
         &self,
