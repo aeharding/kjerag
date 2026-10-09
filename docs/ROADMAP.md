@@ -35,7 +35,7 @@ the owner's actual 0.3.2 Play failure is traced to an
 empty audio ring retaining nonzero gain during a pending reset. The callback
 cannot fade without PCM, while the reset refuses refill; coordinated playback
 therefore waits indefinitely despite six completed successor pictures. The
-`fix/audio-empty-reset` branch finishes silence-target fades when PCM runs out,
+The fix finishes silence-target fades when PCM runs out,
 preserving ordinary running gain, epoch rejection, timestamps and all stitching
 arithmetic. New callback and Player/independent-producer regressions cover the
 observed failure. The device/adapter-hidden workspace reports 1,702 passes with
@@ -48,11 +48,28 @@ check uses real audio callbacks routed to a null sink, lands three clipboard
 seeks and continues playback without counted underruns, new kernel entries or
 scoped memory-limit events. The owner reports "seems fine so far" and explicitly
 authorizes shipping without waiting for extended intermittent validation.
-Merge, CI and release qualification remain pending. This is not yet a released
-fix or a general network-smoothness claim. The separately requested hover-bar
+PR [#259](https://github.com/aeharding/kjerag/pull/259) merges at `59fd56e1` after
+all eight CI checks pass. **0.3.3 is published and installed**, with tag source
+`07edcdec`. Both signed native builds and assembly pass. Publication attempt 1
+cannot rediscover its newly created empty draft; a failed-job-only retry succeeds
+using the unchanged signed artifacts. No rebuild, asset replacement or tag change
+occurs. Pages deployment succeeds, and the initially stale public release marker
+is retained before a fresh fetch authenticates the new signed record.
+
+Both architectures' downloads and channel commits authenticate against the
+preexisting release key. Installed x86_64 commit `fc5fe232a94b`, executable
+SHA256 `1339e0f13ce8`, follows the canonical signed `kjerag` remote again.
+The bundle installer retains the disabled test-origin name, so an explicit
+reinstall from the existing official remote restores normal updates at the same
+commit. Both installers exit normally; shared runtimes and permissions remain
+unchanged. Actual-installed suites pass 50 X4 and 54 ONE X2 functional checks,
+with both moving pictures from each inspected, no new kernel entries and zero
+scoped OOM/limit or CPU-throttling counters. Existing sound-device, import-fault,
+exact-view and X4 single-file-pair skips remain. This fixes the reproduced Play deadlock, not
+all network stutters or the 240-capacity goal. The separately requested hover-bar
 picture-jump fix is not included.
 
-October 9: **0.3.2 is published and installed**, following the owner's October 8
+Earlier October 9 checkpoint: **0.3.2 is published and qualified**, following the owner's October 8
 acceptance of `c524ad0e` as "acceptable enough for release" and explicit merge/
 publication approval. Cumulative PR [#254](https://github.com/aeharding/kjerag/pull/254)
 merged at `efdd18a9`; tag `0.3.2` names `08f0246a`. Application sources remain

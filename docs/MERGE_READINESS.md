@@ -1,7 +1,8 @@
 # GPU stitching delivery: merge and release review
 
-Published-release checkpoint: 2026-10-09. Cumulative playback PR #254 is merged
-and 0.3.2 is published and installed. Earlier releases 0.3.0 and 0.3.1 remain
+Published-release checkpoint: 2026-10-09. Cumulative playback PR #254 and scoped
+audio-reset PR #259 are merged; 0.3.3 is published and installed. Earlier releases
+0.3.0, 0.3.1 and 0.3.2 remain
 historical checkpoints below. Performance qualification remains open because
 the current scoped capacity result is below 240 and network holds remain. This page
 records the cumulative delivery without requiring reviewers to reconstruct
@@ -13,7 +14,65 @@ with a [research navigation index](research/README.md). The shared playback
 slowdown, native/Flatpak differences and frame-time spikes are tracked in
 [issue #186](https://github.com/aeharding/kjerag/issues/186).
 
-## Signed 0.3.2 delivery, October 9
+## Signed 0.3.3 audio-reset correction, October 9
+
+The owner reports the signed local test "seems fine so far" and authorizes
+shipping without waiting for extended intermittent validation. This accepts
+the scoped correction, not a claim of universal network smoothness. The actual
+0.3.2 Play failure has an empty audio ring retaining nonzero gain while a reset
+waits for silence. No PCM remains to fade and reset blocks refill; playback
+waits for sound despite completed successor pictures. The fix completes a
+silence-target fade when the ring runs dry, preserving normal running gain,
+pause history, epoch rejection, timestamps and stitching/color arithmetic.
+Four callback regressions and a real Player/independent-producer regression
+cover that state. The device/adapter-hidden workspace reports 1,702 passes
+and 53 ignored, not real GPU qualification. The accepted installed network
+test lands three clipboard seeks through actual audio callbacks and resumes.
+
+Exact checked PR head `bf6a7450` merges at `59fd56e1` with its identical tree.
+All eight PR CI checks pass on attempt 2; attempt 1's x86 dependency-download
+setup was canceled and rerun, with successful sibling jobs retained. Standard
+main-only release hooks pass 60 native X4 and 64 native ONE X2 checks. The dry
+run records one CPU workqueue warning, with no observed AMD/reset or OOM entry;
+the execution records no new kernel entries. Neither proves the earlier desktop
+freeze's cause or that the warning is harmless. Source `07edcdec747af38633eb8ec3c03497763f75c2d6`
+changes only version metadata after the reviewed fix; dependency sources regenerate
+identically in that transaction.
+
+Release run `37981815393` passes both signed builds, CI and payload assembly.
+Publication attempt 1 fails to find the newly created empty draft. A failed-job-only
+retry succeeds with the exact existing signed payload, followed by Pages deployment
+`37985692598`. No rebuild, tag replacement or divergent asset overwrite occurs.
+The first local audit rejects a stale public 0.3.2 marker; a fresh canonical HTTPS
+fetch subsequently matches the signed 0.3.3 record. Both attempts are retained.
+
+- x86_64 app commit: `fc5fe232a94bbe14ee49acece9b41dcc6b9a06e5a2fc3d7e3f9e8cf98dce4868`.
+- x86_64 executable SHA256: `1339e0f13ce89a07048b1708c73dafa8ed2b97820aa4a2df03243d0c62d63541`.
+- aarch64 app commit: `433f7661489d3f8b8129f9a8f266103f94430a43eb1c87c36f107389559b0100`.
+- aarch64 executable SHA256: `e345fe42a0f06d98c25290e8d39e1291d2e2afe27db6df9a0e713ccfe20ea2c5`.
+
+Both app/Debug commits, bundle bytes, source/version record, license, metainfo,
+permissions, architecture and FFmpeg 7 linkage verify against the preexisting
+production public key. The public signed summary includes both architecture
+app and AppStream refs. This is not ARM installation or playback qualification.
+The x86 bundle installs with exit zero but preserves the disabled test-origin
+name. An explicit reinstall from the existing canonical `kjerag` remote selects
+the same signed commit and restores normal updates, also with exit zero.
+The public key, shared runtimes and manifest permissions remain unchanged.
+The subsequent normal channel update reports "Nothing to update" and preserves
+the same commit. The signed 0.3.2 rollback and accepted local fix remain retained.
+
+The installed X4 suite passes 50 checks and ONE X2 passes 54. Both moving pictures
+from each suite are inspected. Each records no new kernel entries and zero scoped
+OOM/limit and CPU-throttling counters. Existing sound-device, import-fault,
+exact-view and X4 single-file-pair skips remain. These are functional checks, not
+physical-scanout, audible-continuity or capacity measurements. Issue #186 and the
+240-capacity goal remain open. The separately requested hover-bar picture jump
+is excluded. Private evidence remains in
+`.worktrees/release-0.3.2-20261009/scratch/release-0.3.3-20261009/` and
+`scratch/play-not-playing-20261009-01/` beneath the same checkout.
+
+## Signed 0.3.2 delivery, October 9 (historical)
 
 The owner authorized merging #254 and publishing 0.3.2. Exact checked head
 `9d1cc710` passes both eight-job CI executions; merged main `efdd18a9` has its
