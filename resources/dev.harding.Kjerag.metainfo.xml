@@ -147,6 +147,7 @@
   </screenshots>
 
   <releases>
+    <release version="0.3.3" type="development" date="2026-10-09"/>
     <release version="0.3.2" type="development" date="2026-10-09"/>
     <release version="0.3.1" type="development" date="2026-09-12"/>
     <release version="0.3.0" type="development" date="2026-09-12"/>
