@@ -80,8 +80,14 @@ passed. Its original workflow remains failed. The owner-authorized recovery
 independently authenticated the unchanged same-run payload against the existing
 channel trust key, uploaded without replacement, downloaded and compared all
 four files, published, then deployed the exact signed repository through PR #255.
-No rebuild, tag replacement or new signing occurred. Issue #256 fixes future
-automation; rerunning the old tag's workflow still uses its old workflow source.
+No rebuild, tag replacement or new signing occurred. Issue #256 fixes those
+trust-handoff and draft-discovery paths; rerunning the old tag's workflow still
+uses its old workflow source. The next two releases, 0.3.3 and 0.3.4, expose a
+remaining first-attempt failure: a draft is created but the immediate lookup
+says "created release cannot be found". Publication-only retries succeed with
+the original signed artifacts. That separate defect remains tracked in #263;
+its exact lookup-failure cause is not established. Preserve the failed attempt
+and retry only failed jobs, not builds, tags or differing public assets.
 
 Before a release-workflow change is ready, exercise its native builds and
 artifact handoffs without publication:

@@ -30,7 +30,7 @@ changes no released code, accepted picture or performance qualification.
 
 ## Current delivery
 
-October 9 hover-bar follow-up ([#261](https://github.com/aeharding/kjerag/issues/261)):
+October 9 hover-bar release ([#261](https://github.com/aeharding/kjerag/issues/261)):
 the unchanged, authenticated 0.3.3 Flatpak reproduces the owner's picture jump.
 The stock header consumes 48 logical pixels; its appearance changes the video
 rectangle from 1280x720 to 1280x672 at y=48 while the camera stays unchanged.
@@ -48,10 +48,41 @@ Formatting, workspace Clippy, vendor warnings and source/name checks pass.
 The full native X4 UI suite passes 60 checks, with no new kernel entries or
 scoped memory-limit events. The owner tests the frozen branch executable
 (`a67f6506` runtime source, SHA256 `723a745d7a89`) and accepts it as "looks good",
-requesting normal review and merge. Review finds no outstanding defects and
-both CI architectures pass. The SDK package is still building; the installed
-0.3.3 Flatpak remains unchanged and this fix is not yet released. These are
-functional UI results, not a new playback-capacity qualification.
+requesting normal review and merge. Review of the fix finds no outstanding
+defects; all eight exact-head CI jobs pass. PR
+[#262](https://github.com/aeharding/kjerag/pull/262) merges at `f7eade02` with a
+tree identical to the checked head. The exact-runtime-source SDK candidate
+passes 50 X4 app-path UI checks before publication, with actual moving pictures
+inspected. Standard native release hooks pass 60 X4 and 64 ONE X2 checks.
+Tag `0.3.4` names `20bd8a8c`; only version/lock/metainfo metadata changes after
+the reviewed merge, and the offline source list regenerates identically.
+
+Both signed builds, tagged-source CI and assembly pass. Initial publication
+fails after creating an empty draft with "created release cannot be found";
+publication-only retry succeeds with the original signed artifacts. The failed
+attempt is retained, not relabeled green. This remaining publisher defect is
+tracked separately in [#263](https://github.com/aeharding/kjerag/issues/263).
+Both architectures' exact download/channel app and Debug commits, canonical
+HTTPS release record, permissions, license, metainfo and FFmpeg linkage
+authenticate against the preexisting release key. No ARM execution is claimed.
+
+Signed 0.3.4 installs at x86_64 commit `5f4935d4c47f`, executable SHA256
+`602d7ea5ed09`, preserving the canonical signed `kjerag` update origin, shared
+runtimes, manifest permissions and trust. Verified 0.3.3 is retained for rollback.
+The normal app-only channel update retains the exact bundle commit. Canonical
+HTTPS summary bytes and their signature container match the authenticated sealed
+publication; both architectures' public app and AppStream refs are present.
+Actual-installed suites pass 50 X4 and 54 ONE X2 functional checks, with both
+moving pictures from each inspected. The original hover-bar regression passes
+all three actual pointer wakes on each camera, retaining full-window projection
+and unchanged camera values. Scoped memory-limit/OOM and CPU-quota-throttling
+counters are zero. Existing sound-device, preload-import, exact-view and X4
+single-file-pair skips remain. During the ONE X2 suite, the kernel logs an AMD
+display `REG_WAIT` timeout around a dock/monitor connection, followed by hotplug
+messages. No desktop-freeze cause or harmless-warning verdict is established;
+further GPU runs stop pending desktop-health confirmation. These are functional
+UI results, not a new playback-capacity, universal network-smoothness or
+all-camera qualification.
 
 October 9 follow-up ([#258](https://github.com/aeharding/kjerag/issues/258)):
 the owner's actual 0.3.2 Play failure is traced to an
