@@ -6,10 +6,16 @@
 # Usage: bash scripts/uitest-controls-wake.sh <file.insv> [time=... yaw=... ...]
 # KJERAG_BIN and KJERAG_POINTER may name frozen same-checkout test binaries.
 # KJERAG_FLATPAK=dev.harding.Kjerag selects the installed Flatpak instead.
+# KJERAG_WAKE_CHECK=projection checks stable window-pixel projection during
+# the same actual pointer wakes, instead of redraw-pump timing.
 set -euo pipefail
 ulimit -c 0
 
 task_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+case ${KJERAG_WAKE_CHECK:-pump} in
+    pump | projection) ;;
+    *) echo 'KJERAG_WAKE_CHECK must be pump or projection' >&2; exit 2 ;;
+esac
 
 if [[ ${1:-} == --client ]]; then
     shift
@@ -151,7 +157,13 @@ if [[ ${1:-} == --client ]]; then
     # coordinates guarantees a new motion event even on an unchanged view.
     for task_x in 620 640 660; do
         sleep 3
+        if [[ ${KJERAG_WAKE_CHECK:-pump} == projection ]]; then
+            grim -o HEADLESS-1 "$task_dir/hidden-$task_x.png"
+        fi
         "$KJERAG_POINTER" 1280 720 "$task_x" 350 >> "$task_dir/pointer.log" 2>&1
+        if [[ ${KJERAG_WAKE_CHECK:-pump} == projection ]]; then
+            grim -o HEADLESS-1 "$task_dir/shown-$task_x.png"
+        fi
     done
     sleep 2
     # Preserve memory accounting for this exact private player, not another
@@ -276,6 +288,12 @@ if (( task_cage_status != 0 )); then
     exit "$task_cage_status"
 fi
 task_status=0
+if [[ ${KJERAG_WAKE_CHECK:-pump} == projection ]]; then
+    python3 "$task_root/scripts/check-hover-layout.py" "$task_dir/play.log" \
+        > "$task_dir/result.json" || task_status=$?
+    cat "$task_dir/result.json"
+    exit "$task_status"
+fi
 python3 "$task_root/scripts/check-controls-wake.py" "$task_dir/play.log" \
     > "$task_dir/result.json" || task_status=$?
 cat "$task_dir/result.json"

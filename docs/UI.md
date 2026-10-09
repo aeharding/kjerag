@@ -433,6 +433,15 @@ movement anywhere in the window brings both back, via a global
 `event::listen_with` subscription mapping `CursorMoved` to a `ShowControls`
 message (`src/main.rs:2119`).
 
+The picture stays fixed in window coordinates through that transition
+(owner report, issue #261). COSMIC's stock template still lays the header out
+above the content; Kjerag's video-only `window_video` wrapper projects against
+the full logical window viewport and clips to the visible content rectangle.
+The header covers the top of the view instead of moving its center or changing
+its aspect ratio. Drag and cursor-anchored zoom use the same full-window
+projection, with new grabs and wheels restricted to visible video. No header
+height is hard-coded, and a real window resize updates both coordinates.
+
 The part that is easy to get wrong: **the controls do not hide while
 paused.** cosmic-player never states this, it falls out of the wiring. The
 hide check only runs on `Message::NewFrame` (`src/main.rs:1613-1628`), and
