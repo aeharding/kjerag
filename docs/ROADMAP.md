@@ -37,8 +37,16 @@ therefore waits indefinitely despite six completed successor pictures. The
 `fix/audio-empty-reset` branch finishes silence-target fades when PCM runs out,
 preserving ordinary running gain, epoch rejection, timestamps and all stitching
 arithmetic. New callback and Player/independent-producer regressions cover the
-observed failure. Qualification and an installed branch retest remain pending;
-this is not yet a released fix or a general network-smoothness claim.
+observed failure. The device/adapter-hidden workspace reports 1,702 passes with
+53 ignored; unavailable-GPU paths are not hardware coverage. The exact-source
+SDK candidate passes 50 X4 and 54 ONE X2 functional app-path checks, then is
+installed through an owner-approved separate signed local test origin. Normal
+automatic updates are paused for that test; official release signature trust
+and the signed rollback remain intact. An actual-installed original network-clip
+check uses real audio callbacks routed to a null sink, lands three clipboard
+seeks and continues playback without counted underruns, new kernel entries or
+scoped memory-limit events. Owner branch retest and PR publication remain
+pending. This is not yet a released fix or a general network-smoothness claim.
 
 October 9: **0.3.2 is published and installed**, following the owner's October 8
 acceptance of `c524ad0e` as "acceptable enough for release" and explicit merge/
