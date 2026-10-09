@@ -30,12 +30,30 @@ changes no released code, accepted picture or performance qualification.
 
 ## Current delivery
 
+October 9 hover-bar follow-up ([#261](https://github.com/aeharding/kjerag/issues/261)):
+the unchanged, authenticated 0.3.3 Flatpak reproduces the owner's picture jump.
+The stock header consumes 48 logical pixels; its appearance changes the video
+rectangle from 1280x720 to 1280x672 at y=48 while the camera stays unchanged.
+The owner confirms the recorded down/up jump. The candidate keeps the stock
+COSMIC shell and projects only its video against the full window viewport,
+clipping to the visible content. Mouse rays use the same projection; header
+input cannot start a video grab or zoom. There is no media or stitching change.
+Three device-hidden widget regressions pass for draw/input agreement, changing
+header heights, header hit testing and real window resizing. The actual-input
+regression rejects all three released header transitions, then passes three
+actual pointer wakes on each of X4 Air and ONE X2, with captured stock headers
+and no new kernel entries. The device/driver-hidden workspace reports 1,705
+passes and 53 ignored; unavailable-GPU paths are not hardware test coverage.
+Formatting, workspace Clippy, vendor warnings and source/name checks pass.
+The broader UI check and owner branch acceptance remain pending; this fix is
+not installed or released.
+
 October 9 follow-up ([#258](https://github.com/aeharding/kjerag/issues/258)):
 the owner's actual 0.3.2 Play failure is traced to an
 empty audio ring retaining nonzero gain during a pending reset. The callback
 cannot fade without PCM, while the reset refuses refill; coordinated playback
 therefore waits indefinitely despite six completed successor pictures. The
-The fix finishes silence-target fades when PCM runs out,
+fix finishes silence-target fades when PCM runs out,
 preserving ordinary running gain, epoch rejection, timestamps and all stitching
 arithmetic. New callback and Player/independent-producer regressions cover the
 observed failure. The device/adapter-hidden workspace reports 1,702 passes with

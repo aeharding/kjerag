@@ -48,7 +48,7 @@ use cosmic::iced::keyboard::key::{Key, Physical};
 use cosmic::iced::keyboard::{Event as KeyEvent, Modifiers};
 use cosmic::iced::mouse::Event as MouseEvent;
 use cosmic::iced::runtime::clipboard;
-use cosmic::iced::widget::{Stack, shader};
+use cosmic::iced::widget::Stack;
 use cosmic::iced::window::{self, Mode};
 use cosmic::iced::{Alignment, Length, Limits, Subscription, time};
 use cosmic::widget::about::About;
@@ -1538,13 +1538,9 @@ impl App {
     /// is what leaves it for this `mouse_area`
     /// (`kjerag_render`'s widget, `ButtonPressed`).
     fn playing<'a>(&'a self, open: &'a Open) -> Element<'a, Message> {
-        let video = widget::mouse_area(
-            shader::Shader::new(&open.scene)
-                .width(Length::Fill)
-                .height(Length::Fill),
-        )
-        .on_press(Message::VideoAreaClick)
-        .on_double_press(Message::Fullscreen);
+        let video = widget::mouse_area(crate::window_video::view(&open.scene))
+            .on_press(Message::VideoAreaClick)
+            .on_double_press(Message::Fullscreen);
         let stage = widget::container(video)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -1945,6 +1941,8 @@ fn applied_optical_flow(saved: bool, available: bool) -> bool {
 /// failure puts in the alert is `crate::fail`'s, and tested there.
 #[cfg(test)]
 mod tests {
+    use cosmic::iced::widget::shader;
+
     use super::*;
 
     fn prepared_message(task: Task<Message>) -> Message {

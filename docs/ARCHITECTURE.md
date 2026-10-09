@@ -49,6 +49,14 @@ decode delivery, and `kjerag-meta`'s
 the shader widget traits to live beside renderer-owned types. Engine code does
 not report directly to the pilot.
 
+The shell's [`window_video.rs`](../crates/app/src/window_video.rs) wraps the
+video shader only. Drawing and mouse rays use the current logical window
+viewport, while a scissor clips drawing to the content space left by stock
+COSMIC chrome. The header can appear or auto-hide without moving or rescaling
+the picture. A press or wheel over the header still cannot grab or zoom the
+video. The wrapper caches no window or header dimensions and changes no media,
+stitching, color or redraw scheduling.
+
 ## Capture admission and camera selection
 
 The shell prepares file opens on one background worker, with one replaceable

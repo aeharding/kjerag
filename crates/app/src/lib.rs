@@ -22,6 +22,7 @@ mod menu;
 mod opening;
 mod shot;
 mod strings;
+mod window_video;
 
 /// What the desktop and both cosmic-config directories call this app.
 ///
