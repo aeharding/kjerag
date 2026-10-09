@@ -2240,6 +2240,67 @@ mod tests {
     }
 
     #[test]
+    fn completed_video_resumes_after_seeking_with_an_empty_live_audio_ring() {
+        use crate::audio::Pipe;
+        use crate::audio_worker::tests as producer;
+        let pipe = Pipe::new(1000, 1, Duration::from_millis(500));
+        pipe.set_volume(0.2);
+        let old = pipe.epoch();
+        pipe.write_in(&old, &[0.5; 20], Duration::from_millis(20));
+        pipe.fill(&mut [0.0; 20], Some(Duration::ZERO));
+        assert_eq!(pipe.room(), Duration::from_millis(500));
+        let fresh = pipe.invalidate();
+        let (worker, _) = producer::fixture(pipe.clone());
+
+        let mut bench = Bench::new();
+        bench.player.audio_control = Some(worker.control());
+        assert!(
+            bench
+                .player
+                .set_presentation_policy(PresentationPolicy::SequentialRealtime)
+        );
+        bench.player.play();
+        let start = Instant::now();
+        bench.decoded(0, 4269);
+        bench.player.pump(start).unwrap();
+        let position = bench.player.position(start);
+        worker
+            .seek(position.as_micros() as i64, Some(fresh.clone()))
+            .unwrap();
+        bench
+            .player
+            .coordinate_buffering(
+                start,
+                true,
+                Player::RECOVERY_SUCCESSORS,
+                false,
+                false,
+                Waker::noop().clone(),
+            )
+            .unwrap();
+        assert!(bench.player.is_buffering());
+        pipe.fill(&mut [0.0; 20], None);
+        producer::until(|| pipe.buffered_through(position, NTSC * 2));
+        let later = start + Duration::from_secs(10);
+        bench
+            .player
+            .coordinate_buffering(
+                later,
+                true,
+                Player::RECOVERY_SUCCESSORS,
+                false,
+                false,
+                Waker::noop().clone(),
+            )
+            .unwrap();
+        assert!(!bench.player.is_buffering());
+        assert_eq!(bench.player.position(later), position);
+        assert!(pipe.is_current(&fresh));
+        assert!(!pipe.is_current(&old));
+        assert_eq!(pipe.health().dropped, 0);
+    }
+
+    #[test]
     fn filtered_progress_report_does_not_claim_physical_present_or_redraw_rates() {
         let stats = Stats {
             presented: 60,

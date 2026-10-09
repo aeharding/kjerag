@@ -30,6 +30,28 @@ changes no released code, accepted picture or performance qualification.
 
 ## Current delivery
 
+October 9 follow-up ([#258](https://github.com/aeharding/kjerag/issues/258)):
+the owner's actual 0.3.2 Play failure is traced to an
+empty audio ring retaining nonzero gain during a pending reset. The callback
+cannot fade without PCM, while the reset refuses refill; coordinated playback
+therefore waits indefinitely despite six completed successor pictures. The
+`fix/audio-empty-reset` branch finishes silence-target fades when PCM runs out,
+preserving ordinary running gain, epoch rejection, timestamps and all stitching
+arithmetic. New callback and Player/independent-producer regressions cover the
+observed failure. The device/adapter-hidden workspace reports 1,702 passes with
+53 ignored; unavailable-GPU paths are not hardware coverage. The exact-source
+SDK candidate passes 50 X4 and 54 ONE X2 functional app-path checks, then is
+installed through an owner-approved separate signed local test origin. Normal
+automatic updates are paused for that test; official release signature trust
+and the signed rollback remain intact. An actual-installed original network-clip
+check uses real audio callbacks routed to a null sink, lands three clipboard
+seeks and continues playback without counted underruns, new kernel entries or
+scoped memory-limit events. The owner reports "seems fine so far" and explicitly
+authorizes shipping without waiting for extended intermittent validation.
+Merge, CI and release qualification remain pending. This is not yet a released
+fix or a general network-smoothness claim. The separately requested hover-bar
+picture-jump fix is not included.
+
 October 9: **0.3.2 is published and installed**, following the owner's October 8
 acceptance of `c524ad0e` as "acceptable enough for release" and explicit merge/
 publication approval. Cumulative PR [#254](https://github.com/aeharding/kjerag/pull/254)
