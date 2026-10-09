@@ -53,19 +53,35 @@ from it. Cache contents and matrix execution order do not select release refs.
 **Both routes use the same signed app commits** (issue #146). The complete
 repository, bundles and checksums receive a signed publication manifest before
 either destination is eligible. Publication jobs independently verify that
-manifest against the signing job's public key and expected source/tag. Neither
-publishing job needs a private key. The builder and assembler still need
+manifest against the signing job's public key and expected source/tag. That
+public-only key travels in a separately named, same-run `release-signing-key`
+artifact (or `validation-signing-key` on dispatch), not in the publication
+payload and not as a job output. GitHub's secret filter suppressed the public
+key job output in the production 0.3.2 run. The
+expected signing fingerprint remains independently supplied by the signing job.
+Neither publishing job needs a private key. The builder and assembler still need
 `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE`; a missing key or failed architecture
 withholds the entire release, not an unsigned or single-architecture fallback.
 
 GitHub receives `kjerag-0.2.0-x86_64.flatpak`,
 `kjerag-0.2.0-aarch64.flatpak` and a `.flatpak.sha256` for each. The publisher
-checks the remote tag's exact commit, creates a draft with generated notes,
+checks the remote tag's exact commit, discovers drafts through the authenticated
+paginated release list when the by-tag endpoint returns 404, creates a draft
+with generated notes,
 uploads only missing files, and downloads all four to verify their bytes before
 publishing. Existing differing assets are refused, never overwritten. Only a
 successful Release job permits the signed channel deployment at
 `https://kjerag.harding.dev/`. Those two destinations are not atomic: a Pages
 failure leaves a valid Release available and the previous channel in place.
+
+The first production single-build release, 0.3.2, exposed both the filtered
+public-key output and draft-lookup defects after both signed builds and sealing
+passed. Its original workflow remains failed. The owner-authorized recovery
+independently authenticated the unchanged same-run payload against the existing
+channel trust key, uploaded without replacement, downloaded and compared all
+four files, published, then deployed the exact signed repository through PR #255.
+No rebuild, tag replacement or new signing occurred. Issue #256 fixes future
+automation; rerunning the old tag's workflow still uses its old workflow source.
 
 Before a release-workflow change is ready, exercise its native builds and
 artifact handoffs without publication:

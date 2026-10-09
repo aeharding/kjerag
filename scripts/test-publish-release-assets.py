@@ -64,11 +64,29 @@ if args[:1] == ["api"]:
             print(json.dumps({"message": "broken", "status": state["api_error"]}))
             save()
             sys.exit(1)
-        if not state["exists"]:
+        # The real by-tag endpoint hides drafts, even from their author.
+        if not state["exists"] or state["draft"]:
             print(json.dumps({"message": "Not Found", "status": "404"}))
             save()
             sys.exit(1)
         print(json.dumps(release_value()))
+    elif endpoint.endswith("/releases?per_page=100"):
+        assert "--paginate" in args and "--slurp" in args
+        if state.get("list_error"):
+            print(json.dumps({"message": "list failed", "status": "500"}))
+            save()
+            sys.exit(1)
+        if state.get("invalid_pages"):
+            print(json.dumps({"not": "pages"}))
+        else:
+            # Use two pages and an unrelated release to exercise exact-tag
+            # discovery rather than relying on the first item/page.
+            pages = [[{"tag_name": "unrelated", "draft": False}]]
+            matches = [release_value()] if state["exists"] else []
+            if state.get("duplicate_drafts"):
+                matches += matches
+            pages.append(matches)
+            print(json.dumps(pages))
     else:
         raise SystemExit("unexpected api endpoint")
 elif args[:2] == ["release", "create"]:
@@ -205,6 +223,29 @@ class PublishReleaseAssetsTest(unittest.TestCase):
         self.assertFalse(
             any(command[:2] == ["release", "edit"] for command in commands)
         )
+
+    def test_authenticated_list_discovers_draft_hidden_by_tag_endpoint(self) -> None:
+        self._install_remote(NAMES[:2])
+        result = self._run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = self._read_state()
+        self.assertFalse(state["draft"])
+        self.assertTrue(any(command[1].endswith("/releases?per_page=100")
+                            for command in state["commands"] if command[:1] == ["api"]))
+        self.assertFalse(any(command[:2] == ["release", "create"] for command in state["commands"]))
+
+    def test_draft_list_errors_fail_before_writes(self) -> None:
+        for failure in ("list_error", "invalid_pages", "duplicate_drafts"):
+            with self.subTest(failure=failure):
+                self.state.update({"exists": True, "commands": []})
+                for option in ("list_error", "invalid_pages", "duplicate_drafts"):
+                    self.state.pop(option, None)
+                self.state[failure] = True
+                self._write_state()
+                result = self._run()
+                self.assertNotEqual(result.returncode, 0)
+                commands = self._read_state()["commands"]
+                self.assertFalse(any(command[:1] == ["release"] for command in commands))
 
     def test_partial_draft_resumes_only_missing_assets(self) -> None:
         present = NAMES[:2]

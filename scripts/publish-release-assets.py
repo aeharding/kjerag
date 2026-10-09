@@ -143,9 +143,32 @@ def verify_tag(version: str, source: str, repository: str) -> None:
 
 
 def release(version: str, repository: str) -> dict | None:
-    return gh_json(
+    published = gh_json(
         ["api", f"repos/{repository}/releases/tags/{version}"], allow_404=True
     )
+    if published is not None:
+        return published
+    # GitHub's by-tag endpoint hides drafts, including a draft just created
+    # by this authenticated caller. The authenticated list includes them.
+    result = run_gh(
+        ["api", f"repos/{repository}/releases?per_page=100", "--paginate", "--slurp"]
+    )
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or "no error text"
+        fail(f"gh failed: {detail}")
+    try:
+        pages = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        fail("gh returned invalid release pages")
+    if not isinstance(pages, list) or any(
+        not isinstance(page, list) or any(not isinstance(item, dict) for item in page)
+        for page in pages
+    ):
+        fail("gh returned invalid release pages")
+    matches = [item for page in pages for item in page if item.get("tag_name") == version]
+    if len(matches) > 1:
+        fail(f"more than one release uses tag {version}")
+    return matches[0] if matches else None
 
 
 def release_assets(
