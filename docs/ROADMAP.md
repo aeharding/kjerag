@@ -30,6 +30,16 @@ changes no released code, accepted picture or performance qualification.
 
 ## Current delivery
 
+October 8 release preparation: the owner accepts the currently installed
+`c524ad0e` playback build as "acceptable enough for release". Prepare its
+cumulative selected playback fixes for merge and a 0.3.2 patch release, without
+adding an untested runtime change or the parked color optimization. All eight
+CI jobs pass on the preceding final documentation head `ba084bc5`. The signed
+dual-architecture publication gates still apply. This acceptance does not
+close #186, certify all network conditions or meet the 240-capacity target;
+the scoped 188-redraw/s result and occasional buffering hold remain recorded.
+No new release is published at this checkpoint.
+
 PR [#183](https://github.com/aeharding/kjerag/pull/183) is the cumulative GPU
 stitching delivery. It merged at `53ecc929` after all six fresh CI checks passed
 on final cleanup head `2afef25c`, followed by 50 native X4 UI checks. Tag
@@ -193,8 +203,10 @@ progression returns near 30 advances/s. Normal exit, actual executable identity,
 output pixels and postflight with no new kernel entries or pressure averages
 are verified. Whole-run cadence integrity remains false; no audible-continuity,
 physical-scanout, universal network-stutter or 240-capacity verdict is inferred.
-The installed build is ready for the owner's ordinary network-playback retest.
-No merge or release. Receipt: `runtime/completed-runway-installed-moab003-outage-01`
+The owner subsequently accepts this installed build for release preparation
+on October 8. This does not erase the additional hold or qualify general
+smoothness. No merge or release at that checkpoint. Receipt:
+`runtime/completed-runway-installed-moab003-outage-01`
 under `scratch/playback-independent-20260927/`.
 
 Packaged ONE X2 ordinary playback at the reported riser view also maintains

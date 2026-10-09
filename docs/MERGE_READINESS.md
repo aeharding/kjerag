@@ -13,7 +13,26 @@ with a [research navigation index](research/README.md). The shared playback
 slowdown, native/Flatpak differences and frame-time spikes are tracked in
 [issue #186](https://github.com/aeharding/kjerag/issues/186).
 
-## Current private test package, October 3
+## Accepted playback release candidate, October 8
+
+After returning to the installed build, the owner reports "seems acceptable
+enough for release" on October 8. This satisfies the branch-player acceptance
+gate for the currently installed runtime source `c524ad0e`, not a claim that
+all microstutters are gone. Prepare the cumulative selected playback changes
+for merge and a 0.3.2 patch release without changing their runtime code.
+The 240-capacity target, frame-time spikes and broader network verification
+remain open in #186. Publication and signed-package qualification are separate
+gates; no new release has been published at this checkpoint.
+
+All eight CI jobs pass on documentation head
+`ba084bc585ea22dc112ece6f28a112e80f49b77e`, run `37146840123`.
+The selected cumulative chain is #233, #235, #236, #238, #240, #241, #242,
+#243, #248, #249, #250, #252, #253 and #254. Alternative experiments #234,
+#245, #246 and #247 are not selected for this release. The two uncommitted
+periodic-color files remain excluded, exactly as in the accepted installed
+package. Both signed architectures must succeed before publication.
+
+### Current installed test package, October 3
 
 Runtime source `c524ad0e48e12922b11b4a6018135bf7201bb74b`, draft
 [PR #254](https://github.com/aeharding/kjerag/pull/254), is installed for the
@@ -21,7 +40,8 @@ owner's network-playback retest. It inherits #252's arithmetic fix and #253's
 startup pipeline preparation, then waits for six completed successor pictures
 after an actual buffering hold. The owner explicitly accepts roughly 300 MiB
 extra GPU allocation and potentially longer recovery holds for this test.
-This is tradeoff/installation approval, not acceptance of the playback result.
+That October 3 approval was for testing; the October 8 playback acceptance
+above is the later release-preparation decision.
 The working `039c0a31` package is retained for rollback.
 
 - Installed OSTree: `53263015fe291e43e401402250e664355118bd76a9c44d635845d3e30d0d96e7`.
@@ -37,8 +57,9 @@ hold. Both holds resume; warm source progression returns near 30 advances/s.
 The run exits normally with no new kernel entries or memory-pressure averages.
 Its output image is inspected. Whole-run cadence integrity remains false;
 this is not audible-continuity, physical-scanout, 240-capacity or general
-network-stutter qualification. Owner field retest and the broader goal remain
-open. No merge or release. Actual-installed receipt:
+network-stutter qualification. The owner now accepts the installed result for
+release preparation; the broader goal remains open. No merge or release has
+occurred at this checkpoint. Actual-installed receipt:
 `runtime/completed-runway-installed-moab003-outage-01` under the evidence root
 `scratch/playback-independent-20260927/`.
 
@@ -139,8 +160,9 @@ Accepted test tradeoffs are about 266–348 MiB more GPU allocation in retained
 snapshots and potentially longer recovery holds while the runway fills. These are not
 peak-memory measurements. The owner's October 3 "sure" explicitly approves
 installation with those disclosed tradeoffs; playback-result acceptance is
-not inferred. The candidate is installed. Owner branch retest, the 240-capacity
-target and broader network-stutter verification remain due. No merge, release, graphics
+not inferred from that earlier approval. The October 8 owner verdict accepts
+the installed candidate for release preparation. The 240-capacity target and
+broader network-stutter verification remain due. No merge, release, graphics
 runtime or system setting change. Receipts: `scratch/flatpak-delivery-c524ad0e/`
 and `scratch/playback-independent-20260927/runtime/completed-runway-*`.
 

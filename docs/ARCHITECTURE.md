@@ -348,8 +348,9 @@ reserves up to six ready corrected frames plus one installed frame in the
 installed completed-runway test source `c524ad0e`. Player may prepare nine real
 successors, including while paused for startup or seek. The preceding retained
 source `039c0a31` uses four ready outputs and six prepared successors. The owner
-accepts the larger retention and potentially longer holds for testing, not a
-general playback or memory-peak qualification.
+accepts the larger retention and potentially longer holds for testing, then
+accepts the installed result for release preparation on October 8. This is not
+a general playback, 240-capacity or memory-peak qualification.
 One temporal executor and its capacity-one channel are shared across restarts;
 seeking does not create another worker thread. Superseded epochs cancel and
 release unpublished history when their executing work permits, while the old
