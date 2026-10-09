@@ -30,6 +30,16 @@ changes no released code, accepted picture or performance qualification.
 
 ## Current delivery
 
+October 9 follow-up: the owner's actual 0.3.2 Play failure is traced to an
+empty audio ring retaining nonzero gain during a pending reset. The callback
+cannot fade without PCM, while the reset refuses refill; coordinated playback
+therefore waits indefinitely despite six completed successor pictures. The
+`fix/audio-empty-reset` branch finishes silence-target fades when PCM runs out,
+preserving ordinary running gain, epoch rejection, timestamps and all stitching
+arithmetic. New callback and Player/independent-producer regressions cover the
+observed failure. Qualification and an installed branch retest remain pending;
+this is not yet a released fix or a general network-smoothness claim.
+
 October 9: **0.3.2 is published and installed**, following the owner's October 8
 acceptance of `c524ad0e` as "acceptable enough for release" and explicit merge/
 publication approval. Cumulative PR [#254](https://github.com/aeharding/kjerag/pull/254)

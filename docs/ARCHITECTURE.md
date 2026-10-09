@@ -569,8 +569,13 @@ explicitly in both architecture CI jobs; no footage or sound device is required.
 A seek invalidates audio writes under the ring lock before returning to the
 UI. That authorization travels with the video seek command and the audio
 decoder; an older in-flight packet or superseded seek cannot refill the new
-ring. The existing callback, gain fades, resampling and splice arithmetic in
-[`audio.rs`](../crates/media/src/audio.rs) remain unchanged.
+ring. In [`audio.rs`](../crates/media/src/audio.rs), an empty ring whose gain
+target is silence finishes its fade and any pending reset without waiting for
+nonexistent old PCM. Otherwise a seek could leave `stale` set forever, blocking
+both audio refill and the coordinated picture/sound restart. Pause retains
+consumed history for the existing resumed-PTS rewind; a seek clears it. Ordinary
+running refill retains its gain. Epoch rejection, fade duration, resampling and
+splice thresholds are unchanged.
 
 The presentation clock remains based on container PTS. Its published `Beat`
 anchor is extrapolated by the audio callback without needing redraw ticks.

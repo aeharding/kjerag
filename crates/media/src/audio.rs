@@ -527,6 +527,16 @@ impl Buffer {
             self.drop_front(1);
             written += 1;
         }
+        // A stopped/reset empty ring is already silent. No old sample remains
+        // to fade, so do not leave gain waiting for a sample that a stale ring
+        // refuses to accept. Zero gain also lets pause/resume rewind retained
+        // PCM. Keep the ordinary running gain when refill can still arrive.
+        if self.frames == 0 && target == 0.0 {
+            self.gain = 0.0;
+            if self.stale {
+                self.clear();
+            }
+        }
         // A callback the ring could not fill while the picture was moving is a
         // hole in the sound, and an empty ring is one however far out its head
         // was: a ring that has run dry behind a splice never reaches the ramp
@@ -592,6 +602,82 @@ mod tests {
         assert!(!pipe.buffered_through(Duration::ZERO, Duration::ZERO));
         pipe.fill(&mut frames(480, 0.0), None);
         assert!(!pipe.buffered_through(Duration::ZERO, Duration::ZERO));
+    }
+
+    #[test]
+    fn a_seek_after_audio_runs_dry_allows_fresh_samples_to_refill() {
+        let pipe = Pipe::new(RATE, CHANNELS, Duration::from_millis(500));
+        pipe.set_volume(0.2);
+        let old = pipe.epoch();
+        let origin = Duration::from_secs(4);
+        pipe.write_in(&old, &frames(480, 0.5), origin + at(480));
+        let mut out = frames(512, 0.0);
+        pipe.fill(&mut out, Some(origin));
+        assert!(out.iter().any(|sample| *sample > 0.0));
+        assert_eq!(pipe.room(), Duration::from_millis(500));
+
+        let fresh = pipe.invalidate();
+        pipe.fill(&mut out, None);
+        assert!(out.iter().all(|sample| *sample == 0.0));
+        assert_eq!(pipe.room(), Duration::from_millis(500));
+        let held = Duration::from_millis(142_442);
+        pipe.write_in(&old, &frames(4_800, 0.9), held + at(4_800));
+        assert!(!pipe.buffered_through(held, at(3_200)));
+        pipe.write_in(&fresh, &frames(4_800, 0.25), held + at(4_800));
+        assert!(pipe.buffered_through(held, at(3_200)));
+        pipe.fill(&mut out, Some(held));
+        assert!(out[0] > 0.0 && out[0] < 0.25 * 0.2);
+        assert_eq!(out[out.len() - 1], 0.25 * 0.2);
+        assert_eq!(pipe.health().dropped, 0);
+    }
+
+    #[test]
+    fn a_seek_fade_finishes_when_its_remaining_samples_run_out() {
+        let pipe = Pipe::new(RATE, CHANNELS, Duration::from_millis(500));
+        pipe.set_volume(0.2);
+        let origin = Duration::from_secs(4);
+        pipe.write_in(&pipe.epoch(), &frames(544, 0.5), origin + at(544));
+        let mut out = frames(512, 0.0);
+        pipe.fill(&mut out, Some(origin));
+        pipe.invalidate();
+        pipe.fill(&mut out, None);
+        assert!(out[0] > 0.0, "retain the fade over available old samples");
+        assert!(out[32 * CHANNELS..].iter().all(|sample| *sample == 0.0));
+        assert_eq!(pipe.room(), Duration::from_millis(500));
+        assert_eq!(pipe.locked().gain, 0.0);
+        assert_eq!(pipe.locked().past, 0, "a seek cannot retain old history");
+    }
+
+    #[test]
+    fn a_pause_after_audio_runs_dry_can_rewind_retained_samples_on_resume() {
+        let pipe = Pipe::new(RATE, CHANNELS, Duration::from_millis(500));
+        pipe.set_volume(0.2);
+        pipe.write_in(&pipe.epoch(), &frames(480, 0.5), at(480));
+        let mut out = frames(512, 0.0);
+        pipe.fill(&mut out, Some(Duration::ZERO));
+        pipe.fill(&mut out, None);
+        pipe.fill(&mut out, Some(at(240)));
+        assert!(out[0] > 0.0, "resume must reuse the actual retained PCM");
+        assert!(out[0] < 0.5 * 0.2, "resume starts with the existing fade");
+        assert_eq!(pipe.health().offset, 0);
+    }
+
+    #[test]
+    fn running_refill_keeps_its_gain_when_a_callback_empties_the_ring() {
+        let pipe = Pipe::new(RATE, CHANNELS, Duration::from_millis(500));
+        pipe.set_volume(0.2);
+        let epoch = pipe.epoch();
+        pipe.write_in(&epoch, &frames(480, 0.5), at(480));
+        let mut out = frames(480, 0.0);
+        pipe.fill(&mut out, Some(Duration::ZERO));
+        pipe.write_in(&epoch, &frames(480, 0.5), at(960));
+        pipe.fill(&mut out, Some(at(480)));
+        assert_eq!(
+            out[0],
+            0.5 * 0.2,
+            "ordinary refill must not restart its fade"
+        );
+        assert_eq!(pipe.health().underruns, 0);
     }
 
     #[test]
