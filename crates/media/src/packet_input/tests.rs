@@ -6,6 +6,110 @@ use std::time::{Duration, Instant};
 
 const WAIT: Duration = Duration::from_secs(5);
 
+#[test]
+fn diagnostic_snapshot_normalizes_all_lenses_without_consuming_or_rearming() {
+    let (input, mut observer, release, dropped) = blocked_read_ahead();
+    observer.streams = vec![0, 2];
+    observer.start = 900;
+    let packet = |stream, at| {
+        let mut packet = ff::Packet::copy(&[1]);
+        packet.set_stream(stream);
+        packet.set_dts(Some(at));
+        packet.set_pts(Some(at + 3));
+        packet.set_duration(1);
+        packet
+    };
+    let wake = Waker::from(Arc::new(Counter::default()));
+    {
+        let mut state = input.0.state.lock().unwrap();
+        state.packets.clear();
+        state.packets.extend([packet(0, 929), packet(2, 905)]);
+        state.bytes = 2;
+        state.audio.packets.push_back(packet(1, 929));
+        state.audio.bytes = 1;
+        state.read_bytes = Some(9000);
+        state.refill_wait = Some(wake.clone());
+    }
+    let expected = InputBuffer {
+        lead: Duration::from_millis(100),
+        bytes: 3,
+        read_bytes: Some(9000),
+        packets: 3,
+        eof: false,
+    };
+    assert_eq!(
+        observer.snapshot(Duration::from_millis(100)),
+        Some(expected)
+    );
+    assert_eq!(
+        observer.snapshot(Duration::from_millis(100)),
+        Some(expected)
+    );
+    {
+        let state = input.0.state.lock().unwrap();
+        assert_eq!(state.packets.len(), 2);
+        assert!(state.refill_wait.as_ref().unwrap().will_wake(&wake));
+        assert_eq!(
+            observer.snapshot(Duration::ZERO),
+            None,
+            "do not wait on input locks"
+        );
+    }
+    drop(input);
+    release.send(()).unwrap();
+    dropped.recv_timeout(WAIT).unwrap();
+}
+
+#[test]
+fn diagnostic_snapshot_marks_eof_but_never_hides_input_errors() {
+    let (input, observer, release, dropped) = blocked_read_ahead();
+    input.0.state.lock().unwrap().terminal = Some(Ok(()));
+    assert!(observer.snapshot(Duration::ZERO).unwrap().eof);
+    input.0.state.lock().unwrap().terminal = Some(Err("test input failure".into()));
+    assert_eq!(observer.snapshot(Duration::ZERO), None);
+    drop(input);
+    release.send(()).unwrap();
+    dropped.recv_timeout(WAIT).unwrap();
+}
+
+#[test]
+fn combined_input_uses_the_slowest_file_and_requires_both_eofs() {
+    let first = InputBuffer {
+        lead: Duration::from_secs(2),
+        bytes: 20,
+        read_bytes: Some(200),
+        packets: 2,
+        eof: true,
+    };
+    let second = InputBuffer {
+        lead: Duration::from_secs(1),
+        bytes: 30,
+        read_bytes: Some(300),
+        packets: 3,
+        eof: false,
+    };
+    assert_eq!(
+        first.combined(second),
+        InputBuffer {
+            lead: Duration::from_secs(1),
+            bytes: 50,
+            read_bytes: Some(500),
+            packets: 5,
+            eof: false,
+        }
+    );
+    assert_eq!(
+        first
+            .combined(InputBuffer {
+                read_bytes: None,
+                ..second
+            })
+            .read_bytes,
+        None,
+        "a missing lens-file observation must not look like its IO was idle"
+    );
+}
+
 #[derive(Default)]
 struct Counter(AtomicUsize);
 
@@ -230,6 +334,7 @@ struct Source {
     at: u64,
     end: u64,
     packet_size: usize,
+    read_bytes: u64,
     audio_every: Option<u64>,
     block_at: Option<u64>,
     entered: Sender<()>,
@@ -254,6 +359,7 @@ impl Demux for Source {
             packet.set_stream(usize::from(self.at % every == every - 1));
         }
         self.at += 1;
+        self.read_bytes += self.packet_size as u64;
         Ok(Some(packet))
     }
 
@@ -263,6 +369,10 @@ impl Demux for Source {
         }
         self.at = to as u64;
         Ok(())
+    }
+
+    fn bytes_read(&self) -> Option<u64> {
+        Some(self.read_bytes)
     }
 }
 
@@ -287,6 +397,7 @@ fn source(end: u64, packet_size: usize, block_at: Option<u64>) -> (Source, Contr
             at: 0,
             end,
             packet_size,
+            read_bytes: 0,
             audio_every: None,
             block_at,
             entered,
@@ -316,12 +427,20 @@ fn input_prefetches_without_decoded_delivery_and_serves_a_read_stall_from_cache(
     wait_for(&input.0, |state| state.packets.len() == 4);
     assert_eq!(input.read().unwrap().unwrap().pts(), Some(1));
     control.entered.recv_timeout(WAIT).unwrap();
+    let observer = input.read_ahead(vec![0], ff::Rational(1, 30), 0);
+    assert_eq!(
+        observer.snapshot(Duration::ZERO).unwrap().read_bytes,
+        Some(5)
+    );
 
     // File reading is now blocked. Previously prefetched compressed packets
     // remain usable without waiting for that read or requiring GPU surfaces.
     for at in 2..=4 {
         assert_eq!(input.read().unwrap().unwrap().pts(), Some(at));
     }
+    let snapshot = observer.snapshot(Duration::ZERO).unwrap();
+    assert_eq!(snapshot.bytes, 0);
+    assert_eq!(snapshot.read_bytes, Some(5), "draining is not negative IO");
     control.release.send(()).unwrap();
     assert_eq!(input.read().unwrap().unwrap().pts(), Some(5));
     drop(input);
@@ -406,7 +525,11 @@ fn real_demux_packets_and_seek_results_are_unchanged_by_prefetch() {
     let path = fixture.write("packet-input.insv", crate::Size::new(32, 16), 129, 0);
     let mut reference = ff::format::input(&path).unwrap();
     let input = crate::capture::open_input(&path).unwrap();
+    let opened_bytes = input.bytes_read().unwrap();
+    assert!(opened_bytes > 0, "real FFmpeg IO exposes fetched bytes");
     let mut cached = PacketInput::new(input, small_limits()).unwrap();
+    let observer = cached.read_ahead(vec![0], ff::Rational(1, 30), 0);
+    let mut previous_bytes = opened_bytes;
     for target in [None, Some(1_500_000), Some(0)] {
         if let Some(to) = target {
             reference.seek(to, ..to).unwrap();
@@ -435,6 +558,24 @@ fn real_demux_packets_and_seek_results_are_unchanged_by_prefetch() {
             }
         }
         assert!(cached.read().unwrap().is_none(), "EOF remains observable");
+        // EOF can wake the consumer before the worker parks again. A try-lock
+        // observation may correctly be unavailable during that handoff.
+        let deadline = Instant::now() + WAIT;
+        let bytes = loop {
+            if let Some(snapshot) = observer.snapshot(Duration::ZERO) {
+                break snapshot.read_bytes.unwrap();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "EOF input observation stays unavailable"
+            );
+            std::thread::yield_now();
+        };
+        assert!(
+            bytes >= previous_bytes,
+            "seek and queue drain do not reset IO"
+        );
+        previous_bytes = bytes;
     }
 }
 
@@ -447,6 +588,9 @@ fn producer_panic_wakes_read_and_does_not_leave_seek_waiting_forever() {
         }
         fn seek(&mut self, _: i64) -> Result<(), String> {
             Ok(())
+        }
+        fn bytes_read(&self) -> Option<u64> {
+            None
         }
     }
     let mut input = PacketInput::spawn(Panics, small_limits()).unwrap();

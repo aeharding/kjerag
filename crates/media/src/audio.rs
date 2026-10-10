@@ -232,6 +232,17 @@ impl Pipe {
         self.locked().health
     }
 
+    /// Read-only overlay snapshot. Never wait behind an audio callback.
+    pub(crate) fn buffer_snapshot(&self) -> Option<(Duration, Audio)> {
+        let buffer = self.0.try_lock().ok()?;
+        let queued = if buffer.stale {
+            Duration::ZERO
+        } else {
+            buffer.seconds(buffer.frames)
+        };
+        Some((queued, buffer.health))
+    }
+
     /// How much more sound the ring would take. This is the pacing for the
     /// sound's own producer: it reads until
     /// the ring is nearly full and stops, so nothing it reads is ever
@@ -575,6 +586,31 @@ pub fn compensation(offset: i64, distance: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_audio_queue_is_live_read_only_and_does_not_wait() {
+        let pipe = Pipe::new(1000, 2, Duration::from_secs(1));
+        pipe.write(&[0.25; 200], Duration::from_millis(100));
+        assert_eq!(
+            pipe.buffer_snapshot().unwrap().0,
+            Duration::from_millis(100)
+        );
+        {
+            let buffer = pipe.0.lock().unwrap();
+            assert_eq!(buffer.frames, 100, "snapshot cannot consume PCM");
+            assert_eq!(
+                pipe.buffer_snapshot(),
+                None,
+                "snapshot cannot wait for callback"
+            );
+        }
+        pipe.invalidate();
+        assert_eq!(
+            pipe.buffer_snapshot().unwrap().0,
+            Duration::ZERO,
+            "old seek-lineage PCM is not usable lead"
+        );
+    }
 
     const RATE: u32 = 48_000;
     const CHANNELS: usize = 2;

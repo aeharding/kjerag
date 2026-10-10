@@ -38,6 +38,15 @@ impl CompletionStatus {
         self.0.ready()
     }
 
+    /// Diagnostics must not wait for a callback or reinterpret errors as ready.
+    fn try_ready(&self) -> Option<bool> {
+        match self.0.0.try_lock().ok()?.as_ref() {
+            None => Some(false),
+            Some(Ok(())) => Some(true),
+            Some(Err(_)) => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn pending_for_test() -> Self {
         Self(Arc::new(Signal::default()))
@@ -89,6 +98,10 @@ impl SubmissionCompletion {
         self.status.clone()
     }
 
+    pub(crate) fn try_ready(&self) -> Option<bool> {
+        self.status.try_ready()
+    }
+
     /// Only the bounded worker calls this, including when no job or redraw is
     /// arriving. Poll never waits for this output or for the shared queue.
     pub(crate) fn poll(&self) -> Fallible<()> {
@@ -100,6 +113,20 @@ impl SubmissionCompletion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_completion_does_not_wait_or_call_errors_complete() {
+        let status = CompletionStatus::pending_for_test();
+        assert_eq!(status.try_ready(), Some(false));
+        {
+            let _held = status.0.0.lock().unwrap();
+            assert_eq!(status.try_ready(), None);
+        }
+        status.finish_for_test(Ok(()));
+        assert_eq!(status.try_ready(), Some(true));
+        status.finish_for_test(Err("test completion error".to_owned()));
+        assert_eq!(status.try_ready(), None);
+    }
 
     #[test]
     fn unfinished_output_is_not_ready() {

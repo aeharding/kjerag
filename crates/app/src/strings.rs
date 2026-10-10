@@ -131,11 +131,80 @@ pub const LOCK_HORIZON: &str = "Lock horizon";
 /// own name for the arm the owner runs, so it is the words this pilot already
 /// has (memory: Studio stitching controls).
 pub const OPTICAL_FLOW: &str = "Optical flow";
+pub const PLAYBACK_STATS: &str = "Playback stats";
+pub const STATS_WAITING: &str = "Playback stats\nWaiting for playback counters";
 pub const FULLSCREEN: &str = "Fullscreen";
 /// The ellipsis is on the menu item, which opens something; the page it opens
 /// is titled without one.
 pub const SETTINGS: &str = "Settings...";
 pub const SETTINGS_TITLE: &str = "Settings";
+
+/// Source promotions are not physical display FPS. Buffer layers are distinct.
+pub(crate) fn playback_stats(
+    snapshot: &kjerag_render::PlaybackSnapshot,
+    rates: Option<(f64, f64)>,
+    input_mbps: Option<f64>,
+) -> String {
+    let media = snapshot.media;
+    let status = if snapshot.stopped {
+        "Stopped"
+    } else if media.seeking {
+        "Seeking"
+    } else if media.preparing {
+        "Preparing"
+    } else if media.buffering {
+        "Buffering"
+    } else if media.playing {
+        "Playing"
+    } else if media.ended {
+        "Ended"
+    } else {
+        "Paused"
+    };
+    let (source, checks) = rates.map_or_else(
+        || ("n/a".to_owned(), "n/a".to_owned()),
+        |(source, checks)| (format!("{source:.2} fps"), format!("{checks:.1}/s")),
+    );
+    let input = media.input.map_or_else(
+        || "Input: unavailable".to_owned(),
+        |input| {
+            format!(
+                "Input: {:.2} s, {:.1} MiB, {} packets{}",
+                input.lead.as_secs_f64(),
+                input.bytes as f64 / (1024.0 * 1024.0),
+                input.packets,
+                if input.eof { " (EOF)" } else { "" },
+            )
+        },
+    );
+    let ready = snapshot
+        .stitched_ready
+        .map_or_else(|| "unavailable".to_owned(), |count| count.to_string());
+    let input_rate = input_mbps.map_or_else(|| "n/a".to_owned(), |rate| format!("{rate:.1} Mbps"));
+    let audio = if !media.has_audio {
+        "Audio: no output".to_owned()
+    } else if let (Some(queued), Some(audio)) = (media.audio_queued, media.stats.audio) {
+        format!(
+            "Audio queue: {:.0} ms, sync: {:+.1} ms\nAudio underruns: {}, dropped: {}",
+            queued.as_secs_f64() * 1000.0,
+            audio.offset as f64 / 1000.0,
+            audio.underruns,
+            audio.dropped,
+        )
+    } else {
+        "Audio: unavailable".to_owned()
+    };
+    format!(
+        "{PLAYBACK_STATS}: {status}\nSource rate: {source} (video {:.2} fps)\n\
+         {input}\nRead: {input_rate}\nDecoded ahead: {}, stitched ready: {ready}\n{audio}\n\
+         Drops: {}, starves: {} (total)\nWorst late: {:.1} ms, checks: {checks}",
+        media.source_fps,
+        media.decoded,
+        media.stats.dropped,
+        media.stats.starved,
+        media.stats.worst_late.as_secs_f64() * 1000.0,
+    )
+}
 
 /// What a capture says when it lands (issue #15). The noun is the menu's
 /// own: the pilot pressed `Copy frame`, so the toast says frame.
@@ -316,6 +385,45 @@ mod tests {
     use kjerag_render::{MissingDecoder, Stall};
 
     use super::*;
+
+    #[test]
+    fn playback_stats_separates_source_progress_and_buffer_layers() {
+        let mut snapshot = crate::playback_stats::tests::snapshot(100, 200);
+        snapshot.media.input = Some(kjerag_render::InputBuffer {
+            lead: Duration::from_millis(1500),
+            bytes: 3 * 1024 * 1024,
+            read_bytes: Some(100_000_000),
+            packets: 45,
+            eof: true,
+        });
+        snapshot.media.decoded = 9;
+        snapshot.stitched_ready = Some(6);
+        snapshot.media.stats.dropped = 2;
+        let text = playback_stats(&snapshot, Some((30.0, 120.0)), Some(168.6));
+        assert!(text.contains("Source rate: 30.00 fps (video 29.97 fps)"));
+        assert!(text.contains("checks: 120.0/s"));
+        assert!(!text.contains("120.00 fps"));
+        assert!(text.contains("Input: 1.50 s, 3.0 MiB, 45 packets (EOF)"));
+        assert!(text.contains("Read: 168.6 Mbps"));
+        assert!(text.contains("Decoded ahead: 9, stitched ready: 6"));
+        assert!(text.contains("Drops: 2, starves: 0 (total)"));
+        assert!(!text.contains('\u{2014}'));
+    }
+
+    #[test]
+    fn unavailable_buffers_are_not_reported_as_empty_or_working_audio() {
+        let mut snapshot = crate::playback_stats::tests::snapshot(0, 0);
+        snapshot.stitched_ready = None;
+        snapshot.media.has_audio = true;
+        snapshot.media.buffering = true;
+        let text = playback_stats(&snapshot, None, None);
+        assert!(text.contains("Playback stats: Buffering"));
+        assert!(text.contains("Input: unavailable"));
+        assert!(text.contains("Read: n/a"));
+        assert!(text.contains("stitched ready: unavailable"));
+        assert!(text.contains("Audio: unavailable"));
+        assert!(!text.contains("Audio underruns: 0"));
+    }
 
     #[test]
     fn the_title_carries_the_file_name_and_no_em_dash() {

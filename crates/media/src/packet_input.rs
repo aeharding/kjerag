@@ -64,6 +64,7 @@ struct AudioQueue {
 trait Demux: Send + 'static {
     fn read(&mut self) -> Result<Option<ff::Packet>, String>;
     fn seek(&mut self, to: i64) -> Result<(), String>;
+    fn bytes_read(&self) -> Option<u64>;
 }
 
 impl Demux for Input {
@@ -80,12 +81,22 @@ impl Demux for Input {
     fn seek(&mut self, to: i64) -> Result<(), String> {
         ff::format::context::Input::seek(self, to, ..to).map_err(|error| error.to_string())
     }
+
+    fn bytes_read(&self) -> Option<u64> {
+        // SAFETY: only the demux worker accesses this live input/context. Read
+        // FFmpeg's public IO statistic between operations, never from the UI.
+        unsafe {
+            let io = (*self.as_ptr()).pb.as_ref()?;
+            u64::try_from(io.bytes_read).ok()
+        }
+    }
 }
 
 #[derive(Default)]
 struct State {
     packets: VecDeque<ff::Packet>,
     bytes: usize,
+    read_bytes: Option<u64>,
     generation: u64,
     started: bool,
     stopped: bool,
@@ -145,7 +156,78 @@ pub(crate) struct ReadAhead {
     start: i64,
 }
 
+/// Compressed packets still owned by input, not decoded or stitched pictures.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InputBuffer {
+    /// Smallest queued timestamp lead across the required video streams.
+    pub lead: Duration,
+    /// Combined compressed audio and video payload bytes.
+    pub bytes: usize,
+    /// Cumulative bytes fetched by FFmpeg IO, including rereads after seeks.
+    /// This is file input, possibly cached, not Wi-Fi traffic or queued bytes.
+    pub read_bytes: Option<u64>,
+    pub packets: usize,
+    pub eof: bool,
+}
+
+impl InputBuffer {
+    pub(crate) fn combined(self, other: Self) -> Self {
+        Self {
+            lead: self.lead.min(other.lead),
+            bytes: self.bytes.saturating_add(other.bytes),
+            read_bytes: self
+                .read_bytes
+                .zip(other.read_bytes)
+                .map(|(first, second)| first.saturating_add(second)),
+            packets: self.packets.saturating_add(other.packets),
+            eof: self.eof && other.eof,
+        }
+    }
+}
+
 impl ReadAhead {
+    /// Observe without consuming input, waiting for IO or changing refill wakes.
+    /// Contention and failures are unavailable readings, never a clean zero.
+    pub(crate) fn snapshot(&self, position: Duration) -> Option<InputBuffer> {
+        let state = self.shared.state.try_lock().ok()?;
+        if state.failure.is_some() || matches!(state.terminal, Some(Err(_))) {
+            return None;
+        }
+        let lead = self
+            .streams
+            .iter()
+            .map(|stream| {
+                state
+                    .packets
+                    .iter()
+                    .filter(|packet| packet.stream() == *stream)
+                    .filter_map(|packet| {
+                        packet.dts().or(packet.pts()).map(|at| {
+                            crate::media_time(
+                                at.saturating_add(packet.duration().max(0)),
+                                self.start,
+                                self.time_base,
+                            )
+                            .saturating_sub(position)
+                        })
+                    })
+                    .max()
+                    .unwrap_or_default()
+            })
+            .min()
+            .unwrap_or_default();
+        Some(InputBuffer {
+            lead,
+            bytes: state.bytes.saturating_add(state.audio.bytes),
+            read_bytes: state.read_bytes,
+            packets: state
+                .packets
+                .len()
+                .saturating_add(state.audio.packets.len()),
+            eof: matches!(state.terminal, Some(Ok(()))),
+        })
+    }
+
     pub(crate) fn buffered_or_wait(&self, through: Duration, wake: Waker) -> Fallible<bool> {
         let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(error) = state.failure.as_ref().or_else(|| {
@@ -261,7 +343,10 @@ impl PacketInput {
         let shared = Arc::new(Shared {
             audio,
             limits,
-            state: Mutex::default(),
+            state: Mutex::new(State {
+                read_bytes: input.bytes_read(),
+                ..State::default()
+            }),
             changed: Condvar::default(),
         });
         let running = shared.clone();
@@ -436,14 +521,20 @@ fn run(mut input: impl Demux, shared: &Shared, limits: Limits) {
         if let Some(to) = state.seek.take() {
             drop(state);
             let result = input.seek(to);
+            let read_bytes = input.bytes_read();
             state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.read_bytes = read_bytes;
             state.started = true;
             state.terminal = result.as_ref().err().map(|error| Err(error.clone()));
             state.seek_result = Some(result);
         } else {
             drop(state);
             let result = input.read();
+            let read_bytes = input.bytes_read();
             state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            // IO still happened when a seek invalidates the resulting packet.
+            // Consumption, queue clearing and inspection never reduce this.
+            state.read_bytes = read_bytes;
             if state.generation != generation || state.stopped {
                 continue;
             }

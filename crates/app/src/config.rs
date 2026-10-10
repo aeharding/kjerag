@@ -71,6 +71,8 @@ pub struct Config {
     /// automatically and never falls through this legacy solver; this
     /// preference controls only supported legacy routes.
     pub optical_flow: bool,
+    /// Optional on-video diagnostics, off by default.
+    pub playback_stats: bool,
     /// Loudness, 0 to 1 (issue #13).
     ///
     /// cosmic-player keeps neither this nor [`Config::muted`]: its volume is a
@@ -87,6 +89,7 @@ impl Default for Config {
             app_theme: AppTheme::System,
             horizon_lock: true,
             optical_flow: false,
+            playback_stats: false,
             volume: 1.0,
             muted: false,
         }
@@ -202,8 +205,10 @@ mod tests {
 
     impl Scratch {
         fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let path = std::env::temp_dir()
-                .join(format!("kjerag-config-nan-volume-{}", std::process::id()));
+                .join(format!("kjerag-config-test-{}-{id}", std::process::id()));
             fs::create_dir(&path).expect("a fresh temporary config directory");
             Self(path)
         }
@@ -221,6 +226,24 @@ mod tests {
             .iter()
             .map(|path| path.to_str().unwrap())
             .collect()
+    }
+
+    #[test]
+    fn playback_stats_defaults_off_and_saved_choice_round_trips() {
+        assert!(!Config::default().playback_stats);
+        let scratch = Scratch::new();
+        let handler = cosmic_config::Config::with_custom_path(
+            crate::APP_ID,
+            CONFIG_VERSION,
+            scratch.0.clone(),
+        )
+        .unwrap();
+        let config = Config {
+            playback_stats: true,
+            ..Config::default()
+        };
+        config.write_entry(&handler).unwrap();
+        assert!(Config::get_entry(&handler).unwrap().playback_stats);
     }
 
     #[test]

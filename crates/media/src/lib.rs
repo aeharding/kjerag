@@ -44,10 +44,11 @@ use ffmpeg_next as ff;
 
 pub use audio::Audio;
 pub use decode::{DrmFrame, HwDevice, MissingDecoder, SwFrame, open_decoder};
+pub use packet_input::InputBuffer;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub use player::TestDecoder;
-pub use player::{Player, PresentationPolicy, Stats};
+pub use player::{PlaybackDiagnostics, Player, PresentationPolicy, Stats};
 pub use reader::{Accuracy, Cue, FrameStamp, Frames, Read, Reader, Timing};
 pub use walk::{Chroma, Pair, Plane, Walk};
 

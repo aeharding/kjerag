@@ -30,6 +30,87 @@ changes no released code, accepted picture or performance qualification.
 
 ## Current delivery
 
+October 9 stats-throughput follow-up ([#265](https://github.com/aeharding/kjerag/issues/265)):
+the owner requests buffer speed in Mbps and authorizes investigating streaming
+performance. The branch adds `Read` in decimal megabits/sec, sampled from
+FFmpeg's existing cumulative file-IO byte count on its sole demux worker.
+Combined lens-file counters include rereads, not queue-level changes, and remain
+measurable during pause/refill. Cached reads are included; this is not Wi-Fi
+link speed or network-protocol overhead. Missing/first/reset observations show
+`n/a`. Device/driver-hidden workspace gates pass 1,721 tests with 53 ignored,
+plus formatting, workspace Clippy, vendor warnings and source/name checks.
+The first added real-demux observation test assumes try-lock availability during
+the EOF worker handoff and fails; that test now allows bounded observation
+retry, with the failed receipt retained. Production observation stays nonblocking.
+All eight CI jobs pass on `ace88eee`. The hardware-hidden SDK build succeeds in
+11m33s, retaining the existing COSMIC desktop-category validation warning.
+Focused SDK preflight and actual-installed overlay suites each pass nine checks
+on both X4 and ONE X2. Actual playing pictures are inspected; video/view
+preservation and pointer/shortcut behavior pass. The signed local Mbps update
+is installed at app commit `7636f7462e41`, executable SHA256 `05c46183e4c0`.
+Official trust, permissions and shared runtimes are unchanged, with the previous
+stats-only test and signed 0.3.4 rollback retained. The separate local test
+origin remains disabled for review, so normal automatic app updates remain
+paused. Camera UI runs have no new kernel entries or scoped memory-limit/OOM
+events. The SDK compile reaches its 6 GiB memory limit with reclaim events but
+no OOM at the observed checkpoint; it finishes successfully. Owner review
+remains due; no merge, release, full camera-suite, sandbox-audio, ARM-playback,
+network-smoothness or 240-capacity claim. No buffering policy or stitching/color
+arithmetic changes. Metadata inspection
+finds the April X4 clip at 168.6 Mbps and the known September network fixture at
+170.8 Mbps, about 56-57% of the owner's reported 300 Mbps speed-test result.
+Normal reader controls deliver the same eight-second network packet prefix at
+162-176 Mbps; a larger-buffer control delivers 173 Mbps with identical packet
+and metadata hash, within the observed variation. A bounded sequential share
+read delivers about 187 Mbps. These are native read-only diagnostics, not
+installed-player, Wi-Fi traffic or hitch-free qualifications. The speed-test
+page uses six parallel HTTP requests to the same host. A bounded single HTTP
+download from that host reaches 314 Mbps, so the slower mounted-file path is
+not evidence that this Wi-Fi can only deliver 170 Mbps. Direct native GIO
+delivers 211 Mbps once, but its repeat is 178 Mbps between normal-reader controls
+of 176 and 170 Mbps, with matching hashes and similar CPU cost. This does not
+justify a new backend/dependency/service permission. Limited refill headroom is observed,
+but a justified production optimization and the exact startup-stutter cause
+remain unestablished. No larger-read implementation is adopted. The separately
+claimed streaming follow-up is [#267](https://github.com/aeharding/kjerag/issues/267).
+
+October 9 initial playback-stats option
+([#265](https://github.com/aeharding/kjerag/issues/265)): the owner requests a
+toggleable on-video buffer/playback overlay. The branch adds a stock `View >
+Playback stats` checkbox and `Ctrl+I`, off by default and remembered. Bare `I`
+still copies the view reference. A fixed, input-transparent stack layer leaves
+the video viewport and camera unchanged and remains visible when controls hide.
+Opt-in 500 ms snapshots report source promotions/checks, compressed-input lead
+and bytes, retained decoded successors, completion-proven stitched FIFO lead,
+live audio queue and callback health. Source progress is not physical display
+FPS, and compressed lead is not completion-proven playback runway. Diagnostic
+try-locks report unavailable rather than wait, consume queues, change wakes or
+poll the GPU; seeking masks unacknowledged input lineage. No stats timer runs
+with the option off or no video open. Formatting, workspace Clippy, vendor
+warnings, name/source checks and the device/driver-hidden workspace pass
+(1,718 tests, zero failures, 53 ignored; unavailable-device returns are not
+hardware coverage). The owner confirms normal desktop behavior after the earlier
+dock/display warning, allowing bounded one-at-a-time checks to resume. The native
+X4 overlay regression passes nine checks: real held picture, default-off and
+saved toggle, unchanged video pixels and view, panning through the panel,
+preference persistence and clean exit. Actual playing/fullscreen captures are
+retained for inspection. The regression is part of `scripts/uitest.sh` and can
+run alone with `KJERAG_UITEST_ONLY=playback-stats`. All eight CI jobs pass on
+`88897ef7`; the hardware-hidden SDK build succeeds. SDK app-path preflight passes
+the full X4 suite (59 checks) and focused ONE X2 overlay suite (9 checks), with
+actual pictures inspected. That initial SDK package was installed from a separate
+signed local test origin: app commit `df699be5fdb1`, executable SHA256
+`496c171baaac`. Actual-installed overlay suites pass nine checks on each camera
+without an app-path override, with playing pictures inspected. No new kernel
+entries or scoped memory-limit/OOM events are recorded. Official release trust,
+shared runtimes and permissions are unchanged; signed 0.3.4 is retained for
+rollback. Normal automatic Kjerag updates pause while following the local test
+origin. The initial installer wrapper stops because Flatpak adds a blank INI
+separator; its failed receipt is retained, and verification of actual trust
+fields and the installed payload succeeds separately. Owner review remains
+pending. This is not full ONE X2 UI-suite, sandbox-audio, ARM-playback,
+network-smoothness or rendering-capacity qualification; no merge or release.
+
 October 9 hover-bar release ([#261](https://github.com/aeharding/kjerag/issues/261)):
 the unchanged, authenticated 0.3.3 Flatpak reproduces the owner's picture jump.
 The stock header consumes 48 logical pixels; its appearance changes the video
