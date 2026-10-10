@@ -6,6 +6,95 @@ use std::time::{Duration, Instant};
 
 const WAIT: Duration = Duration::from_secs(5);
 
+#[test]
+fn diagnostic_snapshot_normalizes_all_lenses_without_consuming_or_rearming() {
+    let (input, mut observer, release, dropped) = blocked_read_ahead();
+    observer.streams = vec![0, 2];
+    observer.start = 900;
+    let packet = |stream, at| {
+        let mut packet = ff::Packet::copy(&[1]);
+        packet.set_stream(stream);
+        packet.set_dts(Some(at));
+        packet.set_pts(Some(at + 3));
+        packet.set_duration(1);
+        packet
+    };
+    let wake = Waker::from(Arc::new(Counter::default()));
+    {
+        let mut state = input.0.state.lock().unwrap();
+        state.packets.clear();
+        state.packets.extend([packet(0, 929), packet(2, 905)]);
+        state.bytes = 2;
+        state.audio.packets.push_back(packet(1, 929));
+        state.audio.bytes = 1;
+        state.refill_wait = Some(wake.clone());
+    }
+    let expected = InputBuffer {
+        lead: Duration::from_millis(100),
+        bytes: 3,
+        packets: 3,
+        eof: false,
+    };
+    assert_eq!(
+        observer.snapshot(Duration::from_millis(100)),
+        Some(expected)
+    );
+    assert_eq!(
+        observer.snapshot(Duration::from_millis(100)),
+        Some(expected)
+    );
+    {
+        let state = input.0.state.lock().unwrap();
+        assert_eq!(state.packets.len(), 2);
+        assert!(state.refill_wait.as_ref().unwrap().will_wake(&wake));
+        assert_eq!(
+            observer.snapshot(Duration::ZERO),
+            None,
+            "do not wait on input locks"
+        );
+    }
+    drop(input);
+    release.send(()).unwrap();
+    dropped.recv_timeout(WAIT).unwrap();
+}
+
+#[test]
+fn diagnostic_snapshot_marks_eof_but_never_hides_input_errors() {
+    let (input, observer, release, dropped) = blocked_read_ahead();
+    input.0.state.lock().unwrap().terminal = Some(Ok(()));
+    assert!(observer.snapshot(Duration::ZERO).unwrap().eof);
+    input.0.state.lock().unwrap().terminal = Some(Err("test input failure".into()));
+    assert_eq!(observer.snapshot(Duration::ZERO), None);
+    drop(input);
+    release.send(()).unwrap();
+    dropped.recv_timeout(WAIT).unwrap();
+}
+
+#[test]
+fn combined_input_uses_the_slowest_file_and_requires_both_eofs() {
+    let first = InputBuffer {
+        lead: Duration::from_secs(2),
+        bytes: 20,
+        packets: 2,
+        eof: true,
+    };
+    let second = InputBuffer {
+        lead: Duration::from_secs(1),
+        bytes: 30,
+        packets: 3,
+        eof: false,
+    };
+    assert_eq!(
+        first.combined(second),
+        InputBuffer {
+            lead: Duration::from_secs(1),
+            bytes: 50,
+            packets: 5,
+            eof: false,
+        }
+    );
+}
+
 #[derive(Default)]
 struct Counter(AtomicUsize);
 

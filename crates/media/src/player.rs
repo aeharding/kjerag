@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use super::audio::{Audio, AudioEpoch, Beat, Reading};
 use super::audio_worker::AudioControl;
 use super::decode_arrival::{self, Arrival, Delivery};
-use super::packet_input::ReadAhead;
+use super::packet_input::{InputBuffer, ReadAhead};
 use super::sound::Sound;
 use super::{Accuracy, Cue, Fallible, Frames, Read, Reader, Size, Timing};
 
@@ -156,6 +156,24 @@ impl Stats {
             None => line,
         }
     }
+}
+
+/// Read-only diagnostic levels. None means unavailable, not an empty buffer.
+#[derive(Clone, Copy, Debug)]
+pub struct PlaybackDiagnostics {
+    pub stats: Stats,
+    pub input: Option<InputBuffer>,
+    /// Successors already retained by Player, excluding its current picture
+    /// and the decoder's delivery channel. Reading does not pull that channel.
+    pub decoded: usize,
+    pub audio_queued: Option<Duration>,
+    pub has_audio: bool,
+    pub source_fps: f64,
+    pub playing: bool,
+    pub buffering: bool,
+    pub seeking: bool,
+    pub preparing: bool,
+    pub ended: bool,
 }
 
 /// What the decode thread sends back.
@@ -714,6 +732,40 @@ impl Player {
         Stats {
             audio: self.sound.as_ref().map(|sound| sound.pipe().health()),
             ..self.presenter.stats
+        }
+    }
+
+    /// Snapshot counters and buffer levels without driving playback or IO.
+    pub fn diagnostics(&self, now: Instant) -> PlaybackDiagnostics {
+        let input = if self.is_seeking() {
+            // The decoder may not have acknowledged the new input epoch yet.
+            None
+        } else {
+            self.read_ahead
+                .iter()
+                .map(|input| input.snapshot(self.position(now)))
+                .collect::<Option<Vec<_>>>()
+                .and_then(|inputs| inputs.into_iter().reduce(InputBuffer::combined))
+        };
+        let audio = self
+            .sound
+            .as_ref()
+            .and_then(|sound| sound.pipe().buffer_snapshot());
+        PlaybackDiagnostics {
+            stats: Stats {
+                audio: audio.map(|(_, health)| health),
+                ..self.presenter.stats
+            },
+            input,
+            decoded: self.presenter.peeked.len(),
+            audio_queued: audio.map(|(queued, _)| queued),
+            has_audio: self.has_sound(),
+            source_fps: self.timing.fps(),
+            playing: self.is_playing(),
+            buffering: self.is_buffering(),
+            seeking: self.is_seeking(),
+            preparing: self.presenter.current.is_none(),
+            ended: self.is_ended(),
         }
     }
 

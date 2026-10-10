@@ -52,6 +52,7 @@ pub enum Action {
     Mute,
     NextFrame,
     OpticalFlow,
+    PlaybackStats,
     PlayPause,
     PreviousFrame,
     Quit,
@@ -84,6 +85,7 @@ impl MenuAction for Action {
             Self::Mute => Message::AudioToggle,
             Self::NextFrame => Message::StepFrame(1),
             Self::OpticalFlow => Message::OpticalFlow,
+            Self::PlaybackStats => Message::ToggleStats,
             Self::PlayPause => Message::PlayPause,
             Self::PreviousFrame => Message::StepFrame(-1),
             Self::Quit => Message::Quit,
@@ -153,6 +155,7 @@ pub fn key_binds() -> HashMap<KeyBind, Action> {
     // half, doing what a paste does everywhere: putting in front of you the
     // thing that was copied.
     bind!([], Key::Character("i".into()), CopyView);
+    bind!([Ctrl], Key::Character("i".into()), PlaybackStats);
     bind!([Ctrl], Key::Character("v".into()), GoToView);
 
     // The sound (issue #13). cosmic-player's map has no mute key, so this is
@@ -176,6 +179,22 @@ mod tests {
             .into_iter()
             .find(|(bind, _)| bind.matches(modifiers, &key, Some(&physical)))
             .map(|(_, action)| action)
+    }
+
+    #[test]
+    fn stats_shortcut_does_not_replace_copy_view() {
+        assert_eq!(
+            pressed(Modifiers::CTRL, Key::Character("i".into())),
+            Some(Action::PlaybackStats)
+        );
+        assert_eq!(
+            pressed(Modifiers::empty(), Key::Character("i".into())),
+            Some(Action::CopyView)
+        );
+        assert!(matches!(
+            Action::PlaybackStats.message(),
+            Message::ToggleStats
+        ));
     }
 
     /// The four keys a pilot reaches for without looking, and the modifier
@@ -260,13 +279,23 @@ mod tests {
         );
     }
 
-    /// A modifier on the view key is a different key, and none of the three
-    /// a pilot might hit by accident does anything at all.
+    /// Ctrl+I toggles stats. Other modified view keys still cannot copy a view.
     #[test]
-    fn a_modified_i_is_nothing() {
+    fn only_control_i_toggles_stats_and_modified_i_never_copies_view() {
         let i = Key::Character("i".into());
-        for modifiers in [Modifiers::CTRL, Modifiers::ALT, Modifiers::SHIFT] {
-            assert_eq!(pressed(modifiers, i.clone()), None, "{modifiers:?}");
+        for modifiers in [
+            Modifiers::CTRL,
+            Modifiers::ALT,
+            Modifiers::SHIFT,
+            Modifiers::CTRL | Modifiers::SHIFT,
+            Modifiers::CTRL | Modifiers::ALT,
+        ] {
+            let expected = if modifiers == Modifiers::CTRL {
+                Some(Action::PlaybackStats)
+            } else {
+                None
+            };
+            assert_eq!(pressed(modifiers, i.clone()), expected, "{modifiers:?}");
         }
     }
 

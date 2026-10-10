@@ -145,7 +145,70 @@ pub(crate) struct ReadAhead {
     start: i64,
 }
 
+/// Compressed packets still owned by input, not decoded or stitched pictures.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InputBuffer {
+    /// Smallest queued timestamp lead across the required video streams.
+    pub lead: Duration,
+    /// Combined compressed audio and video payload bytes.
+    pub bytes: usize,
+    pub packets: usize,
+    pub eof: bool,
+}
+
+impl InputBuffer {
+    pub(crate) fn combined(self, other: Self) -> Self {
+        Self {
+            lead: self.lead.min(other.lead),
+            bytes: self.bytes.saturating_add(other.bytes),
+            packets: self.packets.saturating_add(other.packets),
+            eof: self.eof && other.eof,
+        }
+    }
+}
+
 impl ReadAhead {
+    /// Observe without consuming input, waiting for IO or changing refill wakes.
+    /// Contention and failures are unavailable readings, never a clean zero.
+    pub(crate) fn snapshot(&self, position: Duration) -> Option<InputBuffer> {
+        let state = self.shared.state.try_lock().ok()?;
+        if state.failure.is_some() || matches!(state.terminal, Some(Err(_))) {
+            return None;
+        }
+        let lead = self
+            .streams
+            .iter()
+            .map(|stream| {
+                state
+                    .packets
+                    .iter()
+                    .filter(|packet| packet.stream() == *stream)
+                    .filter_map(|packet| {
+                        packet.dts().or(packet.pts()).map(|at| {
+                            crate::media_time(
+                                at.saturating_add(packet.duration().max(0)),
+                                self.start,
+                                self.time_base,
+                            )
+                            .saturating_sub(position)
+                        })
+                    })
+                    .max()
+                    .unwrap_or_default()
+            })
+            .min()
+            .unwrap_or_default();
+        Some(InputBuffer {
+            lead,
+            bytes: state.bytes.saturating_add(state.audio.bytes),
+            packets: state
+                .packets
+                .len()
+                .saturating_add(state.audio.packets.len()),
+            eof: matches!(state.terminal, Some(Ok(()))),
+        })
+    }
+
     pub(crate) fn buffered_or_wait(&self, through: Duration, wake: Waker) -> Fallible<bool> {
         let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(error) = state.failure.as_ref().or_else(|| {

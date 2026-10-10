@@ -67,6 +67,7 @@ use crate::dnd::Dropped;
 use crate::fail::{Alert, Failure};
 use crate::key_bind::{Action, JUMP, key_binds};
 use crate::opening::{OpenRequest, Opener};
+use crate::playback_stats::{self, Sampler};
 use crate::shot::{Destination, Done};
 use crate::{menu, shot, strings};
 
@@ -204,6 +205,8 @@ pub enum Message {
     /// `View > Optical flow`).
     OpticalFlow,
     PlayPause,
+    ToggleStats,
+    StatsTick,
     Quit,
     /// Five seconds have passed and playback has a line to print.
     Report,
@@ -304,6 +307,7 @@ pub struct App {
     /// The counters as of the last report, so each line covers its own five
     /// seconds instead of the whole run.
     counted: Stats,
+    stats: Sampler,
 }
 
 /// A file on screen.
@@ -487,6 +491,7 @@ impl cosmic::Application for App {
             fullscreen: false,
             reported: Instant::now(),
             counted: Stats::default(),
+            stats: Sampler::default(),
         };
 
         let task = match flags.input {
@@ -538,7 +543,11 @@ impl cosmic::Application for App {
                 self.show_controls(now);
             }
             Message::Config(config) => {
+                if self.stored.config.playback_stats != config.playback_stats {
+                    self.stats = Sampler::default();
+                }
                 self.stored.config = config;
+                self.refresh_stats(now);
                 // The settings can change from outside this window, so the
                 // scene is told again rather than only on the toggle.
                 self.hold_horizon();
@@ -581,6 +590,7 @@ impl cosmic::Application for App {
             Message::FileClose => {
                 self.opener.cancel();
                 self.open = None;
+                self.stats = Sampler::default();
                 self.dragging = None;
                 self.show_controls(now);
                 return self.retitle();
@@ -672,6 +682,14 @@ impl cosmic::Application for App {
                 // stay up long enough to see what it did.
                 self.show_controls(now);
             }
+            Message::ToggleStats => {
+                self.stored.config.playback_stats = !self.stored.config.playback_stats;
+                self.stored.write_config();
+                self.stats = Sampler::default();
+                self.refresh_stats(now);
+                self.show_controls(now);
+            }
+            Message::StatsTick => self.refresh_stats(now),
             Message::Capture(to) => {
                 self.show_controls(now);
                 return self.capture(to);
@@ -864,6 +882,7 @@ impl cosmic::Application for App {
                 horizon_locked,
                 can_lock: self.can_lock(),
                 flow: self.can_flow().then_some(self.stored.config.optical_flow),
+                playback_stats: self.stored.config.playback_stats,
             },
         )]
     }
@@ -911,7 +930,7 @@ impl cosmic::Application for App {
         // is not a free rearrangement: the toast reached the screen on the
         // first capture after it landed with a fixed tree, and on the sixth,
         // two seconds later, with a tree that grew a layer.
-        let content = Stack::with_children(vec![shown, self.toast_stack()]);
+        let content = Stack::with_children(vec![shown, self.stats_overlay(), self.toast_stack()]);
         // cosmic-player implements no drag and drop, so this follows
         // cosmic-files (`src/app.rs:6491-6496`). The destination is the whole
         // window rather than only the video: a file dropped on "No video
@@ -1005,6 +1024,9 @@ impl cosmic::Application for App {
                 sources.push(time::every(CONTROLS_POLL).map(|_| Message::Tick));
             }
         }
+        if self.samples_stats() {
+            sources.push(time::every(playback_stats::INTERVAL).map(|_| Message::StatsTick));
+        }
         Subscription::batch(sources)
     }
 }
@@ -1056,6 +1078,8 @@ impl App {
                     position: Duration::ZERO,
                     scene,
                 });
+                self.stats = Sampler::default();
+                self.refresh_stats(now);
                 self.dragging = None;
                 self.stored.state.remember(&request.path);
                 self.stored.write_state();
@@ -1495,6 +1519,50 @@ impl App {
         );
         self.counted = stats;
         self.reported = now;
+    }
+
+    fn samples_stats(&self) -> bool {
+        self.stored.config.playback_stats && self.open.is_some()
+    }
+
+    fn refresh_stats(&mut self, now: Instant) {
+        if !self.samples_stats() {
+            return;
+        }
+        if let Some(snapshot) = self
+            .open
+            .as_ref()
+            .and_then(|open| open.scene.playback_snapshot(now))
+        {
+            self.stats.sample(now, snapshot);
+        } else {
+            self.stats = Sampler::default();
+        }
+    }
+
+    /// Always mounted, like the toast layer, so toggling cannot replace Scene.
+    /// Plain text/container widgets ignore input and leave video grabs intact.
+    fn stats_overlay(&self) -> Element<'_, Message> {
+        let spacing = theme::active().cosmic().spacing;
+        let mut layer = widget::column::with_capacity(2)
+            .width(Length::Fill)
+            .height(Length::Fill);
+        if self.samples_stats() {
+            let text = self.stats.snapshot.as_ref().map_or_else(
+                || strings::STATS_WAITING.to_owned(),
+                |snapshot| strings::playback_stats(snapshot, self.stats.rates),
+            );
+            layer = layer.push(
+                widget::container(widget::text(text).font(font::mono()).size(13))
+                    .max_width(400)
+                    .padding(spacing.space_xxs)
+                    .class(theme::Container::Dropdown),
+            );
+        }
+        layer
+            .push(widget::space::vertical())
+            .padding(spacing.space_xs)
+            .into()
     }
 
     /// Nothing open: an icon, a line saying so, and the button that fixes it
@@ -1944,6 +2012,43 @@ mod tests {
     use cosmic::iced::widget::shader;
 
     use super::*;
+
+    #[test]
+    fn stats_toggle_does_not_change_the_view_and_polling_is_opt_in() {
+        let (mut app, _) = App::init(
+            Core::default(),
+            Flags {
+                stored: Stored::default(),
+                input: None,
+                at: None,
+            },
+        );
+        assert!(!app.samples_stats());
+        let _ = app.update(Message::ToggleStats);
+        assert!(app.stored.config.playback_stats);
+        assert!(!app.samples_stats(), "no stats timer without a video");
+        app.open = Some(Open {
+            path: watching(),
+            scene: Scene::blank(),
+            duration: Duration::from_secs(100),
+            position: Duration::ZERO,
+        });
+        let camera = app.open.as_ref().unwrap().scene.viewpoint().camera();
+        let horizon = app.open.as_ref().unwrap().scene.horizon();
+        assert!(app.samples_stats());
+        let _ = app.update(Message::StatsTick);
+        let _ = app.update(Message::ToggleStats);
+        assert!(!app.samples_stats());
+        let open = app.open.as_ref().unwrap();
+        assert_eq!(open.scene.viewpoint().camera(), camera);
+        assert_eq!(open.scene.horizon(), horizon);
+        assert_eq!(open.position, Duration::ZERO);
+        assert_eq!(open.scene.position(Instant::now()), Duration::ZERO);
+        assert!(app.stats.snapshot.is_none());
+        let _ = app.update(Message::ToggleStats);
+        let _ = app.update(Message::FileClose);
+        assert!(!app.samples_stats());
+    }
 
     fn prepared_message(task: Task<Message>) -> Message {
         use cosmic::iced::futures::StreamExt;

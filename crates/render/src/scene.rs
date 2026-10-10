@@ -36,7 +36,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use kjerag_media::{Accuracy, Cue, FrameStamp, Frames, Player, PresentationPolicy, Reader, Stats};
+use kjerag_media::{
+    Accuracy, Cue, FrameStamp, Frames, PlaybackDiagnostics, Player, PresentationPolicy, Reader,
+    Stats,
+};
 use kjerag_meta::{
     CalibrationSet, ExposureTrack, Filter, Format, Lens, OrientationTrack, Quat, Readout,
 };
@@ -238,6 +241,15 @@ pub struct Scene {
     /// The preceding admitted pair, retained while the current admitted pair
     /// works from its unpublished temporal result.
     resident_previous_submitted: Shown,
+}
+
+/// Counters and queue levels for an optional shell overlay, not scanout proof.
+#[derive(Clone, Copy, Debug)]
+pub struct PlaybackSnapshot {
+    pub media: PlaybackDiagnostics,
+    /// Contiguous completed filtered outputs, not merely submitted GPU work.
+    pub stitched_ready: Option<usize>,
+    pub stopped: bool,
 }
 
 /// How the picture is to be held for one redraw: the shell's own toggle, and
@@ -2167,6 +2179,22 @@ impl Scene {
 
     pub fn stats(&self) -> Option<Stats> {
         self.player(Player::stats)
+    }
+
+    pub fn playback_snapshot(&self, now: Instant) -> Option<PlaybackSnapshot> {
+        let mut media = self.player(|player| player.diagnostics(now))?;
+        media.preparing |= self.show.as_ref()?.replay.borrow().is_some();
+        let stitched_ready = self
+            .show
+            .as_ref()?
+            .filtered
+            .as_ref()
+            .and_then(FilteredCaptureFacade::diagnostic_ready);
+        Some(PlaybackSnapshot {
+            media,
+            stitched_ready,
+            stopped: self.stalled.stopped(),
+        })
     }
 
     /// Reading the player needs the cell, so this hands it to a closure

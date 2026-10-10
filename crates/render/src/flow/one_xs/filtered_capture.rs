@@ -554,6 +554,22 @@ impl FilteredCaptureFacade {
         completed_prefix(state.ready.iter().map(|output| output.completion().ready()))
     }
 
+    /// Read only completion-proven FIFO lead. Never poll, install, or wait.
+    pub(crate) fn diagnostic_ready(&self) -> Option<usize> {
+        let state = self.inner.state.try_lock().ok()?;
+        if state.failure.is_some() || state.retired {
+            return None;
+        }
+        let mut count = 0;
+        for output in &state.ready {
+            if !output.completion().try_ready()? {
+                break;
+            }
+            count += 1;
+        }
+        Some(count)
+    }
+
     /// Preserve the last complete picture for a terminal-error screenshot.
     /// Unlike observed-state queries, this deliberately does not mask that
     /// already-installed resource with a later sticky worker failure.

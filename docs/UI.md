@@ -945,12 +945,31 @@ File                              Playback              View
   Close video                       Forward 10 seconds    Zoom out
   ---                               ---                   ---
   Save frame                        Previous frame        [x] Lock horizon
-  Copy frame                        Next frame            ---
+  Copy frame                        Next frame            [ ] Playback stats
+                                                          ---
   Copy current view reference                             Fullscreen
   Go to copied view reference                             ---
   ---                                                     Settings...
   Quit                                                    About Kjerag...
 ```
+
+`View > Playback stats` is a remembered checkbox, off by default; `Ctrl+I`
+toggles it without replacing bare `I`'s copied-view reference. The stock text
+and container form a top-left overlay, not a dock or video-size change. It
+ignores pointer input, stays up when playback controls auto-hide and works in
+fullscreen. Its layer is always mounted to preserve the video widget tree.
+
+The overlay samples every 500 ms only while enabled with a video open.
+"Source rate" counts source promotions, not physical scanout; "checks" counts
+Player pumps, not new video frames. Input lead is the smallest queued timestamp
+lead across required lens streams/files, with combined compressed audio/video
+bytes and packet count. Decoded ahead counts Player's retained successors, not
+the delivery channel or every decoder surface. Stitched ready counts only the
+completion-proven FIFO prefix, never queued or in-flight GPU work. Audio queue
+is the current usable PCM duration; sync/underruns are existing callback health.
+Unavailable/contended readings are marked unavailable, not zero. Input lead is
+unavailable while a seek's new lineage is not yet acknowledged. The option
+changes no playback, stitching, color, source-cadence or buffering policy.
 
 - Ellipsis on items that open a dialog, none on items that act
   (cosmic-player `Open media...` vs `Close file`, `src/menu.rs:119-121`).

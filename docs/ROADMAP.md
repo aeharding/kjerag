@@ -30,6 +30,25 @@ changes no released code, accepted picture or performance qualification.
 
 ## Current delivery
 
+October 9 playback-stats option
+([#265](https://github.com/aeharding/kjerag/issues/265)): the owner requests a
+toggleable on-video buffer/playback overlay. The branch adds a stock `View >
+Playback stats` checkbox and `Ctrl+I`, off by default and remembered. Bare `I`
+still copies the view reference. A fixed, input-transparent stack layer leaves
+the video viewport and camera unchanged and remains visible when controls hide.
+Opt-in 500 ms snapshots report source promotions/checks, compressed-input lead
+and bytes, retained decoded successors, completion-proven stitched FIFO lead,
+live audio queue and callback health. Source progress is not physical display
+FPS, and compressed lead is not completion-proven playback runway. Diagnostic
+try-locks report unavailable rather than wait, consume queues, change wakes or
+poll the GPU; seeking masks unacknowledged input lineage. No stats timer runs
+with the option off or no video open. Formatting, workspace Clippy, vendor
+warnings, name/source checks and the device/driver-hidden workspace pass
+(1,718 tests, zero failures, 53 ignored; unavailable-device returns are not
+hardware coverage). Real-player/owner review remains pending, with GPU checks
+held for the earlier dock/display desktop-health question. Installed 0.3.4 is
+unchanged.
+
 October 9 hover-bar release ([#261](https://github.com/aeharding/kjerag/issues/261)):
 the unchanged, authenticated 0.3.3 Flatpak reproduces the owner's picture jump.
 The stock header consumes 48 logical pixels; its appearance changes the video

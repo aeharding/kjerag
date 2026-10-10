@@ -60,7 +60,10 @@ pub use camera::{Camera, Nudge, Viewpoint};
 pub use capture::{Request, Shot, Then};
 pub use framing::Framing;
 pub use image_fusion::{FusionInputs, PendingOneXsFusionInputs};
-pub use kjerag_media::{Accuracy, Cue, Fallible, FrameStamp, MissingDecoder, Size, Stats};
+pub use kjerag_media::{
+    Accuracy, Cue, Fallible, FrameStamp, InputBuffer, MissingDecoder, PlaybackDiagnostics, Size,
+    Stats,
+};
 /// Which files one capture is made of (issue #123), under a name that does
 /// not collide with this crate's own `capture`, which is the screenshot one.
 pub use kjerag_meta::capture as capture_set;
@@ -70,7 +73,10 @@ pub use projection::{
     Blend, Held, Landing, MAX_LENSES, Reframe, Rolling, SeamAnchor, seam_follows_a_lens,
 };
 pub use sampling::Sampling;
-pub use scene::{FrameClock, Horizon, Next, PreparedScene, Scene, ScenePipeline, ScenePrimitive};
+pub use scene::{
+    FrameClock, Horizon, Next, PlaybackSnapshot, PreparedScene, Scene, ScenePipeline,
+    ScenePrimitive,
+};
 pub use seam::{Correction, SeamFit};
 pub use stall::{STUCK_FOR, Stall};
 pub use studio_type2::{MapBindError, OneXsMapFrame, OneXsMapRaster, PisBackend, PreparedPicture};

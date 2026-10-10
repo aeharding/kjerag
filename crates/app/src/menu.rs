@@ -35,6 +35,7 @@ pub(crate) struct MenuState {
     pub horizon_locked: bool,
     pub can_lock: bool,
     pub flow: Option<bool>,
+    pub playback_stats: bool,
 }
 
 pub fn menu_bar<'a>(
@@ -133,6 +134,12 @@ pub fn menu_bar<'a>(
                         // remains editable with no file open or with a camera
                         // whose legacy route is supported.
                         optical_flow(menu.flow),
+                        Item::CheckBox(
+                            strings::PLAYBACK_STATS.to_owned(),
+                            None,
+                            menu.playback_stats,
+                            Action::PlaybackStats,
+                        ),
                         Item::Divider,
                         Item::Button(strings::FULLSCREEN.to_owned(), None, Action::Fullscreen),
                         Item::Divider,

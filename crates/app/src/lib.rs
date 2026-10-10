@@ -20,6 +20,7 @@ mod fail;
 mod key_bind;
 mod menu;
 mod opening;
+mod playback_stats;
 mod shot;
 mod strings;
 mod window_video;
