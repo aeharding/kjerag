@@ -51,8 +51,21 @@ X4 overlay regression passes nine checks: real held picture, default-off and
 saved toggle, unchanged video pixels and view, panning through the panel,
 preference persistence and clean exit. Actual playing/fullscreen captures are
 retained for inspection. The regression is part of `scripts/uitest.sh` and can
-run alone with `KJERAG_UITEST_ONLY=playback-stats`. SDK/installed camera checks
-and owner review remain pending. Installed 0.3.4 is unchanged.
+run alone with `KJERAG_UITEST_ONLY=playback-stats`. All eight CI jobs pass on
+`88897ef7`; the hardware-hidden SDK build succeeds. SDK app-path preflight passes
+the full X4 suite (59 checks) and focused ONE X2 overlay suite (9 checks), with
+actual pictures inspected. The exact SDK package is installed from a separate
+signed local test origin: app commit `df699be5fdb1`, executable SHA256
+`496c171baaac`. Actual-installed overlay suites pass nine checks on each camera
+without an app-path override, with playing pictures inspected. No new kernel
+entries or scoped memory-limit/OOM events are recorded. Official release trust,
+shared runtimes and permissions are unchanged; signed 0.3.4 is retained for
+rollback. Normal automatic Kjerag updates pause while following the local test
+origin. The initial installer wrapper stops because Flatpak adds a blank INI
+separator; its failed receipt is retained, and verification of actual trust
+fields and the installed payload succeeds separately. Owner review remains
+pending. This is not full ONE X2 UI-suite, sandbox-audio, ARM-playback,
+network-smoothness or rendering-capacity qualification; no merge or release.
 
 October 9 hover-bar release ([#261](https://github.com/aeharding/kjerag/issues/261)):
 the unchanged, authenticated 0.3.3 Flatpak reproduces the owner's picture jump.
