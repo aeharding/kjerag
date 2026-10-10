@@ -42,21 +42,39 @@ plus formatting, workspace Clippy, vendor warnings and source/name checks.
 The first added real-demux observation test assumes try-lock availability during
 the EOF worker handoff and fails; that test now allows bounded observation
 retry, with the failed receipt retained. Production observation stays nonblocking.
-Real-player and package qualification remain due. No buffering policy,
-stitching/color arithmetic or installed package changes yet. Metadata inspection
+All eight CI jobs pass on `ace88eee`. The hardware-hidden SDK build succeeds in
+11m33s, retaining the existing COSMIC desktop-category validation warning.
+Focused SDK preflight and actual-installed overlay suites each pass nine checks
+on both X4 and ONE X2. Actual playing pictures are inspected; video/view
+preservation and pointer/shortcut behavior pass. The signed local Mbps update
+is installed at app commit `7636f7462e41`, executable SHA256 `05c46183e4c0`.
+Official trust, permissions and shared runtimes are unchanged, with the previous
+stats-only test and signed 0.3.4 rollback retained. The separate local test
+origin remains disabled for review, so normal automatic app updates remain
+paused. Camera UI runs have no new kernel entries or scoped memory-limit/OOM
+events. The SDK compile reaches its 6 GiB memory limit with reclaim events but
+no OOM at the observed checkpoint; it finishes successfully. Owner review
+remains due; no merge, release, full camera-suite, sandbox-audio, ARM-playback,
+network-smoothness or 240-capacity claim. No buffering policy or stitching/color
+arithmetic changes. Metadata inspection
 finds the April X4 clip at 168.6 Mbps and the known September network fixture at
 170.8 Mbps, about 56-57% of the owner's reported 300 Mbps speed-test result.
 Normal reader controls deliver the same eight-second network packet prefix at
-162-172 Mbps; a larger-buffer control delivers 173 Mbps with identical packet
+162-176 Mbps; a larger-buffer control delivers 173 Mbps with identical packet
 and metadata hash, within the observed variation. A bounded sequential share
 read delivers about 187 Mbps. These are native read-only diagnostics, not
 installed-player, Wi-Fi traffic or hitch-free qualifications. The speed-test
-page uses six parallel HTTP requests to the same host; its 300 Mbps result is
-not equivalent to one mounted-file reader. Limited refill headroom is observed,
+page uses six parallel HTTP requests to the same host. A bounded single HTTP
+download from that host reaches 314 Mbps, so the slower mounted-file path is
+not evidence that this Wi-Fi can only deliver 170 Mbps. Direct native GIO
+delivers 211 Mbps once, but its repeat is 178 Mbps between normal-reader controls
+of 176 and 170 Mbps, with matching hashes and similar CPU cost. This does not
+justify a new backend/dependency/service permission. Limited refill headroom is observed,
 but a justified production optimization and the exact startup-stutter cause
-remain unestablished. No larger-read implementation is adopted.
+remain unestablished. No larger-read implementation is adopted. The separately
+claimed streaming follow-up is [#267](https://github.com/aeharding/kjerag/issues/267).
 
-October 9 playback-stats option
+October 9 initial playback-stats option
 ([#265](https://github.com/aeharding/kjerag/issues/265)): the owner requests a
 toggleable on-video buffer/playback overlay. The branch adds a stock `View >
 Playback stats` checkbox and `Ctrl+I`, off by default and remembered. Bare `I`
@@ -80,7 +98,7 @@ retained for inspection. The regression is part of `scripts/uitest.sh` and can
 run alone with `KJERAG_UITEST_ONLY=playback-stats`. All eight CI jobs pass on
 `88897ef7`; the hardware-hidden SDK build succeeds. SDK app-path preflight passes
 the full X4 suite (59 checks) and focused ONE X2 overlay suite (9 checks), with
-actual pictures inspected. The exact SDK package is installed from a separate
+actual pictures inspected. That initial SDK package was installed from a separate
 signed local test origin: app commit `df699be5fdb1`, executable SHA256
 `496c171baaac`. Actual-installed overlay suites pass nine checks on each camera
 without an app-path override, with playing pictures inspected. No new kernel
