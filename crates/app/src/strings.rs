@@ -143,6 +143,7 @@ pub const SETTINGS_TITLE: &str = "Settings";
 pub(crate) fn playback_stats(
     snapshot: &kjerag_render::PlaybackSnapshot,
     rates: Option<(f64, f64)>,
+    input_mbps: Option<f64>,
 ) -> String {
     let media = snapshot.media;
     let status = if snapshot.stopped {
@@ -179,6 +180,7 @@ pub(crate) fn playback_stats(
     let ready = snapshot
         .stitched_ready
         .map_or_else(|| "unavailable".to_owned(), |count| count.to_string());
+    let input_rate = input_mbps.map_or_else(|| "n/a".to_owned(), |rate| format!("{rate:.1} Mbps"));
     let audio = if !media.has_audio {
         "Audio: no output".to_owned()
     } else if let (Some(queued), Some(audio)) = (media.audio_queued, media.stats.audio) {
@@ -194,7 +196,7 @@ pub(crate) fn playback_stats(
     };
     format!(
         "{PLAYBACK_STATS}: {status}\nSource rate: {source} (video {:.2} fps)\n\
-         {input}\nDecoded ahead: {}, stitched ready: {ready}\n{audio}\n\
+         {input}\nRead: {input_rate}\nDecoded ahead: {}, stitched ready: {ready}\n{audio}\n\
          Drops: {}, starves: {} (total)\nWorst late: {:.1} ms, checks: {checks}",
         media.source_fps,
         media.decoded,
@@ -390,17 +392,19 @@ mod tests {
         snapshot.media.input = Some(kjerag_render::InputBuffer {
             lead: Duration::from_millis(1500),
             bytes: 3 * 1024 * 1024,
+            read_bytes: Some(100_000_000),
             packets: 45,
             eof: true,
         });
         snapshot.media.decoded = 9;
         snapshot.stitched_ready = Some(6);
         snapshot.media.stats.dropped = 2;
-        let text = playback_stats(&snapshot, Some((30.0, 120.0)));
+        let text = playback_stats(&snapshot, Some((30.0, 120.0)), Some(168.6));
         assert!(text.contains("Source rate: 30.00 fps (video 29.97 fps)"));
         assert!(text.contains("checks: 120.0/s"));
         assert!(!text.contains("120.00 fps"));
         assert!(text.contains("Input: 1.50 s, 3.0 MiB, 45 packets (EOF)"));
+        assert!(text.contains("Read: 168.6 Mbps"));
         assert!(text.contains("Decoded ahead: 9, stitched ready: 6"));
         assert!(text.contains("Drops: 2, starves: 0 (total)"));
         assert!(!text.contains('\u{2014}'));
@@ -412,9 +416,10 @@ mod tests {
         snapshot.stitched_ready = None;
         snapshot.media.has_audio = true;
         snapshot.media.buffering = true;
-        let text = playback_stats(&snapshot, None);
+        let text = playback_stats(&snapshot, None, None);
         assert!(text.contains("Playback stats: Buffering"));
         assert!(text.contains("Input: unavailable"));
+        assert!(text.contains("Read: n/a"));
         assert!(text.contains("stitched ready: unavailable"));
         assert!(text.contains("Audio: unavailable"));
         assert!(!text.contains("Audio underruns: 0"));

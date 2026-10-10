@@ -1550,7 +1550,9 @@ impl App {
         if self.samples_stats() {
             let text = self.stats.snapshot.as_ref().map_or_else(
                 || strings::STATS_WAITING.to_owned(),
-                |snapshot| strings::playback_stats(snapshot, self.stats.rates),
+                |snapshot| {
+                    strings::playback_stats(snapshot, self.stats.rates, self.stats.input_mbps)
+                },
             );
             layer = layer.push(
                 widget::container(widget::text(text).font(font::mono()).size(13))

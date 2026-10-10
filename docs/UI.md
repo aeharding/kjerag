@@ -963,8 +963,14 @@ The overlay samples every 500 ms only while enabled with a video open.
 "Source rate" counts source promotions, not physical scanout; "checks" counts
 Player pumps, not new video frames. Input lead is the smallest queued timestamp
 lead across required lens streams/files, with combined compressed audio/video
-bytes and packet count. Decoded ahead counts Player's retained successors, not
-the delivery channel or every decoder surface. Stitched ready counts only the
+bytes and packet count. "Read" reports file-input speed in decimal Mbps
+(megabits per second), sampled from FFmpeg's cumulative IO bytes,
+not from changes in queued bytes. It includes all input files and rereads after
+seeks, and continues measuring while paused or buffering. It can be zero when
+read-ahead is full and includes cached file reads; it is not Wi-Fi link speed or
+protocol overhead. The first or unavailable sample is `n/a`. Decoded ahead counts
+Player's retained successors, not the delivery channel or every decoder surface.
+Stitched ready counts only the
 completion-proven FIFO prefix, never queued or in-flight GPU work. Audio queue
 is the current usable PCM duration; sync/underruns are existing callback health.
 Unavailable/contended readings are marked unavailable, not zero. Input lead is

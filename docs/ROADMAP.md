@@ -30,6 +30,32 @@ changes no released code, accepted picture or performance qualification.
 
 ## Current delivery
 
+October 9 stats-throughput follow-up ([#265](https://github.com/aeharding/kjerag/issues/265)):
+the owner requests buffer speed in Mbps and authorizes investigating streaming
+performance. The branch adds `Read` in decimal megabits/sec, sampled from
+FFmpeg's existing cumulative file-IO byte count on its sole demux worker.
+Combined lens-file counters include rereads, not queue-level changes, and remain
+measurable during pause/refill. Cached reads are included; this is not Wi-Fi
+link speed or network-protocol overhead. Missing/first/reset observations show
+`n/a`. Device/driver-hidden workspace gates pass 1,721 tests with 53 ignored,
+plus formatting, workspace Clippy, vendor warnings and source/name checks.
+The first added real-demux observation test assumes try-lock availability during
+the EOF worker handoff and fails; that test now allows bounded observation
+retry, with the failed receipt retained. Production observation stays nonblocking.
+Real-player and package qualification remain due. No buffering policy,
+stitching/color arithmetic or installed package changes yet. Metadata inspection
+finds the April X4 clip at 168.6 Mbps and the known September network fixture at
+170.8 Mbps, about 56-57% of the owner's reported 300 Mbps speed-test result.
+Normal reader controls deliver the same eight-second network packet prefix at
+162-172 Mbps; a larger-buffer control delivers 173 Mbps with identical packet
+and metadata hash, within the observed variation. A bounded sequential share
+read delivers about 187 Mbps. These are native read-only diagnostics, not
+installed-player, Wi-Fi traffic or hitch-free qualifications. The speed-test
+page uses six parallel HTTP requests to the same host; its 300 Mbps result is
+not equivalent to one mounted-file reader. Limited refill headroom is observed,
+but a justified production optimization and the exact startup-stutter cause
+remain unestablished. No larger-read implementation is adopted.
+
 October 9 playback-stats option
 ([#265](https://github.com/aeharding/kjerag/issues/265)): the owner requests a
 toggleable on-video buffer/playback overlay. The branch adds a stock `View >
