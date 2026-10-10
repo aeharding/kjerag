@@ -45,9 +45,14 @@ poll the GPU; seeking masks unacknowledged input lineage. No stats timer runs
 with the option off or no video open. Formatting, workspace Clippy, vendor
 warnings, name/source checks and the device/driver-hidden workspace pass
 (1,718 tests, zero failures, 53 ignored; unavailable-device returns are not
-hardware coverage). Real-player/owner review remains pending, with GPU checks
-held for the earlier dock/display desktop-health question. Installed 0.3.4 is
-unchanged.
+hardware coverage). The owner confirms normal desktop behavior after the earlier
+dock/display warning, allowing bounded one-at-a-time checks to resume. The native
+X4 overlay regression passes nine checks: real held picture, default-off and
+saved toggle, unchanged video pixels and view, panning through the panel,
+preference persistence and clean exit. Actual playing/fullscreen captures are
+retained for inspection. The regression is part of `scripts/uitest.sh` and can
+run alone with `KJERAG_UITEST_ONLY=playback-stats`. SDK/installed camera checks
+and owner review remain pending. Installed 0.3.4 is unchanged.
 
 October 9 hover-bar release ([#261](https://github.com/aeharding/kjerag/issues/261)):
 the unchanged, authenticated 0.3.3 Flatpak reproduces the owner's picture jump.

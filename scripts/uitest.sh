@@ -13,6 +13,7 @@
 # Set KJERAG_UITEST_ONLY=drag-release for the video-to-controls drag regression.
 # Set KJERAG_UITEST_ONLY=end-seek for the scrubber endpoint regression.
 # Set KJERAG_UITEST_ONLY=blocked-open for startup with stalled filesystem IO.
+# Set KJERAG_UITEST_ONLY=playback-stats for the optional statistics overlay.
 #
 # The same checks run against the installed Flatpak with
 # KJERAG_FLATPAK=dev.harding.Kjerag, which is how a bundle is checked before
@@ -215,12 +216,15 @@ drag-release)
 end-seek)
 	[ -n "$media" ] || die "KJERAG_UITEST_ONLY=end-seek needs test media"
 	;;
+playback-stats)
+	[ -n "$media" ] || die "KJERAG_UITEST_ONLY=playback-stats needs test media"
+	;;
 stalls)
 	[ -n "$media" ] || die "KJERAG_UITEST_ONLY=stalls needs test media"
 	[ -z "${KJERAG_FLATPAK:-}" ] ||
 		die "KJERAG_UITEST_ONLY=stalls cannot preload into a Flatpak"
 	;;
-*) die "KJERAG_UITEST_ONLY must be stalls, view-paths, drag-release, end-seek or blocked-open when it is set" ;;
+*) die "KJERAG_UITEST_ONLY must be stalls, view-paths, drag-release, end-seek, blocked-open or playback-stats when it is set" ;;
 esac
 
 # The session went away with checks still to run: a dead compositor cannot
@@ -960,6 +964,109 @@ with_media() {
 
 # Report lines counted before the resume key, for the check below.
 reported=0
+
+# Read the real persisted preference, not an added test hook. Both native and
+# Flatpak sessions use this isolated config directory. A missing key is off.
+stats_enabled() {
+	local setting=$session/config/cosmic/dev.harding.Kjerag/v1/playback_stats
+	[ -f "$setting" ] && [ "$(tr -d '[:space:]' <"$setting")" = true ]
+}
+
+stats_disabled() {
+	! stats_enabled
+}
+
+# The panel is at most 400 px wide. Compare the complete right-hand video
+# region, excluding stock chrome, so a changed projection cannot pass merely
+# because the camera values stayed the same. Validate both crop payloads.
+stats_preserves_picture() {
+	local before=$session/stats-crop-before.rgb after=$session/stats-crop-after.rgb
+	ffmpeg -nostdin -v error -threads 1 -i "$1" -vf crop=840:560:440:64 \
+		-pix_fmt rgb24 -threads 1 -f rawvideo -y "$before" 2>>"$log" &&
+	ffmpeg -nostdin -v error -threads 1 -i "$2" -vf crop=840:560:440:64 \
+		-pix_fmt rgb24 -threads 1 -f rawvideo -y "$after" 2>>"$log" &&
+		[ "$(stat -c%s "$before")" = 1411200 ] &&
+		[ "$(stat -c%s "$after")" = 1411200 ] && cmp -s "$before" "$after"
+}
+
+playback_stats_check() {
+	printf '\n-- playback statistics overlay\n'
+	boot stats "$media"
+	if ! await '^media:' "$READY" || ! await_visible_playback ||
+		! press_until still_picture stats-paused -k space; then
+		fail "the statistics check starts with a held real picture" "log: $log"
+		teardown
+		return
+	fi
+	pass "the statistics check starts with a held real picture"
+	if stats_disabled; then
+		pass "playback statistics are off by default"
+	else
+		fail "playback statistics are off by default"
+	fi
+	local before enabled view_before view_after dragged
+	view_before=$(drag_view) || { fail "bare I still reports the view"; teardown; return; }
+	sleep "$TOAST_GONE"
+	before=$(grab stats-off)
+	if ! press_until stats_enabled stats-on -M ctrl -k i -m ctrl; then
+		fail "Ctrl+I enables and saves playback statistics" "log: $log"
+		teardown
+		return
+	fi
+	pass "Ctrl+I enables and saves playback statistics"
+	enabled=$(grab stats-on)
+	if ! same_picture "$before" "$enabled" && stats_preserves_picture "$before" "$enabled"; then
+		pass "statistics appear without moving the paused video"
+	else
+		fail "statistics appear without moving the paused video" "$before" "$enabled"
+	fi
+	view_after=$(drag_view)
+	if [ -n "$view_after" ] && [ "$view_before" = "$view_after" ]; then
+		pass "Ctrl+I preserves the shown frame, camera and horizon; bare I still copies"
+	else
+		fail "Ctrl+I preserves the shown frame, camera and horizon; bare I still copies" \
+			"before: $view_before" "after: $view_after"
+	fi
+	sleep "$TOAST_GONE"
+	# Start the press over the actual panel, not elsewhere in the video.
+	env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$sock" \
+		"$poker" 1280 720 180 120 drag 320 120 2>>"$log"
+	dragged=$(drag_view)
+	if [ -n "$dragged" ] && [ "$dragged" != "$view_after" ] &&
+		[ "$(printf '%s' "$dragged" | sed -n 's/.* time=\([^ ]*\).*/\1/p')" = \
+		  "$(printf '%s' "$view_after" | sed -n 's/.* time=\([^ ]*\).*/\1/p')" ]; then
+		pass "a drag starting over statistics still pans the held video"
+	else
+		fail "a drag starting over statistics still pans the held video" "log: $log"
+	fi
+	sleep "$TOAST_GONE"
+	key -k f
+	grab stats-fullscreen >/dev/null
+	key -k f
+	# Restart with the same isolated settings and inspect the restored overlay.
+	quit >/dev/null 2>&1 || teardown
+	boot stats-reopened "$media"
+	if stats_enabled && await '^media:' "$READY" && await_visible_playback; then
+		pass "the statistics preference survives a player restart"
+	else
+		fail "the statistics preference survives a player restart" "log: $log"
+		teardown
+		return
+	fi
+	# Retain actual playing/auto-hidden output for the eye gate. This is not
+	# physical-display FPS or a numerical throughput qualification.
+	sleep 5
+	grab stats-playing-a >/dev/null
+	sleep 1
+	grab stats-playing-b >/dev/null
+	if press_until stats_disabled stats-off-again -M ctrl -k i -m ctrl; then
+		pass "Ctrl+I disables and saves playback statistics"
+	else
+		fail "Ctrl+I disables and saves playback statistics" "log: $log"
+	fi
+	grab stats-disabled >/dev/null
+	exits_clean
+}
 
 # The report subscription only runs while playing, so a new line is the app
 # saying it is playing again. The rate in it has to be a real number of
@@ -3568,12 +3675,15 @@ elif [ "${KJERAG_UITEST_ONLY:-}" = drag-release ]; then
 	drag_release_check
 elif [ "${KJERAG_UITEST_ONLY:-}" = end-seek ]; then
 	end_seek_check
+elif [ "${KJERAG_UITEST_ONLY:-}" = playback-stats ]; then
+	playback_stats_check
 elif [ "${KJERAG_UITEST_ONLY:-}" = stalls ]; then
 	stalls
 else
 	blocked_open
 	if [ -n "$media" ]; then
 		with_media
+		playback_stats_check
 		spaced_view_reference
 		dropped_files
 		paired_files
