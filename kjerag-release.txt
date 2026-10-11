@@ -1,0 +1,7 @@
+format=1
+source=8c76765bba4a43d5eec83001cd9b2a5be834137d
+version=0.3.5
+app/dev.harding.Kjerag/x86_64/stable cc5014e052216344fb0890a7fe3a3f04f0ccbd797de04e5f3bfe0054fd6526e4
+runtime/dev.harding.Kjerag.Debug/x86_64/stable 1cf4e66b3ad1d27a8498e40476cef2c054436e88792699fff2be326c77b0f6db
+app/dev.harding.Kjerag/aarch64/stable 1d45f374eedcb14a4dab937ecc1539de5c3831be32569dce48861e84eca9e7df
+runtime/dev.harding.Kjerag.Debug/aarch64/stable bf4b5b601c8e4375250a5019ea9c605c0cf87b02ec2d7a8bcdd543c64b9129eb
