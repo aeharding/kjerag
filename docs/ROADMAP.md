@@ -30,6 +30,48 @@ changes no released code, accepted picture or performance qualification.
 
 ## Current delivery
 
+October 11 stats release ([#268](https://github.com/aeharding/kjerag/issues/268)):
+**0.3.5 is published and installed**, and the normal signed `kjerag` update
+origin is restored. The owner accepts the Mbps test build and authorizes merge
+and release. PR [#266](https://github.com/aeharding/kjerag/pull/266) merges at
+`cd2c621d` after all eight exact-head CI jobs pass. This ships the opt-in
+`View > Playback stats` / `Ctrl+I` overlay and combined-file `Read` rate in
+decimal Mbps. The rate includes cached reads and rereads; it is not Wi-Fi link
+speed. No buffering policy, source cadence or stitching/color arithmetic changes.
+The earlier October 9 pending-review entries below are retained as history.
+
+Device/driver-hidden workspace gates pass 1,721 tests with 53 ignored, plus
+formatting, workspace Clippy, vendor warnings and source/name checks. Unavailable
+GPU returns are not hardware coverage. Standard native release hooks pass 69 X4
+and 73 ONE X2 checks, with actual playing pictures inspected and no new kernel
+entries or scoped memory-limit/OOM events. Tag `0.3.5` names `8c76765b`; only
+version/lock/metainfo metadata changes after the reviewed merge, and the offline
+source list regenerates identically.
+
+Release run [38147173185](https://github.com/aeharding/kjerag/actions/runs/38147173185)
+passes tagged-source CI, both signed native builds, assembly and both publication
+jobs on its first attempt. Both architecture downloads and exact signed app/Debug
+channel commits authenticate against the preexisting production trust key,
+including the canonical HTTPS release record, manifest permissions, license,
+metainfo and FFmpeg linkage. No ARM execution is claimed. The x86_64 installation
+is app commit `cc5014e05221`, executable SHA256 `8266a114824a`. Flatpak initially
+retains the local test origin when installing the signed bundle; selecting the
+existing trusted public remote restores `kjerag` at the identical app commit.
+The normal app-only update retains that commit, permissions, shared runtimes and
+trust. Signed 0.3.4 and the local test repositories remain available for rollback.
+Canonical HTTPS summary bytes and signature container match the authenticated
+sealed publication; both architectures' public app and AppStream refs are present.
+
+Actual-installed suites pass 59 X4 and 63 ONE X2 checks without an app-path
+override, with both moving pictures and playing statistics captures inspected
+on each camera. Both scopes report zero memory-limit/OOM or CPU-quota-throttling
+events. The X4 kernel postflight records Wi-Fi reassociation but no GPU warning;
+the ONE X2 postflight has no new kernel entries. Existing sound-device,
+preload-import, exact-view and X4 single-file-pair skips remain. These are
+functional checks, not a sandbox-audio, network-smoothness, ARM-playback,
+all-camera or 240-capacity claim. The separate streaming follow-up remains
+[#267](https://github.com/aeharding/kjerag/issues/267).
+
 October 9 stats-throughput follow-up ([#265](https://github.com/aeharding/kjerag/issues/265)):
 the owner requests buffer speed in Mbps and authorizes investigating streaming
 performance. The branch adds `Read` in decimal megabits/sec, sampled from
